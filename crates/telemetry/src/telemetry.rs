@@ -1,10 +1,12 @@
-//! See [Telemetry in Zed](https://zed.dev/docs/telemetry) for additional information.
+//! Telemetry is disabled by construction in this fork: no event ever leaves the
+//! process. The crate is deliberately kept rather than deleted because 31 call
+//! sites across the workspace invoke [`event!`]; retaining the macro as a no-op
+//! keeps the removal to one file instead of thirty.
 use futures::channel::mpsc;
 pub use serde_json;
-use std::sync::OnceLock;
 pub use telemetry_events::FlexibleEvent as Event;
 
-/// Macro to create telemetry events and send them to the telemetry queue.
+/// Macro to create telemetry events. In this fork the events are discarded.
 ///
 /// By convention, the name should be "Noun Verbed", e.g. "Keymap Changed"
 /// or "Project Diagnostics Opened".
@@ -16,8 +18,6 @@ pub use telemetry_events::FlexibleEvent as Event;
 /// telemetry::event!("Keymap Changed", version = "1.0.0");
 /// telemetry::event!("Documentation Viewed", url, source = "Extension Upsell");
 /// ```
-///
-/// If you want to debug logging in development, export `RUST_LOG=telemetry=trace`
 #[macro_export]
 macro_rules! event {
     ($name:expr) => {{
@@ -53,14 +53,10 @@ macro_rules! serialize_property {
     };
 }
 
-pub fn send_event(event: Event) {
-    if let Some(queue) = TELEMETRY_QUEUE.get() {
-        queue.unbounded_send(event).ok();
-    }
-}
+/// Drops the event. There is no telemetry queue and no network path in this
+/// fork — the event is built by the caller and discarded here.
+pub fn send_event(_event: Event) {}
 
-pub fn init(tx: mpsc::UnboundedSender<Event>) {
-    TELEMETRY_QUEUE.set(tx).ok();
-}
-
-static TELEMETRY_QUEUE: OnceLock<mpsc::UnboundedSender<Event>> = OnceLock::new();
+/// Accepts and drops the sender. The signature is retained only so existing
+/// callers compile unchanged.
+pub fn init(_tx: mpsc::UnboundedSender<Event>) {}
