@@ -1,0 +1,49 @@
+ghosts (not real crates): none
+
+SEED: 46   ORPHANED: 7   TOTAL DELETE: 53
+
+Orphans pulled in automatically:
+  + aws_http_client
+  + opencode
+  + rules_library
+  + streaming_diff
+  + vercel
+  + x_ai
+  + zeta_prompt
+
+======================================================================
+SURVIVORS NEEDING CODE CHANGES: 15
+  zed                    (23) acp_thread, acp_tools, agent, agent_servers, agent_settings, agent_ui, auto_update, auto_update_ui, call, channel, codestral, collab_ui, copilot, copilot_chat, copilot_ui, crashes, edit_prediction, edit_prediction_ui, language_model, language_models, sidebar, web_search, web_search_providers
+  settings_ui            ( 7) agent, agent_settings, codestral, copilot, copilot_ui, edit_prediction, edit_prediction_ui
+  title_bar              ( 4) auto_update, call, channel, livekit_client
+  git_ui                 ( 3) agent_settings, call, language_model
+  client                 ( 2) cloud_api_client, cloud_llm_client
+  activity_indicator     ( 1) auto_update
+  cloud_api_types        ( 1) cloud_llm_client
+  diagnostics            ( 1) agent_settings
+  file_finder            ( 1) channel
+  language_tools         ( 1) edit_prediction
+  notifications          ( 1) channel
+  remote_connection      ( 1) auto_update
+  remote_server          ( 1) crashes
+  settings_content       ( 1) language_model_core
+  workspace              ( 1) agent_settings
+
+DEV-DEP ONLY (tests): 0
+
+======================================================================
+KEEP-LIST verification:
+  edit_prediction_types  kept ok              must-patch: (none)
+  remote_connection      kept ok              must-patch: auto_update
+  remote_server          kept ok              must-patch: crashes
+  remote                 kept ok              must-patch: (none)
+  context_server         kept ok              must-patch: (none)
+  cloud_api_types        kept ok              must-patch: cloud_llm_client
+  notifications          kept ok              must-patch: channel
+  client                 kept ok              must-patch: cloud_api_client, cloud_llm_client
+  telemetry              kept ok              must-patch: (none)
+  recent_projects        kept ok              must-patch: (none)
+  editor                 kept ok              must-patch: (none)
+  project                kept ok              must-patch: (none)
+
+Workspace: 240 -> 187 crates (53 removed, 22%)

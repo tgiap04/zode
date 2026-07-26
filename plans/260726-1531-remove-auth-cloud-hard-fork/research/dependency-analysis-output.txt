@@ -1,0 +1,67 @@
+==============================================================================
+SEED entries that are NOT real workspace crates (typo / renamed):
+  open_ai_compatible, vercel_ai_gateway, zeta
+
+SEED size (real crates): 49  /  workspace total: 240
+
+==============================================================================
+ORPHANED by the seed deletion (7) — nothing else uses them anymore:
+  + aws_http_client                    (was used only by: language_models)
+  + opencode                           (was used only by: language_models)
+  + rules_library                      (was used only by: agent_ui)
+  + streaming_diff                     (was used only by: agent, agent_ui)
+  + vercel                             (was used only by: language_models)
+  + x_ai                               (was used only by: language_models)
+  + zeta_prompt                        (was used only by: cloud_llm_client, codestral, edit_prediction, edit_prediction_cli, edi)
+
+==============================================================================
+TOTAL DELETE SET: 56 crates
+
+==============================================================================
+SURVIVORS THAT MUST BE PATCHED (real deps into the delete set):
+  zed                        -> acp_thread, acp_tools, agent, agent_servers, agent_settings, agent_ui, auto_update, auto_update_ui, call, channel, codestral, collab_ui, copilot, copilot_chat, copilot_ui, crashes, edit_prediction, edit_prediction_ui, language_model, language_models, web_search, web_search_providers
+  settings_ui                -> agent, agent_settings, codestral, copilot, copilot_ui, edit_prediction, edit_prediction_ui
+  sidebar                    -> acp_thread, agent, agent_settings, agent_ui, remote_connection
+  title_bar                  -> auto_update, call, channel, livekit_client, remote_connection
+  git_ui                     -> agent_settings, call, language_model, remote_connection
+  client                     -> cloud_api_client, cloud_llm_client
+  activity_indicator         -> auto_update
+  cloud_api_types            -> cloud_llm_client
+  diagnostics                -> agent_settings
+  editor                     -> edit_prediction_types
+  file_finder                -> channel
+  language_tools             -> edit_prediction
+  notifications              -> channel
+  project                    -> context_server
+  recent_projects            -> remote_connection
+  settings_content           -> language_model_core
+  workspace                  -> agent_settings
+
+  => 17 crates need code changes.
+
+==============================================================================
+SURVIVORS with only DEV-dependencies into the delete set (tests only):
+  git_graph                  -> remote_connection
+  project_panel              -> remote_connection
+
+  => 2 crates need only test fixes.
+
+==============================================================================
+KEEP-LIST SANITY CHECK:
+  client               kept                 deps into delete set: cloud_api_client, cloud_llm_client
+  telemetry            kept                 deps into delete set: -
+  telemetry_events     kept                 deps into delete set: -
+  remote_server        IN DELETE SET (!!)   deps into delete set: crashes
+  extension_host       kept                 deps into delete set: -
+  proto                kept                 deps into delete set: -
+  rpc                  kept                 deps into delete set: -
+  audio                kept                 deps into delete set: -
+  feature_flags        kept                 deps into delete set: -
+  settings_content     kept                 deps into delete set: language_model_core
+  workspace            kept                 deps into delete set: agent_settings
+  editor               kept                 deps into delete set: edit_prediction_types
+  project              kept                 deps into delete set: context_server
+  title_bar            kept                 deps into delete set: auto_update, call, channel, livekit_client, remote_connection
+  command_palette      kept                 deps into delete set: -
+  zed                  kept                 deps into delete set: acp_thread, acp_tools, agent, agent_servers, agent_settings, agent_ui, auto_update, auto_update_ui, call, channel, codestral, collab_ui, copilot, copilot_chat, copilot_ui, crashes, edit_prediction, edit_prediction_ui, language_model, language_models, web_search, web_search_providers
+  denoise              kept                 deps into delete set: -
