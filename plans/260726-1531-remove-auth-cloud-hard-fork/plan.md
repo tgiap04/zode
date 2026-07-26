@@ -57,10 +57,10 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 1 | [Preparation and baseline](./phase-01-preparation-and-baseline.md) | Completed |
 | 2 | [Free wins - visual test harness](./phase-02-free-wins-visual-test-harness.md) | Completed |
 | 3 | [Sever thin ties](./phase-03-sever-thin-ties.md) | Completed |
-| 4 | [Atomic structural cut](./phase-04-atomic-structural-cut.md) | Pending |
-| 5 | [Gut client auth core](./phase-05-gut-client-auth-core.md) | Pending |
+| 4 | [Atomic structural cut](./phase-04-atomic-structural-cut.md) | Completed |
+| 5 | [Gut client auth core](./phase-05-gut-client-auth-core.md) | Completed |
 | 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Pending |
-| 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | Pending |
+| 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | In progress (2/7) |
 | 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Pending |
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Pending |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Pending |
@@ -114,8 +114,8 @@ The commissioner allowed downloads ("vẫn cho phép tải về"), so this is pe
 | 1 | `onboarding` is an unscoped 16th survivor calling deleted auth APIs | Critical | Accept | Completed |
 | 2 | Extension registry still hits `api.zed.dev`; contradicts "zero outbound" | Critical | Accept | Completed |
 | 3 | Phase 3d binary-download integrity is prose only, not a gate | Critical | Accept | Completed |
-| 4 | No abort/rollback protocol for the 6-phase red period | Critical | Accept | Phase 4 |
-| 5 | `project` is not zero-change — `agent_servers` unwrap at `agent_server_store.rs:1896` | High | Accept | plan.md, Phase 7, Phase 9 |
+| 4 | No abort/rollback protocol for the 6-phase red period | Critical | Accept | Completed |
+| 5 | `project` is not zero-change — `agent_servers` unwrap at `agent_server_store.rs:1896` | High | Accept | Completed |
 | 6 | `git_panel.rs` is 8,142 lines, not 5,700 — Phase 8 under-estimated | High | Accept | Phase 8 (est. 8-10d) |
 | 7 | `tail -40` test baseline cannot support "every delta explained" | High | Accept | Phase 1, Phase 10 |
 | 8 | Phase 5 `reconnect`/`disconnect` rationale factually wrong | High | Accept | Phase 5 |
@@ -210,6 +210,90 @@ exists — and those consumers only vanish at Phase 4.
 The plan's value is intact: Phase 3 exists to make the keep-decision real so `editor` and
 `recent_projects` never need surgery. That still holds — the severances just land later in the
 sequence than drafted.
+
+### Phase 4 — 2026-07-26 · commit `c3e2ac3`
+
+**54 crates** removed (not 53 — `action_log` became an orphan once Phase 2 took the visual-test
+harness, its last non-delete-set consumer). `crates/` 232 → 178, packages 240 → 186, **372,180 lines**.
+Tags `pre-structural-cut` / `post-structural-cut` bracket the cut.
+
+**The atomic cut is FOUR edits, not three.** The plan listed directories + `[workspace] members` +
+`[workspace.dependencies]`. It missed the fourth: every surviving crate's own `[dependencies]`.
+Inherited `name.workspace = true` fails at **manifest-parse time**, so `cargo metadata` will not even
+load the workspace until all 14 survivor manifests are stripped — in the same commit.
+
+**The `Cargo.lock` gate was stated wrong.** The plan said "zero version bumps". Reality: zero packages
+added, 168 removed, and **five version _downgrades_** (`bindgen`, `hashlink`, `nom`,
+`tokio-tungstenite`, `tungstenite`) — the crates that forced unification to the higher versions are
+gone, so resolution correctly falls back. The gate should read *"zero version increases; downgrades
+are expected and must be enumerated."*
+
+Post-cut census: **1 error, in `cloud_api_types`** — leaf #1 of the derived order, with everything
+downstream blocked behind it. The census is a map, exactly as designed.
+
+### Phase 7 (partial) — 2026-07-26 · commit `f753b91`
+
+The two topological leaves, which are the deferred 3c and 3b.
+
+- `cloud_api_types`: `PlanInfo` loses its `usage` field.
+- `settings_content`: `ReasoningEffort`, `ModelMode`, `Speed` come home from the deleted `language_model_core`.
+
+**Caught a silent data-corruption bug.** `Speed` was nearly relocated with `rename_all = "lowercase"`
+instead of the original `snake_case`. For `Standard`/`Fast` the two are **identical**, so it would
+have compiled, passed every test, and only diverged the first time a multi-word variant appeared —
+by which point users' `settings.json` would silently stop parsing. Found by diffing against
+`git show pre-structural-cut`. Three round-trip tests now pin all three wire formats.
+
+Also: `.config/nextest.toml` filtered on the deleted `collab` and `language_model` packages. A stale
+filter there is a **hard config parse error**, not a warning — the entire test suite refuses to run.
+That file was not in Phase 9's data-file inventory.
+
+Also: `crates/audio` pulls `libwebrtc`/`webrtc-sys`. The scout cleared `audio` as safe but never noted
+it drags in WebRTC native libs — questionable for a fork that deleted all voice/video. Phase 11 candidate.
+
+### Phase 5 — 2026-07-26 · commit `52b9d6e`
+
+`client.rs` 2303 → ~1570, `user.rs` 1079 → ~715. **23 of 23 keepers verified present, 9 of 9 auth
+symbols verified gone.** The relocated 3a landed too: `edit_prediction_types` no longer imports
+`client::EditPredictionUsage`, and `crates/editor` needed **zero** changes — the entire justification
+for keeping that crate, now proven rather than argued.
+
+Deliberately left, with the compiler already naming every item (~500 lines):
+`ClientCredentialsProvider` (**red team finding 12 confirmed** — no caller once `sign_in` went), the
+dead collab transport (`connect_with_credentials`, `set_connection`, `establish_connection`,
+`rpc_url`, `establish_websocket_connection`), all of `proxy.rs` + `proxy/http_proxy.rs`, `ZED_RPC_URL`.
+Phase 11's `--deny warnings` will not let them ship.
+
+## Execution rule: how to cut (learned the hard way in Phase 5)
+
+**Three over-cuts happened in Phase 5.** All three had the same cause, and all three were caught only
+by checking `git show`:
+
+| # | Destroyed | Caught by |
+|---|---|---|
+| 1 | **The entire RPC request API** — `send`, `request`, `request_stream`, `request_envelope`, `request_dynamic`, `handle_message`, `connection_id` | `no method named handle_message` |
+| 2 | `ClientSettings`, `ProxySettings` | `zed_urls.rs` failed to resolve |
+| 3 | `Subscription`, `PendingEntitySubscription`, `TelemetrySettings`, `impl Default for ClientState` | syntax error |
+
+The cause every time: cutting **"from marker A to marker B"** where A and B are two functions that
+both need deleting. Keepers sit *between* them. In a 2,300-line file the doomed functions are not
+contiguous, and the eye that picked the markers cannot see what it swept up.
+
+**The rule, for Phases 7, 8 and 9 — which still have to cut a 9,501-line `page_data.rs`, an
+8,142-line `git_panel.rs`, and `crates/zed`:**
+
+1. **Cut one function at a time.** The end marker must be the *next* item you also intend to delete,
+   never "the next thing that happens to appear".
+2. **Before cutting, dump the function map** of the region:
+   `grep -n "^    pub fn \|^    pub async fn \|^    async fn \|^    fn \|^impl \|^pub struct \|^pub enum " <file>`
+   Then decide delete/keep for **every** entry in the range. If any entry inside a proposed A→B range
+   is a keeper, the range is wrong — split it.
+3. **Assert the keep-list after every cut**, in the same script. Phase 5's 23 assertions are the
+   template. A cut that compiles is not a cut that is correct.
+4. **Never trust `cargo check` alone.** Over-cut #2 compiled the file it damaged; only a *different*
+   crate revealed it.
+5. **Commit per crate, always.** This is what made all three recoveries cheap. It is the rollback
+   unit, not a tidiness preference.
 
 ## Reference material
 

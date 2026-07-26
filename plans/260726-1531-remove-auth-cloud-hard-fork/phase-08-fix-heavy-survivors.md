@@ -23,6 +23,33 @@ The five crates carrying real weight: `zed` (23 dependency edges), `settings_ui`
 
 `crates/zed` alone is ~40 non-test call sites plus a **duplicate of the whole init sequence inside its test module** that must receive identical edits.
 
+## ⚠ Cutting discipline (mandatory — see plan.md "Execution rule")
+
+Phase 5 over-cut **three times**, each time destroying keepers that sat between two doomed functions.
+This phase cuts the two largest files in the fork, so the rule is not optional here:
+
+1. **Dump the function map first**, for every region you intend to touch:
+   ```sh
+   grep -n "^    pub fn \|^    pub async fn \|^    async fn \|^    fn \|^impl \|^pub struct \|^pub enum " <file>
+   ```
+   Classify **every** entry in the range as delete or keep before writing a single edit.
+2. **One function per cut.** The end marker must be the next item you also intend to delete — never
+   "the next thing that appears". If a keeper sits inside a proposed A→B range, the range is wrong.
+3. **Assert the keep-list after every cut**, in the same script. Phase 5 used 23 assertions; that is
+   the template, not the ceiling.
+4. **A cut that compiles is not a cut that is correct.** Phase 5's second over-cut compiled the file
+   it damaged — only a different crate revealed it. Check the *consumers*.
+5. **Commit per crate.** This is the rollback unit. All three Phase 5 recoveries were cheap because
+   of it.
+
+**Where this bites hardest in this phase:**
+
+| File | Lines | Why the rule matters |
+|---|---|---|
+| `settings_ui/src/page_data.rs` | **9,501** | Seven separate section deletions plus two hand-counted array arities. Prime over-cut territory. |
+| `git_ui/src/git_panel.rs` | **8,142** | Three unrelated features to excise from one file; the original size estimate was 43% low, so the census in 12a is not optional. |
+| `zed/src/main.rs` + `zed.rs` | 1,940 + 6,587 | `zed.rs` holds a duplicate of the whole init sequence inside its test module. |
+
 ## Key Insights
 
 - `zed.rs:5371-5412` (`init_test_with_state`) is a **twin of the `main.rs` init block**: `channel::init`, `call::init`, `notifications::init`, `collab_ui::init`, `copilot_chat::init`, `language_model::init`, `RefreshLlmTokenListener::register`, `language_models::init`, `web_search*::init`, `PromptBuilder::load`, `agent_ui::init`. Every edit to `main.rs` must be mirrored here or the tests will not compile.

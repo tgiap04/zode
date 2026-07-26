@@ -22,6 +22,34 @@ Six crates with small edges into the delete set, plus `file_finder` with a sligh
 
 Work in the reverse-topological order derived in Phase 1 (`research/survivor-fix-order.txt`) and use `cargo check -p <crate>`, never `--workspace`. The point of this ordering is that each crate is fixed exactly once — errors flow downstream only.
 
+## ⚠ Cutting discipline (mandatory — see plan.md "Execution rule")
+
+Phase 5 over-cut **three times**, each time destroying keepers that sat between two doomed functions.
+This phase cuts the two largest files in the fork, so the rule is not optional here:
+
+1. **Dump the function map first**, for every region you intend to touch:
+   ```sh
+   grep -n "^    pub fn \|^    pub async fn \|^    async fn \|^    fn \|^impl \|^pub struct \|^pub enum " <file>
+   ```
+   Classify **every** entry in the range as delete or keep before writing a single edit.
+2. **One function per cut.** The end marker must be the next item you also intend to delete — never
+   "the next thing that appears". If a keeper sits inside a proposed A→B range, the range is wrong.
+3. **Assert the keep-list after every cut**, in the same script. Phase 5 used 23 assertions; that is
+   the template, not the ceiling.
+4. **A cut that compiles is not a cut that is correct.** Phase 5's second over-cut compiled the file
+   it damaged — only a different crate revealed it. Check the *consumers*.
+5. **Commit per crate.** This is the rollback unit. All three Phase 5 recoveries were cheap because
+   of it.
+
+## Progress
+
+- [x] **`cloud_api_types`** — `PlanInfo.usage` removed (commit `f753b91`)
+- [x] **`settings_content`** — 3 enums relocated; `Speed` serde attribute bug caught and pinned by tests (commit `f753b91`)
+- [ ] `project` · `workspace` · `activity_indicator` · `diagnostics` · `file_finder` · `language_tools` · `notifications`
+
+> Note: `cloud_api_types` and `settings_content` were the deferred 3c and 3b. They are leaves #1 and
+> #2 of the derived order, which is why the post-cut census showed a single error.
+
 ## Key Insights
 
 - `activity_indicator` imports `auto_update::DismissMessage`, which is **only an action declaration** inside an `actions!` macro (`auto_update.rs:97`). Declare it locally or in `zed_actions` — 4 lines.

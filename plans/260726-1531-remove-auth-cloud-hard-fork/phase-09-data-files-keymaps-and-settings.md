@@ -65,6 +65,22 @@ default.json key        ─┼─► must be removed ATOMICALLY (same commit)
 
 ## Related Code Files
 
+**Config files that reference crates by name — found during execution, not in the original inventory**
+- `.config/nextest.toml` — **already fixed in `f753b91`**. It filtered on `package(collab)` and
+  `package(language_model)`. A stale filter there is a **hard config parse error**, not a warning: the
+  entire test suite refuses to run, which masks everything else. Re-grep after any further deletion:
+  ```sh
+  for c in $(grep -o "package([a-z_]*)" .config/nextest.toml | sed 's/package(\(.*\))/\1/' | sort -u); do
+    [ -d "crates/$c" ] || echo "STALE: $c"
+  done
+  ```
+- `Cargo.toml` `[patch.crates-io]` — the `livekit` patch was pruned in `f753b91`. `libwebrtc` and
+  `webrtc-sys` stay: `crates/audio` still pulls them (see Phase 11 note).
+- Also sweep for this class generally, since two instances were missed by the scout:
+  ```sh
+  rg -l "package\(|crates/" .config/ .github/ script/ ci/ *.toml
+  ```
+
 **To modify**
 - `assets/keymaps/default-macos.json` (125), `default-linux.json` (119), `default-windows.json` (117)
 - `assets/keymaps/macos/cursor.json` (17), `linux/cursor.json` (17), `vim.json` (6)

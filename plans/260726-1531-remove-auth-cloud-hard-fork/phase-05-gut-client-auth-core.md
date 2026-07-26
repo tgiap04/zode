@@ -1,11 +1,38 @@
 ---
 phase: 5
-title: "Gut client auth core"
-status: pending
-effort: "2d"
+title: Gut client auth core
+status: completed
+effort: 2d
 ---
 
 # Phase 5: Gut client auth core
+
+## Outcome — completed 2026-07-26, commit `52b9d6e`
+
+`client.rs` 2303 → ~1570 · `user.rs` 1079 → ~715 · **23/23 keepers verified, 9/9 auth symbols gone.**
+Step 0 (the relocated 3a) landed: `crates/editor` needed **zero** changes, proving the keep-decision.
+
+**Three over-cuts occurred and were recovered from git.** See plan.md → "Execution rule: how to cut".
+The RPC request API, `ClientSettings`/`ProxySettings`, and `Subscription`/`PendingEntitySubscription`/
+`TelemetrySettings` were each destroyed and restored. Every recovery was cheap only because the
+previous crate had been committed.
+
+### Deliberately left for a follow-up pass (~500 lines)
+
+The compiler names all of it; `--deny warnings` in Phase 11 will force it. Do this as its own commit,
+following the cutting discipline:
+
+| Item | Location | Note |
+|---|---|---|
+| `ClientCredentialsProvider` + `credentials_provider()` + `IMPERSONATE_LOGIN` | `client.rs` | **Red team finding 12 confirmed** — no caller once `sign_in` went. Every other credential consumer calls `zed_credentials_provider::global(cx)` directly. |
+| `connect_with_credentials`, `set_connection`, `establish_connection`, `rpc_url`, `establish_websocket_connection` | `client.rs` | The collab transport. No collab server to reach. |
+| `proxy.rs`, `proxy/http_proxy.rs` | whole files | Only the websocket path used them. **Keep `ProxySettings`** — `main.rs:476` reads it. |
+| `ZED_RPC_URL` | `client.rs:54` | static, unused |
+| `test.rs` auth fixtures | `make_get_authenticated_user_response` etc. | |
+
+**Retained pending Phase 8:** `disconnect` and `reconnect`. Fresh `rg` (as the plan required) showed
+`Client::reconnect` has exactly one surviving-crate caller — `crates/zed/src/main.rs:778`, which Phase 8
+step 21 deletes. Removing them now would break `main.rs` for Phase 8 to un-break. Re-check at Phase 11.
 
 ## Context Links
 
