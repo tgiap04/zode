@@ -46,7 +46,6 @@ pub struct LogStore {
 
 struct ProjectState {
     _subscriptions: [Subscription; 2],
-    copilot_log_subscription: Option<lsp::Subscription>,
 }
 
 pub trait Message: AsRef<str> {
@@ -350,7 +349,6 @@ impl LogStore {
                         }
                     }),
                 ],
-                copilot_log_subscription: None,
             },
         );
     }
@@ -713,13 +711,5 @@ impl LogStore {
                 self.disable_rpc_trace_for_language_server(server_id);
             }
         }
-    }
-    pub fn copilot_state_for_project(
-        &mut self,
-        project: &WeakEntity<Project>,
-    ) -> Option<&mut Option<lsp::Subscription>> {
-        self.projects
-            .get_mut(project)
-            .map(|project| &mut project.copilot_log_subscription)
     }
 }
