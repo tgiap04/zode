@@ -1,9 +1,9 @@
 ---
 title: "Hard fork Zed: remove auth, cloud and AI subsystems"
 description: "Delete 53 crates (auth, collab, AI, edit-prediction, auto-update, crash reporting) from the Zed workspace, gut client/telemetry, and rebrand as an independent privacy-first IDE"
-status: pending
+status: in_progress
 priority: P1
-effort: 3-5w
+effort: 4-6w
 tags: [refactor, deletion, privacy, fork, rust, workspace]
 blockedBy: []
 blocks: []
@@ -138,6 +138,66 @@ Re-read `plan.md` + all 12 phase files after applying. Reconciled:
 - Extension-registry contradiction now stated in plan.md, carved out in Phase 11, and assigned a decision in Phase 12.
 
 **Unresolved:** none. The extension-registry question is open but explicitly *assigned* to Phase 12 rather than left implicit.
+
+## Execution log
+
+### Phase 1 — 2026-07-26
+
+Branch `fork/remove-auth-and-cloud` off `7ac6829`.
+
+**Baseline is GREEN** — `cargo check --workspace` exit 0 in **1m23s**. That number matters: the red-period
+fix loop is far more tolerable than the plan assumed when it recommended `-p` over `--workspace`. Both
+remain worth using, but the cost of a full check is ~90s, not the many minutes feared.
+
+**Three corrections the baseline capture forced:**
+
+1. **Phase 7 was ordered wrong.** The first draft fixed `activity_indicator`/`diagnostics`/`language_tools`
+   before `project` and `workspace` — but all four of the former depend on the latter two, so their errors
+   would have been masked by unfixed upstream crates. Corrected order: `project` → `workspace` →
+   `activity_indicator` → `diagnostics` → `file_finder` → `language_tools` → `notifications`.
+2. **Phase 8 was ordered wrong.** `title_bar` depends on `git_ui`; the draft put `git_ui` last. Corrected:
+   `settings_ui` → `git_ui` → `onboarding` → `title_bar` → `zed`.
+3. **The action dump found two namespaces the plan never listed** and two partial removals a
+   namespace-prefix sweep would miss entirely:
+   - `bedrock` (2 actions) and `zed_predict_onboarding` (1) — crates in the delete set, absent from the plan's list.
+   - `client::{SignIn,SignOut,Reconnect}` — the **crate survives** but these 3 actions are declared at
+     `client.rs:90-98` and must die in Phase 5. Added as step 1b.
+   - `onboarding::{SignIn,OpenAccount}` go while `Finish`/`ResetHints` stay.
+
+   Baseline: **1,292 actions / 88 namespaces**; **142** in namespaces that vanish, plus the partials.
+
+**Resolved the scope critic's open question.** "403 keymap action strings" and "142 doomed actions" measure
+different things and are both right: 403 counts *bindings* across 8 keymap files (one action is bound many
+times, per platform); 142 counts *distinct actions* that cease to exist.
+
+Artifacts: `research/baseline-metrics.md` · `baseline-actions.txt` (JSON) · `baseline-action-names.txt` ·
+`baseline-action-inventory.md` · `survivor-fix-order.py` + `.txt`
+
+### Phase 2 — 2026-07-26 · commit `3a78fc9`
+
+Visual-test harness removed: **4,274 deletions**, build green, five dependency edges dropped from
+`crates/zed` (`acp_thread`, `action_log`, `agent_servers`, `clock`, `tempfile`).
+
+**Correction the plan missed:** `.github/workflows/*.yml` are **generated** from `tooling/xtask`, and
+`run_tests.yml:730-733` fails CI if `.github` has uncommitted changes after `cargo xtask workflows`.
+Hand-editing the YAML would have been a guaranteed CI failure. Editing the generator removed the job
+plus its four gate-wiring points in one change. Also dropped four optional deps the `visual-tests`
+feature was the sole enabler of.
+
+### Phase 3 — 2026-07-26 · commit `47113fa` (partial)
+
+**Structural finding: only 2 of 5 severances can run while green.** A severance that replaces a
+*shared type* with a local copy breaks every cross-crate consumer while the original crate still
+exists — and those consumers only vanish at Phase 4.
+
+- ✅ **3e** `remote_server` ← `crashes` — done, warning-free.
+- ⏸ **3d** `remote_connection` ← `auto_update` — safe to run, **blocked on a security decision**
+  (integrity mechanism for the remote-server binary fetch).
+- ⤴ **3a** → Phase 5 step 0 · **3b**, **3c** → head of the red period, in topological order.
+
+The plan's value is intact: Phase 3 exists to make the keep-decision real so `editor` and
+`recent_projects` never need surgery. That still holds — the severances just land later in the
+sequence than drafted.
 
 ## Reference material
 

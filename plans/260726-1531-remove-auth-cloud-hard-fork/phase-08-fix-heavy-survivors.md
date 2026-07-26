@@ -47,17 +47,22 @@ The five crates carrying real weight: `zed` (23 dependency edges), `settings_ui`
 
 Order matters. `zed` last because every earlier fix shrinks its diff:
 
+**Corrected against the derived topology** (`research/survivor-fix-order.txt`). `title_bar` depends on
+`git_ui`, so the first draft's order (settings_ui → onboarding → title_bar → git_ui) would have made
+`title_bar` show errors sourced from an unfixed `git_ui`.
+
 ```
 1. settings_ui   ← 3 files deleted + page_data.rs (9,501 ln) surgery  ~2,900 lines
-2. onboarding    ← sign-in + plan UI removed                           ~200 lines   (needs Phase 5)
-3. title_bar     ← 3 files deleted + title_bar.rs edits              ~1,030 lines   (needs Phase 5)
-4. git_ui        ← 3 features excised from git_panel.rs (8,142 ln)     ~400 lines
+2. git_ui        ← 3 features excised from git_panel.rs (8,142 ln)     ~400 lines
+3. onboarding    ← sign-in + plan UI removed                           ~200 lines   (needs Phase 5)
+4. title_bar     ← 3 files deleted + title_bar.rs edits              ~1,030 lines   (needs Phase 5 + git_ui)
 5. zed           ← Cargo.toml → main.rs → reliability → menus
                    → quick_action_bar → open_listener → telemetry_log
                    → zed.rs → zed.rs tests                          ~40 call sites
 ```
 
-`onboarding` and `title_bar` both remove sign-in/plan UI and both depend on Phase 5 — do them back to back while the context is loaded.
+`onboarding` and `title_bar` both strip sign-in/plan UI and both depend on Phase 5 — adjacent on
+purpose, so that context is loaded once.
 
 ## Related Code Files
 

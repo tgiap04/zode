@@ -1,0 +1,46 @@
+# Survivor fix order (reverse-topological, leaves first)
+#
+# Derived by research/survivor-fix-order.py from cargo metadata.
+# Fix in THIS order and each crate is touched exactly once — errors
+# only flow dependency -> dependent.
+#
+# Use `cargo check -p <crate>`, never `--workspace`, until Phase 11.
+
+ 1. cloud_api_types  # no survivor deps — a leaf
+ 2. settings_content  # no survivor deps — a leaf
+ 3. client  # after: cloud_api_types
+ 4. edit_prediction_types  # after: client
+ 5. project  # after: client
+ 6. remote_server  # after: client, project
+ 7. workspace  # after: client, project
+ 8. activity_indicator  # after: project, workspace
+ 9. diagnostics  # after: project, workspace
+10. file_finder  # after: client, project, workspace
+11. language_tools  # after: client, project, workspace
+12. notifications  # after: client, workspace
+13. remote_connection  # after: workspace
+14. settings_ui  # after: project, workspace
+15. git_ui  # after: notifications, project, remote_connection, workspace
+16. onboarding  # after: client, cloud_api_types, notifications, project, workspace
+17. title_bar  # after: client, cloud_api_types, git_ui, notifications, project, remote_connection, workspace
+18. zed  # after: activity_indicator, client, diagnostics, file_finder, git_ui, language_tools, notifications, onboarding, project, settings_ui, title_bar, workspace
+
+# Phase assignment
+#   cloud_api_types        Phase 3
+#   settings_content       Phase 3
+#   client                 Phase 5
+#   edit_prediction_types  Phase 3
+#   project                Phase 7
+#   remote_server          Phase 3
+#   workspace              Phase 7
+#   activity_indicator     Phase 7
+#   diagnostics            Phase 7
+#   file_finder            Phase 7
+#   language_tools         Phase 7
+#   notifications          Phase 7
+#   remote_connection      Phase 3
+#   settings_ui            Phase 8
+#   git_ui                 Phase 8
+#   onboarding             Phase 8
+#   title_bar              Phase 8
+#   zed                    Phase 8

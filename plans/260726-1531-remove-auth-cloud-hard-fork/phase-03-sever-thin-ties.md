@@ -16,13 +16,39 @@ effort: "1d"
 
 **Priority:** P1 · **Build state:** GREEN (must stay green) · **Depends on:** Phase 2
 
-Cut the handful of thin symbol-level dependencies that are the *only* reason three valuable crates looked deletable. Each patch is small; together they keep `editor`, `project`, and `recent_projects` at **zero changes** for the entire operation.
+Cut the thin symbol-level dependencies that are the *only* reason three valuable crates looked deletable. The keep-decision they protect (`editor`, `recent_projects` at zero changes) is what makes this the highest-leverage work in the plan.
 
-**This is the highest-leverage phase in the plan.** ~40 lines of patch here avoids ~8,800 lines of surgery in the three most dangerous files in the codebase.
+## ⚠ Structural correction, found during execution
+
+**Only two of the five severances can run while the build is green.** The other three share a shape the plan did not account for:
+
+> A severance that **replaces a shared type with a local copy** cannot run while the crate that
+> originally owned the type is still present. The two definitions are distinct types, so every
+> cross-crate consumer breaks — and those consumers only disappear at Phase 4.
+
+| Severance | Shape | Can run pre-cut? |
+|---|---|---|
+| 3d `remote_connection` ← `auto_update` | replaces **call sites** | ✅ yes |
+| 3e `remote_server` ← `crashes` | deletes **call sites** | ✅ **done** |
+| 3a `edit_prediction_types` ← `client` | removes a **trait method** 3 delete-set crates override | ❌ E0407 |
+| 3b `settings_content` ← `language_model_core` | **re-export → local copy** of 3 enums | ❌ type mismatch |
+| 3c `cloud_api_types` ← `cloud_llm_client` | **shared struct → local copy** | ❌ type mismatch |
+
+Evidence for each:
+- **3a** — `EditPredictionDelegate::usage()` has a default impl (`edit_prediction_types.rs:167`) overridden by `codestral:195`, `copilot:40`, `edit_prediction:48`.
+- **3b** — `copilot_chat/responses.rs:9` (`pub use settings::OpenAiReasoningEffort`), `open_router:7` (`pub use settings::ModelMode`), `language_models/provider/anthropic.rs:198-199` all consume the type *through* the `settings` re-export.
+- **3c** — `client/src/test.rs:278` constructs a `cloud_llm_client::CurrentUsage` and assigns it into a `cloud_api_types` field.
+
+**Where they went.** 3a → Phase 5 step 0. 3b and 3c → the head of the red period, taken in the derived topological order (`cloud_api_types` is leaf #1, `settings_content` leaf #2 — see `research/survivor-fix-order.txt`).
+
+**The plan's value is unharmed.** Phase 3 was never about keeping the build green for its own sake — it was about making the keep-decision real so `editor` and `recent_projects` never need surgery. That still holds; the severances just land a few hours later in the sequence.
 
 ## Key Insights
 
 - `edit_prediction_types` (380 LOC) touches the cloud graph through exactly **one import used at 3 sites**: `use client::EditPredictionUsage`. Deleting the crate instead would mean ~429 `edit_prediction` references in `editor.rs`, 33 in `element.rs`, 5 in `display_map.rs`.
+- **⚠ 3a MOVED to Phase 5 step 0 — discovered during execution.** The plan assumed `edit_prediction_types` was the last consumer of `client::EditPredictionUsage`. It is not. `EditPredictionDelegate::usage()` has a **default impl** (`edit_prediction_types.rs:167`) that three delete-set crates override — `codestral:195`, `copilot:40`, `edit_prediction:48` (`zed_edit_prediction_delegate.rs:140`). Removing the trait method while those crates still exist is **E0407**, turning the build red *before* Phase 4.
+
+  Correct window: **after** Phase 4 removes the implementors, **before** Phase 5 deletes the type. Verified safe on the far side — the only surviving implementors are `editor`'s two test fakes (`edit_prediction_tests.rs:1580`, `:1658`), which rely on the default and never override it; `editor` references neither `.usage()` nor `EditPredictionUsage`.
 - `remote_connection` (728 LOC) touches it through **four call sites across two separate trait impls** — corrected by red team, the scout report undercounted by half:
   - `impl RemoteClientDelegate for RemoteClientDelegate` `:450` → `download_remote_server_release` `:484`, `get_remote_server_release_url` `:515`
   - `impl RemoteClientDelegate for BackgroundRemoteClientDelegate` `:626` → `download_remote_server_release` `:649`, `get_remote_server_release_url` `:680`
@@ -67,21 +93,26 @@ Five independent severances, no ordering constraints among themselves:
 
 ## Implementation Steps
 
-### 3a. `edit_prediction_types` — sever `client` (do this first; Phase 5 depends on it)
+### 3a. `edit_prediction_types` — **MOVED to Phase 5 step 0**
 
-1. Delete `use client::EditPredictionUsage;` at `:3`.
-2. Delete the `usage()` default method (`:165-168`), the trait method reference at `:215`, and the handle impl (`:267-271`).
-3. Drop `client` from `crates/edit_prediction_types/Cargo.toml`.
-4. `cargo check -p edit_prediction_types && cargo check -p editor` — **editor must need zero changes.** If it does not, stop and re-scope.
+See the Key Insights note above. Doing it here breaks the build; the procedure now lives in
+`phase-05-gut-client-auth-core.md` step 0, which runs after Phase 4 has removed the three
+overriding implementors.
 
-### 3b. `settings_content` — sever `language_model_core`
+### 3b. `settings_content` — **DEFERRED to the head of the red period**
+
+Cannot run pre-cut (see the structural correction above). Runs as the **second** survivor fix after
+Phase 4, per the derived topological order. Procedure unchanged:
 
 5. Move `ReasoningEffort` (`language_model_core.rs:465-476`), `ModelMode` (`:453-459`), and `Speed` (`request.rs:340-353`) into `crates/settings_content/`. All three are small fieldless/2-variant enums with no dependencies.
 6. Rewrite `language_model.rs:240` and `:482` from `pub use language_model_core::X` to local definitions; change `agent.rs:428` and `merge_from.rs:59` to `crate::Speed`.
 7. Drop the dep; `cargo check -p settings_content`.
    > Note: `agent.rs` and `language_model.rs` are deleted wholesale in Phase 8, but this phase must keep the build green *now*, so patch them rather than pre-deleting.
 
-### 3c. `cloud_api_types` — sever `cloud_llm_client`
+### 3c. `cloud_api_types` — **DEFERRED to the head of the red period**
+
+Cannot run pre-cut (see the structural correction above). Runs as the **first** survivor fix after
+Phase 4 — it is leaf #1 in the topological order. Procedure unchanged:
 
 8. Inline `CurrentUsage` (9 lines) into `crates/cloud_api_types/src/plan.rs`, replacing the qualified reference at `:22`. Drop the dep.
 9. **Verify the four extension crates.** The expected set is `ExtensionMetadata`, `ExtensionProvides`, `Timestamp`, `KnownOrUnknown` — **plus two the scout report omitted** (red team): `ExtensionApiManifest` (`extension_cli/src/main.rs:111`) and `GetExtensionsResponse` (`extension_host/src/extension_host.rs:13`). Seeing those two is **expected**, not a stop-and-rescope trigger.
@@ -107,29 +138,29 @@ Five independent severances, no ordering constraints among themselves:
 
 ### 3f. Gate
 
-17. `cargo check --workspace` green.
+17. `cargo check --workspace` green. (3a is no longer part of this phase.)
 18. Re-run `research/final-delete-set.py`; confirm the five crates report `must-patch: (none)` and the survivor count is 15 minus the ones just fixed.
-19. Commit as five separate commits, one per severance.
+19. Commit as four separate commits, one per severance.
 
 ## Todo List
 
-- [ ] 3a `edit_prediction_types` severed; `cargo check -p editor` needs **zero** changes
-- [ ] 3b `settings_content` severed; three enums relocated
-- [ ] 3c `cloud_api_types` severed; extension crates verified
+- [x] 3a **moved to Phase 5 step 0** — cannot run before Phase 4 (E0407 on three delete-set implementors)
+- [x] 3b **deferred** to post-Phase-4 (type-identity conflict while `language_model_core` lives)
+- [x] 3c **deferred** to post-Phase-4 (type-identity conflict while `cloud_llm_client` lives)
 - [ ] 3d `remote_connection` severed — **all four call sites** (`:484`, `:515`, `:649`, `:680`) across **both** impls
 - [ ] 3d Remote-binary delivery transport decided and implemented
 - [ ] 3d **Integrity verification implemented** — signature or published SHA256 checked before the binary is moved into place. A bare HTTPS GET does not satisfy this item.
-- [ ] 3e `remote_server` severed; proto messages left intact
+- [x] 3e `remote_server` severed — `crashes` dep dropped, both `crashes::init` sites and the `--crash-handler` entry point removed, orphaned bindings cleaned, warning-free (commit `47113fa`)
 - [ ] `cargo check --workspace` green
 - [ ] `final-delete-set.py` re-run and confirms the keep-list
+- [ ] Deferred severances (3a/3b/3c) recorded in the red-period sequence
 - [ ] Five standalone commits
 
 ## Success Criteria
 
 - `cargo check --workspace` green.
-- `cargo tree -i client -e normal` no longer lists `edit_prediction_types`.
 - `cargo tree -i auto_update -e normal` no longer lists `remote_connection`.
-- `cargo tree -i crashes -e normal` no longer lists `remote_server`.
+- ✅ `cargo tree -i crashes -e normal` no longer lists `remote_server` — **verified**.
 - `editor` and `recent_projects` untouched — verified by `git diff --stat`. (`project` needs 2 small edits, handled in Phases 7 and 9 — see plan.md finding 5.)
 - **The remote-server binary fetch verifies a signature or checksum.** Demonstrate it: point the fetch at a deliberately corrupted artifact and confirm it is rejected.
 
@@ -138,7 +169,7 @@ Five independent severances, no ordering constraints among themselves:
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Remote-binary download replacement is under-designed | SSH remote dev silently broken until manual testing | Step 10 forces an explicit decision; Phase 11 includes a live SSH remote-dev smoke test |
-| `edit_prediction_types` patch leaves `editor` needing changes | The whole keep-it rationale collapses | Step 4 is a hard gate — stop and re-scope rather than proceeding |
+| `edit_prediction_types` patch attempted in this phase | **Build goes red before Phase 4** (E0407) | Moved to Phase 5 step 0; this phase no longer touches it |
 | Moving enums changes serde representation | Users' `settings.json` values silently stop parsing | Copy the enums **verbatim** including all `#[serde(...)]` attributes; add a round-trip test |
 | Extension crates need more from `cloud_api_types` than expected | Phase 4 breaks the extension system | Step 9 verifies before committing |
 

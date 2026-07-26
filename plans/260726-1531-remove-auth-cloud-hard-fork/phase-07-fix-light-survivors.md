@@ -20,7 +20,7 @@ Six crates with small edges into the delete set, plus `file_finder` with a sligh
 
 **`project` was added here by the red team** — the plan originally called it a zero-change survivor, which was wrong (see 7e).
 
-Work in the reverse-topological order from Phase 1 and use `cargo check -p <crate>`, never `--workspace`. The point of this ordering is that each crate is fixed exactly once — errors flow downstream only.
+Work in the reverse-topological order derived in Phase 1 (`research/survivor-fix-order.txt`) and use `cargo check -p <crate>`, never `--workspace`. The point of this ordering is that each crate is fixed exactly once — errors flow downstream only.
 
 ## Key Insights
 
@@ -43,15 +43,21 @@ Work in the reverse-topological order from Phase 1 and use `cargo check -p <crat
 
 Fix order (leaf-first; each depends only on Phases 5–6, not on each other):
 
+**Corrected against the derived topology** (`research/survivor-fix-order.txt`, Phase 1 step 4). The
+first draft of this phase had `project` and `workspace` fifth and sixth — wrong, because the other
+five crates all depend on them, so their errors would have masked everything downstream.
+
 ```
-1. activity_indicator   ← auto_update::DismissMessage        ~6 lines
-2. diagnostics          ← agent_settings                     ~5 lines
-3. language_tools       ← edit_prediction::EditPredictionStore ~15 lines
-4. notifications        ← channel        (done in Phase 6c — verify only)
-5. project              ← agent_servers settings key         ~30 lines   [red team]
-6. workspace            ← agent_settings                     ~10-40 lines
-7. file_finder          ← channel::ChannelStore              ~110 lines
+1. project             ← agent_servers unwrap + disable_ai   ~30 lines   [red team]
+2. workspace           ← agent_settings                      ~10-40 lines
+3. activity_indicator  ← auto_update::DismissMessage          ~6 lines
+4. diagnostics         ← agent_settings                       ~5 lines
+5. file_finder         ← channel::ChannelStore               ~110 lines
+6. language_tools      ← edit_prediction::EditPredictionStore ~15 lines
+7. notifications       ← channel      (done in Phase 6c — verify only)
 ```
+
+`project` and `workspace` first is not a preference — every other crate here sits downstream of them.
 
 ## Related Code Files
 
@@ -66,28 +72,28 @@ Fix order (leaf-first; each depends only on Phases 5–6, not on each other):
 
 ## Implementation Steps
 
-### 7a. `activity_indicator`
+### 7c. `activity_indicator`
 
 1. `DismissMessage` is an action, not logic. Move the declaration into `zed_actions` (preferred — it is where cross-crate actions live) or declare it locally in `activity_indicator`.
 2. Update `:1`, `:297`, `:525`, `:554`. Drop `auto_update` from `Cargo.toml`.
 3. `cargo check -p activity_indicator`.
 
-### 7b. `diagnostics`
+### 7d. `diagnostics`
 
 4. Delete `use agent_settings::AgentSettings;` `:2` and the `is_agent_enabled` binding `:51`, plus the button branch it gates in `render`.
 5. Drop the dep. `cargo check -p diagnostics`.
 
-### 7c. `language_tools`
+### 7f. `language_tools`
 
 6. Delete `use edit_prediction::EditPredictionStore;` `:2` and the `EditPredictionStore::try_global` branch at `:346`.
 7. **Leave `lsp_button.rs:1309` alone** — it reads `language::language_settings`, a surviving crate.
 8. Drop the dep. `cargo check -p language_tools`.
 
-### 7d. `notifications` — verification only
+### 7g. `notifications` — verification only
 
 9. Already gutted in Phase 6c. Confirm: `cargo check -p notifications` green and `rg -n "channel::" crates/notifications/` empty.
 
-### 7e. `project` — the "zero-change survivor" that isn't (red team finding 5)
+### 7a. `project` — the "zero-change survivor" that isn't (red team finding 5)
 
 The plan originally listed `project` as needing no changes. That was wrong on two counts:
 
@@ -101,14 +107,14 @@ The plan originally listed `project` as needing no changes. That was wrong on tw
 9c. Remove `DisableAiSettings` / `disable_ai` (`project.rs:1094`) and coordinate the `default.json` entry removal with Phase 9.
 9d. `cargo check -p project`. Record the `agent_servers` decision — **Phase 9's settings table depends on it.**
 
-### 7f. `workspace`
+### 7b. `workspace`
 
 10. `welcome.rs:427` — delete the `ai_enabled` conditional and whatever it gated.
 11. `multi_workspace.rs` — since `sidebar` is deleted, remove `sidebar_side_context_menu` (`:65-100`) and the `AgentSettings::get_global(cx).sidebar_side` read at `:69`. Leave the `WorkspaceSidebar` **trait** in place if removing it ripples; nothing implements it after Phase 4, which is harmless.
 12. Drop `agent_settings` from `Cargo.toml`. `cargo check -p workspace`.
     > `workspace` is depended on by nearly everything — get it green before moving to Phase 8.
 
-### 7g. `file_finder`
+### 7e. `file_finder`
 
 13. Delete `use channel::ChannelStore;` `:7` and the `channel_store` field `:398`.
 14. Delete the `Match::Channel` variant `:465-466`. Then let the compiler find every match site — expect `:672`, `:1154-1158`, `:1548-1551`.
@@ -124,14 +130,14 @@ The plan originally listed `project` as needing no changes. That was wrong on tw
 
 ## Todo List
 
-- [ ] 7a `activity_indicator` — `DismissMessage` rehomed
-- [ ] 7b `diagnostics` — toolbar branch removed
-- [ ] 7c `language_tools` — Copilot LSP-log branch removed; `lsp_button.rs:1309` untouched
-- [ ] 7d `notifications` verified green
-- [ ] 7e `project` — `agent_server_store.rs:1896` unwrap resolved; `disable_ai` removed; **decision recorded for Phase 9**
-- [ ] 7f `workspace` — sidebar context menu removed; **green before Phase 8**
-- [ ] 7g `file_finder` — `Match::Channel` fully unwound
-- [ ] 7g `include_channels` removal **recorded for Phase 9**
+- [ ] 7a `project` — `agent_server_store.rs:1896` unwrap resolved; `disable_ai` removed; **decision recorded for Phase 9**
+- [ ] 7b `workspace` — sidebar context menu removed; **green before everything downstream**
+- [ ] 7c `activity_indicator` — `DismissMessage` rehomed
+- [ ] 7d `diagnostics` — toolbar branch removed
+- [ ] 7e `file_finder` — `Match::Channel` fully unwound
+- [ ] 7e `include_channels` removal **recorded for Phase 9**
+- [ ] 7f `language_tools` — Copilot LSP-log branch removed; `lsp_button.rs:1309` untouched
+- [ ] 7g `notifications` verified green
 - [ ] `final-delete-set.py` shows only the heavy five remaining
 - [ ] Six standalone commits
 
