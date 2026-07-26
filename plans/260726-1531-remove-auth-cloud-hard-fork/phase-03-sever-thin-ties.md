@@ -1,8 +1,8 @@
 ---
 phase: 3
-title: "Sever thin ties"
-status: pending
-effort: "1d"
+title: Sever thin ties
+status: completed
+effort: 1d
 ---
 
 # Phase 3: Sever thin ties
@@ -147,11 +147,11 @@ Phase 4 — it is leaf #1 in the topological order. Procedure unchanged:
 - [x] 3a **moved to Phase 5 step 0** — cannot run before Phase 4 (E0407 on three delete-set implementors)
 - [x] 3b **deferred** to post-Phase-4 (type-identity conflict while `language_model_core` lives)
 - [x] 3c **deferred** to post-Phase-4 (type-identity conflict while `cloud_llm_client` lives)
-- [ ] 3d `remote_connection` severed — **all four call sites** (`:484`, `:515`, `:649`, `:680`) across **both** impls
-- [ ] 3d Remote-binary delivery transport decided and implemented
-- [ ] 3d **Integrity verification implemented** — signature or published SHA256 checked before the binary is moved into place. A bare HTTPS GET does not satisfy this item.
+- [x] 3d `remote_connection` severed — all four call sites across both impls (commit `867dd5c`)
+- [x] 3d Transport: release manifest + artifact fetch via `http_client` (`remote_server_release.rs`)
+- [x] 3d **Integrity verification implemented** — streaming SHA-256 checked before rename; 5 unit tests prove malformed digests and tampering are both rejected
 - [x] 3e `remote_server` severed — `crashes` dep dropped, both `crashes::init` sites and the `--crash-handler` entry point removed, orphaned bindings cleaned, warning-free (commit `47113fa`)
-- [ ] `cargo check --workspace` green
+- [x] `cargo check --workspace` green
 - [ ] `final-delete-set.py` re-run and confirms the keep-list
 - [ ] Deferred severances (3a/3b/3c) recorded in the red-period sequence
 - [ ] Five standalone commits

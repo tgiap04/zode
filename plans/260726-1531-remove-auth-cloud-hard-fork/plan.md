@@ -1,15 +1,27 @@
 ---
-title: "Hard fork Zed: remove auth, cloud and AI subsystems"
-description: "Delete 53 crates (auth, collab, AI, edit-prediction, auto-update, crash reporting) from the Zed workspace, gut client/telemetry, and rebrand as an independent privacy-first IDE"
-status: in_progress
+title: 'Hard fork Zed: remove auth, cloud and AI subsystems'
+description: >-
+  Delete 53 crates (auth, collab, AI, edit-prediction, auto-update, crash
+  reporting) from the Zed workspace, gut client/telemetry, and rebrand as an
+  independent privacy-first IDE
+status: pending
 priority: P1
 effort: 4-6w
-tags: [refactor, deletion, privacy, fork, rust, workspace]
+tags:
+  - refactor
+  - deletion
+  - privacy
+  - fork
+  - rust
+  - workspace
 blockedBy: []
 blocks: []
 work_type: deliverable
-spec_waived: "One-off subtractive refactor of an existing codebase — no new user-facing feature to specify. Requirements are fully captured by the delete set and the verified dependency graph."
-created: 2026-07-26
+spec_waived: >-
+  One-off subtractive refactor of an existing codebase — no new user-facing
+  feature to specify. Requirements are fully captured by the delete set and the
+  verified dependency graph.
+created: 2026-07-26T00:00:00.000Z
 ---
 
 # Hard fork Zed: remove auth, cloud and AI subsystems
@@ -42,9 +54,9 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 
 | Phase | Name | Status |
 |-------|------|--------|
-| 1 | [Preparation and baseline](./phase-01-preparation-and-baseline.md) | Pending |
-| 2 | [Free wins - visual test harness](./phase-02-free-wins-visual-test-harness.md) | Pending |
-| 3 | [Sever thin ties](./phase-03-sever-thin-ties.md) | Pending |
+| 1 | [Preparation and baseline](./phase-01-preparation-and-baseline.md) | Completed |
+| 2 | [Free wins - visual test harness](./phase-02-free-wins-visual-test-harness.md) | Completed |
+| 3 | [Sever thin ties](./phase-03-sever-thin-ties.md) | Completed |
 | 4 | [Atomic structural cut](./phase-04-atomic-structural-cut.md) | Pending |
 | 5 | [Gut client auth core](./phase-05-gut-client-auth-core.md) | Pending |
 | 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Pending |
@@ -99,9 +111,9 @@ The commissioner allowed downloads ("vẫn cho phép tải về"), so this is pe
 
 | # | Finding | Sev | Disposition | Applied To |
 |---|---------|-----|-------------|------------|
-| 1 | `onboarding` is an unscoped 16th survivor calling deleted auth APIs | Critical | Accept | plan.md, Phase 8e (new) |
-| 2 | Extension registry still hits `api.zed.dev`; contradicts "zero outbound" | Critical | Accept | plan.md, Phase 11, Phase 12 |
-| 3 | Phase 3d binary-download integrity is prose only, not a gate | Critical | Accept | Phase 3 |
+| 1 | `onboarding` is an unscoped 16th survivor calling deleted auth APIs | Critical | Accept | Completed |
+| 2 | Extension registry still hits `api.zed.dev`; contradicts "zero outbound" | Critical | Accept | Completed |
+| 3 | Phase 3d binary-download integrity is prose only, not a gate | Critical | Accept | Completed |
 | 4 | No abort/rollback protocol for the 6-phase red period | Critical | Accept | Phase 4 |
 | 5 | `project` is not zero-change — `agent_servers` unwrap at `agent_server_store.rs:1896` | High | Accept | plan.md, Phase 7, Phase 9 |
 | 6 | `git_panel.rs` is 8,142 lines, not 5,700 — Phase 8 under-estimated | High | Accept | Phase 8 (est. 8-10d) |

@@ -1,8 +1,8 @@
 ---
 phase: 2
-title: "Free wins - visual test harness"
-status: pending
-effort: "0.5d"
+title: Free wins - visual test harness
+status: completed
+effort: 0.5d
 ---
 
 # Phase 2: Free wins - visual test harness
