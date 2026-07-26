@@ -1774,7 +1774,6 @@ dependencies = [
  "log",
  "objc2-foundation",
  "parking_lot",
- "paths",
  "postage",
  "rand 0.9.3",
  "regex",
@@ -1786,7 +1785,6 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "settings",
- "sha2",
  "smol",
  "telemetry",
  "telemetry_events",
@@ -8819,16 +8817,9 @@ dependencies = [
 name = "notifications"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "client",
  "component",
- "db",
  "gpui",
- "rpc",
- "sum_tree",
- "time",
  "ui",
- "util",
  "workspace",
  "zed_actions",
 ]
@@ -14364,7 +14355,6 @@ dependencies = [
 name = "telemetry"
 version = "0.1.0"
 dependencies = [
- "futures 0.3.32",
  "serde",
  "serde_json",
  "telemetry_events",
@@ -18889,7 +18879,6 @@ dependencies = [
  "windows 0.61.3",
  "winresource",
  "workspace",
- "zed-reqwest",
  "zed_actions",
  "zed_env_vars",
  "zlog",
