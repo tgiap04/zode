@@ -59,9 +59,9 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 3 | [Sever thin ties](./phase-03-sever-thin-ties.md) | Completed |
 | 4 | [Atomic structural cut](./phase-04-atomic-structural-cut.md) | Completed |
 | 5 | [Gut client auth core](./phase-05-gut-client-auth-core.md) | Completed |
-| 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Pending |
-| 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | In progress (2/7) |
-| 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Pending |
+| 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Completed |
+| 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | In progress (8/9 — `file_finder` re-sequenced to Phase 8) |
+| 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Pending (now six crates: + `file_finder`) |
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Pending |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Pending |
 | 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Pending |
@@ -263,6 +263,62 @@ Deliberately left, with the compiler already naming every item (~500 lines):
 dead collab transport (`connect_with_credentials`, `set_connection`, `establish_connection`,
 `rpc_url`, `establish_websocket_connection`), all of `proxy.rs` + `proxy/http_proxy.rs`, `ZED_RPC_URL`.
 Phase 11's `--deny warnings` will not let them ship.
+
+### Phase 6 — 2026-07-26 · commits `f66d5c2` `bd7b79a` `affdb88` `8884e39` `2677953`
+
+All telemetry egress is gone **by construction**, not by configuration. `client/src/telemetry.rs`
+977 → 439 lines; `reliability.rs` 499 → 151.
+
+**The plan contradicted itself, and the contradiction was load-bearing.** 6a said make
+`send_event` a no-op; 6b and 6d said keep the disk-write path and the hang detector because
+"disk-only is fine". Both cannot hold: with the macro no-op'd nothing feeds the event queue, so
+the **Help → View Telemetry** pane would have shipped permanently empty on top of a dead
+collection subsystem — and because those items are `pub`, Phase 11's `--deny warnings` would
+never have flagged them. Commissioner chose deletion. `zed/telemetry_log.rs` (562 lines), its
+toolbar item, its menu item and `zed_actions::OpenTelemetryLog` went with it.
+
+**A removed Cargo *feature* is a manifest-parse error, not a warning** — the same class as Phase
+4's "fourth edit". Dropping `notifications`' `test-support` feature broke `title_bar`'s
+dev-dependency on it, and `cargo check -p notifications` refused to resolve the workspace at all
+until both landed in one commit. Feature removals need the same reverse-dependency sweep the
+plan already prescribes for dependency removals.
+
+Also: `metrics_enabled`/`diagnostics_enabled` and `os_name`/`os_version` were kept on evidence,
+not habit — `system_specs` calls the latter for Copy System Specs, and the `telemetry` settings
+key survives with `settings_ui` and `onboarding` still writing it.
+
+### Phase 7 (8 of 9) — 2026-07-26 · commits `de097a6` `64a5708` `a74d128` `993414f` `3c8c30f`
+
+Six crates green: `project`, `workspace`, `activity_indicator`, `diagnostics`, `language_tools`,
+and `notifications` (which needed nothing beyond 6c once `project` landed).
+
+**Ordering correction #3 — the derived order has the same blind spot twice.**
+`file_finder → project_panel → git_ui`, so `file_finder` sits downstream of a **Phase 8** crate.
+`cargo check -p file_finder` returns 16 errors and **not one is in `file_finder`** — cargo never
+reaches it. Its own errors are masked, which is precisely what the reverse-topological ordering
+exists to prevent. `file_finder` is re-sequenced to Phase 8, after `git_ui`. Doing its 14-site
+`Match::Channel` unwind blind would violate cutting rules 3 and 4 — no compiler means no
+assert-after-cut and no consumer check, the exact conditions that produced Phase 5's three
+over-cuts.
+
+**`project` was wrong in the plan for a third reason.** Phase 7a predicted two problems
+(`agent_server_store.rs:1896` unwrap, `disable_ai`). The crate's *only actual compile error* was
+neither: `project.rs:1647` called the `Client::connect` that Phase 5 removed, inside
+`Project::in_room` — the collab room-join constructor, which had **no callers left**. It and
+`from_join_project_response` (whose only caller was `in_room`) came out together, 310 lines.
+
+**The plan's 9a recommendation is not executable as written.** "Delete `agent_server_store.rs`
+and its wiring" overlooked that `AgentServerStore` is used by
+`remote_server/headless_project.rs` — a **survivor**. 2,241 lines across a survivor boundary is
+Phase 8 work. Deferred safely: the `:1896` `.unwrap()` cannot panic while `default.json` keeps the
+key, so **Phase 9 must not remove that key before the decision is made.**
+
+**One dead `pub` item was caught only because it was noticed by hand.** Removing
+`language_tools`' Copilot branch orphaned `LogStore::copilot_state_for_project` in `project`.
+Being `pub`, neither `dead_code` nor `--deny warnings` would ever have reported it. Removed with
+its `copilot_log_subscription` plumbing. **This is a gap in the Phase 11 gate**: `--deny warnings`
+cannot see orphaned `pub` API, so `cargo machete` and reverse-dependency greps are not optional
+there.
 
 ## Execution rule: how to cut (learned the hard way in Phase 5)
 

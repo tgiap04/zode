@@ -1,7 +1,7 @@
 ---
 phase: 6
 title: "Gut telemetry notifications reliability"
-status: pending
+status: completed
 effort: "1d"
 ---
 
@@ -117,16 +117,29 @@ crates/zed/src/reliability.rs
 
 ## Todo List
 
-- [ ] 6a `telemetry::send_event` is a no-op; macro API unchanged; comment explains why
-- [ ] 6b `set_authenticated_user_info` and `MINIDUMP_ENDPOINT` gone; `TelemetrySettings` kept
-- [ ] 6c `notification_store.rs` deleted; `status_toast` intact; `git_ui` still checks
-- [ ] 6c `notifications/Cargo.toml` pruned
-- [ ] 6d `reliability.rs` reduced to the hang detector (~130 lines)
-- [ ] 6d `init` signature changed and `main.rs:621` updated
-- [ ] 6d `reqwest` removed from `crates/zed` if unused
-- [ ] `cargo check -p telemetry -p client -p notifications` green
-- [ ] Egress grep returns nothing
-- [ ] Three standalone commits
+- [x] 6a `telemetry::send_event` is a no-op; macro API unchanged; comment explains why
+- [x] 6b `set_authenticated_user_info` and `MINIDUMP_ENDPOINT` gone; `TelemetrySettings` kept
+- [x] 6c `notification_store.rs` deleted; `status_toast` intact
+- [x] 6c `notifications/Cargo.toml` pruned
+- [x] 6d `reliability.rs` reduced to the hang detector (151 lines)
+- [x] 6d `init` signature changed and `main.rs` caller updated
+- [x] 6d `reqwest` removed from `crates/zed`
+- [x] `cargo check -p telemetry -p client` green; `-p notifications` verified green after 7a
+- [x] Egress grep returns nothing
+- [x] Standalone commits (five, not three — see the log)
+
+**Deviation: the local event log went too.** The plan's 6a (no-op `send_event`) and its
+6b/6d (keep the disk-write path, keep the hang detector) contradicted each other: with the
+macro no-op'd nothing feeds the queue, so the **Help → View Telemetry** pane
+(`zed/telemetry_log.rs`, 562 lines) would have shipped permanently empty, with its collection
+machinery dead but `pub` — invisible to Phase 11's `--deny warnings`. Commissioner chose to
+delete the subsystem. Removed: the queue, log file, subscriber fan-out, `report_event`,
+`subscribe_with_history`, `read_log_file`, `flush_events`, `telemetry_log.rs`, its toolbar item,
+its menu item, `zed_actions::OpenTelemetryLog`, and `telemetry::init`.
+
+Kept deliberately: `os_name`/`os_version` (`system_specs` uses them for Copy System Specs) and
+`metrics_enabled`/`diagnostics_enabled` (the `telemetry` settings key survives and `settings_ui`
+plus `onboarding` still write it).
 
 ## Success Criteria
 
