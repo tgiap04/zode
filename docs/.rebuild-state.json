@@ -1,0 +1,26 @@
+{
+  "doc_shas": {
+    "behavior-logic.md": "43405f6b106fa202e97fe4adf6171d7a6f128f0459e07073bfc88e4114f09f67",
+    "business-rules.md": "36302c33fe569651358097373cadf6d4789d39c8f2c909ef2057c22fd50137a3",
+    "data-model.md": "2953fb060d1f8ba29cf32a3b08c9ce38c2888554e1359cf4f24e9275496d8e78",
+    "feature-list.md": "16322aece7da604d91ad144880a88571ee269d985ce5932c190f6f21b52a3c78",
+    "permissions.md": "394f8af909ce4db0339fc04e7053e178e737ec6bebc20e018213dac6a5751af9",
+    "system-overview.md": "349e4c79ea63f8ee3040953b9cc0cbb68d4e3843e29300b51b5d7b15ab3d4e99",
+    "user-stories.md": "1424f875889d56257730a826de4f820dac258611829fc9b367658f0c6743e5e8"
+  },
+  "fcode_index_sha": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "last_api_contracts_run_sha": "",
+  "last_design_intent_run_sha": "",
+  "last_feature_spec_run_sha": "",
+  "last_flows_run_sha": "",
+  "last_glossary_run_sha": "",
+  "last_jobs_run_sha": "",
+  "last_rebuild_sha": "67f8108f6e1609a28d33c914cc2f264c97ae6f69",
+  "last_test_cases_run_sha": "",
+  "mode": "full",
+  "primary_lang": "",
+  "rebuilt_at": "2026-07-26T07:40:52Z",
+  "schema_version": "21.0.0",
+  "screen_spec_shas": {},
+  "translations": {}
+}

@@ -1,0 +1,457 @@
+{
+  "generated_at": "2026-07-26T07:16:00Z",
+  "plan": "260726-1400-rebuild-spec",
+  "features": [
+    {
+      "fcode": "F001",
+      "name": "Project folder navigation",
+      "slug": "F001_ProjectFolderNavigation",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US001_OpenProjectFolder",
+          "US002_BrowseWorktreeFiles"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL005_WorkspaceEventEmitterSubscribe"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F002",
+      "name": "Buffer text editing",
+      "slug": "F002_BufferTextEditing",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US003_EditBufferText",
+          "US021_ReadOnlyBufferRejectsEdit"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL006_LspRequestDispatch"
+        ],
+        "perms": [
+          "PERM004_BufferCapabilityGate"
+        ]
+      }
+    },
+    {
+      "fcode": "F003",
+      "name": "LSP diagnostics feedback",
+      "slug": "F003_LspDiagnostics",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US005_ReceiveLspDiagnostics"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL006_LspRequestDispatch"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F004",
+      "name": "LSP completion suggestions",
+      "slug": "F004_LspCompletions",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US026_ReceiveLspCompletions"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL006_LspRequestDispatch"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F005",
+      "name": "Live settings.json editing",
+      "slug": "F005_LiveSettingsEditing",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US008_EditSettingsJson",
+          "US023_SettingsChangeNotifiesObservers"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL013_SettingsStoreObserver"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F006",
+      "name": "Third-party extension installation",
+      "slug": "F006_ExtensionInstallation",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US009_InstallExtension",
+          "US022_ExtensionCapabilityDenied"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL004_ExtensionHostWasmDispatch"
+        ],
+        "perms": [
+          "PERM001_ExtensionProcessExecCapability",
+          "PERM002_ExtensionDownloadFileCapability",
+          "PERM003_ExtensionNpmInstallCapability"
+        ]
+      }
+    },
+    {
+      "fcode": "F007",
+      "name": "Project sharing for collaboration",
+      "slug": "F007_ProjectSharing",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US010_ShareProjectForCollaboration"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL007_RpcProtoMessageRouting"
+        ],
+        "perms": [
+          "PERM005_CollabMutatingProjectRequestGuard"
+        ]
+      }
+    },
+    {
+      "fcode": "F008",
+      "name": "Join a shared project",
+      "slug": "F008_JoinSharedProject",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US011_JoinSharedProject"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL007_RpcProtoMessageRouting",
+          "BL008_InAppNotificationCenter"
+        ],
+        "perms": [
+          "PERM006_CollabReadOnlyProjectRequestGuard",
+          "PERM007_ChannelRoleAccessControl"
+        ]
+      }
+    },
+    {
+      "fcode": "F009",
+      "name": "Integrated terminal command execution",
+      "slug": "F009_IntegratedTerminal",
+      "priority": "P0",
+      "type": "ui",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US014_RunTerminalCommand"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F010",
+      "name": "Git diff viewing",
+      "slug": "F010_GitDiffViewing",
+      "priority": "P0",
+      "type": "ui",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US015_ViewGitDiff"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F011",
+      "name": "Git hunk staging",
+      "slug": "F011_GitHunkStaging",
+      "priority": "P0",
+      "type": "ui",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US027_StageGitHunk"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [],
+        "perms": [
+          "PERM008_DisallowGuestRequestGuard"
+        ]
+      }
+    },
+    {
+      "fcode": "F012",
+      "name": "Git commit of staged changes",
+      "slug": "F012_GitCommit",
+      "priority": "P0",
+      "type": "ui",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US016_CommitStagedChanges"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F013",
+      "name": "AI agent chat thread",
+      "slug": "F013_AiAgentChat",
+      "priority": "P0",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US017_ChatWithAiAgent"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL003_AgentThreadToolCallLoop",
+          "BL009_LlmProviderClients"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F014",
+      "name": "Keyboard shortcut action dispatch",
+      "slug": "F014_KeyboardActionDispatch",
+      "priority": "P0",
+      "type": "background",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US024_DispatchKeyboardAction"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL005_WorkspaceEventEmitterSubscribe"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F015",
+      "name": "Multi-buffer search results view",
+      "slug": "F015_MultiBufferSearchResults",
+      "priority": "P1",
+      "type": "ui",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US004_OpenMultiBufferSearchResults"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F016",
+      "name": "LSP code action application",
+      "slug": "F016_LspCodeActions",
+      "priority": "P1",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US006_ApplyLspCodeAction"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL006_LspRequestDispatch"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F017",
+      "name": "Editor theme customization",
+      "slug": "F017_EditorThemeCustomization",
+      "priority": "P1",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US007_ChangeEditorTheme"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL013_SettingsStoreObserver"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F018",
+      "name": "Collaborator role management",
+      "slug": "F018_CollaboratorRoleManagement",
+      "priority": "P1",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US012_ChangeCollaboratorRole"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL007_RpcProtoMessageRouting"
+        ],
+        "perms": [
+          "PERM007_ChannelRoleAccessControl",
+          "PERM008_DisallowGuestRequestGuard"
+        ]
+      }
+    },
+    {
+      "fcode": "F019",
+      "name": "Voice/video call with collaborators",
+      "slug": "F019_VoiceVideoCall",
+      "priority": "P1",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US013_StartVoiceCall"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL010_LiveKitCallingIntegration"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F020",
+      "name": "Inline AI edit prediction acceptance",
+      "slug": "F020_InlineEditPrediction",
+      "priority": "P1",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US018_AcceptInlineEditPrediction"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL009_LlmProviderClients"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F021",
+      "name": "LLM provider switching",
+      "slug": "F021_LlmProviderSwitching",
+      "priority": "P1",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US019_SwitchLlmProvider"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL009_LlmProviderClients",
+          "BL013_SettingsStoreObserver"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F022",
+      "name": "Application auto-update",
+      "slug": "F022_AutoUpdate",
+      "priority": "P1",
+      "type": "background",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US020_ReceiveAutoUpdateNotification"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL001_AutoUpdatePoller",
+          "BL002_SchedulerTrait"
+        ],
+        "perms": []
+      }
+    },
+    {
+      "fcode": "F023",
+      "name": "Git hosting permalink resolution",
+      "slug": "F023_GitHostingPermalink",
+      "priority": "P2",
+      "type": "mixed",
+      "related": {
+        "screens": [],
+        "user_stories": [
+          "US025_ResolveGitHostingPermalink"
+        ],
+        "routes": [],
+        "models": [],
+        "bl": [
+          "BL011_GitHostingProviderDetection"
+        ],
+        "perms": []
+      }
+    }
+  ]
+}

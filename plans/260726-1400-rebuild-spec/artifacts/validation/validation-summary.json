@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-07-26T07:16:20Z",
+  "overall_status": "PASS",
+  "plan": "260726-1400-rebuild-spec",
+  "schema_version": 1,
+  "totals": {
+    "critical": 0,
+    "failed_specs": 0,
+    "passed_specs": 0,
+    "warning": 0
+  },
+  "validators": {
+    "feature_existence": {
+      "issues": [],
+      "status": "PASS",
+      "summary": {
+        "critical": 0,
+        "warning": 0
+      }
+    },
+    "id_contiguity": {
+      "issues": [],
+      "status": "PASS",
+      "summary": {
+        "critical": 0,
+        "warning": 0
+      }
+    }
+  }
+}
