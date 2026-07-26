@@ -2,7 +2,6 @@
 //! process. The crate is deliberately kept rather than deleted because 31 call
 //! sites across the workspace invoke [`event!`]; retaining the macro as a no-op
 //! keeps the removal to one file instead of thirty.
-use futures::channel::mpsc;
 pub use serde_json;
 pub use telemetry_events::FlexibleEvent as Event;
 
@@ -56,7 +55,3 @@ macro_rules! serialize_property {
 /// Drops the event. There is no telemetry queue and no network path in this
 /// fork — the event is built by the caller and discarded here.
 pub fn send_event(_event: Event) {}
-
-/// Accepts and drops the sender. The signature is retained only so existing
-/// callers compile unchanged.
-pub fn init(_tx: mpsc::UnboundedSender<Event>) {}

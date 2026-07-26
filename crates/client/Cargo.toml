@@ -36,7 +36,6 @@ http_client_tls.workspace = true
 httparse = "1.10"
 log.workspace = true
 parking_lot.workspace = true
-paths.workspace = true
 postage.workspace = true
 rand.workspace = true
 regex.workspace = true
