@@ -62,7 +62,6 @@ windows.workspace = true
 [dev-dependencies]
 client = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
-notifications = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true
 remote = { workspace = true, features = ["test-support"] }
