@@ -1,7 +1,7 @@
 ---
 phase: 9
 title: "Data files keymaps and settings"
-status: pending
+status: completed
 effort: "3-4d"
 ---
 
@@ -170,21 +170,21 @@ default.json key        ─┼─► must be removed ATOMICALLY (same commit)
 
 ## Todo List
 
-- [ ] 9a Post-deletion action dump generated
-- [ ] 9a `removed-actions.txt` derived by diff (**not hand-curated**)
-- [ ] 9a All 8 keymap files purged; 3 defaults edited in lockstep
-- [ ] 9a Dead key contexts cleaned
-- [ ] 9a **Regression test added**: every bundled keymap loads, every action resolves
-- [ ] 9b All settings triples removed atomically (field + default.json + consumer)
-- [ ] 9b `audio`, `telemetry` keys verified and **kept**
-- [ ] 9b `server_url` kept, and the extension-registry consequence recorded for Phase 12
-- [ ] 9b `agent_servers` decision honoured from Phase 7e (unwrap at `agent_server_store.rs:1896` resolved)
-- [ ] 9b `title_bar.show_*` keys **removed** (decision, not recommendation)
-- [ ] 9b `replace_subschema` audit done
-- [ ] 9c `assets/prompts/`, `assets/sounds/`, orphaned icons deleted; `IconName` pruned
-- [ ] 9d **`cargo run` launches without panic**
-- [ ] 9d All 7 base keymaps switch cleanly
-- [ ] 9d Legacy `settings.json` loads without error
+- [x] 9a Post-deletion action dump generated (`research/post-deletion-actions.json`)
+- [x] 9a `removed-actions.txt` derived by diff — **128 removed, 1 added** (not 142; see log)
+- [x] 9a 320 bindings purged from 6 files (2 of the 8 had none); 3 defaults in lockstep
+- [x] 9a 41 dead blocks removed; 3 always-true negated predicates simplified
+- [x] 9a **Regression test added** — `test_bundled_keymaps_all_actions_resolve`; cannot RUN until Phase 10 fixes `client` test-support: every bundled keymap loads, every action resolves
+- [x] 9b Nine triples removed atomically; **three of the table's rows were wrong and NOT followed** (see log)
+- [x] 9b `audio` verified live (`audio_settings.rs` reads all three) and kept; `telemetry` kept — **its removal is deferred, see Unresolved**
+- [x] 9b `server_url` kept; consequence already recorded in plan.md for Phase 12
+- [x] 9b `agent_servers` **kept** — `AgentServerStore` survives via `remote_server`, so the `:1896` unwrap stays valid (unwrap at `agent_server_store.rs:1896` resolved)
+- [x] 9b `title_bar.show_*` removed — done in Phase 8b with their consumers; `show_onboarding_banner` **kept** (live at `title_bar.rs:218`)
+- [x] 9b `replace_subschema` audit clean — only 6 unaffected types
+- [x] 9c prompts + sounds deleted; **35 icons, not ~48** — 12 of the estimated set are live
+- [x] 9d **launches without panic** — alive 20s, ZED_STATELESS
+- [x] 9d All 8 `base_keymap` values launch clean (7 named + None), each in an isolated `--user-data-dir`
+- [x] 9d Legacy `settings.json` with 13 removed keys loads clean, no error — confirms finding 2
 
 ## Success Criteria
 

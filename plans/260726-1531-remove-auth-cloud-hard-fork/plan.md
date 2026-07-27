@@ -62,7 +62,7 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Completed |
 | 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | Completed (9/9 — `file_finder` landed in Phase 8) |
 | 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Completed (8f closed as a no-op — MCP kept) |
-| 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Pending |
+| 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Completed — **the app launches** |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Pending |
 | 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Pending |
 | 12 | [Rebrand and packaging](./phase-12-rebrand-and-packaging.md) | Pending |
@@ -393,6 +393,73 @@ But removing the subsystem is not the contained edit 29a-29b describe. It reache
 `extension_api.rs`) — which would break the extension compatibility the commissioner explicitly
 wanted kept. That is a scope and compatibility trade the plan did not price, so it is the
 commissioner's call.
+
+### Phase 9 — 2026-07-27 · commits `0400e3d` `5848812` `f0ad624`
+
+**The editor starts.** That is this phase's whole gate and it passes: launched with
+`ZED_STATELESS`, alive 20s, no panic. All **8** `base_keymap` values (7 named + `None`) launch clean,
+each in an isolated `--user-data-dir`. A legacy `settings.json` carrying 13 of the removed keys
+loads with no error, confirming finding 2's permissiveness claim empirically rather than by reading.
+
+`default.json` 2603 → 2321 · 320 keymap bindings and 41 dead blocks gone · 35 icons · 8 sounds ·
+3 prompts.
+
+**The derived diff beat the estimate, in both directions.** 1,292 → 1,165 actions: **128** removed,
+not the ~142 predicted, and exactly **1** added — `activity_indicator::DismissMessage`, which
+independently confirms the Phase 7c hand-off. Hand-curating by namespace would have been wrong for
+the reason the phase warned about *and* one it did not anticipate.
+
+**A naive resolution check condemns 17 working bindings.** `editor::CopyPath`,
+`branches::OpenRecent`, `project_panel::CopyPath` and friends are absent from
+`--dump-all-actions` **at baseline too**, because the dump lists only *preferred* names while these
+are declared `#[action(deprecated_aliases = [...])]`. Any "does every binding resolve?" test must
+consult the alias set. The new regression test goes through the real action registry instead of the
+dump, so it gets this right for free — a test written against the dump would have failed on day one.
+
+**Three rows of the 9b settings table are wrong and were not followed:**
+
+1. **`edit_predictions` + its `copilot`/`codestral`/`ollama` sub-keys must be KEPT.**
+   `language/src/language_settings.rs:779,787,794` **unwraps all three**, and `language` is a
+   survivor. Removing them is precisely the startup panic this phase exists to prevent. Same for
+   `show_edit_predictions` and `edit_predictions_disabled_in`.
+2. **`context_servers` / `context_server_timeout` / `agent_servers` stay** — Phase 8f kept MCP, and
+   `AgentServerStore` survives because `remote_server` shares it over SSH.
+3. **`disable_ai` stays** — `settings_store` merges it across project files and `DisableAiSettings`
+   still gates the surviving context-server and agent-registry stores.
+
+**Two estimates in 9c were wrong in both directions.** The "~48 orphaned icons" are 35: `MicMute`
+and `Screen` *are* used while `Mic`/`Bell*`/`Chat`/`User*` are not, and 12 of the supposedly-orphaned
+set are live (`ai_zed` alone has 27 references). Step 12's "check `IconName` consumers first" is the
+instruction that saved this.
+
+**A test that looked like a casualty was actually load-bearing.** `settings_store`'s
+`AutoUpdateSetting` was not testing auto-update — it was the store's generic example of a
+*global-only bool*, carrying ~15 assertions about layering, project-vs-user schema scoping and
+update formatting. Repointed at `vim_mode` with every value inverted (`vim_mode` defaults false where
+`auto_update` defaulted true), so each step still proves something. 27 settings tests pass.
+
+**`crates/audio` is now fully orphaned.** Removing `play_sound` took the last consumer of the output
+mixer, and the crate has **zero** external API consumers left — only `audio::init`, which just
+registers settings. With the libwebrtc/webrtc-sys edge flagged in Phase 7, deleting the crate is a
+Phase 11 candidate; its three settings keys are kept only because `audio_settings.rs` still reads them.
+
+**Also cleaned:** `assets/keymaps/storybook.json` and `script/{storybook,seed-db,squawk,zed-local}`
+(their crates died in Phase 4), and the macOS camera/microphone/speech-recognition usage descriptions
+plus the `device.audio-input`/`device.camera` entitlements. Note those descriptions cover programs run
+*inside* Zed, so a terminal child process wanting the microphone is now denied — correct for this fork,
+but a real behaviour change.
+
+**Deferred to Phase 11:** `.github/workflows/{deploy_collab,run_tests}.yml` still name the `collab`
+crate, but they are **generated** from `tooling/xtask` and `run_tests` fails CI on any hand edit to
+`.github` — that is a generator change, not a YAML edit.
+
+**Unresolved, carried to Phase 10:** the `telemetry` settings key. Phase 8d deferred the decision
+here, and this phase's step 8 says "keep" — but that instruction predates the commissioner's Phase 6
+choice to delete the collection subsystem outright, so the toggle now controls nothing. Removing it
+spans `default.json`, the two live unwraps at `client.rs:379-380`, `TelemetrySettings`, `settings_ui`
+and `onboarding`'s telemetry section. It is a coherent single commit, but it is a **user-visible
+settings removal** and wants an explicit decision rather than being smuggled in behind a stale
+instruction.
 
 ## Execution rule: how to cut (learned the hard way in Phase 5)
 
