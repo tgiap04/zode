@@ -382,7 +382,13 @@ What *is* true, and is a stronger argument than the red team had: **nothing cons
 `project.context_server_store()` has **no production caller** — only `project`'s own integration
 tests. So the subsystem spawns external processes from user config for no purpose.
 
-But removing it is not the contained edit 29a-29b describe. It reaches `project`, `remote_server`,
+**Decision (commissioner, 2026-07-27): keep MCP, remove only the dead accessor. On inspection the
+accessor is not dead either, so 8f closes as a deliberate no-op.**
+`Project::context_server_store()` has no *production* caller but is used at five sites in
+`crates/project/tests/integration/context_server_store.rs`. Removing it would mean deleting the
+integration tests of the very subsystem we just chose to keep working. The accessor stays.
+
+But removing the subsystem is not the contained edit 29a-29b describe. It reaches `project`, `remote_server`,
 `extension_host`, and potentially the **extension WIT API** (`since_v0_8_0.rs`,
 `extension_api.rs`) — which would break the extension compatibility the commissioner explicitly
 wanted kept. That is a scope and compatibility trade the plan did not price, so it is the

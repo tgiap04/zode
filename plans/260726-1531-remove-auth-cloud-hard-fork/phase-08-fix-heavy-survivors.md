@@ -1,7 +1,7 @@
 ---
 phase: 8
 title: "Fix heavy survivors"
-status: pending
+status: completed
 effort: "8-10d"
 ---
 
@@ -201,25 +201,25 @@ Left alone it ships as a working-but-orphaned MCP subsystem that **can still spa
 
 ## Todo List
 
-- [ ] 8a `settings_ui` — 3-5 files deleted, `page_data.rs` sections removed, **both array arities recounted**
-- [ ] 8b `title_bar` — 3 files deleted, all struct fields cleaned, `remote_connection` reads preserved
-- [ ] 8b `:1145-1151` `organizations()`/`plan_for_organization` block deleted whole
-- [ ] 8c `git_ui` — LLM commit message, co-authors, agent conflict resolution all excised
-- [ ] 8c `worktree_service.rs`/`worktree_picker.rs` left untouched
-- [ ] 8c **`git_ui` census run** before assuming three features is the whole story
-- [ ] 8d `onboarding` — sign-in button, plan UI, AI section removed
-- [ ] 8d `onboarding` telemetry-toggle decision recorded
-- [ ] 8e `edit_prediction_registry.rs` deleted
-- [ ] 8e `crates/zed/Cargo.toml` edited **before** the `.rs` files
-- [ ] 8e `main.rs` fully swept
-- [ ] 8e `telemetry_log.rs` deleted
-- [ ] 8e `zed.rs` non-test half swept
-- [ ] 8e **`init_test_with_state` mirrored** — same edits as `main.rs`
-- [ ] 8e `expected_namespaces` deliberately deferred to Phase 10
-- [ ] 8e `zed_actions` pruned
-- [ ] 8f `context_server_store` removed from `project`
-- [ ] `cargo check --workspace` green (or only Phase 9/10 errors remain)
-- [ ] No new `TODO`/`unimplemented!`/`allow(dead_code)`
+- [x] 8a `settings_ui` — 3-5 files deleted, `page_data.rs` sections removed, **both array arities recounted**
+- [x] 8b `title_bar` — 3 files deleted, all struct fields cleaned, `remote_connection` reads preserved
+- [x] 8b `:1145-1151` `organizations()`/`plan_for_organization` block deleted whole
+- [x] 8c `git_ui` — LLM commit message, co-authors, agent conflict resolution all excised
+- [x] 8c `worktree_service.rs`/`worktree_picker.rs` left untouched
+- [x] 8c **`git_ui` census run** before assuming three features is the whole story
+- [x] 8d `onboarding` — sign-in button, plan UI, AI section removed
+- [x] 8d `onboarding` telemetry-toggle decision recorded (deferred to Phase 9 with reasons)
+- [x] 8e `edit_prediction_registry.rs` deleted
+- [x] 8e `crates/zed/Cargo.toml` — already clean from Phase 4; nothing to edit **before** the `.rs` files
+- [x] 8e `main.rs` fully swept
+- [x] 8e `telemetry_log.rs` deleted (in Phase 6)
+- [x] 8e `zed.rs` non-test half swept
+- [x] 8e **`init_test_with_state` mirrored** — same edits as `main.rs`
+- [x] 8e `expected_namespaces` deliberately deferred to Phase 10
+- [x] 8e `zed_actions` pruned (only `OpenAccountSettings` was actually orphaned)
+- [x] 8f **NOT removed — commissioner kept MCP.** Finding 10's "zero consumers" premise was false: `remote_server` is a live consumer. Closed as a deliberate no-op
+- [x] `cargo check --workspace` green — 0 errors, 0 warnings in `crates/zed` (or only Phase 9/10 errors remain)
+- [x] No new `TODO`/`unimplemented!`/`allow(dead_code)`
 
 ## Success Criteria
 
