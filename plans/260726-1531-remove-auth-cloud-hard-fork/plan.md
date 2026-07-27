@@ -60,14 +60,15 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 4 | [Atomic structural cut](./phase-04-atomic-structural-cut.md) | Completed |
 | 5 | [Gut client auth core](./phase-05-gut-client-auth-core.md) | Completed |
 | 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Completed |
-| 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | In progress (8/9 — `file_finder` re-sequenced to Phase 8) |
-| 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Pending (now six crates: + `file_finder`) |
+| 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | Completed (9/9 — `file_finder` landed in Phase 8) |
+| 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | In progress (6/7 — 8f blocked on a decision) |
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Pending |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Pending |
 | 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Pending |
 | 12 | [Rebrand and packaging](./phase-12-rebrand-and-packaging.md) | Pending |
 
-**Build-state map:** Phases 1–3 green · **Phase 4 goes RED** · Phases 5–10 red · **Phase 11 returns green** · Phase 12 green.
+**Build-state map:** Phases 1–3 green · **Phase 4 goes RED** · Phases 5–7 red · **Phase 8 returns green
+(earlier than planned — `cargo check --workspace` is green at the end of 8e, not Phase 11)** · Phase 12 green.
 
 ## The four findings that shaped this plan
 
@@ -319,6 +320,73 @@ Being `pub`, neither `dead_code` nor `--deny warnings` would ever have reported 
 its `copilot_log_subscription` plumbing. **This is a gap in the Phase 11 gate**: `--deny warnings`
 cannot see orphaned `pub` API, so `cargo machete` and reverse-dependency greps are not optional
 there.
+
+### Phase 8 (6 of 7) — 2026-07-27 · commits `a01115b` `5d4e998` `2e3082b` `b20604d` `1cbc2ac` `82bc7eb`
+
+**`cargo check --workspace` is GREEN — 0 errors, 0 warnings in `crates/zed`.** The build came back
+at the end of 8e, three phases earlier than the plan's build-state map predicted.
+
+`settings_ui` 9,501 → 8,657 · `git_panel.rs` 8,142 → 7,619 · `title_bar.rs` 1,309 → 904 ·
+`conflict_view.rs` 675 → 426 · plus 8 whole files deleted.
+
+**The census in 12a paid for itself, twice.** `git_ui`'s "three features" were nine: the plan missed
+`generate_commit_message_action`, `load_commit_message_prompt`, `load_project_rules`,
+`show_commit_message_error`, `load_local_committer`, `toggle_fill_co_authors`, `fill_co_authors`, the
+whole `MergeConflictIndicator` status item, and **a second review-button block in `project_diff.rs`**
+that step 16 never mentioned.
+
+**Five settings keys and 15 keymap bindings had to move with their code, not wait for Phase 9.**
+Every one had a live `.unwrap()` or a `bail!` behind it, so splitting them across commits would have
+shipped a startup panic between the two:
+`git::GenerateCommitMessage` (6 bindings) · `git::ReviewDiff` (3) · `onboarding::{SignIn,OpenAccount}`
+(6) · `file_finder.include_channels` · `title_bar.{show_user_picture,show_sign_in,show_user_menu}`.
+**The lesson generalises: Phase 9 is not a container for deferred coupling. A key and its consumer
+are one commit, wherever the consumer happens to live.**
+
+**Two array arities recounted by hand and confirmed by the compiler**, as step 4 demands:
+`toolbar_section` 6 → 5, `title_bar_section` 10 → 7.
+
+**Three of this phase's own instructions were wrong and were not followed:**
+
+1. **Step 3 said delete the Server URL settings item. It is KEPT.** Red-team finding 2 established
+   that `server_url` must survive for the extension marketplace, and `client.rs:86` unwraps it.
+   Deleting the UI would have hidden the exact egress `plan.md` requires be *disclosed*.
+2. **Step 29's "orphaned `agent`/`assistant`/`agents_sidebar` modules" in `zed_actions` are not
+   orphaned.** `workspace`, `editor` and `terminal_view` still declare against them — and `editor` is
+   the zero-change crate. Only `OpenAccountSettings` was removable.
+3. **Step 20 was already done.** Phase 4's fourth-edit lesson had stripped `crates/zed`'s delete-set
+   deps, which is why all 84 errors arrived as clean *unresolved-crate* errors rather than hundreds
+   of unresolved-item ones. The ordering advice was right; the work was already banked.
+
+**A near-miss worth recording.** `project_diff.rs` has **two identical `fn dispatch_action` signatures**
+— one dead on `BranchDiffToolbar`, one live on `ProjectDiffToolbar` with 5 callers. A
+first-match-wins anchor removed the live one. Caught immediately because the cut was followed by a
+compile, and recovered by restoring it and deleting the intended copy. **Brace-matched extraction is
+not enough when a signature is not unique; the anchor must be scoped to its `impl` block.**
+
+**8f is NOT done — it is blocked on a decision, not on work.** See below.
+
+## Phase 8f: why `context_server_store` was not removed
+
+Red-team finding 10's premise — "after Phase 4 every external consumer is gone" — is **false**:
+
+- **`remote_server/src/headless_project.rs` is a live consumer** and `remote_server` is a *survivor*
+  (the commissioner kept SSH remote dev; rejection rationale 21). It constructs the store, calls
+  `shared(REMOTE_SERVER_PROJECT_ID, …)`, subscribes to it, and runs `ContextServerStore::init_headless`.
+- **`extension_host` still registers MCP servers** from extension manifests
+  (`extension_host.rs:1202`, `:1432`).
+- The plan's counts were also stale in our favour: 2 constructor sites remain, not 3 — Phase 7a's
+  removal of `Project::in_room` already took the third.
+
+What *is* true, and is a stronger argument than the red team had: **nothing consumes the output.**
+`project.context_server_store()` has **no production caller** — only `project`'s own integration
+tests. So the subsystem spawns external processes from user config for no purpose.
+
+But removing it is not the contained edit 29a-29b describe. It reaches `project`, `remote_server`,
+`extension_host`, and potentially the **extension WIT API** (`since_v0_8_0.rs`,
+`extension_api.rs`) — which would break the extension compatibility the commissioner explicitly
+wanted kept. That is a scope and compatibility trade the plan did not price, so it is the
+commissioner's call.
 
 ## Execution rule: how to cut (learned the hard way in Phase 5)
 
