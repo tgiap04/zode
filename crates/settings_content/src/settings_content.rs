@@ -114,16 +114,11 @@ pub struct SettingsContent {
 
     pub preview_tabs: Option<PreviewTabsSettingsContent>,
 
-    pub agent: Option<AgentSettingsContent>,
     pub agent_servers: Option<AllAgentServersSettings>,
 
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
 
-    /// Whether or not to automatically check for updates.
-    ///
-    /// Default: true
-    pub auto_update: Option<bool>,
 
     /// This base keymap settings adjusts the default keybindings in Zed to be similar
     /// to other common code editors. By default, Zed's keymap closely follows VSCode's
@@ -132,8 +127,6 @@ pub struct SettingsContent {
     /// Default: VSCode
     pub base_keymap: Option<BaseKeymapContent>,
 
-    /// Configuration for the collab panel visual settings.
-    pub collaboration_panel: Option<PanelSettingsContent>,
 
     pub debugger: Option<DebuggerSettingsContent>,
 
@@ -166,14 +159,11 @@ pub struct SettingsContent {
 
     pub line_indicator_format: Option<LineIndicatorFormat>,
 
-    pub language_models: Option<AllLanguageModelSettingsContent>,
 
     pub outline_panel: Option<OutlinePanelSettingsContent>,
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
-    /// Configuration for the Message Editor
-    pub message_editor: Option<MessageEditorSettings>,
 
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
@@ -199,7 +189,6 @@ pub struct SettingsContent {
     pub vim_mode: Option<bool>,
 
     // Settings related to calls in Zed
-    pub calls: Option<CallSettingsContent>,
 
     /// Settings for the which-key popup.
     pub which_key: Option<WhichKeySettingsContent>,
@@ -553,21 +542,6 @@ pub enum DockPosition {
     Right,
 }
 
-/// Configuration of voice calls in Zed.
-#[with_fallible_options]
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
-pub struct CallSettingsContent {
-    /// Whether the microphone should be muted when joining a channel or a call.
-    ///
-    /// Default: false
-    pub mute_on_join: Option<bool>,
-
-    /// Whether your current project should be shared when joining an empty channel.
-    ///
-    /// Default: false
-    pub share_on_join: Option<bool>,
-}
-
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct GitPanelSettingsContent {
@@ -687,16 +661,6 @@ pub struct PanelSettingsContent {
     /// Default: 240
     #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
     pub default_width: Option<f32>,
-}
-
-#[with_fallible_options]
-#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
-pub struct MessageEditorSettings {
-    /// Whether to automatically replace emoji shortcodes with emoji characters.
-    /// For example: typing `:wave:` gets replaced with `👋`.
-    ///
-    /// Default: false
-    pub auto_replace_emoji_shortcode: Option<bool>,
 }
 
 #[with_fallible_options]

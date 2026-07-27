@@ -28,11 +28,10 @@ pub use crate::schema::{
 };
 use crate::settings::adjust_buffer_font_size;
 pub use crate::settings::{
-    AgentFontSize, BufferLineHeight, FontFamilyName, IconThemeName, IconThemeSelection,
-    ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings, adjust_agent_buffer_font_size,
-    adjust_agent_ui_font_size, adjust_ui_font_size, adjusted_font_size, appearance_to_mode,
-    clamp_font_size, default_theme, observe_buffer_font_size_adjustment,
-    reset_agent_buffer_font_size, reset_agent_ui_font_size, reset_buffer_font_size,
+    BufferLineHeight, FontFamilyName, IconThemeName, IconThemeSelection, ThemeAppearanceMode,
+    ThemeName, ThemeSelection, ThemeSettings, adjust_ui_font_size, adjusted_font_size,
+    appearance_to_mode,
+    clamp_font_size, default_theme, observe_buffer_font_size_adjustment, reset_buffer_font_size,
     reset_ui_font_size, set_icon_theme, set_mode, set_theme, setup_ui_font,
 };
 pub use theme::UiDensity;
@@ -85,8 +84,6 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
 
     let mut prev_buffer_font_size_settings = settings.buffer_font_size_settings();
     let mut prev_ui_font_size_settings = settings.ui_font_size_settings();
-    let mut prev_agent_ui_font_size_settings = settings.agent_ui_font_size_settings();
-    let mut prev_agent_buffer_font_size_settings = settings.agent_buffer_font_size_settings();
     let mut prev_theme_name = settings.theme.name(SystemAppearance::global(cx).0);
     let mut prev_icon_theme_name = settings.icon_theme.name(SystemAppearance::global(cx).0);
     let mut prev_theme_overrides = (
@@ -99,8 +96,6 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
 
         let buffer_font_size_settings = settings.buffer_font_size_settings();
         let ui_font_size_settings = settings.ui_font_size_settings();
-        let agent_ui_font_size_settings = settings.agent_ui_font_size_settings();
-        let agent_buffer_font_size_settings = settings.agent_buffer_font_size_settings();
         let theme_name = settings.theme.name(SystemAppearance::global(cx).0);
         let icon_theme_name = settings.icon_theme.name(SystemAppearance::global(cx).0);
         let theme_overrides = (
@@ -116,16 +111,6 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
         if ui_font_size_settings != prev_ui_font_size_settings {
             prev_ui_font_size_settings = ui_font_size_settings;
             reset_ui_font_size(cx);
-        }
-
-        if agent_ui_font_size_settings != prev_agent_ui_font_size_settings {
-            prev_agent_ui_font_size_settings = agent_ui_font_size_settings;
-            reset_agent_ui_font_size(cx);
-        }
-
-        if agent_buffer_font_size_settings != prev_agent_buffer_font_size_settings {
-            prev_agent_buffer_font_size_settings = agent_buffer_font_size_settings;
-            reset_agent_buffer_font_size(cx);
         }
 
         if theme_name != prev_theme_name || theme_overrides != prev_theme_overrides {

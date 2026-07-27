@@ -875,14 +875,10 @@ fn register_actions(
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.ui_font_size = None;
                         settings.theme.buffer_font_size = None;
-                        settings.theme.agent_ui_font_size = None;
-                        settings.theme.agent_buffer_font_size = None;
                     });
                 } else {
                     theme_settings::reset_ui_font_size(cx);
                     theme_settings::reset_buffer_font_size(cx);
-                    theme_settings::reset_agent_ui_font_size(cx);
-                    theme_settings::reset_agent_buffer_font_size(cx);
                 }
             }
         })

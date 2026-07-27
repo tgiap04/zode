@@ -8046,7 +8046,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         ]
     }
 
-    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 3] {
+    fn global_only_miscellaneous_sub_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Image Viewer",
@@ -8061,29 +8061,6 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
                     },
                     write: |settings_content, value| {
                         settings_content.image_viewer.get_or_insert_default().unit = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Auto Replace Emoji Shortcode",
-                description: "Whether to automatically replace emoji shortcodes with emoji characters.",
-                field: Box::new(SettingField {
-                    json_path: Some("message_editor.auto_replace_emoji_shortcode"),
-                    pick: |settings_content| {
-                        settings_content
-                            .message_editor
-                            .as_ref()
-                            .and_then(|message_editor| {
-                                message_editor.auto_replace_emoji_shortcode.as_ref()
-                            })
-                    },
-                    write: |settings_content, value| {
-                        settings_content
-                            .message_editor
-                            .get_or_insert_default()
-                            .auto_replace_emoji_shortcode = value;
                     },
                 }),
                 metadata: None,

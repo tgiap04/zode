@@ -67,10 +67,6 @@
   "ui_font_weight": 400,
   // The default font size for text in the UI
   "ui_font_size": 16,
-  // The default font size for agent responses in the agent panel. Falls back to the UI font size if unset.
-  "agent_ui_font_size": null,
-  // The default font size for user messages in the agent panel.
-  "agent_buffer_font_size": 12,
   // How much to fade out unused code.
   "unnecessary_code_fade": 0.3,
   // Active pane styling settings.
@@ -445,13 +441,6 @@
   "whitespace_map": {
     "space": "•",
     "tab": "→",
-  },
-  // Settings related to calls in Zed
-  "calls": {
-    // Join calls with the microphone live by default
-    "mute_on_join": false,
-    // Share your project when you are the first to join a channel
-    "share_on_join": false,
   },
   // Toolbar related settings
   "toolbar": {
@@ -895,14 +884,6 @@
     // Set to 0 to collapse all items that have children, 1 or higher to collapse items at that depth or deeper.
     "expand_outlines_with_depth": 100,
   },
-  "collaboration_panel": {
-    // Whether to show the collaboration panel button in the status bar.
-    "button": true,
-    // Where to dock the collaboration panel. Can be 'left' or 'right'.
-    "dock": "right",
-    // Default width of the collaboration panel.
-    "default_width": 240,
-  },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,
@@ -959,224 +940,6 @@
     // Default: true
     "diff_stats": true,
   },
-  "message_editor": {
-    // Whether to automatically replace emoji shortcodes with emoji characters.
-    // For example: typing `:wave:` gets replaced with `👋`.
-    "auto_replace_emoji_shortcode": true,
-  },
-  "agent": {
-    // Whether the inline assistant should use streaming tools, when available
-    "inline_assistant_use_streaming_tools": true,
-    // Whether the agent is enabled.
-    "enabled": true,
-    // Whether to show the agent panel button in the status bar.
-    "button": true,
-    // Where to dock the agent panel. Can be 'left', 'right' or 'bottom'.
-    "dock": "left",
-    // Whether the agent panel should use flexible (proportional) sizing.
-    //
-    // Default: true
-    "flexible": true,
-    // Where to position the threads sidebar. Can be 'left' or 'right'.
-    "sidebar_side": "left",
-    // Default width when the agent panel is docked to the left or right.
-    "default_width": 640,
-    // Default height when the agent panel is docked to the bottom.
-    "default_height": 320,
-    // Whether to limit the content width in the agent panel. When enabled,
-    // content will be constrained to `max_content_width` and centered when
-    // the panel is wider, for optimal readability.
-    "limit_content_width": true,
-    // Maximum content width in pixels when limit_content_width is enabled.
-    // Content will be centered within the panel.
-    "max_content_width": 850,
-    // The default model to use when creating new threads.
-    "default_model": {
-      // The provider to use.
-      "provider": "zed.dev",
-      // The model to use.
-      "model": "claude-sonnet-4",
-      // Whether thinking is enabled.
-      "enable_thinking": false,
-    },
-    // Additional parameters for language model requests. When making a request to a model, parameters will be taken
-    // from the last entry in this list that matches the model's provider and name. In each entry, both provider
-    // and model are optional, so that you can specify parameters for either one.
-    "model_parameters": [
-      // To set parameters for all requests to OpenAI models:
-      // {
-      //   "provider": "openai",
-      //   "temperature": 0.5
-      // }
-      //
-      // To set parameters for all requests in general:
-      // {
-      //   "temperature": 0
-      // }
-      //
-      // To set parameters for a specific provider and model:
-      // {
-      //   "provider": "zed.dev",
-      //   "model": "claude-sonnet-4",
-      //   "temperature": 1.0
-      // }
-    ],
-    // Permission rules for tool actions.
-    //
-    // The "default" setting applies when no tool-specific rules match.
-    // For external agents that define their own permission modes,
-    // "deny" and "confirm" still take precedence — the external agent's
-    // permission system is only used when Zed would allow the action.
-    //
-    // Per-tool regex patterns ("tools" below) match against tool input text
-    // (commands, paths, URLs, etc.). For `copy_path` and `move_path`,
-    // patterns are matched independently against each path (source and
-    // destination).
-    "tool_permissions": {
-      // Global default permission when no tool-specific rules match.
-      // "allow" - Auto-approve without prompting
-      // "deny" - Auto-reject
-      // "confirm" - Always prompt (default)
-      "default": "confirm",
-      // Per-tool permission rules. Regex patterns match against tool input text.
-      // The per-tool "default" also applies to MCP tools.
-      // Each tool can have its own default and regex patterns.
-      "tools": {
-        // "terminal": {
-        //   "default": "confirm",
-        //   "always_confirm": [
-        //     // Destructive git operations
-        //     { "pattern": "git\\s+(reset|clean)\\s+--hard" },
-        //     { "pattern": "git\\s+push\\s+(-f|--force)" },
-        //   ],
-        // },
-        // "edit_file": {
-        //   "default": "confirm",
-        //   "always_deny": [
-        //     // Secrets and credentials
-        //     { "pattern": "\\.env($|\\.)" },
-        //     { "pattern": "secrets?/" },
-        //     { "pattern": "\\.pem$" },
-        //     { "pattern": "\\.key$" },
-        //   ],
-        // },
-      },
-    },
-    // When enabled, agent edits will be displayed in single-file editors for review
-    "single_file_review": false,
-    // When enabled, show voting thumbs for feedback on agent edits.
-    "enable_feedback": true,
-    "default_profile": "write",
-    "profiles": {
-      "write": {
-        "name": "Write",
-        "enable_all_context_servers": true,
-        "tools": {
-          "copy_path": true,
-          "create_directory": true,
-          "delete_path": true,
-          "diagnostics": true,
-          "edit_file": true,
-          "fetch": true,
-          "list_directory": true,
-          "project_notifications": false,
-          "move_path": true,
-          "now": true,
-          "find_path": true,
-          "read_file": true,
-          "restore_file_from_disk": true,
-          "save_file": true,
-          "open": true,
-          "grep": true,
-          "spawn_agent": true,
-          "terminal": true,
-          "thinking": true,
-          "update_plan": true,
-          "search_web": true,
-        },
-      },
-      "ask": {
-        "name": "Ask",
-        // We don't know which of the context server tools are safe for the "Ask" profile, so we don't enable them by default.
-        // "enable_all_context_servers": true,
-        "tools": {
-          "diagnostics": true,
-          "fetch": true,
-          "list_directory": true,
-          "project_notifications": false,
-          "now": true,
-          "find_path": true,
-          "read_file": true,
-          "open": true,
-          "grep": true,
-          "spawn_agent": true,
-          "thinking": true,
-          "update_plan": true,
-          "search_web": true,
-        },
-      },
-      "minimal": {
-        "name": "Minimal",
-        "enable_all_context_servers": false,
-        "tools": {},
-      },
-    },
-    // Whether to start a new thread in the current local project or in a new Git worktree.
-    //
-    // Default: local_project
-    "new_thread_location": "local_project",
-    // Where to show notifications when the agent has either completed
-    // its response, or else needs confirmation before it can run a
-    // tool action.
-    // "primary_screen" - Show the notification only on your primary screen (default)
-    // "all_screens" - Show these notifications on all screens
-    // "never" - Never show these notifications
-    "notify_when_agent_waiting": "primary_screen",
-    // When to play a sound when the agent has either completed
-    // its response, or needs user input.
-    // "never" - Never play the sound
-    // "when_hidden" - Only play the sound when the agent panel is not visible
-    // "always" - Always play the sound
-    //
-    // Default: never
-    "play_sound_when_agent_done": "never",
-    // Whether to have edit cards in the agent panel expanded, showing a preview of the full diff.
-    //
-    // Default: true
-    "expand_edit_card": true,
-    // Whether to have terminal cards in the agent panel expanded, showing the whole command output.
-    //
-    // Default: true
-    "expand_terminal_card": true,
-    // How thinking blocks should be displayed by default in the agent panel.
-    //
-    // Default: auto
-    "thinking_display": "auto",
-    // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
-    // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
-    //
-    // Default: true
-    "cancel_generation_on_terminal_stop": true,
-    // Whether to always use cmd-enter (or ctrl-enter on Linux or Windows) to send messages in the agent panel.
-    //
-    // Default: false
-    "use_modifier_to_send": false,
-    // Minimum number of lines to display in the agent message editor.
-    //
-    // Default: 4
-    "message_editor_min_lines": 4,
-    // Whether to show turn statistics (elapsed time during generation, final turn duration).
-    //
-    // Default: false
-    "show_turn_stats": false,
-    // Whether to show the merge conflict indicator in the status bar
-    // that offers to resolve conflicts using the agent.
-    //
-    // Default: true
-    "show_merge_conflict_indicator": true,
-  },
-  // Whether the screen sharing icon is shown in the os status bar.
-  "show_call_status_icon": true,
   // Whether to use language servers to provide code intelligence.
   "enable_language_server": true,
   // Whether to perform linked edits of associated ranges, if the language server supports it.
@@ -1423,9 +1186,6 @@
   //
   // Default: false
   "disable_ai": false,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
-  "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -2259,48 +2019,6 @@
     "Zig": {
       "language_servers": ["zls", "..."],
     },
-  },
-  // Different settings for specific language models.
-  "language_models": {
-    "anthropic": {
-      "api_url": "https://api.anthropic.com",
-    },
-    "bedrock": {},
-    "google": {
-      "api_url": "https://generativelanguage.googleapis.com",
-    },
-    "ollama": {
-      "api_url": "http://localhost:11434",
-    },
-    "openai": {
-      "api_url": "https://api.openai.com/v1",
-    },
-    "openai_compatible": {},
-    "opencode": {
-      "api_url": "https://opencode.ai/zen",
-    },
-    "open_router": {
-      "api_url": "https://openrouter.ai/api/v1",
-    },
-    "lmstudio": {
-      "api_url": "http://localhost:1234/api/v0",
-    },
-    "deepseek": {
-      "api_url": "https://api.deepseek.com/v1",
-    },
-    "mistral": {
-      "api_url": "https://api.mistral.ai/v1",
-    },
-    "vercel": {
-      "api_url": "https://api.v0.dev/v1",
-    },
-    "vercel_ai_gateway": {
-      "api_url": "https://ai-gateway.vercel.sh/v1",
-    },
-    "x_ai": {
-      "api_url": "https://api.x.ai/v1",
-    },
-    "zed.dev": {},
   },
   "session": {
     // Whether or not to restore unsaved buffers on restart.
