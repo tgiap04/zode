@@ -1,8 +1,9 @@
 ghosts (not real crates): none
 
-SEED: 46   ORPHANED: 7   TOTAL DELETE: 53
+SEED: 46   ORPHANED: 8   TOTAL DELETE: 54
 
 Orphans pulled in automatically:
+  + action_log
   + aws_http_client
   + opencode
   + rules_library
@@ -12,8 +13,8 @@ Orphans pulled in automatically:
   + zeta_prompt
 
 ======================================================================
-SURVIVORS NEEDING CODE CHANGES: 15
-  zed                    (23) acp_thread, acp_tools, agent, agent_servers, agent_settings, agent_ui, auto_update, auto_update_ui, call, channel, codestral, collab_ui, copilot, copilot_chat, copilot_ui, crashes, edit_prediction, edit_prediction_ui, language_model, language_models, sidebar, web_search, web_search_providers
+SURVIVORS NEEDING CODE CHANGES: 13
+  zed                    (22) acp_thread, acp_tools, agent, agent_settings, agent_ui, auto_update, auto_update_ui, call, channel, codestral, collab_ui, copilot, copilot_chat, copilot_ui, crashes, edit_prediction, edit_prediction_ui, language_model, language_models, sidebar, web_search, web_search_providers
   settings_ui            ( 7) agent, agent_settings, codestral, copilot, copilot_ui, edit_prediction, edit_prediction_ui
   title_bar              ( 4) auto_update, call, channel, livekit_client
   git_ui                 ( 3) agent_settings, call, language_model
@@ -24,18 +25,17 @@ SURVIVORS NEEDING CODE CHANGES: 15
   file_finder            ( 1) channel
   language_tools         ( 1) edit_prediction
   notifications          ( 1) channel
-  remote_connection      ( 1) auto_update
-  remote_server          ( 1) crashes
   settings_content       ( 1) language_model_core
   workspace              ( 1) agent_settings
 
-DEV-DEP ONLY (tests): 0
+DEV-DEP ONLY (tests): 1
+  remote_server          action_log, agent, language_model
 
 ======================================================================
 KEEP-LIST verification:
   edit_prediction_types  kept ok              must-patch: (none)
-  remote_connection      kept ok              must-patch: auto_update
-  remote_server          kept ok              must-patch: crashes
+  remote_connection      kept ok              must-patch: (none)
+  remote_server          kept ok              must-patch: (none)
   remote                 kept ok              must-patch: (none)
   context_server         kept ok              must-patch: (none)
   cloud_api_types        kept ok              must-patch: cloud_llm_client
@@ -46,4 +46,4 @@ KEEP-LIST verification:
   editor                 kept ok              must-patch: (none)
   project                kept ok              must-patch: (none)
 
-Workspace: 240 -> 187 crates (53 removed, 22%)
+Workspace: 240 -> 186 crates (54 removed, 22%)

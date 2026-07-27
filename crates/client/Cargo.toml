@@ -21,9 +21,7 @@ async-tungstenite = { workspace = true, features = ["tokio", "tokio-rustls-manua
 base64.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clock.workspace = true
-cloud_api_client.workspace = true
 cloud_api_types.workspace = true
-cloud_llm_client.workspace = true
 collections.workspace = true
 credentials_provider.workspace = true
 db.workspace = true
@@ -38,7 +36,6 @@ http_client_tls.workspace = true
 httparse = "1.10"
 log.workspace = true
 parking_lot.workspace = true
-paths.workspace = true
 postage.workspace = true
 rand.workspace = true
 regex.workspace = true
@@ -48,7 +45,6 @@ serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
 settings.workspace = true
-sha2.workspace = true
 smol.workspace = true
 telemetry.workspace = true
 telemetry_events.workspace = true

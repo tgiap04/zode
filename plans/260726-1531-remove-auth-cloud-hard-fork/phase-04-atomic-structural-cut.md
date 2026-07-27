@@ -1,8 +1,8 @@
 ---
 phase: 4
-title: "Atomic structural cut"
-status: pending
-effort: "0.5d"
+title: Atomic structural cut
+status: completed
+effort: 0.5d
 ---
 
 # Phase 4: Atomic structural cut

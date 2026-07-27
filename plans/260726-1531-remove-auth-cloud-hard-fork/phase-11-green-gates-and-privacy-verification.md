@@ -70,6 +70,22 @@ ripgrep sweep for stale refs
 
 ## Implementation Steps
 
+### 11a-pre. Dead code the earlier phases deliberately deferred
+
+`--deny warnings` is what forces these; they are listed so the run is not a surprise.
+
+| From | Item | Detail |
+|---|---|---|
+| Phase 5 | `ClientCredentialsProvider`, dead collab transport, `proxy.rs`, `ZED_RPC_URL` | ~500 lines. See phase-05 → "Deliberately left". |
+| Phase 5 | `disconnect` / `reconnect` | Kept until Phase 8 removed their last caller (`main.rs:778`). Re-check now. |
+| Phase 3 | `remote` crate abstraction | Unreachable after `remote_connection` went, if that path was taken. |
+| Phase 8f | `context_server` crate | Unreferenced once its store left `project`. |
+
+**Also decide: `crates/audio` pulls `libwebrtc` + `webrtc-sys`.** The scout cleared `audio` as safe but
+did not note that it drags in WebRTC native libraries — a large native dependency in a fork that
+deleted every voice/video feature. Either confirm `audio` genuinely needs them for local sound
+playback, or cut the dependency. Verify with `cargo tree -i libwebrtc`.
+
 ### 11a. Gate A — mechanical
 
 1. ```sh

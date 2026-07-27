@@ -1,8 +1,8 @@
 ---
 phase: 1
-title: "Preparation and baseline"
-status: pending
-effort: "0.5d"
+title: Preparation and baseline
+status: completed
+effort: 0.5d
 ---
 
 # Phase 1: Preparation and baseline

@@ -94,8 +94,6 @@ actions!(
         Cancel,
         /// Expands the commit message editor.
         ExpandCommitEditor,
-        /// Generates a commit message using AI.
-        GenerateCommitMessage,
         /// Initializes a new git repository.
         Init,
         /// Opens all modified files in the editor.

@@ -237,7 +237,23 @@ pub struct OpenAiAvailableModel {
     pub capabilities: OpenAiModelCapabilities,
 }
 
-pub use language_model_core::ReasoningEffort as OpenAiReasoningEffort;
+/// Reasoning effort for OpenAI-style providers.
+///
+/// This type originally lived here and was hoisted into `language_model_core` so
+/// that crates below the settings layer could name it. That crate is gone with the
+/// rest of the AI stack, so the definition comes home.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, strum::EnumString,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum OpenAiReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
 
 impl MergeFrom for OpenAiReasoningEffort {
     fn merge_from(&mut self, other: &Self) {
@@ -479,10 +495,89 @@ pub struct LanguageModelCacheConfiguration {
     pub min_total_token: u64,
 }
 
-pub use language_model_core::ModelMode;
+/// Whether a model runs in its default mode or an extended-thinking mode.
+///
+/// Hoisted out to `language_model_core` historically; that crate is gone, so the
+/// definition comes home.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ModelMode {
+    #[default]
+    Default,
+    Thinking {
+        budget_tokens: Option<u32>,
+    },
+}
+
+/// Requested latency/quality trade-off for a model.
+//
+// `snake_case`, matching the original definition. It is indistinguishable from
+// `lowercase` for the current variants, but the attribute is what users' settings
+// files are actually keyed against -- a future multi-word variant would diverge.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Speed {
+    #[default]
+    Standard,
+    Fast,
+}
 
 impl MergeFrom for ModelMode {
     fn merge_from(&mut self, other: &Self) {
         *self = *other;
+    }
+}
+
+#[cfg(test)]
+mod relocated_enum_tests {
+    use super::*;
+
+    /// These three enums were hoisted into `language_model_core` and came back when
+    /// that crate was deleted. Their serde representation is what users' existing
+    /// `settings.json` files are keyed against, so it must survive the move byte for
+    /// byte. Getting this wrong would make old settings silently stop parsing.
+    #[test]
+    fn reasoning_effort_wire_format_is_unchanged() {
+        for (json, variant) in [
+            ("minimal", OpenAiReasoningEffort::Minimal),
+            ("low", OpenAiReasoningEffort::Low),
+            ("medium", OpenAiReasoningEffort::Medium),
+            ("high", OpenAiReasoningEffort::High),
+            ("xhigh", OpenAiReasoningEffort::XHigh),
+        ] {
+            let parsed: OpenAiReasoningEffort =
+                serde_json::from_value(serde_json::json!(json)).unwrap();
+            assert_eq!(parsed, variant, "{json} should parse to {variant:?}");
+            assert_eq!(serde_json::to_value(variant).unwrap(), serde_json::json!(json));
+        }
+    }
+
+    #[test]
+    fn model_mode_wire_format_is_unchanged() {
+        // Internally tagged on "type", lowercase variant names.
+        let parsed: ModelMode =
+            serde_json::from_value(serde_json::json!({"type": "default"})).unwrap();
+        assert_eq!(parsed, ModelMode::Default);
+
+        let parsed: ModelMode =
+            serde_json::from_value(serde_json::json!({"type": "thinking", "budget_tokens": 1024}))
+                .unwrap();
+        assert_eq!(
+            parsed,
+            ModelMode::Thinking {
+                budget_tokens: Some(1024)
+            }
+        );
+    }
+
+    #[test]
+    fn speed_wire_format_is_unchanged() {
+        // snake_case, not lowercase -- indistinguishable today, divergent the moment
+        // a multi-word variant is added.
+        let parsed: Speed = serde_json::from_value(serde_json::json!("standard")).unwrap();
+        assert_eq!(parsed, Speed::Standard);
+        let parsed: Speed = serde_json::from_value(serde_json::json!("fast")).unwrap();
+        assert_eq!(parsed, Speed::Fast);
+        assert_eq!(serde_json::to_value(Speed::Fast).unwrap(), serde_json::json!("fast"));
     }
 }

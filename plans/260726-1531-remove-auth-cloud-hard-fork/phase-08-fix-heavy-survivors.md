@@ -1,7 +1,7 @@
 ---
 phase: 8
 title: "Fix heavy survivors"
-status: pending
+status: completed
 effort: "8-10d"
 ---
 
@@ -22,6 +22,33 @@ The five crates carrying real weight: `zed` (23 dependency edges), `settings_ui`
 > **Estimate raised 5-8d → 8-10d.** The red team measured the files: `git_panel.rs` is **8,142** lines (the plan had said 5,700 — 43% under) and `page_data.rs` is **9,501**. Phase 4's abort protocol sets a 12-working-day tripwire on this phase.
 
 `crates/zed` alone is ~40 non-test call sites plus a **duplicate of the whole init sequence inside its test module** that must receive identical edits.
+
+## ⚠ Cutting discipline (mandatory — see plan.md "Execution rule")
+
+Phase 5 over-cut **three times**, each time destroying keepers that sat between two doomed functions.
+This phase cuts the two largest files in the fork, so the rule is not optional here:
+
+1. **Dump the function map first**, for every region you intend to touch:
+   ```sh
+   grep -n "^    pub fn \|^    pub async fn \|^    async fn \|^    fn \|^impl \|^pub struct \|^pub enum " <file>
+   ```
+   Classify **every** entry in the range as delete or keep before writing a single edit.
+2. **One function per cut.** The end marker must be the next item you also intend to delete — never
+   "the next thing that appears". If a keeper sits inside a proposed A→B range, the range is wrong.
+3. **Assert the keep-list after every cut**, in the same script. Phase 5 used 23 assertions; that is
+   the template, not the ceiling.
+4. **A cut that compiles is not a cut that is correct.** Phase 5's second over-cut compiled the file
+   it damaged — only a different crate revealed it. Check the *consumers*.
+5. **Commit per crate.** This is the rollback unit. All three Phase 5 recoveries were cheap because
+   of it.
+
+**Where this bites hardest in this phase:**
+
+| File | Lines | Why the rule matters |
+|---|---|---|
+| `settings_ui/src/page_data.rs` | **9,501** | Seven separate section deletions plus two hand-counted array arities. Prime over-cut territory. |
+| `git_ui/src/git_panel.rs` | **8,142** | Three unrelated features to excise from one file; the original size estimate was 43% low, so the census in 12a is not optional. |
+| `zed/src/main.rs` + `zed.rs` | 1,940 + 6,587 | `zed.rs` holds a duplicate of the whole init sequence inside its test module. |
 
 ## Key Insights
 
@@ -47,17 +74,22 @@ The five crates carrying real weight: `zed` (23 dependency edges), `settings_ui`
 
 Order matters. `zed` last because every earlier fix shrinks its diff:
 
+**Corrected against the derived topology** (`research/survivor-fix-order.txt`). `title_bar` depends on
+`git_ui`, so the first draft's order (settings_ui → onboarding → title_bar → git_ui) would have made
+`title_bar` show errors sourced from an unfixed `git_ui`.
+
 ```
 1. settings_ui   ← 3 files deleted + page_data.rs (9,501 ln) surgery  ~2,900 lines
-2. onboarding    ← sign-in + plan UI removed                           ~200 lines   (needs Phase 5)
-3. title_bar     ← 3 files deleted + title_bar.rs edits              ~1,030 lines   (needs Phase 5)
-4. git_ui        ← 3 features excised from git_panel.rs (8,142 ln)     ~400 lines
+2. git_ui        ← 3 features excised from git_panel.rs (8,142 ln)     ~400 lines
+3. onboarding    ← sign-in + plan UI removed                           ~200 lines   (needs Phase 5)
+4. title_bar     ← 3 files deleted + title_bar.rs edits              ~1,030 lines   (needs Phase 5 + git_ui)
 5. zed           ← Cargo.toml → main.rs → reliability → menus
                    → quick_action_bar → open_listener → telemetry_log
                    → zed.rs → zed.rs tests                          ~40 call sites
 ```
 
-`onboarding` and `title_bar` both remove sign-in/plan UI and both depend on Phase 5 — do them back to back while the context is loaded.
+`onboarding` and `title_bar` both strip sign-in/plan UI and both depend on Phase 5 — adjacent on
+purpose, so that context is loaded once.
 
 ## Related Code Files
 
@@ -169,25 +201,25 @@ Left alone it ships as a working-but-orphaned MCP subsystem that **can still spa
 
 ## Todo List
 
-- [ ] 8a `settings_ui` — 3-5 files deleted, `page_data.rs` sections removed, **both array arities recounted**
-- [ ] 8b `title_bar` — 3 files deleted, all struct fields cleaned, `remote_connection` reads preserved
-- [ ] 8b `:1145-1151` `organizations()`/`plan_for_organization` block deleted whole
-- [ ] 8c `git_ui` — LLM commit message, co-authors, agent conflict resolution all excised
-- [ ] 8c `worktree_service.rs`/`worktree_picker.rs` left untouched
-- [ ] 8c **`git_ui` census run** before assuming three features is the whole story
-- [ ] 8d `onboarding` — sign-in button, plan UI, AI section removed
-- [ ] 8d `onboarding` telemetry-toggle decision recorded
-- [ ] 8e `edit_prediction_registry.rs` deleted
-- [ ] 8e `crates/zed/Cargo.toml` edited **before** the `.rs` files
-- [ ] 8e `main.rs` fully swept
-- [ ] 8e `telemetry_log.rs` deleted
-- [ ] 8e `zed.rs` non-test half swept
-- [ ] 8e **`init_test_with_state` mirrored** — same edits as `main.rs`
-- [ ] 8e `expected_namespaces` deliberately deferred to Phase 10
-- [ ] 8e `zed_actions` pruned
-- [ ] 8f `context_server_store` removed from `project`
-- [ ] `cargo check --workspace` green (or only Phase 9/10 errors remain)
-- [ ] No new `TODO`/`unimplemented!`/`allow(dead_code)`
+- [x] 8a `settings_ui` — 3-5 files deleted, `page_data.rs` sections removed, **both array arities recounted**
+- [x] 8b `title_bar` — 3 files deleted, all struct fields cleaned, `remote_connection` reads preserved
+- [x] 8b `:1145-1151` `organizations()`/`plan_for_organization` block deleted whole
+- [x] 8c `git_ui` — LLM commit message, co-authors, agent conflict resolution all excised
+- [x] 8c `worktree_service.rs`/`worktree_picker.rs` left untouched
+- [x] 8c **`git_ui` census run** before assuming three features is the whole story
+- [x] 8d `onboarding` — sign-in button, plan UI, AI section removed
+- [x] 8d `onboarding` telemetry-toggle decision recorded (deferred to Phase 9 with reasons)
+- [x] 8e `edit_prediction_registry.rs` deleted
+- [x] 8e `crates/zed/Cargo.toml` — already clean from Phase 4; nothing to edit **before** the `.rs` files
+- [x] 8e `main.rs` fully swept
+- [x] 8e `telemetry_log.rs` deleted (in Phase 6)
+- [x] 8e `zed.rs` non-test half swept
+- [x] 8e **`init_test_with_state` mirrored** — same edits as `main.rs`
+- [x] 8e `expected_namespaces` deliberately deferred to Phase 10
+- [x] 8e `zed_actions` pruned (only `OpenAccountSettings` was actually orphaned)
+- [x] 8f **NOT removed — commissioner kept MCP.** Finding 10's "zero consumers" premise was false: `remote_server` is a live consumer. Closed as a deliberate no-op
+- [x] `cargo check --workspace` green — 0 errors, 0 warnings in `crates/zed` (or only Phase 9/10 errors remain)
+- [x] No new `TODO`/`unimplemented!`/`allow(dead_code)`
 
 ## Success Criteria
 

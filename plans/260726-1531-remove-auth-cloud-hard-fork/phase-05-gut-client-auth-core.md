@@ -1,11 +1,38 @@
 ---
 phase: 5
-title: "Gut client auth core"
-status: pending
-effort: "2d"
+title: Gut client auth core
+status: completed
+effort: 2d
 ---
 
 # Phase 5: Gut client auth core
+
+## Outcome — completed 2026-07-26, commit `52b9d6e`
+
+`client.rs` 2303 → ~1570 · `user.rs` 1079 → ~715 · **23/23 keepers verified, 9/9 auth symbols gone.**
+Step 0 (the relocated 3a) landed: `crates/editor` needed **zero** changes, proving the keep-decision.
+
+**Three over-cuts occurred and were recovered from git.** See plan.md → "Execution rule: how to cut".
+The RPC request API, `ClientSettings`/`ProxySettings`, and `Subscription`/`PendingEntitySubscription`/
+`TelemetrySettings` were each destroyed and restored. Every recovery was cheap only because the
+previous crate had been committed.
+
+### Deliberately left for a follow-up pass (~500 lines)
+
+The compiler names all of it; `--deny warnings` in Phase 11 will force it. Do this as its own commit,
+following the cutting discipline:
+
+| Item | Location | Note |
+|---|---|---|
+| `ClientCredentialsProvider` + `credentials_provider()` + `IMPERSONATE_LOGIN` | `client.rs` | **Red team finding 12 confirmed** — no caller once `sign_in` went. Every other credential consumer calls `zed_credentials_provider::global(cx)` directly. |
+| `connect_with_credentials`, `set_connection`, `establish_connection`, `rpc_url`, `establish_websocket_connection` | `client.rs` | The collab transport. No collab server to reach. |
+| `proxy.rs`, `proxy/http_proxy.rs` | whole files | Only the websocket path used them. **Keep `ProxySettings`** — `main.rs:476` reads it. |
+| `ZED_RPC_URL` | `client.rs:54` | static, unused |
+| `test.rs` auth fixtures | `make_get_authenticated_user_response` etc. | |
+
+**Retained pending Phase 8:** `disconnect` and `reconnect`. Fresh `rg` (as the plan required) showed
+`Client::reconnect` has exactly one surviving-crate caller — `crates/zed/src/main.rs:778`, which Phase 8
+step 21 deletes. Removing them now would break `main.rs` for Phase 8 to un-break. Re-check at Phase 11.
 
 ## Context Links
 
@@ -25,7 +52,7 @@ Remove authentication from `crates/client` while preserving the proto/rpc plumbi
 - `editor` imports exactly one line: `use client::{Collaborator, ParticipantIndex, parse_zed_link};` (`editor.rs:95`). All three must survive.
 - `workspace` needs only `proto`, `init`, `Subscription`, `ConnectionIdentifier`, `CONNECTION_TIMEOUT`, `FakeHttpClient`.
 - `project` uses `client::proto` throughout `lsp_command.rs`, `lsp_store.rs`, `search.rs` — **`proto` is the internal wire format for LSP command serialization**, entirely unrelated to auth. This is the single fact that makes deleting `client` impossible.
-- Phase 3a already removed the last surviving consumer of `client::EditPredictionUsage`. If Phase 3a was skipped, **stop** — `edit_prediction_types` will break.
+- Step 0 (below) removes the last surviving consumer of `client::EditPredictionUsage`. It was originally Phase 3a but had to move here: three delete-set crates override the trait method, so severing it before Phase 4 is E0407.
 - `crates/client/src/telemetry.rs` has no cloud imports and is handled in Phase 6, not here.
 - `Status::SignedOut` is already the default startup state (`client.rs:418`), and `main.rs:1311-1322` only auto-authenticates when credentials exist. The signed-out path is already well-trodden — gutting makes it the only path.
 
@@ -82,11 +109,27 @@ user.rs: UserStore contacts half          update_authenticated_user (:832-894)
 
 ## Implementation Steps
 
-1. **Precondition check** — Phase 3a must have landed:
+0. **Step 0 — sever `edit_prediction_types` from `client`** (relocated from Phase 3a during execution; see that phase's Key Insights for why it could not run earlier).
+
+   Precondition: Phase 4 has deleted `codestral`, `copilot`, `edit_prediction` — the three crates that override `EditPredictionDelegate::usage()`. Confirm:
+   ```sh
+   rg -n "fn usage" crates/ | grep -v edit_prediction_types   # expect: nothing
+   ```
+   Then:
+   - `crates/edit_prediction_types/src/edit_prediction_types.rs` — delete `use client::EditPredictionUsage;` `:3`, the `usage()` default method `:167-169`, the required trait method `:215`, and the handle impl `:269`.
+   - Drop `client` from `crates/edit_prediction_types/Cargo.toml`.
+   - `cargo check -p edit_prediction_types && cargo check -p editor` — **`editor` must need zero changes.** Its two test fakes (`edit_prediction_tests.rs:1580`, `:1658`) use the default impl and never override it.
+
+   If `editor` does need changes, **stop** — the keep-`edit_prediction_types` rationale rests on this.
+
+1. **Precondition check** — step 0 must have landed:
    ```sh
    rg -n "EditPredictionUsage" crates/   # expect: only crates/client
    ```
-   If `edit_prediction_types` still references it, go back and do Phase 3a first.
+1b. **Delete the three registered auth actions** — found by the Phase 1 action dump, not by the dependency graph. `crates/client/src/client.rs:90-98` declares `actions!(client, [SignIn, SignOut, Reconnect])`, and `:154-186` registers their handlers. All three appear in the live action list as `client::SignIn` / `client::SignOut` / `client::Reconnect`.
+
+   This matters beyond tidiness: **any keymap binding to them becomes a startup panic** once the actions are gone (Phase 9's mechanism). The `client` crate survives, so a namespace-level sweep would never flag these. Delete the `actions!` entries and the handler registrations together.
+
 2. Delete `crates/client/src/llm_token.rs` and its `pub use llm_token::*;` at `client.rs:57`.
 3. `client.rs` — remove imports `:17-19`, then the two struct fields (`:199` `cloud_client`, `:204` `message_to_client_handlers`) and their initializer at `:540`.
 4. `client.rs` — remove the accessor `cloud_client()` `:579-581`, the credential push at `:907-910`, `validate_credentials` `:923-939`, `connect_to_cloud` `:941-970`.
@@ -122,7 +165,9 @@ user.rs: UserStore contacts half          update_authenticated_user (:832-894)
 
 ## Todo List
 
+- [ ] **Step 0**: `edit_prediction_types` severed from `client`; `cargo check -p editor` needs zero changes
 - [ ] Precondition verified: `EditPredictionUsage` only in `client`
+- [ ] `actions!(client, [SignIn, SignOut, Reconnect])` + handlers deleted (`client.rs:90-98`, `:154-186`)
 - [ ] `llm_token.rs` deleted
 - [ ] `client.rs` cloud fields, accessors, cloud connect removed
 - [ ] LLM-token fns removed
@@ -145,6 +190,7 @@ user.rs: UserStore contacts half          update_authenticated_user (:832-894)
 - `rg -n "cloud_api_client|cloud_llm_client" crates/client/` returns nothing.
 - `Collaborator`, `ParticipantIndex`, `User`, `parse_zed_link`, `pub use rpc::*`, `impl ProtoClient` all still exported.
 - `rg -n "authenticate_with_browser|IMPERSONATE_LOGIN|native_app_signin" crates/client/` returns nothing.
+- `cargo run -p zed -- --dump-all-actions` no longer lists `client::SignIn`, `client::SignOut`, `client::Reconnect`.
 - No `TODO`/`unimplemented!()`/fabricated user left behind.
 
 ## Risk Assessment

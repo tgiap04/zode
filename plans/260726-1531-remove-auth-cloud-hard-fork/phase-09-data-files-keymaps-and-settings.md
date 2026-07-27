@@ -11,7 +11,8 @@ effort: "3-4d"
 
 - [Data-file blast radius](./reports/scout-data-files.md) — the 403 action strings, file by file
 - [Settings scout](./reports/scout-settings-migration.md) §5 — the panic path
-- [`research/baseline-actions.txt`](./research/baseline-actions.txt) — from Phase 1
+- [`research/baseline-action-inventory.md`](./research/baseline-action-inventory.md) — **captured in Phase 1**: 1,292 actions / 88 namespaces, 142 doomed + 2 partial
+- [`research/baseline-action-names.txt`](./research/baseline-action-names.txt) — the sorted name list to diff against
 
 ## Overview
 
@@ -29,7 +30,12 @@ This is not cleanup deferred to the end. It is a hard correctness requirement of
 
 - **Estimate raised 2d → 3-4d** (red team finding 9). This is the plan's own P0 phase with an all-or-nothing gate (`cargo run` starts or it does not) — a 2d budget with no margin was inconsistent with that label.
 - **Bundled keymaps panic; user keymaps do not.** `load_asset` bails on any unresolvable action and `zed.rs:2066`/`:2070`/`:2075` all `.unwrap()` it. A user's own `keymap.json` gets a soft per-binding skip plus a notification (`keymap_file.rs:237-378`, `zed.rs:1942-1962`).
-- **Do not hand-curate the removal list by namespace prefix.** `crates/zed_actions` survives and *still declares* actions in the `agent`, `assistant`, and `collab` namespaces (`zed_actions/src/lib.rs:116`, `:486`, `:520`, `:540`, `:549`, `:557`, `:576`, `:585`). Some bindings with those prefixes remain valid. Diff against the regenerated action list instead.
+- **Do not hand-curate the removal list by namespace prefix.** Two independent reasons, both now measured:
+  - `crates/zed_actions` survives and *still declares* actions in the `agent`, `assistant`, and `collab` namespaces (`zed_actions/src/lib.rs:116`, `:486`, `:520`, `:540`, `:549`, `:557`, `:576`, `:585`). Some bindings with those prefixes stay valid.
+  - Two **surviving** namespaces lose only *some* actions: `client` loses `SignIn`/`SignOut`/`Reconnect` (Phase 5) while keeping the namespace; `onboarding` loses `SignIn`/`OpenAccount` but keeps `Finish`/`ResetHints`. A prefix sweep sees neither.
+
+  Diff the regenerated dump against `research/baseline-action-names.txt` instead.
+- **Baseline measured in Phase 1:** 1,292 actions, 88 namespaces. **142** live in namespaces that vanish with their crate; `bedrock` (2) and `zed_predict_onboarding` (1) were **missing from the plan's original namespace list** — the dump caught them.
 - **Settings are permissive** — no `deny_unknown_fields` anywhere (`fallible_options.rs:11-44`), plus a regression test asserting unknown-key preservation. Users' existing `settings.json` keeps loading. Migration is Phase 13 polish, not a blocker.
 - **But `default.json` is not permissive in practice.** ~12 consumers do `content.<key>.unwrap()` because `default.json` is contractually complete — e.g. `auto_update.rs:217`, `workspace_settings.rs:100`, `call_settings.rs:11`. **Field + `default.json` entry + unwrapping consumer must die in the same commit** or startup panics.
 - Unknown *key contexts* (`AgentPanel`, `agent_diff`) silently never match — ~90 of them, cosmetic only. Clean them, but they are not urgent.
@@ -59,6 +65,22 @@ default.json key        ─┼─► must be removed ATOMICALLY (same commit)
 
 ## Related Code Files
 
+**Config files that reference crates by name — found during execution, not in the original inventory**
+- `.config/nextest.toml` — **already fixed in `f753b91`**. It filtered on `package(collab)` and
+  `package(language_model)`. A stale filter there is a **hard config parse error**, not a warning: the
+  entire test suite refuses to run, which masks everything else. Re-grep after any further deletion:
+  ```sh
+  for c in $(grep -o "package([a-z_]*)" .config/nextest.toml | sed 's/package(\(.*\))/\1/' | sort -u); do
+    [ -d "crates/$c" ] || echo "STALE: $c"
+  done
+  ```
+- `Cargo.toml` `[patch.crates-io]` — the `livekit` patch was pruned in `f753b91`. `libwebrtc` and
+  `webrtc-sys` stay: `crates/audio` still pulls them (see Phase 11 note).
+- Also sweep for this class generally, since two instances were missed by the scout:
+  ```sh
+  rg -l "package\(|crates/" .config/ .github/ script/ ci/ *.toml
+  ```
+
 **To modify**
 - `assets/keymaps/default-macos.json` (125), `default-linux.json` (119), `default-windows.json` (117)
 - `assets/keymaps/macos/cursor.json` (17), `linux/cursor.json` (17), `vim.json` (6)
@@ -81,13 +103,19 @@ default.json key        ─┼─► must be removed ATOMICALLY (same commit)
 
 1. Regenerate the post-deletion action list:
    ```sh
-   cargo run -p zed -- --dump-all-actions > research/post-deletion-actions.txt
+   cargo run -p zed -- --dump-all-actions > research/post-deletion-actions.json
    ```
    If `crates/zed` will not yet run, use `cargo check -p zed` green as the precondition and build the dump as soon as it links.
-2. Compute the disappeared actions:
+2. Compute the disappeared actions. The dump is **JSON** (`{"actions":[{"name":…}], "schema_definitions":…}`), so extract names first — a raw `comm` on the JSON would be meaningless:
    ```sh
-   comm -23 <(sort research/baseline-actions.txt) <(sort research/post-deletion-actions.txt) \
+   python3 -c "
+   import json,sys
+   print('\n'.join(sorted(a['name'] for a in json.load(open(sys.argv[1]))['actions'])))
+   " research/post-deletion-actions.json > research/post-deletion-action-names.txt
+
+   comm -23 research/baseline-action-names.txt research/post-deletion-action-names.txt \
      > research/removed-actions.txt
+   wc -l research/removed-actions.txt    # expect ~142 + the client/onboarding partials
    ```
 3. For each keymap file, remove every binding whose action appears in `removed-actions.txt`. Where a whole context block empties out, delete the block. Where a context predicate references a dead context (`&& !agent_diff`, `AgentPanel`), rewrite or drop the predicate.
 4. Edit `default-macos.json`, `default-linux.json`, `default-windows.json` **in lockstep** — they mirror each other and diverge only in modifiers.

@@ -20,7 +20,66 @@ Six crates with small edges into the delete set, plus `file_finder` with a sligh
 
 **`project` was added here by the red team** — the plan originally called it a zero-change survivor, which was wrong (see 7e).
 
-Work in the reverse-topological order from Phase 1 and use `cargo check -p <crate>`, never `--workspace`. The point of this ordering is that each crate is fixed exactly once — errors flow downstream only.
+Work in the reverse-topological order derived in Phase 1 (`research/survivor-fix-order.txt`) and use `cargo check -p <crate>`, never `--workspace`. The point of this ordering is that each crate is fixed exactly once — errors flow downstream only.
+
+## ⚠ Cutting discipline (mandatory — see plan.md "Execution rule")
+
+Phase 5 over-cut **three times**, each time destroying keepers that sat between two doomed functions.
+This phase cuts the two largest files in the fork, so the rule is not optional here:
+
+1. **Dump the function map first**, for every region you intend to touch:
+   ```sh
+   grep -n "^    pub fn \|^    pub async fn \|^    async fn \|^    fn \|^impl \|^pub struct \|^pub enum " <file>
+   ```
+   Classify **every** entry in the range as delete or keep before writing a single edit.
+2. **One function per cut.** The end marker must be the next item you also intend to delete — never
+   "the next thing that appears". If a keeper sits inside a proposed A→B range, the range is wrong.
+3. **Assert the keep-list after every cut**, in the same script. Phase 5 used 23 assertions; that is
+   the template, not the ceiling.
+4. **A cut that compiles is not a cut that is correct.** Phase 5's second over-cut compiled the file
+   it damaged — only a different crate revealed it. Check the *consumers*.
+5. **Commit per crate.** This is the rollback unit. All three Phase 5 recoveries were cheap because
+   of it.
+
+## Progress
+
+- [x] **`cloud_api_types`** — `PlanInfo.usage` removed (commit `f753b91`)
+- [x] **`settings_content`** — 3 enums relocated; `Speed` serde attribute bug caught and pinned by tests (commit `f753b91`)
+- [x] **`project`** — collab join path removed (commit `de097a6`)
+- [x] **`workspace`** — agent settings reads + dead sidebar UI removed (commit `64a5708`)
+- [x] **`activity_indicator`** — `DismissMessage` rehomed (commit `a74d128`)
+- [x] **`diagnostics`** — inline-assist button removed (commit `993414f`)
+- [x] **`language_tools`** — Copilot LSP-log branch removed (commit `3c8c30f`)
+- [x] **`notifications`** — verified green after `project` landed; no work needed beyond 6c
+- [ ] **`file_finder`** — ⚠ **BLOCKED, must be re-sequenced after Phase 8's `git_ui`** (see below)
+
+## ⚠ Ordering correction #3: `file_finder` is not a light survivor
+
+`file_finder` sits **downstream of a Phase 8 crate**. The dependency chain is:
+
+```
+file_finder → project_panel → git_ui        (cargo tree -p file_finder -i git_ui)
+```
+
+So `cargo check -p file_finder` reports **16 errors, none of them in `file_finder`** — every one
+is in `git_ui` (`agent_settings`, `language_model`, `call`). `file_finder`'s own errors are
+*masked*: cargo never reaches it. This is the exact masking failure the derived order was built to
+prevent, and `research/survivor-fix-order.txt` got this one wrong — it ranked `file_finder` 5th
+among the light survivors.
+
+**Consequence:** the ~110-line, 14-site `Match::Channel` unwind cannot be compile-verified until
+`git_ui` is green. Attempting it blind violates the cutting discipline this phase mandates —
+rule 4, "a cut that compiles is not a cut that is correct; check the consumers" — and rule 3's
+assert-after-every-cut is impossible with no compiler. Phase 5's three over-cuts happened under
+exactly these conditions.
+
+**Resolution:** `file_finder` moves to the head of Phase 8, immediately after `git_ui`. Revised
+Phase 8 order: `settings_ui` → `git_ui` → **`file_finder`** → `onboarding` → `title_bar` → `zed`.
+
+The work itself is unchanged and still scoped in step 13–17 below.
+
+> Note: `cloud_api_types` and `settings_content` were the deferred 3c and 3b. They are leaves #1 and
+> #2 of the derived order, which is why the post-cut census showed a single error.
 
 ## Key Insights
 
@@ -43,15 +102,21 @@ Work in the reverse-topological order from Phase 1 and use `cargo check -p <crat
 
 Fix order (leaf-first; each depends only on Phases 5–6, not on each other):
 
+**Corrected against the derived topology** (`research/survivor-fix-order.txt`, Phase 1 step 4). The
+first draft of this phase had `project` and `workspace` fifth and sixth — wrong, because the other
+five crates all depend on them, so their errors would have masked everything downstream.
+
 ```
-1. activity_indicator   ← auto_update::DismissMessage        ~6 lines
-2. diagnostics          ← agent_settings                     ~5 lines
-3. language_tools       ← edit_prediction::EditPredictionStore ~15 lines
-4. notifications        ← channel        (done in Phase 6c — verify only)
-5. project              ← agent_servers settings key         ~30 lines   [red team]
-6. workspace            ← agent_settings                     ~10-40 lines
-7. file_finder          ← channel::ChannelStore              ~110 lines
+1. project             ← agent_servers unwrap + disable_ai   ~30 lines   [red team]
+2. workspace           ← agent_settings                      ~10-40 lines
+3. activity_indicator  ← auto_update::DismissMessage          ~6 lines
+4. diagnostics         ← agent_settings                       ~5 lines
+5. file_finder         ← channel::ChannelStore               ~110 lines
+6. language_tools      ← edit_prediction::EditPredictionStore ~15 lines
+7. notifications       ← channel      (done in Phase 6c — verify only)
 ```
+
+`project` and `workspace` first is not a preference — every other crate here sits downstream of them.
 
 ## Related Code Files
 
@@ -66,28 +131,28 @@ Fix order (leaf-first; each depends only on Phases 5–6, not on each other):
 
 ## Implementation Steps
 
-### 7a. `activity_indicator`
+### 7c. `activity_indicator`
 
 1. `DismissMessage` is an action, not logic. Move the declaration into `zed_actions` (preferred — it is where cross-crate actions live) or declare it locally in `activity_indicator`.
 2. Update `:1`, `:297`, `:525`, `:554`. Drop `auto_update` from `Cargo.toml`.
 3. `cargo check -p activity_indicator`.
 
-### 7b. `diagnostics`
+### 7d. `diagnostics`
 
 4. Delete `use agent_settings::AgentSettings;` `:2` and the `is_agent_enabled` binding `:51`, plus the button branch it gates in `render`.
 5. Drop the dep. `cargo check -p diagnostics`.
 
-### 7c. `language_tools`
+### 7f. `language_tools`
 
 6. Delete `use edit_prediction::EditPredictionStore;` `:2` and the `EditPredictionStore::try_global` branch at `:346`.
 7. **Leave `lsp_button.rs:1309` alone** — it reads `language::language_settings`, a surviving crate.
 8. Drop the dep. `cargo check -p language_tools`.
 
-### 7d. `notifications` — verification only
+### 7g. `notifications` — verification only
 
 9. Already gutted in Phase 6c. Confirm: `cargo check -p notifications` green and `rg -n "channel::" crates/notifications/` empty.
 
-### 7e. `project` — the "zero-change survivor" that isn't (red team finding 5)
+### 7a. `project` — the "zero-change survivor" that isn't (red team finding 5)
 
 The plan originally listed `project` as needing no changes. That was wrong on two counts:
 
@@ -101,14 +166,14 @@ The plan originally listed `project` as needing no changes. That was wrong on tw
 9c. Remove `DisableAiSettings` / `disable_ai` (`project.rs:1094`) and coordinate the `default.json` entry removal with Phase 9.
 9d. `cargo check -p project`. Record the `agent_servers` decision — **Phase 9's settings table depends on it.**
 
-### 7f. `workspace`
+### 7b. `workspace`
 
 10. `welcome.rs:427` — delete the `ai_enabled` conditional and whatever it gated.
 11. `multi_workspace.rs` — since `sidebar` is deleted, remove `sidebar_side_context_menu` (`:65-100`) and the `AgentSettings::get_global(cx).sidebar_side` read at `:69`. Leave the `WorkspaceSidebar` **trait** in place if removing it ripples; nothing implements it after Phase 4, which is harmless.
 12. Drop `agent_settings` from `Cargo.toml`. `cargo check -p workspace`.
     > `workspace` is depended on by nearly everything — get it green before moving to Phase 8.
 
-### 7g. `file_finder`
+### 7e. `file_finder`
 
 13. Delete `use channel::ChannelStore;` `:7` and the `channel_store` field `:398`.
 14. Delete the `Match::Channel` variant `:465-466`. Then let the compiler find every match site — expect `:672`, `:1154-1158`, `:1548-1551`.
@@ -124,16 +189,43 @@ The plan originally listed `project` as needing no changes. That was wrong on tw
 
 ## Todo List
 
-- [ ] 7a `activity_indicator` — `DismissMessage` rehomed
-- [ ] 7b `diagnostics` — toolbar branch removed
-- [ ] 7c `language_tools` — Copilot LSP-log branch removed; `lsp_button.rs:1309` untouched
-- [ ] 7d `notifications` verified green
-- [ ] 7e `project` — `agent_server_store.rs:1896` unwrap resolved; `disable_ai` removed; **decision recorded for Phase 9**
-- [ ] 7f `workspace` — sidebar context menu removed; **green before Phase 8**
-- [ ] 7g `file_finder` — `Match::Channel` fully unwound
-- [ ] 7g `include_channels` removal **recorded for Phase 9**
-- [ ] `final-delete-set.py` shows only the heavy five remaining
-- [ ] Six standalone commits
+- [x] 7a `project` — compile error fixed (collab join path); **`agent_servers` / `disable_ai` deferred — see hand-off below**
+- [x] 7b `workspace` — sidebar context menu removed; **green before everything downstream**
+- [x] 7c `activity_indicator` — `DismissMessage` rehomed
+- [x] 7d `diagnostics` — toolbar branch removed
+- [ ] 7e `file_finder` — `Match::Channel` fully unwound — **blocked on `git_ui`, moved to Phase 8**
+- [ ] 7e `include_channels` removal **recorded for Phase 9**
+- [x] 7f `language_tools` — Copilot LSP-log branch removed; `lsp_button.rs` untouched
+- [x] 7g `notifications` verified green
+- [ ] `final-delete-set.py` shows only the heavy five remaining — run after `file_finder`
+- [x] Six standalone commits (one per green crate)
+
+## Hand-offs this phase created
+
+**To Phase 8** — `file_finder` (above), plus `crates/zed/src/zed.rs:459` still constructs a
+`Sidebar` from the crate deleted in Phase 4; Phase 7b removed the *workspace* half only.
+
+**To Phase 9 — three settings items:**
+
+1. **`activity_indicator::DismissMessage` is a NEW action string.** The keymap sweep must *add*
+   it, not merely drop the `auto_update` namespace. Phase 1's baseline counted the old name
+   among the 142 doomed actions; the replacement is not in any inventory.
+2. **`agent_servers` settings key — decision deferred, not made.** The plan's 9a recommended
+   "delete `agent_server_store.rs` and its wiring". That is **not contained**: `AgentServerStore`
+   is used by `crates/zed`, `onboarding` *and* **`remote_server/headless_project.rs` — a
+   survivor**, which the recommendation did not account for. 2,241 lines across a survivor
+   boundary is Phase 8 scope, not a light-survivor edit. The `.unwrap()` at
+   `agent_server_store.rs:1896` is **not** a live panic while `default.json` keeps the key, so
+   deferring is safe **only if Phase 9 does not remove the key before that decision is made.**
+3. **`project.disable_ai` / `DisableAiSettings` — still present.** Used in three files
+   (`project.rs`, `agent_registry_store.rs`, `context_server_store.rs`); `context_server_store`
+   is red-team finding 10's "live wired field" already assigned to Phase 8. Same coupling rule:
+   the `default.json` key and its `.unwrap()`ing consumers must go in one commit.
+
+**To Phase 10** — `crates/client`'s test target does not compile: `test.rs` builds
+`GetAuthenticatedUserResponse` from the deleted `cloud_api_client` and calls the removed
+`sign_in`/`connect`. Pre-existing (17 errors before this phase, 17 after), but it means the four
+surviving telemetry tests in `client/src/telemetry.rs` **cannot be run** until `test.rs` is fixed.
 
 ## Success Criteria
 
