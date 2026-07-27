@@ -61,7 +61,7 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 5 | [Gut client auth core](./phase-05-gut-client-auth-core.md) | Completed |
 | 6 | [Gut telemetry notifications reliability](./phase-06-gut-telemetry-notifications-reliability.md) | Completed |
 | 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | Completed (9/9 — `file_finder` landed in Phase 8) |
-| 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | In progress (6/7 — 8f blocked on a decision) |
+| 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Completed (8f closed as a no-op — MCP kept) |
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Pending |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Pending |
 | 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Pending |
