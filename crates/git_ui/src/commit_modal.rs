@@ -1,10 +1,8 @@
 use crate::branch_picker::{self, BranchList};
 use crate::git_panel::{GitPanel, commit_message_editor, panel_editor_style};
 use git::repository::CommitOptions;
-use git::{Amend, Commit, GenerateCommitMessage, Signoff};
+use git::{Amend, Commit, Signoff};
 use panel::panel_button;
-use project::DisableAiSettings;
-use settings::Settings;
 use ui::{
     ContextMenu, KeybindingHint, PopoverMenu, PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
 };
@@ -150,7 +148,6 @@ impl CommitModal {
                 }
             }
             git_panel.set_modal_open(true, cx);
-            git_panel.load_local_committer(cx);
         });
 
         let dock = workspace.dock_at_position(git_panel.position(window, cx));
@@ -332,8 +329,6 @@ impl CommitModal {
             can_commit,
             tooltip,
             commit_label,
-            co_authors,
-            generate_commit_message,
             active_repo,
             is_amend_pending,
             is_signoff_enabled,
@@ -341,8 +336,6 @@ impl CommitModal {
         ) = self.git_panel.update(cx, |git_panel, cx| {
             let (can_commit, tooltip) = git_panel.configure_commit_button(cx);
             let title = git_panel.commit_button_title();
-            let co_authors = git_panel.render_co_authors(cx);
-            let generate_commit_message = git_panel.render_generate_commit_message_button(cx);
             let active_repo = git_panel.active_repository.clone();
             let is_amend_pending = git_panel.amend_pending();
             let is_signoff_enabled = git_panel.signoff_enabled();
@@ -350,8 +343,6 @@ impl CommitModal {
                 can_commit,
                 tooltip,
                 title,
-                co_authors,
-                generate_commit_message,
                 active_repo,
                 is_amend_pending,
                 is_signoff_enabled,
@@ -422,9 +413,7 @@ impl CommitModal {
                             .flex_shrink()
                             .overflow_x_hidden()
                             .child(branch_picker),
-                    )
-                    .children(generate_commit_message)
-                    .children(co_authors),
+                    ),
             )
             .child(div().flex_1())
             .child(
@@ -545,13 +534,6 @@ impl Render for CommitModal {
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_amend))
-            .when(!DisableAiSettings::get_global(cx).disable_ai, |this| {
-                this.on_action(cx.listener(|this, _: &GenerateCommitMessage, _, cx| {
-                    this.git_panel.update(cx, |panel, cx| {
-                        panel.generate_commit_message(cx);
-                    })
-                }))
-            })
             .on_action(
                 cx.listener(|this, _: &zed_actions::git::Branch, window, cx| {
                     this.toggle_branch_selector(window, cx);
