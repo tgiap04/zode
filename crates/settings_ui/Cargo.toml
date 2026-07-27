@@ -17,7 +17,6 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-audio.workspace = true
 component.workspace = true
 cpal.workspace = true
 editor.workspace = true
