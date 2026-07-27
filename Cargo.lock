@@ -5413,7 +5413,6 @@ dependencies = [
  "picker",
  "pretty_assertions",
  "project",
- "prompt_store",
  "proto",
  "rand 0.9.3",
  "remote",
@@ -9346,7 +9345,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "cloud_api_types",
  "collections",
  "component",
  "db",
@@ -13185,7 +13183,6 @@ name = "settings_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "audio",
  "component",
  "cpal",
  "editor",
@@ -14797,7 +14794,6 @@ dependencies = [
  "arrayvec",
  "chrono",
  "client",
- "cloud_api_types",
  "db",
  "git_ui",
  "gpui",
