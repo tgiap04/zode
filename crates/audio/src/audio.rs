@@ -19,29 +19,3 @@ pub use audio_pipeline::RodioExt;
 pub use audio_pipeline::init;
 pub use audio_pipeline::{open_input_stream, open_test_output};
 
-#[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
-pub enum Sound {
-    Joined,
-    GuestJoined,
-    Leave,
-    Mute,
-    Unmute,
-    StartScreenshare,
-    StopScreenshare,
-    AgentDone,
-}
-
-impl Sound {
-    fn file(&self) -> &'static str {
-        match self {
-            Self::Joined => "joined_call",
-            Self::GuestJoined => "guest_joined_call",
-            Self::Leave => "leave_call",
-            Self::Mute => "mute",
-            Self::Unmute => "unmute",
-            Self::StartScreenshare => "start_screenshare",
-            Self::StopScreenshare => "stop_screenshare",
-            Self::AgentDone => "agent_done",
-        }
-    }
-}
