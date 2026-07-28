@@ -1,7 +1,7 @@
 ---
 phase: 10
 title: "Tests and docs"
-status: pending
+status: completed — one open regression, see below
 effort: "2d"
 ---
 
@@ -130,20 +130,48 @@ deleted crates          ─► docs/src/{ai,collaboration}/**, SUMMARY.md
 
 ## Todo List
 
-- [ ] 10a `script/generate-action-metadata` run
-- [ ] 10a `expected_namespaces` updated **from the dump**; unexpected survivors investigated
-- [ ] 10a `settings_store.rs:2871` schema assertion fixed
-- [ ] 10a Deleted-key test fixtures removed
-- [ ] 10a `test_disable_ai_crash` deleted
-- [ ] 10a Test diff **by name**; every delta sorted into bucket (a)/(b)/(c); bucket (c) empty; **nothing `#[ignore]`d**
-- [ ] 10b ~27 docs deleted; `remote-development.md` **kept**
-- [ ] 10b `SUMMARY.md` links fixed
-- [ ] 10b `{#kb}`/`{#action}` sweep clean
-- [ ] 10b JSON snippet sweep clean
-- [ ] 10b Three generated docs regenerated
-- [ ] 10b `mdbook build docs` succeeds
-- [ ] 10c rebuild-spec regeneration scheduled post-Phase-11
-- [ ] 10d `.rules` Crash Investigation section + `script/sentry-fetch` removed
+- [x] 10a `script/generate-action-metadata` run (1,163 actions)
+- [x] 10a `expected_namespaces` generated from the dump; **2 survivors found and removed** — see log
+- [x] 10a `settings_store.rs` schema assertion — already fixed in Phase 9 (repointed to `vim_mode`)
+- [x] 10a fixtures — already handled in Phase 9
+- [x] 10a `test_disable_ai_crash` **KEPT** — Phase 9 kept `disable_ai`; deleting it would have been wrong
+- [x] 10a Test diff by name; (a) 1,660 / (b) 19 all accounted for; **(c) is NOT empty — 1 regression, unfixed and unhidden**; nothing `#[ignore]`d (verified: 0 added)
+- [x] 10b 26 docs deleted; `remote-development.md` kept
+- [x] 10b `SUMMARY.md` fixed; `worktree-trust.md` re-parented rather than orphaned
+- [x] 10b `{#kb}`/`{#action}` sweep clean (alias-aware)
+- [x] 10b JSON snippet sweep clean — **the preprocessor caught 3 real errors**
+- [x] 10b `all-actions.md` + keybinding tables are templated at build time; `all-settings.md` hand-edited
+- [x] 10b **`mdbook` is not installed here**; ran the preprocessor directly over all 144 chapters instead — that is the component `check_docs` enforces. Exits 0. A real `mdbook build` is still unverified
+- [x] 10c all 20 spec artifacts marked stale with the specific fiction named; regeneration deferred
+- [x] 10d section, `script/sentry-fetch` and `.factory/prompts/crash/` removed; 7 stale `typos.toml` exclusions
+
+## ⚠ Open regression (bucket (c) is NOT empty)
+
+`editor inlays::inlay_hints::tests::test_refresh_requested_multi_server` **fails**. It is the only
+failure in 4,001 tests. It has not been hidden, skipped or `#[ignore]`d.
+
+What is established:
+
+| | |
+|---|---|
+| Deterministic | 5/5 runs fail identically |
+| Failure | `Both servers should have hints initially. Got: ["server_b_1"]` — server A never produces hints |
+| Passed at baseline | **Yes** — verified by running it in a worktree at `pre-structural-cut` |
+| `git bisect` | first bad commit is **`c3e2ac3`, the Phase 4 atomic cut** — not any later phase |
+| `crates/editor` | **zero changes** across the whole fork (`git diff pre-structural-cut -- crates/editor/` is empty) |
+| Sibling tests | 32 of 33 `inlay` tests pass; only the two-server case fails |
+
+**Why the baseline could not answer this on its own** — red team finding 7, confirmed in practice.
+`research/baseline-tests.log` is 5,956 bytes for 5,674 tests: a summary tail, with only 36 `PASS`
+lines. It records that 21 tests failed (all `collab` Postgres tests needing a database that was not
+running — all since deleted) but cannot show whether any *specific* test passed. Answering this
+required rebuilding the baseline in a worktree.
+
+**Most likely mechanism, not yet proven:** `crates/copilot` registered an LSP adapter for every
+language. Removing it changed what `LanguageSettings::resolve_language_servers` resolves for a
+language with two registered adapters, so the test's server A ("rust-analyzer") never starts. The
+fix is in `editor`/`language` server-resolution territory — the crate this plan deliberately kept at
+zero change — so it is **handed to Phase 11** rather than patched blind here.
 
 ## Success Criteria
 
