@@ -172,13 +172,9 @@ impl VsCodeSettings {
 
     pub fn settings_content(&self) -> SettingsContent {
         SettingsContent {
-            agent: self.agent_settings_content(),
             agent_servers: None,
             audio: None,
-            auto_update: None,
             base_keymap: Some(BaseKeymapContent::VSCode),
-            calls: None,
-            collaboration_panel: None,
             debugger: None,
             diagnostics: None,
             editor: self.editor_settings_content(),
@@ -193,10 +189,8 @@ impl VsCodeSettings {
             helix_mode: None,
             image_viewer: None,
             journal: None,
-            language_models: None,
             line_indicator_format: None,
             log: None,
-            message_editor: None,
             node: self.node_binary_settings(),
 
             outline_panel: self.outline_panel_settings_content(),
@@ -222,15 +216,6 @@ impl VsCodeSettings {
             modeline_lines: None,
             feature_flags: None,
         }
-    }
-
-    fn agent_settings_content(&self) -> Option<AgentSettingsContent> {
-        let enabled = self.read_bool("chat.agent.enabled");
-        skip_default(AgentSettingsContent {
-            enabled: enabled,
-            button: enabled,
-            ..Default::default()
-        })
     }
 
     fn editor_settings_content(&self) -> EditorSettingsContent {
@@ -949,8 +934,6 @@ impl VsCodeSettings {
             buffer_font_weight: self.read_f32("editor.fontWeight").map(FontWeightContent),
             buffer_line_height: None,
             buffer_font_features: None,
-            agent_ui_font_size: None,
-            agent_buffer_font_size: None,
             theme: None,
             icon_theme: None,
             ui_density: None,
@@ -1005,7 +988,6 @@ impl VsCodeSettings {
             restore_on_file_reopen: self.read_bool("workbench.editor.restoreViewState"),
             restore_on_startup: None,
             window_decorations: None,
-            show_call_status_icon: None,
             use_system_path_prompts: self.read_bool("files.simpleDialog.enable"),
             use_system_prompts: None,
             use_system_window_tabs: self.read_bool("window.nativeTabs"),

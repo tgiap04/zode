@@ -114,7 +114,6 @@ impl Default for MarkdownStyle {
 }
 
 pub enum MarkdownFont {
-    Agent,
     Editor,
 }
 
@@ -125,10 +124,6 @@ impl MarkdownStyle {
 
         let buffer_font_weight = theme_settings.buffer_font.weight;
         let (buffer_font_size, ui_font_size) = match font {
-            MarkdownFont::Agent => (
-                theme_settings.agent_buffer_font_size(cx),
-                theme_settings.agent_ui_font_size(cx),
-            ),
             MarkdownFont::Editor => (
                 theme_settings.buffer_font_size(cx),
                 theme_settings.ui_font_size(cx),

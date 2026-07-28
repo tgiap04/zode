@@ -37,10 +37,6 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: false
     pub confirm_quit: Option<bool>,
-    /// Whether or not to show the call status icon in the status bar.
-    ///
-    /// Default: true
-    pub show_call_status_icon: Option<bool>,
     /// When to automatically save edited buffers.
     ///
     /// Default: off

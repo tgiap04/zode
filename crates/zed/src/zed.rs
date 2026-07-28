@@ -875,14 +875,10 @@ fn register_actions(
                     update_settings_file(fs.clone(), cx, move |settings, _| {
                         settings.theme.ui_font_size = None;
                         settings.theme.buffer_font_size = None;
-                        settings.theme.agent_ui_font_size = None;
-                        settings.theme.agent_buffer_font_size = None;
                     });
                 } else {
                     theme_settings::reset_ui_font_size(cx);
                     theme_settings::reset_buffer_font_size(cx);
-                    theme_settings::reset_agent_ui_font_size(cx);
-                    theme_settings::reset_agent_buffer_font_size(cx);
                 }
             }
         })
@@ -4646,7 +4642,6 @@ mod tests {
             let app_state = AppState::test(cx);
 
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            client::init(&app_state.client, cx);
             workspace::init(app_state.clone(), cx);
             onboarding::init(cx);
             app_state
@@ -4654,6 +4649,38 @@ mod tests {
     }
 
     actions!(test_only, [ActionA, ActionB]);
+
+    /// Every bundled keymap must load with all of its actions resolving.
+    ///
+    /// This guards the startup panic path: `load_default_keymap` calls
+    /// `KeymapFile::load_asset(..).unwrap()` for the platform default, the
+    /// selected base keymap and the vim keymap, and `load_asset` bails as soon
+    /// as one binding names an action that no longer exists. Deleting a crate
+    /// without purging its bindings therefore makes the editor refuse to start,
+    /// and nothing but launching it used to catch that.
+    ///
+    /// Note this resolves deprecated aliases too, because it goes through the
+    /// real action registry rather than comparing against `--dump-all-actions`
+    /// (which reports only preferred names).
+    #[gpui::test]
+    fn test_bundled_keymaps_all_actions_resolve(cx: &mut TestAppContext) {
+        let _app_state = init_keymap_test(cx);
+
+        cx.update(|cx| {
+            let mut paths = vec![DEFAULT_KEYMAP_PATH, VIM_KEYMAP_PATH];
+            paths.extend(
+                BaseKeymap::OPTIONS
+                    .iter()
+                    .filter_map(|(_, keymap)| keymap.asset_path()),
+            );
+
+            for path in paths {
+                if let Err(error) = KeymapFile::load_asset(path, None, cx) {
+                    panic!("bundled keymap {path} failed to load: {error}");
+                }
+            }
+        });
+    }
 
     #[gpui::test]
     async fn test_base_keymap(cx: &mut gpui::TestAppContext) {

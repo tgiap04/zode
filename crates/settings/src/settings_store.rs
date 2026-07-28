@@ -1632,14 +1632,14 @@ mod tests {
     use util::rel_path::rel_path;
 
     #[derive(Debug, PartialEq)]
-    struct AutoUpdateSetting {
-        auto_update: bool,
+    struct GlobalOnlySetting {
+        vim_mode: bool,
     }
 
-    impl Settings for AutoUpdateSetting {
+    impl Settings for GlobalOnlySetting {
         fn from_settings(content: &SettingsContent) -> Self {
-            AutoUpdateSetting {
-                auto_update: content.auto_update.unwrap(),
+            GlobalOnlySetting {
+                vim_mode: content.vim_mode.unwrap(),
             }
         }
     }
@@ -1779,13 +1779,13 @@ mod tests {
     #[gpui::test]
     fn test_settings_store_basic(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &default_settings());
-        store.register_setting::<AutoUpdateSetting>();
+        store.register_setting::<GlobalOnlySetting>();
         store.register_setting::<ItemSettings>();
         store.register_setting::<DefaultLanguageSettings>();
 
         assert_eq!(
-            store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: true }
+            store.get::<GlobalOnlySetting>(None),
+            &GlobalOnlySetting { vim_mode: false }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
@@ -1795,7 +1795,7 @@ mod tests {
         store
             .set_user_settings(
                 r#"{
-                    "auto_update": false,
+                    "vim_mode": true,
                     "tabs": {
                       "close_position": "left"
                     }
@@ -1805,8 +1805,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: false }
+            store.get::<GlobalOnlySetting>(None),
+            &GlobalOnlySetting { vim_mode: true }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,
@@ -1837,7 +1837,7 @@ mod tests {
                 WorktreeId::from_usize(1),
                 LocalSettingsPath::InWorktree(rel_path("root2").into()),
                 LocalSettingsKind::Settings,
-                Some(r#"{ "tab_size": 9, "auto_update": true}"#),
+                Some(r#"{ "tab_size": 9, "vim_mode": false}"#),
                 cx,
             )
             .unwrap();
@@ -1873,11 +1873,11 @@ mod tests {
             }
         );
         assert_eq!(
-            store.get::<AutoUpdateSetting>(Some(SettingsLocation {
+            store.get::<GlobalOnlySetting>(Some(SettingsLocation {
                 worktree_id: WorktreeId::from_usize(1),
                 path: rel_path("root2/something")
             })),
-            &AutoUpdateSetting { auto_update: false }
+            &GlobalOnlySetting { vim_mode: true }
         );
     }
 
@@ -1885,13 +1885,13 @@ mod tests {
     fn test_setting_store_assign_json_before_register(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &test_settings());
         store
-            .set_user_settings(r#"{ "auto_update": false }"#, cx)
+            .set_user_settings(r#"{ "vim_mode": true }"#, cx)
             .unwrap();
-        store.register_setting::<AutoUpdateSetting>();
+        store.register_setting::<GlobalOnlySetting>();
 
         assert_eq!(
-            store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: false }
+            store.get::<GlobalOnlySetting>(None),
+            &GlobalOnlySetting { vim_mode: true }
         );
     }
 
@@ -2032,8 +2032,8 @@ mod tests {
         check_settings_update(
             &mut store,
             r#"{ "one": 1, "two": 2 }"#.to_owned(),
-            |settings| settings.auto_update = Some(true),
-            r#"{ "auto_update": true, "one": 1, "two": 2 }"#.to_owned(),
+            |settings| settings.vim_mode = Some(true),
+            r#"{ "vim_mode": true, "one": 1, "two": 2 }"#.to_owned(),
             cx,
         );
 
@@ -2095,21 +2095,21 @@ mod tests {
     #[gpui::test]
     fn test_edits_for_update_preserves_unknown_keys(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &test_settings());
-        store.register_setting::<AutoUpdateSetting>();
+        store.register_setting::<GlobalOnlySetting>();
 
         let old_json = r#"{
             "some_unknown_key": "should_be_preserved",
-            "auto_update": false
+            "vim_mode": false
         }"#
         .unindent();
 
         check_settings_update(
             &mut store,
             old_json,
-            |settings| settings.auto_update = Some(true),
+            |settings| settings.vim_mode = Some(true),
             r#"{
             "some_unknown_key": "should_be_preserved",
-            "auto_update": true
+            "vim_mode": true
         }"#
             .unindent(),
             cx,
@@ -2130,7 +2130,7 @@ mod tests {
         let mut store = SettingsStore::new(cx, &test_settings());
         store.register_setting::<DefaultLanguageSettings>();
         store.register_setting::<ItemSettings>();
-        store.register_setting::<AutoUpdateSetting>();
+        store.register_setting::<GlobalOnlySetting>();
         store.register_setting::<ThemeSettings>();
 
         // create settings that werent present
@@ -2443,7 +2443,7 @@ mod tests {
     fn test_get_value_for_field_local_worktrees_dont_interfere(cx: &mut App) {
         let mut store = SettingsStore::new(cx, &test_settings());
         store.register_setting::<DefaultLanguageSettings>();
-        store.register_setting::<AutoUpdateSetting>();
+        store.register_setting::<GlobalOnlySetting>();
 
         let local_1 = (WorktreeId::from_usize(0), RelPath::empty().into_arc());
 
@@ -2873,7 +2873,7 @@ mod tests {
         let user_schema_str = serde_json::to_string(&user_schema).unwrap();
         let project_schema_str = serde_json::to_string(&project_schema).unwrap();
 
-        assert!(user_schema_str.contains("\"auto_update\""));
-        assert!(!project_schema_str.contains("\"auto_update\""));
+        assert!(user_schema_str.contains("\"vim_mode\""));
+        assert!(!project_schema_str.contains("\"vim_mode\""));
     }
 }

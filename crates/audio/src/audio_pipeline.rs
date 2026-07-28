@@ -1,31 +1,21 @@
-use anyhow::{Context as _, Result};
-use collections::HashMap;
+use anyhow::Context as _;
 use cpal::{
     DeviceDescription, DeviceId, default_host,
     traits::{DeviceTrait, HostTrait},
 };
 use gpui::{App, AsyncApp, BorrowAppContext, Global};
 
-pub(super) use cpal::Sample;
-
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source, mixer::Mixer, source::Buffered};
-use settings::Settings;
-use std::io::Cursor;
-use util::ResultExt;
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, mixer::Mixer};
 
 mod echo_canceller;
 use echo_canceller::EchoCanceller;
 mod rodio_ext;
-pub use crate::audio_settings::AudioSettings;
 pub use rodio_ext::RodioExt;
 
 use crate::audio_settings::LIVE_SETTINGS;
 
-use crate::Sound;
 
-use super::{CHANNEL_COUNT, SAMPLE_RATE};
-pub const BUFFER_SIZE: usize = // echo canceller and livekit want 10ms of audio
-    (SAMPLE_RATE.get() as usize / 100) * CHANNEL_COUNT.get() as usize;
+use super::SAMPLE_RATE;
 
 pub fn init(cx: &mut App) {
     LIVE_SETTINGS.initialize(cx);
@@ -52,70 +42,17 @@ pub fn ensure_devices_initialized(cx: &mut App) {
 pub struct Audio {
     output: Option<(MixerDeviceSink, Mixer)>,
     pub echo_canceller: EchoCanceller,
-    source_cache: HashMap<Sound, Buffered<Decoder<Cursor<Vec<u8>>>>>,
 }
 
 impl Global for Audio {}
 
 impl Audio {
-    fn ensure_output_exists(&mut self, output_audio_device: Option<DeviceId>) -> Result<&Mixer> {
-        #[cfg(debug_assertions)]
-        log::warn!(
-            "Audio does not sound correct without optimizations. Use a release build to debug audio issues"
-        );
-
-        if self.output.is_none() {
-            let (output_handle, output_mixer) =
-                open_output_stream(output_audio_device, self.echo_canceller.clone())?;
-            self.output = Some((output_handle, output_mixer));
-        }
-
-        Ok(self
-            .output
-            .as_ref()
-            .map(|(_, mixer)| mixer)
-            .expect("we only get here if opening the outputstream succeeded"))
-    }
-
-    pub fn play_sound(sound: Sound, cx: &mut App) {
-        let output_audio_device = AudioSettings::get_global(cx).output_audio_device.clone();
-        cx.update_default_global(|this: &mut Self, cx| {
-            let source = this.sound_source(sound, cx).log_err()?;
-            let output_mixer = this
-                .ensure_output_exists(output_audio_device)
-                .context("Could not get output mixer")
-                .log_err()?;
-
-            output_mixer.add(source);
-            Some(())
-        });
-    }
-
     pub fn end_call(cx: &mut App) {
         cx.update_default_global(|this: &mut Self, _cx| {
             this.output.take();
         });
     }
 
-    fn sound_source(&mut self, sound: Sound, cx: &App) -> Result<impl Source + use<>> {
-        if let Some(wav) = self.source_cache.get(&sound) {
-            return Ok(wav.clone());
-        }
-
-        let path = format!("sounds/{}.wav", sound.file());
-        let bytes = cx
-            .asset_source()
-            .load(&path)?
-            .map(anyhow::Ok)
-            .with_context(|| format!("No asset available for path {path}"))??
-            .into_owned();
-        let cursor = Cursor::new(bytes);
-        let source = Decoder::new(cursor)?.buffered();
-
-        self.source_cache.insert(sound, source.clone());
-
-        Ok(source)
-    }
 }
 
 pub fn open_input_stream(
@@ -176,30 +113,6 @@ pub fn open_test_output(device_id: Option<DeviceId>) -> anyhow::Result<MixerDevi
     DeviceSinkBuilder::from_device(device)?
         .open_stream()
         .context("Could not open output stream")
-}
-
-pub fn open_output_stream(
-    device_id: Option<DeviceId>,
-    mut echo_canceller: EchoCanceller,
-) -> anyhow::Result<(MixerDeviceSink, Mixer)> {
-    let device = resolve_device(device_id.as_ref(), false)?;
-    let mut output_handle = DeviceSinkBuilder::from_device(device)?
-        .open_stream()
-        .context("Could not open output stream")?;
-    output_handle.log_on_drop(false);
-    log::info!("Output stream: {:?}", output_handle);
-
-    let (output_mixer, source) = rodio::mixer::mixer(CHANNEL_COUNT, SAMPLE_RATE);
-    // otherwise the mixer ends as it's empty
-    output_mixer.add(rodio::source::Zero::new(CHANNEL_COUNT, SAMPLE_RATE));
-    let echo_cancelling_source = source // apply echo cancellation just before output
-        .inspect_buffer::<BUFFER_SIZE, _>(move |buffer| {
-            let mut buf: [i16; _] = buffer.map(|s| s.to_sample());
-            echo_canceller.process_reverse_stream(&mut buf)
-        });
-    output_handle.mixer().add(echo_cancelling_source);
-
-    Ok((output_handle, output_mixer))
 }
 
 #[derive(Clone, Debug)]
