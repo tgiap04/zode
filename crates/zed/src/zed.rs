@@ -4941,6 +4941,31 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(actions_without_namespace, Vec::<&str>::new());
 
+            // Derived verbatim from `cargo run -p zed -- --dump-all-actions`.
+            // A surprise here means an action is still registered where it should
+            // not be. That is a finding to chase, not a list to quietly update --
+            // it is how `zed_predict_onboarding::OpenZedPredictOnboarding` and
+            // `collab::ShowCallStats` were caught after their features were deleted.
+            //
+            // Still present on purpose, pending phase 11: `agent`, `agents_sidebar`,
+            // `assistant` and 8 of the `collab` actions are declared but have no
+            // handler left. `collab::{SwitchBranch,ToggleProjectMenu}` are live
+            // title-bar features sitting in a misleading namespace.
+            // Derived from `cargo run -p zed -- --dump-all-actions`, taking each
+            // action's `name` AND its `deprecated_aliases` -- `all_action_names()`
+            // reports aliases too, which is the only reason `zed_actions` appears
+            // here (nothing is declared in that namespace; it is the old name for
+            // several `zed::` actions).
+            //
+            // A surprise here means an action is still registered where it should
+            // not be. That is a finding to chase, not a list to quietly update --
+            // it is how `zed_predict_onboarding::OpenZedPredictOnboarding` and
+            // `collab::ShowCallStats` were caught after their features were deleted.
+            //
+            // Still present on purpose, pending phase 11: `agent`, `agents_sidebar`,
+            // `assistant` and 8 of the `collab` actions are declared but have no
+            // handler left. `collab::{SwitchBranch,ToggleProjectMenu}` are live
+            // title-bar features sitting in a misleading namespace.
             let expected_namespaces = vec![
                 "action",
                 "activity_indicator",
@@ -4949,26 +4974,19 @@ mod tests {
                 "app_menu",
                 "assistant",
                 "assistant2",
-                "auto_update",
                 "branch_picker",
-                "bedrock",
                 "branches",
                 "buffer_search",
-                "channel_modal",
                 "cli",
-                "client",
                 "collab",
-                "collab_panel",
                 "command_palette",
                 "console",
                 "context_server",
-                "copilot",
                 "csv",
                 "debug_panel",
                 "debugger",
                 "dev",
                 "diagnostics",
-                "edit_prediction",
                 "editor",
                 "encoding_selector",
                 "feedback",
@@ -4982,12 +5000,10 @@ mod tests {
                 "highlights_tree_view",
                 "icon_theme_selector",
                 "image_viewer",
-                "inline_assistant",
                 "journal",
                 "keymap_editor",
                 "keystroke_input",
                 "language_selector",
-                "welcome",
                 "line_ending_selector",
                 "lsp_tool",
                 "markdown",
@@ -5008,7 +5024,6 @@ mod tests {
                 "recent_projects",
                 "remote_debug",
                 "repl",
-                "rules_library",
                 "search",
                 "settings_editor",
                 "settings_profile_selector",
@@ -5026,13 +5041,12 @@ mod tests {
                 "toolchain",
                 "variable_list",
                 "vim",
+                "welcome",
                 "window",
                 "workspace",
                 "worktree_picker",
                 "zed",
                 "zed_actions",
-                "zed_predict_onboarding",
-                "zeta",
             ];
             assert_eq!(
                 all_namespaces,

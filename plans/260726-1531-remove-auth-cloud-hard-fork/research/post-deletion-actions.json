@@ -466,14 +466,6 @@
       "documentation": "Shares the current project with collaborators."
     },
     {
-      "name": "collab::ShowCallStats",
-      "human_name": "collab: show call stats",
-      "schema": null,
-      "deprecated_aliases": [],
-      "deprecation_message": null,
-      "documentation": "Show call diagnostics and connection quality statistics."
-    },
-    {
       "name": "collab::SwitchBranch",
       "human_name": "collab: switch branch",
       "schema": null,
@@ -11502,33 +11494,10 @@
       "deprecated_aliases": [],
       "deprecation_message": null,
       "documentation": "Zooms the window."
-    },
-    {
-      "name": "zed_predict_onboarding::OpenZedPredictOnboarding",
-      "human_name": "zed predict onboarding: open zed predict onboarding",
-      "schema": null,
-      "deprecated_aliases": [],
-      "deprecation_message": null,
-      "documentation": "Opens the Zed Predict onboarding modal."
     }
   ],
   "schema_definitions": {
     "KeymapAction": true,
-    "RevealTarget": {
-      "oneOf": [
-        {
-          "type": "string",
-          "const": "center",
-          "description": "In the central pane group, \"main\" editor area."
-        },
-        {
-          "type": "string",
-          "const": "dock",
-          "description": "In the terminal dock, \"regular\" terminal items' place."
-        }
-      ],
-      "description": "Where to spawn the task in the UI."
-    },
     "NewWorktreeBranchTarget": {
       "oneOf": [
         {
@@ -11563,6 +11532,21 @@
         }
       ],
       "description": "Describes which ref to base a new git worktree on. The worktree is\nalways created in a detached HEAD state; users can opt into creating\na branch afterwards from the worktree itself."
+    },
+    "RevealTarget": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "center",
+          "description": "In the central pane group, \"main\" editor area."
+        },
+        {
+          "type": "string",
+          "const": "dock",
+          "description": "In the terminal dock, \"regular\" terminal items' place."
+        }
+      ],
+      "description": "Where to spawn the task in the UI."
     },
     "ConflictContent": {
       "type": "object",
