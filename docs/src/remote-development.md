@@ -16,7 +16,7 @@ Remote development requires two computers, your local machine that runs the Zed 
 
 ![Architectural overview of Zed Remote Development](https://zed.dev/img/remote-development/diagram.png)
 
-On your local machine, Zed runs its UI, talks to language models, uses Tree-sitter to parse and syntax-highlight code, and store unsaved changes and recent projects. The source code, language servers, tasks, and the terminal all run on the remote server. [AI features](./ai/overview.md) work in remote sessions, including the Agent Panel and Inline Assistant.
+On your local machine, Zed runs its UI, uses Tree-sitter to parse and syntax-highlight code, and stores unsaved changes and recent projects. The source code, language servers, tasks, and the terminal all run on the remote server.
 
 > **Note:** The original version of remote development sent traffic via Zed's servers. As of Zed v0.157 you can no-longer use that mode.
 
@@ -268,6 +268,5 @@ Please join the #remoting-feedback channel in the [Zed Discord](https://zed.dev/
   debugger sessions while you work remotely.
 - [Configuring Zed](./configuring-zed.md): Manage shared and project settings,
   including `.zed/settings.json`.
-- [Agent Panel](./ai/agent-panel.md): Use AI workflows in remote projects.
 - [Remote Development on zed.dev](https://zed.dev/remote-development): Product
   overview and release updates.

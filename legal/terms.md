@@ -3,6 +3,22 @@ title: Terms of Service
 slug: terms
 ---
 
+> [!WARNING]
+> **This document does not describe this build.** It is Zed Industries, Inc.'s
+> policy for the hosted Zed service, retained here unmodified only so the fork's
+> history stays honest about where it came from.
+>
+> This fork has no account system, no hosted service, no subscription or payment
+> processing, no collaboration server, and no AI providers. It collects and
+> transmits no telemetry — see `docs/src/telemetry.md`. Statements below about
+> data collection, subprocessors, billing, audio/video processing and AI vendors
+> are therefore inapplicable.
+>
+> Replacing or removing this document is tracked in the fork plan under phase 12
+> (rebrand and packaging). It has deliberately **not** been rewritten here:
+> a privacy policy and terms of service are legal instruments, not prose, and
+> authoring them is the maintainer's decision.
+
 **Last Updated**: March 2, 2026
 
 Welcome, and thank you for your interest in Zed Industries, Inc. (“**Zed**,” “**we**,” or “**us**”) and our website at [www.zed.dev](https://www.zed.dev), along with our downloadable Zed software (the “**Software**”) and related subscription service (the “**Service**”). These Terms of Service are a legally binding contract between you and Zed regarding your use of the Service.

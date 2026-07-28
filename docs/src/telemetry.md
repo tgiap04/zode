@@ -1,21 +1,30 @@
 ---
 title: Telemetry
-description: "What data Zed collects and how to control telemetry settings."
+description: "This build collects no telemetry and sends no usage or crash data."
 ---
 
-# Telemetry in Zed
+# Telemetry
 
-Zed collects anonymous telemetry to understand usage patterns and diagnose issues.
+**This build collects no telemetry.** Nothing about your usage, your projects, or
+your crashes is recorded or transmitted.
 
-Telemetry falls into two categories:
+This is not a setting you have to find and switch off — it is a property of the
+build. The code that gathered events, the code that uploaded them, and the crash
+reporter were all removed rather than disabled:
 
-- **Client-side**: Usage metrics and crash reports. You can disable these in settings.
-- **Server-side**: Collected when using hosted services like AI or Collaboration. Required for these features to function.
+- No usage or metric events are recorded, and there is no event queue or log to
+  upload. The `telemetry::event!` macro that the rest of the editor calls discards
+  its argument.
+- No crash reports or [minidumps](https://learn.microsoft.com/en-us/windows/win32/debug/minidump-files)
+  are captured or uploaded. Hang traces are still written, but only to a local file
+  under your own data directory, and nothing reads them but you.
+- There is no account, so nothing can be attributed to a user in the first place.
+- There is no third-party analytics or crash-reporting service in the dependency
+  tree.
 
-## Configuring Telemetry Settings
+## The `telemetry` setting
 
-You have full control over what data is sent out by Zed.
-To enable or disable some or all telemetry types, open Settings ({#kb zed::OpenSettings}) and search for "telemetry", or add the following to your settings file:
+A `telemetry` key is still accepted in `settings.json`:
 
 ```json [settings]
 "telemetry": {
@@ -24,46 +33,27 @@ To enable or disable some or all telemetry types, open Settings ({#kb zed::OpenS
 },
 ```
 
-## Dataflow
+It is parsed, but **nothing acts on it** — there is no collection for it to
+enable or disable. It remains only so that existing settings files keep loading
+unchanged. Setting either value to `true` does not cause anything to be collected.
 
-Telemetry is sent from the application to our servers every 5 minutes (or when 50 events accumulate), then routed to the appropriate service. We currently use:
+## What still reaches the network
 
-- [Sentry](https://sentry.io): Crash-monitoring service - stores diagnostic events
-- [Snowflake](https://snowflake.com): Data warehouse - stores both diagnostic and metric events
-- [Hex](https://www.hex.tech): Dashboards and data exploration - accesses data stored in Snowflake
-- [Amplitude](https://www.amplitude.com): Dashboards and data exploration - accesses data stored in Snowflake
+Removing telemetry is not the same as never opening a socket. This build still
+makes deliberate outbound requests, and it is worth being precise about them:
 
-## Types of Telemetry
+- **Extension downloads**, when you browse or install an extension.
+- **Language server downloads**, when a language you open needs a server that is
+  not already on your machine.
+- **Remote development**, when you connect to a host you chose yourself.
 
-### Diagnostics
+These are downloads and connections you initiate. None of them carry usage data.
 
-Crash reports consist of a [minidump](https://learn.microsoft.com/en-us/windows/win32/debug/minidump-files) and debug metadata. Reports are sent on the next launch after a crash, allowing Zed to identify and fix issues without requiring you to file a bug report.
+## Verifying this yourself
 
-You can inspect what data is sent in the `Panic` struct in [crates/telemetry_events/src/telemetry_events.rs](https://github.com/zed-industries/zed/blob/main/crates/telemetry_events/src/telemetry_events.rs). See also: [Debugging Crashes](./development/debugging-crashes.md).
+The claims above are meant to be checkable rather than taken on trust:
 
-### Client-Side Metrics
-
-Client-side telemetry includes:
-
-- File extensions of opened files
-- Features and tools used within the editor
-- Project statistics (e.g., number of files)
-- Frameworks detected in your projects
-
-This data does not include your code or sensitive project details. Events are sent over HTTPS and rate-limited.
-
-Usage data is tied to a random telemetry ID. If you've authenticated, this ID may be linked to your email so Zed can analyze patterns over time and reach out for feedback.
-
-To audit what Zed has reported, run {#action zed::OpenTelemetryLog} from the command palette or click `Help > View Telemetry Log`.
-
-For the full list of event types, see the `Event` enum in [telemetry_events.rs](https://github.com/zed-industries/zed/blob/main/crates/telemetry_events/src/telemetry_events.rs).
-
-### Server-Side Metrics
-
-When using Zed's hosted services, we collect metadata for rate limiting and billing (e.g., token usage). Zed does not store your prompts or code unless you explicitly share them via feedback ratings.
-
-For details on AI data handling, see [Zed AI Features and Privacy](./ai/ai-improvement.md).
-
-## Concerns and Questions
-
-If you have concerns about telemetry, you can [open an issue](https://github.com/zed-industries/zed/issues/new/choose) or email hi@zed.dev.
+- `rg -n "MINIDUMP_ENDPOINT|multipart|telemetry/events" crates/` returns nothing.
+- `crates/telemetry/src/telemetry.rs` is a no-op — read it; it is a few dozen lines.
+- Watch the process with a network monitor and confirm that editing, saving and
+  quitting produce no outbound traffic.

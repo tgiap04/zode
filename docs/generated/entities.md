@@ -1,6 +1,22 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 <!-- Output path: docs/generated/entities.md -->
 <!-- SOURCE-SHAPE ADAPTATION: Zed is a native GPUI desktop app (Rust structs held as `Entity<T>`
+
+> [!CAUTION]
+> **STALE — do not treat this document as a description of the current code.**
+> It was generated on 2026-07-26 against the pre-fork tree of 240 packages /
+> 232 crates. The hard fork has since removed 54 crates and gutted several
+> more; the workspace is now 186 packages / 178 crates.
+>
+> Anything here describing accounts, sign-in, collaboration, calls, channels,
+> AI agents, LLM providers, edit prediction, auto-update or crash reporting is
+> **fiction** — that code no longer exists. Feature codes F007, F008, F013,
+> F019, F020, F021 and F022 in particular no longer have an implementation.
+>
+> Regeneration is deliberately deferred until the fork is green and verified
+> (`/tkm:rebuild-spec` after phase 11). Running it against a half-cut tree
+> would just produce a second stale document.
+
      in-process), not a web app with a DB schema. "Entity" here = architecturally central Rust
      struct/enum, not a persisted DB row. `Constraints` column repurposed for Rust-level
      invariants (ownership, uniqueness via typed ID, Option=nullable). No FK/PK in the SQL sense

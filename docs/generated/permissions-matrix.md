@@ -1,6 +1,22 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # Permissions Matrix
 
+> [!CAUTION]
+> **STALE — do not treat this document as a description of the current code.**
+> It was generated on 2026-07-26 against the pre-fork tree of 240 packages /
+> 232 crates. The hard fork has since removed 54 crates and gutted several
+> more; the workspace is now 186 packages / 178 crates.
+>
+> Anything here describing accounts, sign-in, collaboration, calls, channels,
+> AI agents, LLM providers, edit prediction, auto-update or crash reporting is
+> **fiction** — that code no longer exists. Feature codes F007, F008, F013,
+> F019, F020, F021 and F022 in particular no longer have an implementation.
+>
+> Regeneration is deliberately deferred until the fork is green and verified
+> (`/tkm:rebuild-spec` after phase 11). Running it against a half-cut tree
+> would just produce a second stale document.
+
+
 **Project**: Zed (zode)
 **Generated**: 2026-07-26
 **Analysis Scope**: Full monorepo, `generic-source` profile. No screen-list/screen-flow upstream (`screen_source:none`) — Zed is a native GPUI desktop app, not a web app, so this matrix maps to (a) extension WASM sandbox capability grants, (b) Buffer/MultiBuffer read-write capability per collaborator, and (c) collaboration-server RPC role/capability guards. There is no traditional web-style RBAC (no admin/user/manager application roles) — the only role system that exists is the collaboration `ChannelRole` used for shared channels/calls/projects.
