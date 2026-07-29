@@ -88,16 +88,6 @@ Non-negative `float` values
 }
 ```
 
-## Agent Font Size
-
-- Description: The font size for text in the agent panel. Inherits the UI font size if unset.
-- Setting: `agent_font_size`
-- Default: `null`
-
-**Options**
-
-`integer` values from `6` to `100` pixels (inclusive)
-
 ## Allow Rewrap
 
 - Description: Controls where the {#action editor::Rewrap} action is allowed in the current language scope
@@ -257,16 +247,6 @@ Note that a save will be triggered when an unsaved tab is closed, even if this i
 - Description: Whether to show the signature help after completion or a bracket pair inserted. If `auto_signature_help` is enabled, this setting will be treated as enabled also.
 - Setting: `show_signature_help_after_edits`
 - Default: `false`
-
-**Options**
-
-`boolean` values
-
-## Auto Update
-
-- Description: Whether or not to automatically check for updates.
-- Setting: `auto_update`
-- Default: `true`
 
 **Options**
 
@@ -2813,35 +2793,6 @@ Example:
 }
 ```
 
-## Language Models
-
-- Description: Configuration for language model providers
-- Setting: `language_models`
-- Default:
-
-```json [settings]
-{
-  "language_models": {
-    "anthropic": {
-      "api_url": "https://api.anthropic.com"
-    },
-    "google": {
-      "api_url": "https://generativelanguage.googleapis.com"
-    },
-    "ollama": {
-      "api_url": "http://localhost:11434"
-    },
-    "openai": {
-      "api_url": "https://api.openai.com/v1"
-    }
-  }
-}
-```
-
-**Options**
-
-Configuration for various AI model providers including API URLs and authentication settings.
-
 ## Line Indicator Format
 
 - Description: Format for line indicator in the status bar
@@ -3642,16 +3593,6 @@ Examples:
 
 - Searching for "function" would match "function", "Function", "FUNCTION", etc.
 - Searching for "Function" would only match "Function", not "function" or "FUNCTION"
-
-## Show Call Status Icon
-
-- Description: Whether or not to show the call status icon in the status bar.
-- Setting: `show_call_status_icon`
-- Default: `true`
-
-**Options**
-
-`boolean` values
 
 ## Completions
 
@@ -4663,9 +4604,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
     "show_branch_name": true,
     "show_project_items": true,
     "show_onboarding_banner": true,
-    "show_user_picture": true,
-    "show_user_menu": true,
-    "show_sign_in": true,
     "show_menus": false,
     "button_layout": "platform_default"
   }
@@ -5123,32 +5061,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 - `on_paste`: Whether to automatically open files after pasting or duplicating them.
 - `on_drop`: Whether to automatically open files dropped from external sources.
 
-## Agent
-
-Visit [the Configuration page](../ai/configuration.md) under the AI section to learn more about all the agent-related settings.
-
-## Collaboration Panel
-
-- Description: Customizations for the collaboration panel.
-- Setting: `collaboration_panel`
-- Default:
-
-```json [settings]
-{
-  "collaboration_panel": {
-    "button": true,
-    "dock": "left",
-    "default_width": 240
-  }
-}
-```
-
-**Options**
-
-- `button`: Whether to show the collaboration panel button in the status bar
-- `dock`: Where to dock the collaboration panel. Can be `left` or `right`
-- `default_width`: Default width of the collaboration panel
-
 ## Debugger
 
 - Description: Configuration for debugger panel and settings
@@ -5282,23 +5194,6 @@ You can define these in user or project settings; project settings are merged on
     "scrollbar": {
       "show": null
     }
-  }
-}
-```
-
-## Calls
-
-- Description: Customize behavior when participating in a call
-- Setting: `calls`
-- Default:
-
-```json [settings]
-{
-  "calls": {
-    // Join calls with the microphone live by default
-    "mute_on_join": false,
-    // Share your project when you are the first to join a channel
-    "share_on_join": false
   }
 }
 ```
@@ -5439,7 +5334,6 @@ Example:
   "profiles": {
     "Presenting (Dark)": {
       "settings": {
-        "agent_buffer_font_size": 18.0,
         "buffer_font_size": 18.0,
         "theme": "One Dark",
         "ui_font_size": 18.0
@@ -5447,7 +5341,6 @@ Example:
     },
     "Presenting (Light)": {
       "settings": {
-        "agent_buffer_font_size": 18.0,
         "buffer_font_size": 18.0,
         "theme": "One Light",
         "ui_font_size": 18.0
@@ -5455,7 +5348,6 @@ Example:
     },
     "Writing": {
       "settings": {
-        "agent_buffer_font_size": 15.0,
         "buffer_font_size": 15.0,
         "theme": "Catppuccin Frappé - No Italics",
         "ui_font_size": 15.0,

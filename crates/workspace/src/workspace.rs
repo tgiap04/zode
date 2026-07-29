@@ -1193,7 +1193,6 @@ impl AppState {
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
         theme_settings::init(theme::LoadThemes::JustBase, cx);
-        client::init(&client, cx);
 
         Arc::new(Self {
             client,

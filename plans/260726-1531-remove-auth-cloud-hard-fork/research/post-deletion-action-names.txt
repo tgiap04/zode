@@ -40,7 +40,6 @@ collab::OpenChannelNotes
 collab::OpenChannelNotesById
 collab::ScreenShare
 collab::ShareProject
-collab::ShowCallStats
 collab::SwitchBranch
 collab::ToggleProjectMenu
 command_palette::Toggle
@@ -1162,4 +1161,3 @@ zed::ToggleBaseKeymapSelector
 zed::ToggleFullScreen
 zed::Unbind
 zed::Zoom
-zed_predict_onboarding::OpenZedPredictOnboarding

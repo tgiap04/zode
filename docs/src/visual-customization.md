@@ -66,12 +66,6 @@ If you would like to use distinct themes for light mode/dark mode that can be se
     "line_height": "standard",
   },
 
-  // Controls the font size for agent responses in the agent panel.
-  // If not specified, it falls back to the UI font size.
-  "agent_ui_font_size": 15,
-  // Controls the font size for the agent panel's message editor, user message,
-  // and any other snippet of code.
-  "agent_buffer_font_size": 12
 ```
 
 ### Font ligatures
@@ -103,10 +97,8 @@ To disable this behavior use:
   // Individual status bar icons can be hidden:
   // "project_panel": {"button": false },
   // "outline_panel": {"button": false },
-  // "collaboration_panel": {"button": false },
   // "git_panel": {"button": false },
 
-  // "agent": {"button": false },
   // "debugger": {"button": false },
   // "diagnostics": {"button": false },
   // "search": {"button": false },
@@ -122,9 +114,6 @@ To disable this behavior use:
     "show_branch_name": true,       // Show/hide branch name
     "show_project_items": true,     // Show/hide project host and name
     "show_onboarding_banner": true, // Show/hide onboarding banners
-    "show_user_picture": true,      // Show/hide user avatar
-    "show_user_menu": true,         // Show/hide app user button
-    "show_sign_in": true,           // Show/hide sign-in button
     "show_menus": false             // Show/hide menus
   },
 ```
@@ -484,28 +473,6 @@ Project panel can be shown/hidden with {#action project_panel::ToggleFocus} ({#k
   }
 ```
 
-## Agent Panel
-
-```json [settings]
-{
-  "agent": {
-    "enabled": true, // Enable/disable the agent
-    "button": true, // Show/hide the icon in the status bar
-    "dock": "right", // Where to dock: left, right, bottom
-    "default_width": 640, // Default width (left/right docked)
-    "default_height": 320 // Default height (bottom docked)
-  },
-  // Controls the font size for agent responses in the agent panel.
-  // If not specified, it falls back to the UI font size.
-  "agent_ui_font_size": 15,
-  // Controls the font size for the agent panel's message editor, user message,
-  // and any other snippet of code.
-  "agent_buffer_font_size": 12
-}
-```
-
-See [Zed AI Documentation](./ai/overview.md) for additional non-visual AI settings.
-
 ## Terminal Panel
 
 ```json [settings]
@@ -582,18 +549,4 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
       "show": null                // Show/hide: (auto, system, always, never)
     }
   }
-```
-
-## Collaboration Panels
-
-```json [settings]
-{
-  // Collaboration Panel
-  "collaboration_panel": {
-    "button": true, // Show/hide status bar icon
-    "dock": "left", // Where to dock: left, right
-    "default_width": 240 // Default width of the collaboration panel.
-  },
-  "show_call_status_icon": true // Shown call status in the OS status bar.
-}
 ```

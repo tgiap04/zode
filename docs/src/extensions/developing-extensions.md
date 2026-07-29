@@ -16,7 +16,6 @@ Extensions can provide:
 - [Themes](./themes.md)
 - [Icon Themes](./icon-themes.md)
 - [Snippets](./snippets.md)
-- [MCP Servers](./mcp-extensions.md)
 
 ## Developing an Extension Locally
 

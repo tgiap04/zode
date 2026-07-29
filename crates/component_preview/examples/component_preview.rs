@@ -43,7 +43,6 @@ fn main() {
 
         let languages = Arc::new(LanguageRegistry::new(cx.background_executor().clone()));
         let client = Client::production(cx);
-        client::init(&client, cx);
 
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));

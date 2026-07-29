@@ -2,11 +2,9 @@
 /// The tests in this file assume that server_cx is running on Windows too.
 /// We neead to find a way to test Windows-Non-Windows interactions.
 use crate::headless_project::HeadlessProject;
-use agent::{AgentTool, ReadFileTool, ReadFileToolInput, ToolCallEventStream, ToolInput};
 use client::{Client, UserStore};
 use clock::FakeSystemClock;
 use collections::{HashMap, HashSet};
-use language_model::LanguageModelToolResultContent;
 use languages::rust_lang;
 
 use extension::ExtensionHostProxy;
@@ -2237,54 +2235,6 @@ async fn test_remote_git_checkpoints(cx: &mut TestAppContext, server_cx: &mut Te
         .unwrap()
         .unwrap();
     assert!(diff.is_empty(), "diff after restore should be empty");
-}
-
-#[gpui::test]
-async fn test_remote_agent_fs_tool_calls(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
-    let fs = FakeFs::new(server_cx.executor());
-    fs.insert_tree(
-        path!("/project"),
-        json!({
-            "a.txt": "A",
-            "b.txt": "B",
-        }),
-    )
-    .await;
-
-    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
-    project
-        .update(cx, |project, cx| {
-            project.find_or_create_worktree(path!("/project"), true, cx)
-        })
-        .await
-        .unwrap();
-
-    let action_log = cx.new(|_| action_log::ActionLog::new(project.clone()));
-
-    let input = ReadFileToolInput {
-        path: "project/b.txt".into(),
-        start_line: None,
-        end_line: None,
-    };
-    let read_tool = Arc::new(ReadFileTool::new(project, action_log, true));
-    let (event_stream, _) = ToolCallEventStream::test();
-
-    let exists_result = cx.update(|cx| {
-        read_tool
-            .clone()
-            .run(ToolInput::resolved(input), event_stream.clone(), cx)
-    });
-    let output = exists_result.await.unwrap();
-    assert_eq!(output, LanguageModelToolResultContent::Text("B".into()));
-
-    let input = ReadFileToolInput {
-        path: "project/c.txt".into(),
-        start_line: None,
-        end_line: None,
-    };
-    let does_not_exist_result =
-        cx.update(|cx| read_tool.run(ToolInput::resolved(input), event_stream, cx));
-    does_not_exist_result.await.unwrap_err();
 }
 
 #[gpui::test]

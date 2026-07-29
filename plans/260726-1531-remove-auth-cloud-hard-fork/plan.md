@@ -63,7 +63,7 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 7 | [Fix light survivors](./phase-07-fix-light-survivors.md) | Completed (9/9 — `file_finder` landed in Phase 8) |
 | 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Completed (8f closed as a no-op — MCP kept) |
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Completed — **the app launches** |
-| 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Pending |
+| 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Completed — **1 open regression handed to Phase 11** |
 | 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Pending |
 | 12 | [Rebrand and packaging](./phase-12-rebrand-and-packaging.md) | Pending |
 
@@ -460,6 +460,64 @@ spans `default.json`, the two live unwraps at `client.rs:379-380`, `TelemetrySet
 and `onboarding`'s telemetry section. It is a coherent single commit, but it is a **user-visible
 settings removal** and wants an explicit decision rather than being smuggled in behind a stale
 instruction.
+
+### Phase 10 — 2026-07-28 · commits `94ed295` `d6e5881` `83da263` `5235bb4`
+
+**4,000 of 4,001 tests pass.** `cargo check --workspace --all-targets` is clean — every test target
+compiles for the first time since Phase 4. The docs validate. One test fails and is **not hidden**.
+
+**The blocker was one file.** `crates/client/src/test.rs` (FakeServer) mocked the auth endpoint and
+called the `Client::connect` that Phase 5 removed. Anything enabling `client`'s `test-support`
+feature pulled it in, so it blocked *every* test target in the workspace. Deleted with the 8 tests
+that needed it — 5 for reconnection/auth, 3 for `Client::subscribe_to_entity`, which is only
+reachable from `Project::shared()`, and that has no callers left. `client`'s tests now run: 17 pass,
+including the four telemetry tests written in Phase 6 that had never once been executed.
+
+**The canary earned its keep.** `expected_namespaces`, regenerated from the dump rather than
+hand-edited, caught two actions still registered for deleted features:
+`zed_predict_onboarding::OpenZedPredictOnboarding` and `collab::ShowCallStats` — neither with any
+reference or keymap binding.
+
+**The alias trap bites twice.** Phase 9 found that a dump-derived keymap check condemns 17 working
+bindings because `--dump-all-actions` reports only preferred names. The same trap sits under the
+canary from the other side: `cx.all_action_names()` *includes* deprecated aliases, so a list derived
+from preferred names alone **fails** — three namespaces (`zed_actions`, `assistant2`, `branches`)
+exist purely as aliases. The expected list must be built from `name` **and** `deprecated_aliases`.
+
+**Recorded rather than silently shipped:** 27 actions are still declared with no handler left —
+`agent` (16), `agents_sidebar` (2), `assistant` (1) and 8 of `collab`. They would appear in the
+command palette and do nothing. Removing them means editing `workspace`'s ActiveCall trait surface
+and the zero-change `editor` crate, so they are noted in the test itself and assigned to Phase 11.
+`collab::{SwitchBranch,ToggleProjectMenu}` are **live** title-bar features merely sitting in a
+misleading namespace.
+
+**A test that looked like a casualty was load-bearing** (the second time this plan has hit that).
+`settings_store`'s `AutoUpdateSetting` in Phase 9, and here `test_disable_ai_crash` — which this
+phase's step 5 says to *delete*. It stays: Phase 9 kept `disable_ai` because it still gates the
+surviving context-server and agent-registry stores. Steps 3 and 4 were likewise already done in
+Phase 9. Three of this phase's six test steps were moot on arrival.
+
+**The docs gate was run without its tool.** `mdbook` is not installed here, so rather than skip step
+12 the preprocessor — the component `check_docs` actually enforces — was driven directly with a
+synthetic book of all 144 chapters. **It caught three real errors**: settings snippets still carrying
+`title_bar.show_user_picture`/`show_user_menu`/`show_sign_in` and `agent_buffer_font_size`. Now exits
+0. A true `mdbook build` remains unverified and is a Phase 11 item.
+
+**Docs corrected, not just pruned.** 26 pages deleted and `remote-development.md` kept. 27 dangling
+links fixed; where a link carried a sentence or a section, the prose went with it rather than
+leaving a stump. `docs/src/telemetry.md` was false in nearly every sentence — it described Sentry,
+Snowflake, Amplitude, minidump upload and a telemetry log viewer, none of which exist — and is
+rewritten to state what is true and how to check it.
+
+**`legal/*.md` were marked, not rewritten.** They are Zed Industries' corporate instruments for a
+hosted service this fork does not run. Leaving them unmarked would be exactly the false statement
+this phase warns about, but authoring a replacement privacy policy or terms of service is the
+maintainer's decision and possibly a lawyer's — not something to invent. Each now carries a warning
+naming what is inapplicable; Phase 12 owns the replacement.
+
+**Deferred to Phase 11:** `tooling/xtask/src/tasks/workflows/` still generates CI steps that upload
+debug symbols to Sentry and deploy the deleted `collab` crate. These are **generated** files and
+`run_tests` fails CI on any hand edit to `.github`, so they are a generator change.
 
 ## Execution rule: how to cut (learned the hard way in Phase 5)
 
