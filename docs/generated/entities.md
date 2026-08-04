@@ -1,22 +1,6 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 <!-- Output path: docs/generated/entities.md -->
-<!-- SOURCE-SHAPE ADAPTATION: Zed is a native GPUI desktop app (Rust structs held as `Entity<T>`
-
-> [!CAUTION]
-> **STALE — do not treat this document as a description of the current code.**
-> It was generated on 2026-07-26 against the pre-fork tree of 240 packages /
-> 232 crates. The hard fork has since removed 54 crates and gutted several
-> more; the workspace is now 186 packages / 178 crates.
->
-> Anything here describing accounts, sign-in, collaboration, calls, channels,
-> AI agents, LLM providers, edit prediction, auto-update or crash reporting is
-> **fiction** — that code no longer exists. Feature codes F007, F008, F013,
-> F019, F020, F021 and F022 in particular no longer have an implementation.
->
-> Regeneration is deliberately deferred until the fork is green and verified
-> (`/tkm:rebuild-spec` after phase 11). Running it against a half-cut tree
-> would just produce a second stale document.
-
+<!-- SOURCE-SHAPE ADAPTATION: Zode is a native GPUI desktop app (Rust structs held as `Entity<T>`
      in-process), not a web app with a DB schema. "Entity" here = architecturally central Rust
      struct/enum, not a persisted DB row. `Constraints` column repurposed for Rust-level
      invariants (ownership, uniqueness via typed ID, Option=nullable). No FK/PK in the SQL sense
@@ -24,8 +8,16 @@
 
 # Entities
 
-**Project**: Zed Editor (zode)
-**Generated**: 2026-07-26
+**Project**: Zode
+**Rewritten**: 2026-08-04 against the post-fork tree (187 packages / 178 crates).
+
+**What changed from the original pass**: the `Thread`/`Message` entities (sourced from
+`crates/agent/src/thread.rs`) are removed entirely — that crate no longer exists. Several fields
+on entities in crates this fork deliberately left unchanged (`editor`, `project`, `workspace`)
+still exist in the struct definitions but are now **vestigial**: nothing in this fork ever
+populates them, because the subsystem that used to (collaboration, AI agents, edit prediction)
+was removed. Each is called out explicitly below rather than silently dropped from the field
+list — the field is real, accurately transcribed from source; only its behavior changed.
 
 ## Entity Relationship Diagram
 
@@ -44,11 +36,6 @@ erDiagram
     EDITOR ||--|| MULTI_BUFFER : wraps
     MULTI_BUFFER ||--o{ BUFFER : excerpts
     BUFFER ||--|| TEXT_BUFFER : "wraps (CRDT rope)"
-    THREAD ||--o{ MESSAGE : contains
-    MESSAGE ||--o| USER_MESSAGE : "variant"
-    MESSAGE ||--o| AGENT_MESSAGE : "variant"
-    THREAD ||--o| PROJECT : "operates on"
-    THREAD }o--|| LANGUAGE_MODEL : "uses (dyn trait obj)"
     PROJECT_PANEL ||--|| PROJECT : "renders"
     PROJECT_PANEL ||--o{ ENTRY : "selects"
     THEME_FAMILY ||--o{ THEME : contains
@@ -75,8 +62,8 @@ erDiagram
 | project | Entity<Project> | NOT NULL, 1 per Workspace | The workspace's active project |
 | database_id | Option<WorkspaceId> | nullable, FK-like → `crates/db` sqlite row | Persisted-session identity |
 | app_state | Arc<AppState> | NOT NULL | Shared app-global services |
-| follower_states | HashMap<CollaboratorId, FollowerState> | | Live-share follow-mode state |
-| session_id | Option<String> | nullable | Collaboration session identifier |
+| follower_states | HashMap<CollaboratorId, FollowerState> | | **Vestigial** — live-share follow-mode state; the field still exists but is never populated, since the collaboration subsystem that would add entries to it was removed |
+| session_id | Option<String> | nullable | **Vestigial** — collaboration session identifier; always `None` in this fork |
 | multi_workspace | Option<WeakEntity<MultiWorkspace>> | nullable | Parent container when multiple workspaces share a window |
 | open_mode (call-param) | OpenMode (enum) | NOT NULL, not persisted | How this Workspace was attached to its window on open — see Discriminator |
 
@@ -111,12 +98,12 @@ erDiagram
 | task_store | Entity<TaskStore> | NOT NULL | Runnable tasks (tasks.json) |
 | context_server_store | Entity<ContextServerStore> | NOT NULL | MCP server connections |
 | terminals | Terminals | NOT NULL | Open terminal instances for this project |
-| client_state | ProjectClientState (enum) | NOT NULL | Local / Shared / Collab mode — see discriminator |
-| collaborators | HashMap<proto::PeerId, Collaborator> | | Remote collaborators in a shared project |
+| client_state | ProjectClientState (enum) | NOT NULL | Local always in this fork; the `Shared`/`Collab` variants still exist in the enum (kept for a test-only helper, `mark_as_collab_for_testing`) but are never constructed by any real code path — see discriminator |
+| collaborators | HashMap<proto::PeerId, Collaborator> | | **Vestigial** — always empty; nothing populates it since the collaboration subsystem was removed |
 | fs | Arc<dyn Fs> | NOT NULL | Filesystem abstraction (real or in-memory) |
-| remote_client | Option<Entity<RemoteClient>> | nullable | Set when this is a remote-dev project |
+| remote_client | Option<Entity<RemoteClient>> | nullable | Set when this is a remote-dev project (SSH) — this path is live and rebuilt in this fork on a direct connection, not through the removed collaboration relay |
 | settings_observer | Entity<SettingsObserver> | NOT NULL | Watches project-local settings files |
-| agent_location | Option<AgentLocation> | nullable | Where an AI agent is currently editing |
+| agent_location | Option<AgentLocation> | nullable | **Vestigial** — always `None`; nothing populates it since the AI agent subsystem was removed |
 
 **Relationships**:
 - One-to-Many with `Worktree` (via `worktree_store`)
@@ -129,7 +116,7 @@ erDiagram
 
 | Field | DISC-### | Values | Description |
 |-------|----------|--------|-------------|
-| client_state | DISC-002 | Local, Shared { .. }, Collab { .. } | Local = single-player; Shared = hosting a collab session; Collab = joined someone else's shared project |
+| client_state | DISC-002 | Local, Shared { .. }, Collab { .. } | Always `Local` in this fork. `Shared`/`Collab` variants remain in the enum only because a test-support helper (`mark_as_collab_for_testing`) constructs them; no production code path does |
 
 ---
 
@@ -242,7 +229,7 @@ erDiagram
 | branch_state | Option<BufferBranchState> | nullable | Set when this buffer is a "branch" (e.g. diff preview) of another buffer |
 | encoding | &'static Encoding | NOT NULL | Text encoding (UTF-8, etc.) used on disk |
 | has_bom | bool | NOT NULL | Byte-order-mark presence |
-| remote_selections | TreeMap<ReplicaId, SelectionSet> | | Collaborators' live cursor/selection state |
+| remote_selections | TreeMap<ReplicaId, SelectionSet> | | Populated per-replica selection state, keyed by `ReplicaId` — this mechanism is shared with SSH remote development's buffer replication (still live), not solely the removed collaboration path; whether it currently receives any entries in a fork with no other-replica collaborator was not independently re-verified |
 | parse_status | watch::Receiver<ParseStatus> | NOT NULL | Idle/Parsing state of the tree-sitter background parse (buffer.rs:120) |
 
 **Relationships**:
@@ -299,13 +286,13 @@ erDiagram
 | mode | EditorMode (enum) | NOT NULL | Full editor vs. single-line vs. auto-height, etc. — see Discriminator |
 | project | Option<Entity<Project>> | nullable | Set when this editor is backed by a real project (None for standalone/scratch editors) |
 | workspace | Option<(WeakEntity<Workspace>, Option<WorkspaceId>)> | nullable | Owning workspace, if any |
-| completion_provider | Option<Rc<dyn CompletionProvider>> | nullable | Pluggable completions source (LSP, AI, etc.) |
+| completion_provider | Option<Rc<dyn CompletionProvider>> | nullable | Pluggable completions source (LSP; no AI provider registers itself anymore) |
 | semantics_provider | Option<Rc<dyn SemanticsProvider>> | nullable | Pluggable hover/goto-def/references source |
-| edit_prediction_provider | Option<RegisteredEditPredictionDelegate> | nullable | AI inline-completion provider registration |
-| active_edit_prediction | Option<EditPredictionState> | nullable | Currently-shown inline AI suggestion |
+| edit_prediction_provider | Option<RegisteredEditPredictionDelegate> | nullable | **Vestigial** — always `None`; the AI inline-completion crate that used to register here was removed |
+| active_edit_prediction | Option<EditPredictionState> | nullable | **Vestigial** — always `None`, follows from the above |
 | diagnostics_max_severity | DiagnosticSeverity | NOT NULL | Filter threshold for shown diagnostics |
 | read_only | bool | NOT NULL | Blocks all edit operations regardless of buffer capability |
-| leader_id | Option<CollaboratorId> | nullable | Set when following another collaborator's cursor |
+| leader_id | Option<CollaboratorId> | nullable | **Vestigial** — always `None`; there is no other collaborator to follow |
 | show_git_blame_gutter / show_git_blame_inline | bool | NOT NULL | Git-blame display toggles |
 
 **Relationships**:
@@ -319,69 +306,6 @@ erDiagram
 | Field | Code | Values | Description |
 |-------|----------|--------|-------------|
 | mode | DISC-007 | (EditorMode variants, e.g. Full, SingleLine, AutoHeight — see `editor.rs`) | Governs which UI chrome (gutter, breadcrumbs, minimap) renders and whether multi-line input is permitted |
-
----
-
-### Thread (Agent conversation)
-
-**Source**: `crates/agent/src/thread.rs:936`
-
-**Description**: Core AI agent conversation engine — one `Thread` per chat/agent session. Drives the turn loop: sends messages to a `LanguageModel`, streams responses, dispatches tool calls, and tracks token usage.
-
-| Attribute | Type | Constraints | Description |
-|-----------|------|-------------|-------------|
-| id | acp::SessionId | PK-like, unique | Session identifier (Agent Client Protocol) |
-| messages | Vec<Message> | NOT NULL | Ordered conversation history (see `Message` entity) |
-| project | Entity<Project> | NOT NULL | Project this agent session operates against |
-| model | Option<Arc<dyn LanguageModel>> | nullable | Active LLM provider/model for this thread |
-| summarization_model | Option<Arc<dyn LanguageModel>> | nullable | Separate (often cheaper) model used for thread title/summary generation |
-| tools | BTreeMap<SharedString, Arc<dyn AnyAgentTool>> | NOT NULL | Tools available for the model to call in this thread |
-| action_log | Entity<ActionLog> | NOT NULL | Record of file edits/actions the agent has taken (for review/undo) |
-| running_turn | Option<RunningTurn> | nullable | In-flight model-request/tool-execution task, if a turn is active |
-| request_token_usage | HashMap<UserMessageId, language_model::TokenUsage> | | Per-request token accounting |
-| profile_id | AgentProfileId | NOT NULL | Which agent "profile" (tool/permission preset) governs this thread |
-| subagent_context | Option<SubagentContext> | nullable | Set when this Thread is a spawned subagent of a parent Thread |
-| running_subagents | Vec<WeakEntity<Thread>> | | Child subagent threads spawned from this one |
-| imported | bool | NOT NULL | True if loaded from a previously-shared/exported thread |
-| draft_prompt | Option<Vec<acp::ContentBlock>> | nullable | Unsent composer text, persisted across reloads |
-
-**Relationships**:
-- One-to-Many with `Message` (via `messages`)
-- Many-to-One with `Project`
-- One-to-Many with `Thread` (self-referential: parent → subagent threads, via `running_subagents`/`subagent_context.parent_thread_id`)
-- Many-to-One with `LanguageModel` (trait object, not an owned entity)
-
-**Discriminator Fields**: None directly (see `Message`/`AgentMessageContent` below for the conversation-level discriminators).
-
----
-
-### Message
-
-**Source**: `crates/agent/src/thread.rs:123` (enum), `:173` (UserMessage), `:609` (AgentMessage)
-
-**Description**: One turn in a `Thread`'s conversation — either a user turn, an agent turn, or a synthetic "resume" marker.
-
-| Attribute | Type | Constraints | Description |
-|-----------|------|-------------|-------------|
-| (enum) Message | User(UserMessage) \| Agent(AgentMessage) \| Resume | NOT NULL | Discriminated union — see Discriminator Fields |
-| UserMessage.id | UserMessageId | PK-like, unique within Thread | Message identity (used to key token-usage map) |
-| UserMessage.content | Vec<UserMessageContent> | NOT NULL | Text / @-mention / image parts (see nested discriminator) |
-| AgentMessage.content | Vec<AgentMessageContent> | NOT NULL | Text / Thinking / RedactedThinking / ToolUse parts |
-| AgentMessage.tool_results | IndexMap<LanguageModelToolUseId, LanguageModelToolResult> | | Results returned for each tool call the agent issued |
-| AgentMessage.reasoning_details | Option<serde_json::Value> | nullable | Provider-specific extended-thinking metadata |
-| role (derived) | language_model_core::Role | NOT NULL, computed | Canonical LLM-API role derived from the Message variant when building a request (not stored on Message itself) |
-
-**Relationships**:
-- Many-to-One with `Thread` (via `messages` Vec — ordered, not a separate table)
-
-**Discriminator Fields**:
-
-| Field | Code | Values | Description |
-|-------|----------|--------|-------------|
-| Message (enum variant) | DISC-008 | User, Agent, Resume | User = human turn; Agent = model turn; Resume = synthetic continuation marker with no real content, injected to resume an interrupted turn |
-| UserMessageContent (enum variant) | DISC-009 | Text, Mention, Image | Plain text vs. an `@file`/`@symbol` context mention vs. an attached image |
-| AgentMessageContent (enum variant) | DISC-010 | Text, Thinking, RedactedThinking, ToolUse | Visible reply text vs. visible extended-thinking trace vs. provider-redacted thinking vs. a tool invocation |
-| Role (crates/language_model_core) | DISC-011 | User, Assistant, System | Canonical role sent to the LLM API, derived from Message variant |
 
 ---
 
@@ -411,7 +335,7 @@ erDiagram
 
 | Field | Code | Values | Description |
 |-------|----------|--------|-------------|
-| SettingsFile (enum, precedence-ordered) | DISC-012 | Default, Global, User, Server, Project((WorktreeId, RelPath)) | Determines merge precedence: Project > Server > User ≈ Global > Default (see `Ord` impl in settings_store.rs) |
+| SettingsFile (enum, precedence-ordered) | DISC-008 | Default, Global, User, Server, Project((WorktreeId, RelPath)) | Determines merge precedence: Project > Server > User ≈ Global > Default (see `Ord` impl in settings_store.rs) |
 
 ---
 
@@ -439,7 +363,7 @@ erDiagram
 
 | Field | Code | Values | Description |
 |-------|----------|--------|-------------|
-| appearance | DISC-013 | Light, Dark | Governs default contrast assumptions and which system-appearance the theme is auto-selected for |
+| appearance | DISC-009 | Light, Dark | Governs default contrast assumptions and which system-appearance the theme is auto-selected for |
 
 ---
 
@@ -473,7 +397,7 @@ erDiagram
 
 | Field | Code | Values | Description |
 |-------|----------|--------|-------------|
-| WorkDirectory (enum) | DISC-014 | InProject { relative_path }, AboveProject { absolute_path, location_in_repo } | Whether the `.git` root is inside the opened project folder or in an ancestor directory (project root is a subfolder of the repo) |
+| WorkDirectory (enum) | DISC-010 | InProject { relative_path }, AboveProject { absolute_path, location_in_repo } | Whether the `.git` root is inside the opened project folder or in an ancestor directory (project root is a subfolder of the repo) |
 
 ---
 
@@ -529,7 +453,7 @@ erDiagram
 
 | Field | Code | Values | Description |
 |-------|----------|--------|-------------|
-| task (presence) | DISC-015 | Some(TaskState), None | Some = this terminal is running a defined task and reports exit status/output back to `tasks_ui`; None = plain interactive shell with no task lifecycle |
+| task (presence) | DISC-011 | Some(TaskState), None | Some = this terminal is running a defined task and reports exit status/output back to `tasks_ui`; None = plain interactive shell with no task lifecycle |
 
 ---
 
@@ -550,8 +474,8 @@ erDiagram
 | grammars | BTreeMap<Arc<str>, GrammarManifestEntry> | | Tree-sitter grammars contributed |
 | language_servers | BTreeMap<LanguageServerName, LanguageServerManifestEntry> | | LSP servers contributed |
 | context_servers | BTreeMap<Arc<str>, ContextServerManifestEntry> | | MCP servers contributed |
-| agent_servers | BTreeMap<Arc<str>, AgentServerManifestEntry> | | External ACP agent servers contributed |
-| language_model_providers | BTreeMap<Arc<str>, LanguageModelProviderManifestEntry> | | LLM providers contributed |
+| agent_servers | BTreeMap<Arc<str>, AgentServerManifestEntry> | | **Vestigial** — the manifest schema still accepts this field for backward compatibility with existing extensions, but nothing in this fork consumes it (the AI agent subsystem was removed) |
+| language_model_providers | BTreeMap<Arc<str>, LanguageModelProviderManifestEntry> | | **Vestigial** — same as above; nothing consumes it now that the LLM provider subsystem was removed |
 | capabilities | Vec<ExtensionCapability> | | Sandboxed permissions requested (e.g. process-exec allowlist) |
 | debug_adapters / debug_locators | BTreeMap<Arc<str>, ...> | | DAP adapters/locators contributed |
 
@@ -563,8 +487,8 @@ erDiagram
 
 | Field | Code | Values | Description |
 |-------|----------|--------|-------------|
-| schema_version | DISC-016 | (versioned enum, legacy `OldExtensionManifest` vs. current `ExtensionManifest`) | Determines which manifest parser/migration path is applied when loading `extension.toml` |
-| ExtensionCapability (enum, per-entry) | DISC-017 | ProcessExec, DownloadFile, NpmInstallPackage | Which sandboxed permission class a capability grant belongs to (crates/extension/src/capabilities.rs:14) — ProcessExec allows running an allowlisted command, DownloadFile allows fetching from an allowlisted host, NpmInstallPackage allows installing an allowlisted npm package |
+| schema_version | DISC-012 | (versioned enum, legacy `OldExtensionManifest` vs. current `ExtensionManifest`) | Determines which manifest parser/migration path is applied when loading `extension.toml` |
+| ExtensionCapability (enum, per-entry) | DISC-013 | ProcessExec, DownloadFile, NpmInstallPackage | Which sandboxed permission class a capability grant belongs to (crates/extension/src/capabilities.rs:14) — ProcessExec allows running an allowlisted command, DownloadFile allows fetching from an allowlisted host, NpmInstallPackage allows installing an allowlisted npm package |
 
 ---
 
@@ -599,14 +523,13 @@ erDiagram
 
 ## Summary
 
-- **Total Entities**: 16 (Workspace, Project, Worktree, Entry, TextBuffer, Buffer (language), MultiBuffer, Editor, Thread, Message, SettingsStore, Theme/ThemeFamily, GitStore/Repository, ProjectPanel, Terminal, ExtensionManifest)
-- **Total Relationships**: 20 (see ERD + per-entity Relationships sections)
-- **Total Discriminators assigned**: 17 (sequential, no gaps)
+- **Total Entities**: 14 (Workspace, Project, Worktree, Entry, TextBuffer, Buffer (language), MultiBuffer, Editor, SettingsStore, Theme/ThemeFamily, GitStore/Repository, ProjectPanel, Terminal, ExtensionManifest)
+- **Total Relationships**: 17 (see ERD + per-entity Relationships sections; down from 20 after removing Thread/Message and their 3 relationships)
+- **Total Discriminators assigned**: 13 (sequential, no gaps — renumbered after removing Message's 4 discriminators)
 
 ## Scope Notes / Limits
 
-- This is a native GPUI desktop app, not a web app with a DB-backed schema — "entities" are architecturally central Rust structs held as `Entity<T>`, not persisted rows. The only genuine persisted storage is `crates/db` (sqlite, workspace/session state) and `crates/settings`/`crates/theme` config files; these were not modeled as their own row-level schema per Wave 0 breadth-over-depth guidance for a 1.3M-LOC monorepo.
-- ~1,760 source files exist; this document covers the ~15-25 most architecturally central types the scout report and cross-crate reference density point to, not an exhaustive struct inventory. Entities not covered but referenced (`LanguageRegistry`, `Language`, `LspStore`, `DapStore`, `TaskStore`, `ContextServerStore`, `AgentServerStore`, `RemoteClient`, `Pane`/`PaneGroup`/`Dock`) are named in Relationships but not given their own full field breakdown — available on request.
+- This is a native GPUI desktop app, not a web app with a DB-backed schema — "entities" are architecturally central Rust structs held as `Entity<T>`, not persisted rows. The only genuine persisted storage is `crates/db` (sqlite, workspace/session state) and `crates/settings`/`crates/theme` config files; these were not modeled as their own row-level schema.
+- This document covers the most architecturally central types, not an exhaustive struct inventory. Entities not covered but referenced (`LanguageRegistry`, `Language`, `LspStore`, `DapStore`, `TaskStore`, `ContextServerStore`, `RemoteClient`, `Pane`/`PaneGroup`/`Dock`) are named in Relationships but not given their own full field breakdown.
 - Field lists for large structs (`Editor` has 100+ fields, `Workspace` has 45+, `Project` has 30+) are curated to the fields with real cross-entity or behavioral significance, not a full transcription of every private field.
-- `LanguageModel` is a trait object (`Arc<dyn LanguageModel>`), not a concrete data-model struct — modeled here only as a relationship target from `Thread`, not as its own entity block; a dedicated pass could enumerate its per-provider request/response schema types (`crates/language_model_core`, `crates/anthropic`, `crates/open_ai`, etc.) if needed.
-- The `Role` enum lives in `crates/language_model_core/src/role.rs:6`, distinct from the `Message`/`AgentMessageContent` enums in `crates/agent`, and is included as a nested discriminator under Message rather than its own entity.
+- The `Thread`/`Message`/`LanguageModel` entities from the original pass are gone from this document because `crates/agent` (their source) no longer exists in this fork — not because they were curated out.
