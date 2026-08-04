@@ -18,7 +18,6 @@ test-support = []
 [dependencies]
 anyhow.workspace = true
 component.workspace = true
-cpal.workspace = true
 editor.workspace = true
 fs.workspace = true
 feature_flags.workspace = true
@@ -32,17 +31,14 @@ log.workspace = true
 menu.workspace = true
 paths.workspace = true
 picker.workspace = true
-regex.workspace = true
 platform_title_bar.workspace = true
 project.workspace = true
 release_channel.workspace = true
-rodio.workspace = true
 schemars.workspace = true
 search.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
-shell_command_parser.workspace = true
 strum.workspace = true
 telemetry.workspace = true
 theme.workspace = true
@@ -51,7 +47,6 @@ ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
-zed_credentials_provider.workspace = true
 
 [dev-dependencies]
 fs = { workspace = true, features = ["test-support"] }
