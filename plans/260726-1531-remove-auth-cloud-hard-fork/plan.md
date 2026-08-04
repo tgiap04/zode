@@ -65,7 +65,7 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Completed — **the app launches** |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Completed — **1 open regression handed to Phase 11** |
 | 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Gate A (mechanical) complete — Gate B/C (runtime, GUI) need the user |
-| 12 | [Rebrand and packaging](./phase-12-rebrand-and-packaging.md) | Pending |
+| 12 | [Rebrand and packaging](./phase-12-rebrand-and-packaging.md) | Legal/naming complete — packaging + icon/desktop-file rebrand need the user |
 
 **Build-state map:** Phases 1–3 green · **Phase 4 goes RED** · Phases 5–7 red · **Phase 8 returns green
 (earlier than planned — `cargo check --workspace` is green at the end of 8e, not Phase 11)** · Phase 12 green.
@@ -574,6 +574,77 @@ two-tier `/etc/hosts` blackhole test, a Little Snitch/LuLu session, and the full
 keymaps) - all require launching the actual release GUI binary, editing `/etc/hosts` under `sudo`
 twice, and driving the app interactively. The recipe is written down in
 `research/network-verification.md` for whoever runs it.
+
+### Phase 12 — 2026-08-04 · commits `7c2d97d` `e2bd2f0` `fc25ae9` `916f5d3` `bb88bb6`
+
+**The two blocking decisions got made.** Brand name: "Zode" (the user already had it in
+mind — it also matches this repository's own directory name). Extension registry:
+disclose and keep, the lowest-cost option, per the user's explicit choice between the
+four the phase file laid out.
+
+**Renamed the package and binary — `zed` → `zode`, bundle id `dev.zed.Zed` family →
+`io.github.tgiap04.zode` family (derived from the actual GitHub repo, no dedicated
+domain owned).** Version reset to 0.1.0 — a fork version must never be mistaken for an
+upstream Zed one. `release_channel::display_name()`/`app_id()` turned out to be the
+single source of truth the window title, About dialog, and every platform's app-id
+(Wayland/X11 WM_CLASS, macOS bundle id) all read from — one change, wide effect.
+
+**Renaming the `[[bin]]` broke things silently, and caught them one at a time.**
+Every packaging script (`bundle-mac`, `bundle-linux`, `bundle-windows.ps1`) hardcoded
+`target/.../release/zed` as the compiled artifact's path — all now pointed at a file
+that no longer existed. Worse: `crates/cli`'s own app-detection logic (`Detect::detect`)
+hardcoded the same path for **dev-build discovery and the macOS bundle's
+`Contents/MacOS/zed`** — left unfixed, the `zode` command literally could not have
+found the binary to launch on any platform. Fixed the dev-build and macOS paths (both
+verified: `cargo build -p zode -p cli` produces `target/debug/zode`, and the `cli`
+crate's own `Contents/MacOS/zode` path was checked against the exact string the
+`bundle-mac` script now copies to). Windows installer branding (`Zed.exe`, the `.iss`
+script, registry keys) was **not** carried through — deferred to the packaging pass,
+since fixing it fully requires a Windows toolchain to verify, and a dead
+`auto_update_helper` package reference (that crate no longer exists) made clear nobody
+has run this script since Phase 3 removed auto-update.
+
+**A second, unrelated real bug found while sweeping user-visible strings**: "File Bug
+Report...", "Request Feature...", and "Zed Repository" in the Help menu pointed at
+`zed-industries/zed`'s own GitHub issues, discussions, and repo — left as-is, a user
+hitting a bug in this fork's own changes would file it against a codebase Zed
+Industries has never seen. Repointed at this fork's repository; removed "Email Us..."
+(`mailto:hi@zed.dev`), "Zed Twitter", and "Join the Team" (`zed.dev/jobs`) outright —
+there is no support address, social account, or team for this fork to point them at.
+Verified with the full `zed::tests::` suite (33 passed) that removing the now-dead
+`EmailZed` action didn't orphan a keymap binding or break the namespace canary.
+
+**Two more findings had nothing to do with rebranding and predate this whole plan.**
+`README.md` and `AGENTS.md` have described an entirely unrelated AI development kit
+("FayeDark Agent Kit") since this repository's very first commit — leftover
+scaffolding cruft, not something any earlier phase touched. Replaced `README.md`
+(explicitly in this phase's scope); `AGENTS.md` has the same problem but wasn't in
+scope here, so it's flagged rather than fixed. Separately, `ztracing`/`ztracing_macro`
+carried stray `LICENSE-AGPL`/`LICENSE-APACHE` symlinks inconsistent with their own
+`Cargo.toml` (`GPL-3.0-or-later`) — found only because deleting the now-verified-unused
+root `LICENSE-AGPL` (0 of 169 crates declare AGPL) turned them into dangling symlinks.
+
+**`legal/*.md` rewritten, not just re-marked.** Phase 10 added warning banners and
+deliberately stopped there — "a privacy policy and terms of service are legal
+instruments... authoring them is the maintainer's decision." With the brand name and
+registry decision now made, that decision had a floor under it. All four files
+(`privacy-policy.md`, `subprocessors.md`, `terms.md`, `third-party-terms.md`) rewritten
+short and accurate rather than reproduced at upstream's original ~40-page length: no
+company, no service, no subprocessors, one disclosed dependency (the extension
+registry), and the GPL/Apache license as the only thing actually governing use of
+locally-run software.
+
+**What this phase did not do — not a shortfall, a boundary.** The actual Zed logo
+assets (PNG/ICNS/ICO icon files) are unchanged — replacing them needs a designer or an
+image tool this session doesn't have. Signing, notarization, and a Homebrew tap need an
+Apple Developer ID certificate and a separate repository. Linux `.desktop`/
+`snapcraft.yaml.in`/flatpak-manifest branding and the Windows `.iss` installer were left
+alone deliberately — editing them meaningfully requires building and testing on each
+target platform, which isn't available here, and `snapcraft.yaml.in` in particular
+still downloads **upstream Zed's own release tarball**, confirming nobody has touched
+Linux packaging in this fork's history yet either. Onboarding/welcome-screen copy and
+tooltips were not swept exhaustively — the highest-visibility strings (menu bar, About
+dialog, Help menu, permission prompts) were, everything else is still open.
 
 ## Execution rule: how to cut (learned the hard way in Phase 5)
 

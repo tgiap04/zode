@@ -1,7 +1,7 @@
 ---
 phase: 12
 title: "Rebrand and packaging"
-status: pending
+status: "Legal/naming (12a, 12a', 12b) complete; packaging (12c) and full icon/desktop-file rebrand need the user"
 effort: "3-5d"
 ---
 
@@ -129,24 +129,53 @@ Whatever is chosen must be reflected in Phase 11's `network-verification.md` and
 
 ## Todo List
 
-- [ ] 12a′ **Extension registry decision made** and reflected in `legal/` + `network-verification.md`
-- [ ] 12a Brand name chosen; binary name, bundle id, display name derived
-- [ ] 12b Package + `[[bin]]` renamed
-- [ ] 12b Bundle identifier changed; user-migration note written
-- [ ] 12b App icon and branded assets replaced
-- [ ] 12b `zed_urls.rs` rewritten or deleted
-- [ ] 12b User-visible string sweep done
-- [ ] 12b Copyright headers preserved; `NOTICE` added
-- [ ] 12b `LICENSE-AGPL` removal verified by licence scan
-- [ ] 12b `legal/*.md` rewritten to match reality
-- [ ] 12b About dialog and window title updated
-- [ ] 12c Versioning scheme defined
-- [ ] 12c Signed + notarized macOS artifact builds
-- [ ] 12c Homebrew cask published
-- [ ] 12c Clean-machine install **and upgrade** verified
-- [ ] 12c Release process documented as the patch channel
-- [ ] 12d Source published; README states the fork relationship
-- [ ] Build still green: `cargo build --release` + `script/clippy`
+- [x] 12a′ **Extension registry decision made** (disclose and keep) and reflected in
+      `legal/third-party-terms.md` + `research/network-verification.md`
+- [x] 12a Brand name chosen ("Zode"); binary name `zode`, bundle id
+      `io.github.tgiap04.zode` (+ per-channel suffixes), display name "Zode" derived
+- [x] 12b Package + `[[bin]]` renamed (`zed` → `zode`); version reset to 0.1.0 so a fork
+      version is never mistaken for an upstream one
+- [x] 12b Bundle identifier changed in all four `[package.metadata.bundle-*]` blocks and
+      `release_channel::app_id()` (the single source both macOS bundling and Wayland/X11
+      app-id/WM_CLASS read from) — **no user-migration note written yet**, since no
+      release has shipped under the old identity to migrate away from
+- [ ] 12b App icon and branded assets replaced — **not done, needs a designer/design
+      tool**: the actual Zed logo PNGs/ICNS/ICO files are still in `assets/`/
+      `crates/zed/resources/`; I have no image-generation capability to replace them
+- [x] 12b `zed_urls.rs` rewritten (cut to its one surviving caller, `acp_registry_blog`)
+- [ ] 12b User-visible string sweep — **partial, not exhaustive**: fixed the macOS menu
+      bar title, About/Hide/Quit menu items, the Help menu (including a real bug —
+      "File Bug Report..."/"Request Feature..."/"Zed Repository" pointed at
+      zed-industries/zed's own tracker, now repointed at this fork's), `Info.plist`
+      permission-prompt and document-type strings, and `release_channel::display_name()`
+      (the shared source most other window-title/About-dialog text reads from). **Not
+      swept**: onboarding/welcome-screen copy, tooltips, empty states, and the Linux
+      `.desktop`/`snapcraft.yaml.in`/flatpak-manifest branding (left for the packaging
+      pass below, since those files also embed unbuilt/untestable packaging logic)
+- [x] 12b Copyright headers preserved (verified: this codebase doesn't use per-file
+      headers; nothing was touched); `NOTICE` added crediting upstream Zed
+- [x] 12b `LICENSE-AGPL` removal verified by scan (0 of 169 crates declare AGPL) —
+      also found and fixed two stray AGPL/Apache symlinks on `ztracing`/`ztracing_macro`
+      inconsistent with their own GPL-3.0-or-later `Cargo.toml` declaration
+- [x] 12b `legal/*.md` rewritten to match reality (privacy-policy, subprocessors, terms,
+      third-party-terms all replaced; Phase 10's warning banners removed since the
+      content underneath them is now true)
+- [x] 12b About dialog and window title updated (via `release_channel::display_name()`)
+- [ ] 12c Versioning scheme defined — version reset to 0.1.0; a full scheme (tagging,
+      branch strategy) is not defined, `script/bump-zed-minor-versions`' branching
+      workflow was renamed but not redesigned
+- [ ] 12c Signed + notarized macOS artifact builds — **needs the user**: requires an
+      Apple Developer ID certificate this environment doesn't have
+- [ ] 12c Homebrew cask published — **needs the user**: requires a separate tap
+      repository
+- [ ] 12c Clean-machine install **and upgrade** verified — blocked on the above
+- [ ] 12c Release process documented as the patch channel — blocked on the above;
+      what exists instead is a corrected build-from-source path in `README.md`
+- [x] 12d Source published; README states the fork relationship (repo already exists at
+      `github.com/tgiap04/zode` — confirmed via `git remote -v`)
+- [x] Build still green: `cargo check --workspace` (+`--all-features`) and the final
+      `./script/clippy` (`--release --all-targets --all-features -- --deny warnings` +
+      `cargo machete`) both confirmed green after every change in this phase
 
 ## Success Criteria
 
