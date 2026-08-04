@@ -1,24 +1,13 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # User Stories
 
-> [!CAUTION]
-> **STALE — do not treat this document as a description of the current code.**
-> It was generated on 2026-07-26 against the pre-fork tree of 240 packages /
-> 232 crates. The hard fork has since removed 54 crates and gutted several
-> more; the workspace is now 186 packages / 178 crates.
->
-> Anything here describing accounts, sign-in, collaboration, calls, channels,
-> AI agents, LLM providers, edit prediction, auto-update or crash reporting is
-> **fiction** — that code no longer exists. Feature codes F007, F008, F013,
-> F019, F020, F021 and F022 in particular no longer have an implementation.
->
-> Regeneration is deliberately deferred until the fork is green and verified
-> (`/tkm:rebuild-spec` after phase 11). Running it against a half-cut tree
-> would just produce a second stale document.
+**Rewritten 2026-08-04** against the post-fork tree (187 packages / 178 crates). Removed 8 of the
+original 27 user stories (US010–US013, US017–US020) along with the features they belonged to
+(collaboration, AI agent chat/edit-prediction/provider-switching, auto-update) — the crates that
+implemented them no longer exist. BL### citations in the surviving stories were updated to match
+the renumbering in `behavior-logic.md`.
 
-
-**Project**: Zed (zode)
-**Generated**: 2026-07-26
+**Project**: Zode
 **Analysis Scope**: Full monorepo — native GPUI desktop editor (`generic-source` profile, `screen_source:none`)
 
 **Code Format**: All US codes follow `US###_NameSlug` format (e.g., US001_OpenProject).
@@ -29,18 +18,14 @@
 
 ## Adaptation Note (no ScreenList upstream)
 
-Zed is a native desktop app, not a routed web app — no `screen-list.md`/`screen-flow.md` artifact
-exists upstream (per `_session-context.md` and `behavior-logic.md`, `screen_source:none`). Per the
-template's own allowance ("`ui`-typed stories may map to `SCR###`... system US do not"), and because
-no SCR### codes exist to map to, the **Screens** field below names the GPUI `Render`-implementing
-UI surface descriptively (e.g. "Editor pane", "Project Panel", "Agent panel") instead of a SCR###
-code. This mirrors system-overview.md's stated analogue: "GPUI `Render`-implementing entities
-(`Editor`, `Workspace`, dock panels)" stand in for screens. No `[IPE_ZERO]` screen-map table is
-produced since there is no ScreenList to cross-validate against.
+Zode is a native desktop app, not a routed web app — no `screen-list.md`/`screen-flow.md` artifact
+exists upstream (`screen_source:none`). The **Screens** field below names the GPUI
+`Render`-implementing UI surface descriptively (e.g. "Editor pane", "Project Panel") instead of a
+SCR### code, mirroring system-overview.md's stated analogue.
 
-**Roles used**: `developer` (the local editor user / project owner), `collaborator` (a remote
-participant joined to a shared project, further qualified by ChannelRole where relevant: Admin /
-Member / Talker / Guest), `extension author` (third-party code author, non-interactive role).
+**Roles used**: `developer` (the local editor user / project owner), `extension author`
+(third-party code author, non-interactive role). The `collaborator` role from the original pass is
+removed — there is no other participant in this fork.
 
 ## User Story Index
 
@@ -55,17 +40,9 @@ Member / Talker / Guest), `extension author` (third-party code author, non-inter
 | US007_ChangeEditorTheme | Change the editor's color theme | ui | should | Settings / Theme picker |
 | US008_EditSettingsJson | Edit a setting in `settings.json` and see it take effect live | ui | must | Settings editor |
 | US009_InstallExtension | Install a third-party extension | ui | should | Extensions panel |
-| US010_ShareProjectForCollaboration | Share a project so others can collaborate | ui | must | Workspace / Collab panel |
-| US011_JoinSharedProject | Join a shared project as a collaborator | ui | must | Workspace / Collab panel |
-| US012_ChangeCollaboratorRole | Change a collaborator's role in a shared project | ui | should | Collab panel |
-| US013_StartVoiceCall | Start a voice/video call with collaborators | ui | should | Call panel |
 | US014_RunTerminalCommand | Run a shell command in the integrated terminal | ui | must | Terminal panel |
 | US015_ViewGitDiff | View a file's git diff | ui | must | Git panel / Editor gutter |
 | US016_CommitStagedChanges | Commit staged changes | ui | must | Git panel |
-| US017_ChatWithAiAgent | Chat with the AI agent in a thread | ui | must | Agent panel |
-| US018_AcceptInlineEditPrediction | Accept an inline AI edit prediction | ui | should | Editor pane |
-| US019_SwitchLlmProvider | Switch the agent's active LLM provider | ui | should | Agent panel / Settings |
-| US020_ReceiveAutoUpdateNotification | Receive and apply an application auto-update | system | should | — |
 | US021_ReadOnlyBufferRejectsEdit | Read-only buffer silently rejects an edit attempt | system | must | Editor pane |
 | US022_ExtensionCapabilityDenied | Extension's undeclared capability request is denied | system | must | — |
 | US023_SettingsChangeNotifiesObservers | Settings-store change notifies all registered observers | system | must | — |
@@ -91,17 +68,9 @@ Member / Talker / Guest), `extension author` (third-party code author, non-inter
 | Theme picker | Theme list item | primary-action | Swaps the active `Theme`/`ThemeFamily`, re-renders all `Render`-implementing entities | N/A |
 | Settings editor | `settings.json` text buffer | primary-action | On save, `SettingsStore` re-parses JSON and notifies `impl Settings for` registrants | N/A |
 | Extensions panel | "Install" button | primary-action | Downloads, verifies, and loads a WASM extension via `extension_host` | N/A |
-| Workspace | "Share Project" action | primary-action | Registers the current `Project` with `collab` server, generates an invite/join link | N/A |
-| Collab panel | "Join" action | primary-action | Client connects to `collab` server over RPC, requests project state as the assigned `ChannelRole` | N/A |
-| Collab panel | Role dropdown per participant | destructive-action | Admin-only; changes another participant's `ChannelRole` (Admin/Member/Talker/Guest/Banned) | N/A |
-| Call panel | "Start Call" / "Join Call" button | primary-action | Establishes a LiveKit WebRTC session for voice/video with room participants | N/A |
 | Terminal panel | Command input | primary-action | Spawns a shell process, streams stdout/stderr into the `Terminal` entity | N/A |
 | Git panel | "Stage Hunk" inline action | primary-action | Applies a hunk-level stage operation via `GitStore`/`Repository` | N/A |
 | Git panel | "Commit" button | primary-action | Runs `git commit` against staged changes in the active `Repository` | N/A |
-| Agent panel | Message input + "Send" | primary-action | Appends a `Message` to the active `Thread`, streams the model response, dispatches queued tool calls | N/A |
-| Editor pane | Inline edit-prediction ghost text | secondary-action | Tab/Accept action applies the AI-suggested edit to the buffer | N/A |
-| Agent panel | Provider selector | secondary-action | Switches which `language_model` provider crate services the active `Thread` | N/A |
-| — (system) | Auto-update background loop | system-action | Periodically polls update server; on new release, downloads and prompts a restart | N/A |
 | Editor pane | Edit keystroke on a read-only buffer | system-action | Edit is silently discarded — `Capability` check fails before the rope mutation applies | N/A |
 | — (system) | Extension host capability call | system-action | `extension_host` checks the call against the manifest allowlist; undeclared calls are rejected pre-execution | N/A |
 | — (system) | `SettingsStore` re-parse | system-action | Fires observer callbacks on every `impl Settings for` registrant after a settings-JSON change | N/A |
@@ -139,7 +108,7 @@ As a developer, I want to open a project folder so that I can browse and edit it
 
 ### Background Logic
 
-- BL005_WorkspaceEventEmitterSubscribe: `Workspace` emits an event when a worktree is added, other panels subscribe to refresh.
+- BL003_WorkspaceEventEmitterSubscribe: `Workspace` emits an event when a worktree is added, other panels subscribe to refresh.
 
 ### Test Scenarios
 
@@ -179,7 +148,7 @@ As a developer, I want to browse my project's file tree so that I can locate and
 
 ### Background Logic
 
-- BL005_WorkspaceEventEmitterSubscribe: entry-tree updates propagate to the panel view via entity events.
+- BL003_WorkspaceEventEmitterSubscribe: entry-tree updates propagate to the panel view via entity events.
 
 ### Test Scenarios
 
@@ -219,7 +188,7 @@ As a developer, I want to edit an open file's text so that I can make changes to
 
 ### Background Logic
 
-- BL006_LspRequestDispatch: buffer edits are debounced and forwarded to the language server as `textDocument/didChange`.
+- BL004_LspRequestDispatch: buffer edits are debounced and forwarded to the language server as `textDocument/didChange`.
 
 ### Test Scenarios
 
@@ -298,7 +267,7 @@ As a developer, I want to see inline diagnostics from the language server so tha
 
 ### Background Logic
 
-- BL006_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages.
+- BL004_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages.
 
 ### Test Scenarios
 
@@ -337,7 +306,7 @@ As a developer, I want completion suggestions from the language server so that I
 
 ### Background Logic
 
-- BL006_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages.
+- BL004_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages.
 
 ### Test Scenarios
 
@@ -377,7 +346,7 @@ As a developer, I want to apply a suggested code action so that I can fix an iss
 
 ### Background Logic
 
-- BL006_LspRequestDispatch: `handle_apply_code_action` routes the accepted action back through the LSP dispatch table.
+- BL004_LspRequestDispatch: `handle_apply_code_action` routes the accepted action back through the LSP dispatch table.
 
 ### Test Scenarios
 
@@ -417,7 +386,7 @@ As a developer, I want to change the editor's color theme so that the interface 
 
 ### Background Logic
 
-- BL013_SettingsStoreObserver: theme selection is persisted to settings JSON, re-parsed, and observers re-render.
+- BL008_SettingsStoreObserver: theme selection is persisted to settings JSON, re-parsed, and observers re-render.
 
 ### Test Scenarios
 
@@ -457,7 +426,7 @@ As a developer, I want to edit a setting in `settings.json` so that the editor's
 
 ### Background Logic
 
-- BL013_SettingsStoreObserver: `SettingsStore` re-parses on change and notifies ~40 registrant call sites.
+- BL008_SettingsStoreObserver: `SettingsStore` re-parses on change and notifies ~40 registrant call sites.
 
 ### Test Scenarios
 
@@ -497,7 +466,7 @@ As a developer, I want to install a third-party extension so that I can add lang
 
 ### Background Logic
 
-- BL004_ExtensionHostWasmDispatch: sandboxed WASM calls dispatched in the background and routed back to the main thread.
+- BL002_ExtensionHostWasmDispatch: sandboxed WASM calls dispatched in the background and routed back to the main thread.
 
 ### Test Scenarios
 
@@ -505,167 +474,6 @@ As a developer, I want to install a third-party extension so that I can add lang
 |----------|-------|------|------|
 | Happy Path | Developer selects a published extension | Clicks "Install" | Extension loads, its declared capabilities become active, and it appears as installed |
 | Error Case | Extension's WASM module fails to compile/instantiate (corrupt build) | Install proceeds | Install fails with a surfaced error; host process does not crash |
-
----
-
-## US010_ShareProjectForCollaboration: Share a project so others can collaborate
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: L
-
-### User Story
-
-As a developer, I want to share my open project so that a collaborator can join and pair-program with me in real time.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Sharing registers the current `Project` with the `collab` server over the client↔server RPC connection.
-- [ ] Criterion 2: The host retains full local control; sharing does not restrict the host's own edits.
-- [ ] Criterion 3: An invite/room identifier is produced that a collaborator can use to join.
-
-### Technical Notes
-
-- **Endpoint**: N/A (custom binary RPC over `crates/proto`/`crates/rpc`, not HTTP)
-- **Data Required**: `Project`, `Workspace` (data-model.md)
-- **Dependencies**: `crates/collab` (server), `crates/client`, `crates/call`, `crates/channel`
-
-### Screens
-
-- Workspace / Collab panel: share action + invite UI
-
-### Background Logic
-
-- BL007_RpcProtoMessageRouting: share request/response routed as a typed proto message over the persistent RPC connection.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer is signed in and has a project open | Clicks "Share Project" | Project registers with `collab`, an invite becomes available, host's own editing is unaffected |
-| Error Case | Network connection to `collab` server is unavailable | Developer clicks "Share Project" | Share fails with a clear connection error rather than silently appearing shared |
-
----
-
-## US011_JoinSharedProject: Join a shared project as a collaborator
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: L
-
-### User Story
-
-As a collaborator, I want to join a shared project so that I can view and (if permitted) edit the host's files in real time.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Joining connects to the `collab` server over RPC and assigns the joiner a `ChannelRole` (Admin/Member/Talker/Guest/Banned).
-- [ ] Criterion 2: The joiner receives the shared project's file tree and open buffers reflecting their granted `Capability` (ReadWrite/Read/ReadOnly).
-- [ ] Criterion 3: A `Banned` participant cannot see or access the shared project at all.
-
-### Technical Notes
-
-- **Endpoint**: N/A (custom binary RPC)
-- **Data Required**: `Project`, `Worktree` (data-model.md); `ChannelRole`, `Capability` (permissions.md)
-- **Dependencies**: `crates/collab`, `crates/client`, `crates/call`
-
-### Screens
-
-- Workspace / Collab panel: join flow
-
-### Background Logic
-
-- BL007_RpcProtoMessageRouting: join request/state-sync routed over RPC.
-- BL008_InAppNotificationCenter: host is notified in-app that a collaborator has joined.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Collaborator has a valid invite and is assigned Member role | They join | Project files load with read-write access matching the Member role |
-| Error Case | Collaborator's role is Banned | They attempt to join | Connection is rejected server-side; no project data is sent to the client |
-
----
-
-## US012_ChangeCollaboratorRole: Change a collaborator's role in a shared project
-
-**Type**: ui
-**Interaction**: destructive-action
-**Priority**: should
-**Estimate**: S
-
-### User Story
-
-As a collaboration Admin, I want to change another participant's role so that I can control who can edit, chat, or is removed from the session.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Only participants with the Admin `ChannelRole` can change another participant's role.
-- [ ] Criterion 2: Downgrading a participant to Talker/Guest immediately revokes their edit `Capability` server-side (not just hidden in the UI).
-- [ ] Criterion 3: A small set of destructive git-worktree operations remain hard-denied for any non-owning participant regardless of the role granted (permissions.md Special Conditions).
-
-### Technical Notes
-
-- **Endpoint**: N/A (custom binary RPC)
-- **Data Required**: `ChannelRole` (permissions.md)
-- **Dependencies**: `crates/collab` (server-side role enforcement)
-
-### Screens
-
-- Collab panel: participant role dropdown
-
-### Background Logic
-
-- BL007_RpcProtoMessageRouting: role-change message routed to and enforced by the `collab` server.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Admin downgrades a Member to Talker | Change is applied | That participant's subsequent edit requests are rejected server-side before reaching the host |
-| Error Case | A non-Admin (e.g. Member) attempts the role-change action | Action is attempted | Server rejects the change; the requester's own role is unaffected |
-
----
-
-## US013_StartVoiceCall: Start a voice/video call with collaborators
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: should
-**Estimate**: M
-
-### User Story
-
-As a developer, I want to start a voice/video call with my collaborators so that we can talk while pair-programming.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Starting a call establishes a LiveKit WebRTC session for the current collaboration room.
-- [ ] Criterion 2: Talker-role participants can use voice + text chat; Guest-role participants get text chat only (no microphone).
-- [ ] Criterion 3: Call audio/video quality degrades gracefully (not a hard disconnect) under poor network conditions where LiveKit supports it.
-
-### Technical Notes
-
-- **Endpoint**: N/A (WebRTC via LiveKit SDK, not a REST endpoint)
-- **Data Required**: N/A (call state is transient, not a persisted entity in data-model.md)
-- **Dependencies**: `crates/livekit_api`, `crates/livekit_client`, `crates/call`
-
-### Screens
-
-- Call panel: start/join call controls
-
-### Background Logic
-
-- BL010_LiveKitCallingIntegration: WebRTC session establishment via the LiveKit SDK binding.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer and a Member collaborator are in a shared room | Developer clicks "Start Call" | A LiveKit session starts and the Member can join with audio |
-| Error Case | A Guest-role participant attempts to unmute their microphone | Mic toggle is attempted | Action is blocked/hidden — Guests are restricted to text chat only |
 
 ---
 
@@ -762,7 +570,6 @@ As a developer, I want to stage a specific git hunk so that I can commit changes
 ### Acceptance Criteria
 
 - [ ] Criterion 1: Staging a hunk applies only that hunk's changes to the git index, leaving the rest of the file's changes unstaged.
-- [ ] Criterion 2: A non-owning collaborator without write capability cannot stage a hunk.
 
 ### Technical Notes
 
@@ -783,7 +590,7 @@ As a developer, I want to stage a specific git hunk so that I can commit changes
 | Scenario | Given | When | Then |
 |----------|-------|------|------|
 | Happy Path | A tracked file has 2 separate edited hunks | Developer stages hunk 1 only | Git index reflects hunk 1 staged, hunk 2 remains unstaged in the working tree |
-| Error Case | Developer is a non-owning collaborator attempting a destructive worktree git operation | Action is attempted | Hard-denied regardless of assigned collaboration role (permissions.md Special Conditions) |
+| Error Case | The underlying git command fails (e.g. corrupt index) | Developer stages a hunk | Staging fails with a surfaced error; the working tree is left unchanged |
 
 ---
 
@@ -827,168 +634,6 @@ As a developer, I want to commit my staged changes so that I can record a checkp
 
 ---
 
-## US017_ChatWithAiAgent: Chat with the AI agent in a thread
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: L
-
-### User Story
-
-As a developer, I want to chat with the AI agent so that I can get help writing, explaining, or refactoring code without leaving the editor.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Sending a message appends it to the active `Thread` and streams the configured LLM provider's response back into the panel.
-- [ ] Criterion 2: If the response includes tool calls, the `Thread`'s loop dispatches them in order and surfaces each tool's result before continuing.
-- [ ] Criterion 3: The conversation (`Message` history) persists across app restarts for that `Thread`.
-
-### Technical Notes
-
-- **Endpoint**: N/A (vendor LLM API called from `crates/anthropic`/`open_ai`/etc., not a Zed-hosted route)
-- **Data Required**: `Thread`, `Message` (data-model.md)
-- **Dependencies**: `crates/agent`, `crates/language_model`, configured vendor client crate
-
-### Screens
-
-- Agent panel: message input + streamed response view
-
-### Background Logic
-
-- BL003_AgentThreadToolCallLoop: `Thread` loop awaits streamed responses and dispatches queued tool calls.
-- BL009_LlmProviderClients: the per-vendor client crate performs the actual model request.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A valid API key is configured for the active provider | Developer sends a message | Response streams in and any tool calls execute and report results in order |
-| Error Case | Configured provider API key is invalid/expired | Developer sends a message | Thread surfaces an auth error from the vendor client instead of hanging indefinitely |
-
----
-
-## US018_AcceptInlineEditPrediction: Accept an inline AI edit prediction
-
-**Type**: ui
-**Interaction**: secondary-action
-**Priority**: should
-**Estimate**: S
-
-### User Story
-
-As a developer, I want to accept an inline AI-suggested edit so that I can apply likely next changes without typing them manually.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: While typing, a ghost-text prediction renders inline based on surrounding buffer context.
-- [ ] Criterion 2: Accepting (e.g. Tab) applies the prediction to the buffer as a normal, undoable edit.
-- [ ] Criterion 3: Continuing to type without accepting dismisses the prediction without side effects.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `Buffer`, `Editor` (data-model.md)
-- **Dependencies**: `crates/edit_prediction`, `crates/edit_prediction_cli` (offline eval)
-
-### Screens
-
-- Editor pane: inline ghost-text prediction
-
-### Background Logic
-
-- BL009_LlmProviderClients: prediction requests may route through a configured provider client.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A prediction is showing inline | Developer presses Tab | Prediction text is inserted into the buffer as a single undoable edit |
-| Error Case | Prediction service request times out | Developer continues typing | No prediction renders; typing is never blocked waiting on the request |
-
----
-
-## US019_SwitchLlmProvider: Switch the agent's active LLM provider
-
-**Type**: ui
-**Interaction**: secondary-action
-**Priority**: should
-**Estimate**: S
-
-### User Story
-
-As a developer, I want to switch which LLM provider services my agent conversations so that I can use the model/vendor of my choice.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Selecting a different provider in settings changes which vendor client crate services new agent requests.
-- [ ] Criterion 2: In-flight requests on the previous provider are not corrupted by the switch (completed or cleanly cancelled).
-- [ ] Criterion 3: The chosen provider persists across restarts via `SettingsStore`.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `SettingsStore` (data-model.md)
-- **Dependencies**: `crates/language_model`, per-vendor client crate (`crates/anthropic`, `crates/open_ai`, `crates/bedrock`, etc.)
-
-### Screens
-
-- Agent panel / Settings: provider selector
-
-### Background Logic
-
-- BL013_SettingsStoreObserver: provider choice change is persisted and observed via settings.
-- BL009_LlmProviderClients: subsequent requests route to the newly selected vendor client.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer switches from Anthropic to a local Ollama model | Sends a new agent message | Request routes through the Ollama client crate instead of Anthropic's |
-| Error Case | Newly selected provider has no credentials configured | Developer sends a message | Agent surfaces a clear "missing credentials" error rather than silently falling back |
-
----
-
-## US020_ReceiveAutoUpdateNotification: Receive and apply an application auto-update
-
-**Type**: system
-**Interaction**: system-action
-**Priority**: should
-**Estimate**: M
-
-### User Story
-
-As a developer, I want the editor to check for and apply updates automatically so that I stay on the latest release without manually downloading it.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: A background task polls the update server periodically from app start, re-arming itself after each check.
-- [ ] Criterion 2: When a new release is found, the update is downloaded and the developer is prompted to restart to apply it.
-- [ ] Criterion 3: A failed poll (network error) does not crash the app and the loop still re-arms for the next interval.
-
-### Technical Notes
-
-- **Endpoint**: N/A (Zed's own update server, not documented as a public route)
-- **Data Required**: N/A (no persisted entity in data-model.md; ephemeral poller state)
-- **Dependencies**: `crates/auto_update`, `crates/scheduler`
-
-### Screens
-
-- N/A (background system behavior; no dedicated UI surface beyond a restart prompt)
-
-### Background Logic
-
-- BL001_AutoUpdatePoller: the periodic update-check loop itself.
-- BL002_SchedulerTrait: underlying timer abstraction the poller sleeps on between checks.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A newer release exists on the update server | The poller's scheduled check runs | Update downloads and a restart prompt appears |
-| Error Case | Update server is unreachable | The poller's scheduled check runs | Poll fails silently to the user, logs the error, and re-arms for the next interval |
-
----
 
 ## US021_ReadOnlyBufferRejectsEdit: Read-only buffer silently rejects an edit attempt
 
@@ -1019,13 +664,13 @@ As a developer viewing a read-only buffer, I want my edit attempts to be silentl
 
 ### Background Logic
 
-- BL013_SettingsStoreObserver: N/A directly; capability check is buffer-local, not settings-driven — listed for completeness only if a settings-driven read-only mode exists (e.g. vim mode); otherwise no BL### applies.
+- BL008_SettingsStoreObserver: N/A directly; capability check is buffer-local, not settings-driven — listed for completeness only if a settings-driven read-only mode exists (e.g. vim mode); otherwise no BL### applies.
 
 ### Test Scenarios
 
 | Scenario | Given | When | Then |
 |----------|-------|------|------|
-| Happy Path | A buffer's capability is ReadOnly (e.g. a remote collaborator's file with no write access) | Developer types a character | Nothing changes in the buffer; no error is shown |
+| Happy Path | A buffer's capability is ReadOnly (e.g. via the `read_only_files` setting) | Developer types a character | Nothing changes in the buffer; no error is shown |
 | Error Case | N/A — rejection itself is the correct/expected behavior, not an error path | — | — |
 
 ---
@@ -1059,7 +704,7 @@ As an extension author, I want my extension's process-exec capability request to
 
 ### Background Logic
 
-- BL004_ExtensionHostWasmDispatch: the WASM dispatch layer where the allowlist check occurs before executing a host call.
+- BL002_ExtensionHostWasmDispatch: the WASM dispatch layer where the allowlist check occurs before executing a host call.
 
 ### Test Scenarios
 
@@ -1099,7 +744,7 @@ As a developer, I want every part of the editor that depends on a changed settin
 
 ### Background Logic
 
-- BL013_SettingsStoreObserver: the observer/notification mechanism itself.
+- BL008_SettingsStoreObserver: the observer/notification mechanism itself.
 
 ### Test Scenarios
 
@@ -1139,7 +784,7 @@ As a developer, I want my keyboard shortcuts to reliably trigger the right edito
 
 ### Background Logic
 
-- BL005_WorkspaceEventEmitterSubscribe: related entity-event plumbing that action handlers often trigger downstream (e.g. an action emits a follow-up event).
+- BL003_WorkspaceEventEmitterSubscribe: related entity-event plumbing that action handlers often trigger downstream (e.g. an action emits a follow-up event).
 
 ### Test Scenarios
 
@@ -1179,7 +824,7 @@ As a developer, I want to generate a permalink to my current file/selection on G
 
 ### Background Logic
 
-- BL011_GitHostingProviderDetection: the provider-detection module resolving the remote to a hosting provider.
+- BL006_GitHostingProviderDetection: the provider-detection module resolving the remote to a hosting provider.
 
 ### Test Scenarios
 
@@ -1197,7 +842,7 @@ As a developer, I want to generate a permalink to my current file/selection on G
 - [x] All technical notes are complete (or explicitly `N/A` with reason, e.g. no HTTP endpoint / no persisted entity)
 - [ ] All US### codes are referenced in FeatureList.md — N/A this pass; no upstream FeatureList generated in this session
 - [x] All `ui` US### mapped to a descriptive UI-surface screen name (no SCR###/ScreenList exists upstream for this `screen_source:none` project — see Adaptation Note)
-- [x] All `system` US### have at least one BL### mapped (US020, US021, US022, US023, US024 — US021 notes a partial/indirect BL relation; US024 maps to the closest related BL### since keybinding dispatch itself has no dedicated BL### item)
+- [x] All `system` US### have at least one BL### mapped (US021, US022, US023, US024 — US021 notes a partial/indirect BL relation; US024 maps to the closest related BL### since keybinding dispatch itself has no dedicated BL### item)
 
 ## Unresolved Questions
 
