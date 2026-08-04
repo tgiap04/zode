@@ -17,7 +17,7 @@ fi
 git pull -q --ff-only origin main
 
 # Parse the current version
-version=$(script/get-crate-version zed)
+version=$(script/get-crate-version zode)
 major=$(echo $version | cut -d. -f1)
 minor=$(echo $version | cut -d. -f2)
 patch=$(echo $version | cut -d. -f3)
@@ -64,7 +64,7 @@ fi
 echo "Promoting existing branch ${prev_minor_branch_name} to stable..."
 git checkout -q ${prev_minor_branch_name}
 git clean -q -dff
-stable_tag_name="v$(script/get-crate-version zed)"
+stable_tag_name="v$(script/get-crate-version zode)"
 if git show-ref --quiet refs/tags/${stable_tag_name}; then
   echo "tag ${stable_tag_name} already exists"
   exit 1
@@ -85,7 +85,7 @@ echo "Preparing main for version ${next_minor_branch_name}..."
 git checkout -q main
 git clean -q -dff
 git checkout -q -b ${bump_main_branch_name}
-cargo set-version --package zed --bump minor
+cargo set-version --package zode --bump minor
 cargo check -q
 
 git commit -q --all --message "${next_minor_branch_name} dev"

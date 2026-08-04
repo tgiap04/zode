@@ -45,7 +45,7 @@ fn run_bump_patch_version(branch: &WorkflowInput) -> steps::NamedJob {
                 ;;
             esac
             which cargo-set-version > /dev/null || cargo install cargo-edit -f --no-default-features --features "set-version"
-            version="$(cargo set-version -p zed --bump patch 2>&1 | sed 's/.* //')"
+            version="$(cargo set-version -p zode --bump patch 2>&1 | sed 's/.* //')"
             echo "version=$version" >> "$GITHUB_OUTPUT"
             echo "tag_suffix=$tag_suffix" >> "$GITHUB_OUTPUT"
         "#})

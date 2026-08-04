@@ -1,12 +1,12 @@
 [package]
-description = "The fast, collaborative code editor."
+description = "A privacy-first fork of the Zed code editor, with auth, cloud, AI and telemetry removed."
 edition.workspace = true
-name = "zed"
-version = "0.235.0"
+name = "zode"
+version = "0.1.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
-authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+authors = ["Zode contributors"]
+default-run = "zode"
 
 [lints]
 workspace = true
@@ -30,7 +30,7 @@ test-support = [
 ]
 
 [[bin]]
-name = "zed"
+name = "zode"
 path = "src/main.rs"
 
 [dependencies]
@@ -210,32 +210,32 @@ repl = { workspace = true, features = ["test-support"] }
 
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "dev.zed.Zed-Dev"
-name = "Zed Dev"
+identifier = "io.github.tgiap04.zode.dev"
+name = "Zode Dev"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
-identifier = "dev.zed.Zed-Nightly"
-name = "Zed Nightly"
+identifier = "io.github.tgiap04.zode.nightly"
+name = "Zode Nightly"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
-identifier = "dev.zed.Zed-Preview"
-name = "Zed Preview"
+identifier = "io.github.tgiap04.zode.preview"
+name = "Zode Preview"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+identifier = "io.github.tgiap04.zode"
+name = "Zode"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]

@@ -379,7 +379,7 @@ which_key = { path = "crates/which_key" }
 watch = { path = "crates/watch" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
-zed = { path = "crates/zed" }
+zode = { path = "crates/zed" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
 zed_env_vars = { path = "crates/zed_env_vars" }
@@ -839,7 +839,7 @@ lto = "thin"
 codegen-units = 1
 
 [profile.release.package]
-zed = { codegen-units = 16 }
+zode = { codegen-units = 16 }
 
 [profile.release-fast]
 inherits = "release"
