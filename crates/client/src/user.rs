@@ -9,9 +9,7 @@ use postage::{sink::Sink, watch};
 use rpc::proto::{RequestMessage, UsersResponse};
 use std::sync::{Arc, Weak};
 use text::ReplicaId;
-use util::{ResultExt, TryFutureExt as _};
-
-const CURRENT_ORGANIZATION_ID_KEY: &str = "current_organization_id";
+use util::TryFutureExt as _;
 
 pub type UserId = u64;
 
