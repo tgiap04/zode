@@ -1,167 +1,66 @@
-# FayeDark Agent Kit
+# Zode
 
-AI-powered development kit for coding agents (Claude Code, OpenCode). Specialized subagents handle planning, implementation, testing, and review.
+Zode is a fork of [Zed](https://github.com/zed-industries/zed), the code editor built
+by Zed Industries. This fork exists to answer one question: what does Zed look like
+with every account, cloud, AI, and telemetry code path removed rather than merely
+disabled?
 
-## Quick Start
+## What's different from upstream Zed
 
-### Install CLI from a private GitHub Release
+This fork removed:
 
-Requirements:
-- Node.js 18+
-- GitHub CLI authenticated with repo access: `gh auth login`
+- **Authentication and accounts** — no sign-in, no session, no credential storage.
+- **Cloud and collaboration** — no real-time collaboration server, no channels, no
+  shared projects. Editing is single-player.
+- **AI and agent features** — no AI providers, no edit predictions, no agent panel.
+- **Telemetry and crash reporting** — no usage analytics, no event tracking, no
+  minidump upload. `telemetry::send_event` is a no-op by construction, not by setting.
+- **Auto-update** — no in-app updater. Updates come from wherever you installed this
+  from (see Installing, below).
 
-```bash
-# Download the packaged CLI from the latest private release
-gh release download --repo cychipo/fd-kit --pattern "fayedark-kit-*.tgz"
+What's kept: the editor itself, LSP integration, the terminal, git integration, the
+debugger, extensions, and SSH remote development (rebuilt on a direct connection path
+rather than through a relay server).
 
-# Install globally from the downloaded tarball
-npm install -g ./fayedark-kit-*.tgz
+**One dependency was kept and disclosed rather than removed**: browsing and installing
+extensions still queries Zed Industries' extension registry (`api.zed.dev`). Dropping
+it meant either running an independent marketplace or losing the extension ecosystem
+entirely; for now, this fork keeps the registry and says so plainly instead. See
+[`legal/third-party-terms.md`](./legal/third-party-terms.md) for the full disclosure and
+[`legal/privacy-policy.md`](./legal/privacy-policy.md) for what does and doesn't leave
+your machine.
 
-# Verify installation
-fdk --help
+## Why
+
+Not a judgment on Zed's product decisions — its cloud, AI, and collaboration features
+are legitimate choices for a company building a business. This fork is for people who
+want the editor itself without any of that surface area: nothing phoning home, nothing
+to sign into, nothing to disable in settings because it was never wired up to begin
+with.
+
+## Installing
+
+<!-- TODO(packaging): fill in once a signed, notarized release artifact and a
+     Homebrew cask (or equivalent) exist. Until then, build from source: -->
+
+```sh
+git clone https://github.com/tgiap04/zode.git
+cd zode
+cargo build --release
 ```
 
-Alternative global install commands:
-
-```bash
-pnpm add -g ./fayedark-kit-*.tgz
-# or
-yarn global add file:./fayedark-kit-*.tgz
-# or
-bun add -g ./fayedark-kit-*.tgz
-```
-
-For project setup from the local monorepo:
-
-```bash
-cd ../my-project
-fdk init --local
-```
-
-Or point directly at a local kit directory:
-
-```bash
-fdk init --kit-path /path/to/agent-kit/claude
-```
-
-### Initialize a project
-
-```bash
-# From GitHub release (recommended for installed users)
-fdk init
-
-# From local monorepo (recommended when developing this repo)
-fdk init --local
-
-# Explicit local kit path
-fdk init --kit-path /path/to/agent-kit/claude
-```
-
-### Core commands
-
-```bash
-fdk doctor         # Health check
-fdk skills --list  # List installed skills
-fdk config show    # View configuration
-fdk update         # Update CLI, then offer to refresh project kit with fdk init
-```
-
-## Repo Layout
-
-This is a **monorepo** containing the kit and its CLI:
-
-```
-agent-kit/
-├── claude/           # Kit source (shipped as .claude/ after install)
-│   ├── agents/       # 16 specialized agents
-│   ├── skills/       # 80+ skills
-│   ├── commands/fdk/  # /fdk: slash commands
-│   ├── hooks/        # Lifecycle hooks
-│   ├── rules/        # Workflow rules
-│   ├── output-styles/
-│   ├── schemas/
-│   ├── session-state/
-│   ├── templates/
-│   ├── metadata.json
-│   └── settings.json
-├── cli/              # fayedark-agent-kit-cli (published to npm, CLI binary: `fdk`)
-├── scripts/          # Build scripts (prepare-release-assets.cjs)
-├── docs/             # Documentation
-├── tests/, evals/    # Dev-only
-└── .github/workflows/release.yml
-```
-
-## Update workflow
-
-When a new release is published:
-
-```bash
-fdk update
-```
-
-This updates the global CLI first, then hands off to `fdk init` so the `.claude/` kit inside each project can be refreshed.
-
-## Claude workflow after installation
-
-After the kit is installed, use these slash commands inside Claude Code:
-
-```
-/fdk:plan → /fdk:cook → /fdk:code-review → /fdk:ship
-```
-
-Claude orchestrates specialized subagents:
-
-| Agent | Role |
-|-------|------|
-| `planner` | Architecture breakdown, phase planning |
-| `implementer` | Code implementation per phase |
-| `tester` | Unit + integration tests, coverage |
-| `reviewer` | Code quality, spec compliance |
-| `debugger` | Root-cause investigation |
-| `researcher` | Technical research (parallel) |
-| `doc-writer` | Documentation updates |
-| `git-manager` | Git operations, commits |
-
-See `.claude/rules/primary-workflow.md` for the full protocol.
-
-## Common Claude slash commands
-
-These run inside Claude Code after `fdk init` has installed the kit:
-
-```text
-/fdk:plan Build a task management app
-/fdk:brainstorm Choose stack for real-time collaboration
-/fdk:fix Authentication bug when logging in with Google
-/fdk:code-review
-/fdk:ship
-```
-
-## Plan Format
-
-```
-plans/
-└── 260409-1226-task-management-app/
-    ├── plan.md
-    ├── phase-01-setup.md
-    ├── phase-02-database.md
-    └── phase-03-implementation.md
-```
-
-## Documentation
-
-- [Installation Guide](./docs/INSTALL.md)
-- [Development Guide](./docs/DEV.md)
-- [User Guide](./docs/GUIDE.md)
-- [Code Standards](./docs/code-standards.md)
-- [System Architecture](./docs/system-architecture.md)
-
-## Contributing
-
-1. Fork and create a feature branch
-2. Follow `.claude/rules/development-rules.md`
-3. Run `fdk doctor` to verify setup
-4. Submit PR
+The binary lands at `target/release/zode`. See [`docs/`](./docs/) for the full
+development setup (this fork's docs still describe most of upstream Zed's build
+process, since the build system itself wasn't touched).
 
 ## License
 
-Internal use — FayeDark.
+GPL-3.0-or-later for the application ([`LICENSE-GPL`](./LICENSE-GPL)) and Apache-2.0 for
+`gpui` and related crates ([`LICENSE-APACHE`](./LICENSE-APACHE)). See
+[`NOTICE`](./NOTICE) for attribution to the upstream Zed project.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md), which still describes upstream Zed's
+contribution process (largely unchanged by this fork) — apart from its references to
+Zed's own CLA and hosted forums, which don't apply here.

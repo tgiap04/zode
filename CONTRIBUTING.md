@@ -1,11 +1,14 @@
-# Contributing to Zed
+# Contributing to Zode
 
-Thank you for helping us make Zed better!
+Thank you for helping make Zode better!
 
-All activity in Zed forums is subject to our [Code of
-Conduct](https://zed.dev/code-of-conduct). Additionally, contributors must sign
-our [Contributor License Agreement](https://zed.dev/cla) before their
-contributions can be merged.
+Zode is a fork of Zed with no company, hosted forum, or CLA behind it — the rest of
+this document is inherited from upstream Zed's own `CONTRIBUTING.md` and still
+describes its process reasonably well for a repository like this one, but two things
+in particular don't apply here: there is no Zed-hosted forum this fork's activity is
+subject to, and there is no Contributor License Agreement to sign. Contributions are
+made under this repository's own license — see [`LICENSE-GPL`](./LICENSE-GPL) and
+[`LICENSE-APACHE`](./LICENSE-APACHE).
 
 ## Contribution ideas
 
