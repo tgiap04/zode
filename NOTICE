@@ -1,0 +1,23 @@
+Zode
+====
+
+Zode is a fork of Zed (https://github.com/zed-industries/zed), the code
+editor built by Zed Industries, Inc. and its contributors.
+
+This fork removes Zed's authentication, cloud, AI/agent, collaboration,
+edit-prediction, auto-update, and crash-reporting subsystems, in order to
+produce an independent editor with no account, no telemetry, and no network
+egress beyond what the user explicitly asks for (extension installs and
+language-server downloads). None of the changes made in this fork are
+endorsed by, affiliated with, or supported by Zed Industries, Inc.
+
+Zed's original source is licensed under the GNU General Public License v3.0
+or later (GPL-3.0-or-later) for its application code and the Apache License,
+Version 2.0 for `gpui` and related crates. See LICENSE-GPL and
+LICENSE-APACHE in this repository for the full license texts. This fork
+preserves all original copyright notices; see individual source files for
+authorship.
+
+"Zed" is a trademark of Zed Industries, Inc. This project is not affiliated
+with or endorsed by Zed Industries, Inc., and does not use the Zed name,
+logo, or branding for the software in this repository.

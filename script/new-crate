@@ -22,9 +22,6 @@ LICENSE_FLAG=$(echo "${2}" | tr '[:upper:]' '[:lower:]')
 if [[ "$LICENSE_FLAG" == *"apache"* ]]; then
     LICENSE_MODE="Apache-2.0"
     LICENSE_FILE="LICENSE-APACHE"
-elif [[ "$LICENSE_FLAG" == *"agpl"* ]]; then
-    LICENSE_MODE="AGPL-3.0-or-later"
-    LICENSE_FILE="LICENSE-AGPL"
 else
     LICENSE_MODE="GPL-3.0-or-later"
     LICENSE_FILE="LICENSE-GPL"

@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-AGPL_CRATES=("collab")
-RELEASE_CRATES=("cli" "remote_server" "zed")
+AGPL_CRATES=()
+RELEASE_CRATES=("cli" "remote_server" "zode")
 
 check_symlink_target () {
     local symlink_path="$1"
