@@ -7,8 +7,6 @@ use gpui::{App, AsyncApp, BorrowAppContext, Global};
 
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, mixer::Mixer};
 
-mod echo_canceller;
-use echo_canceller::EchoCanceller;
 mod rodio_ext;
 pub use rodio_ext::RodioExt;
 
@@ -41,7 +39,6 @@ pub fn ensure_devices_initialized(cx: &mut App) {
 #[derive(Default)]
 pub struct Audio {
     output: Option<(MixerDeviceSink, Mixer)>,
-    pub echo_canceller: EchoCanceller,
 }
 
 impl Global for Audio {}
