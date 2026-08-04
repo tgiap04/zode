@@ -38,11 +38,6 @@ impl SettingsInputField {
         }
     }
 
-    pub fn with_id(mut self, id: impl Into<ElementId>) -> Self {
-        self.id = Some(id.into());
-        self
-    }
-
     pub fn with_initial_text(mut self, initial_text: String) -> Self {
         self.initial_text = Some(initial_text);
         self
@@ -61,38 +56,8 @@ impl SettingsInputField {
         self
     }
 
-    pub fn display_confirm_button(mut self) -> Self {
-        self.display_confirm_button = true;
-        self
-    }
-
-    pub fn display_clear_button(mut self) -> Self {
-        self.display_clear_button = true;
-        self
-    }
-
-    pub fn clear_on_confirm(mut self) -> Self {
-        self.clear_on_confirm = true;
-        self
-    }
-
-    pub fn action_slot(mut self, action: impl IntoElement) -> Self {
-        self.action_slot = Some(action.into_any_element());
-        self
-    }
-
     pub(crate) fn tab_index(mut self, arg: isize) -> Self {
         self.tab_index = Some(arg);
-        self
-    }
-
-    pub fn with_buffer_font(mut self) -> Self {
-        self.use_buffer_font = true;
-        self
-    }
-
-    pub fn color(mut self, color: Color) -> Self {
-        self.color = Some(color);
         self
     }
 }
