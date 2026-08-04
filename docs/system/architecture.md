@@ -1,41 +1,27 @@
 # Architecture
 
-> [!CAUTION]
-> **STALE — do not treat this document as a description of the current code.**
-> It was generated on 2026-07-26 against the pre-fork tree of 240 packages /
-> 232 crates. The hard fork has since removed 54 crates and gutted several
-> more; the workspace is now 186 packages / 178 crates.
->
-> Anything here describing accounts, sign-in, collaboration, calls, channels,
-> AI agents, LLM providers, edit prediction, auto-update or crash reporting is
-> **fiction** — that code no longer exists. Feature codes F007, F008, F013,
-> F019, F020, F021 and F022 in particular no longer have an implementation.
->
-> Regeneration is deliberately deferred until the fork is green and verified
-> (`/tkm:rebuild-spec` after phase 11). Running it against a half-cut tree
-> would just produce a second stale document.
-
+**Rewritten 2026-08-04** against the post-fork tree (187 packages / 178 crates). This fork
+removed authentication, cloud/collaboration, AI/agent, edit-prediction, auto-update, and
+telemetry/crash-reporting — see `plans/260726-1531-remove-auth-cloud-hard-fork/plan.md` for the
+full 12-phase history of what changed and why.
 
 <!-- Stack: Rust workspace (generic-source profile), native GPUI desktop app.
-     Verified via root Cargo.toml (241 workspace members), rust-toolchain.toml (channel 1.94.1,
-     targets: wasm32-wasip2 [extensions], wasm32-unknown-unknown [gpui-web], x86_64-unknown-linux-musl [remote server]),
-     and dependency sampling of crates/editor, crates/gpui, crates/project, crates/agent, crates/collab,
-     crates/zed Cargo.toml [dependencies] sections (see scout-report.md for full per-crate inventory). -->
+     Verified via root Cargo.toml (187 workspace members), rust-toolchain.toml (channel 1.94.1,
+     targets: wasm32-wasip2 [extensions], wasm32-unknown-unknown [gpui-web], x86_64-unknown-linux-musl [remote server]). -->
 
 ## System Architecture
 
-The binary `crates/zed` (`default-members`) statically links ~230 in-workspace library crates. There
-is no client/server web split in the desktop app itself — `collab` is a separately-deployed backend
-binary that the desktop client talks to over a custom RPC/proto protocol (not HTTP routes), confirmed
-in `crates/collab/Cargo.toml` (axum + sea-orm + sqlx + tokio, its own binary target) vs. `crates/zed`
-(gpui-based binary, no axum/sea-orm deps).
+The binary `crates/zed` (package name `zode`) statically links the in-workspace library crates.
+There is no client/server split of any kind anymore — no cloud backend, no collaboration server.
+The only outbound network paths are the disclosed extension registry (`api.zed.dev`) and
+per-language-server downloads from each server's own distributor.
 
 ```mermaid
 graph TB
     subgraph "Application Shell"
-        ZED[crates/zed — binary entry point]
+        ZED[crates/zed — binary entry point, package name zode]
         WS[workspace — panes/docks/panels]
-        CLI[cli — zed launcher binary]
+        CLI[cli — zode launcher binary]
     end
 
     subgraph "GPUI Framework (rendering/windowing engine)"
@@ -65,19 +51,9 @@ graph TB
         DAP[dap / dap_adapters]
     end
 
-    subgraph "AI / Agent"
-        AGENT[agent — Thread engine]
-        AGENT_UI[agent_ui]
-        LANG_MODEL[language_model — provider abstraction]
-        PROVIDERS[anthropic / open_ai / google_ai / bedrock / ollama / ... — per-vendor clients]
-        EDIT_PRED[edit_prediction* — Zeta inline completion]
-    end
-
-    subgraph "Collaboration & Networking (separate deployable)"
-        CLIENT[client — auth/websocket to collab]
-        RPC[rpc / proto — wire protocol]
-        COLLAB[collab server binary — axum + sea-orm/postgres]
-        LIVEKIT[livekit_api / livekit_client — calls]
+    subgraph "Remote Development"
+        REMOTE[remote / remote_connection — direct SSH connection]
+        REMOTE_SERVER[remote_server — runs on the remote host]
     end
 
     subgraph "Version Control"
@@ -93,16 +69,15 @@ graph TB
     end
 
     subgraph "UI Component Library"
-        UI[ui — design system, 106 files]
+        UI[ui — design system]
         PICKER[picker]
     end
 
     ZED --> WS
     WS --> EDITOR
-    ZED --> AGENT_UI
     ZED --> EXT_HOST
     ZED --> GIT_UI
-    ZED --> CLIENT
+    ZED --> REMOTE
 
     EDITOR --> MB --> TEXT
     EDITOR --> LANG --> TEXT
@@ -115,21 +90,13 @@ graph TB
     PROJECT --> LSP
     PROJECT --> DAP
     PROJECT --> GIT
-    PROJECT --> RPC
     PROJECT --> GPUI
 
     LANG --> LSP
     EXT_HOST --> EXTENSIONS
     EXT_HOST -.-> PROJECT
 
-    AGENT --> LANG_MODEL --> PROVIDERS
-    AGENT --> PROJECT
-    AGENT --> DB
-    AGENT_UI --> AGENT
-    EDIT_PRED --> EDITOR
-
-    CLIENT --> RPC --> COLLAB
-    CLIENT --> LIVEKIT
+    REMOTE --> REMOTE_SERVER
     GIT_UI --> GIT --> BUFFER_DIFF
 
     WS --> SETTINGS
@@ -146,75 +113,62 @@ graph TB
 | Layer | Technology | Version / Evidence |
 |-------|------------|---------|
 | Language | Rust | toolchain `1.94.1`, `rust-toolchain.toml` |
-| UI framework | GPUI (in-house, `crates/gpui`) | GPU-accelerated retained-mode UI; own entity/element/layout system (Taffy flex layout `taffy = "=0.9.0"`) |
+| UI framework | GPUI (in-house, `crates/gpui`) | GPU-accelerated retained-mode UI; own entity/element/layout system (Taffy flex layout) |
 | Rendering backend | `gpui_wgpu` (wgpu) + platform backends | `gpui_macos` (Cocoa/Metal via objc2), `gpui_linux` (X11/Wayland), `gpui_windows` (Win32/Direct3D), `gpui_web` (wasm32-unknown-unknown, experimental) |
-| Text/buffer engine | `text`, `rope`, `sum_tree` (in-house CRDT-like rope + B-tree index) | `crates/text/src/text.rs:59 Buffer` |
+| Text/buffer engine | `text`, `rope`, `sum_tree` (in-house rope + B-tree index) | `crates/text/src/text.rs` `Buffer` |
 | Language intelligence | `lsp` (custom LSP client), tree-sitter grammars via `grammars`/`languages` | LSP client transport, not tower-lsp |
 | Extension runtime | WASM via `extension_host`, targets `wasm32-wasip2` | confirmed in `rust-toolchain.toml` targets |
 | Local persistence | SQLite via `sqlez` (thin async wrapper) + `db` | app state (workspace layout, kv store) |
-| AI/LLM integration | `language_model` abstraction + per-vendor client crates | `anthropic`, `open_ai`, `google_ai`, `bedrock`, `mistral`, `ollama`, `lmstudio`, `deepseek`, `open_router`, `vercel`, `x_ai`, `copilot` |
-| Agent protocol | ACP (Agent Client Protocol) via `agent-client-protocol` dep + `acp_thread` | `crates/agent/Cargo.toml` dep `agent-client-protocol.workspace = true` |
-| Collab server (separate binary) | axum 0.6 (WS/HTTP), sea-orm 1.1.10 + sqlx 0.8 (Postgres), tokio (full) | `crates/collab/Cargo.toml` — distinct dependency profile from the desktop `zed` binary |
-| Client↔collab wire protocol | Custom binary RPC (`rpc`, `proto` crates) over WebSocket (`async-tungstenite`) | not REST/gRPC |
-| Calls/media | LiveKit (WebRTC) via `livekit_api`/`livekit_client`; `audio`, `denoise` | |
-| Async runtime | GPUI's own executor (`cx.spawn`, `cx.background_spawn`); `gpui_tokio` bridges Tokio only where a dep requires it (e.g. AWS SDK) | not tokio-first; 360 files use `cx.spawn`, 153 use `cx.background_spawn` per scout report |
-| Build/workspace | Cargo workspace, resolver "2", 241 members | root `Cargo.toml` |
+| Remote development | direct SSH connection via `remote`/`remote_connection`, running `remote_server` on the host | rebuilt in this fork — no relay server |
+| Async runtime | GPUI's own executor (`cx.spawn`, `cx.background_spawn`); `gpui_tokio` bridges Tokio only where a dep requires it | not tokio-first |
+| Build/workspace | Cargo workspace, resolver "2", 187 members | root `Cargo.toml` |
 | Packaging targets | macOS/Linux/Windows native, `x86_64-unknown-linux-musl` (remote server), WASM (extensions + experimental web) | `rust-toolchain.toml` |
 
 ## Concurrency & Event Model
 
-GPUI supplies its own concurrency and pub/sub primitives in place of an OS/web-framework thread pool
-or message broker (confirmed via scout report's Background Logic Source Inventory, `[SIGNAL_INFERRED]`):
+GPUI supplies its own concurrency and pub/sub primitives in place of an OS/web-framework thread
+pool or message broker:
 
 ```mermaid
 graph LR
     A[UI thread: Entity update via cx] -->|cx.spawn| B[Foreground async task]
     A -->|cx.background_spawn| C[Background thread pool task]
     C -->|result| A
-    A -->|cx.emit event| D[EventEmitter — 187 impls]
+    A -->|cx.emit event| D[EventEmitter impls]
     D -->|cx.subscribe| E[Other entities react]
-    F[SettingsStore] -->|notifies ~40 impl Settings for registrants| G[Per-crate settings structs]
+    F[SettingsStore] -->|notifies impl Settings for registrants| G[Per-crate settings structs]
 ```
 
-- **Entity model**: nearly every major struct (`Editor`, `Project`, `Workspace`, `Thread`) is held as
+- **Entity model**: nearly every major struct (`Editor`, `Project`, `Workspace`) is held as
   `Entity<T>`, mutated only through `cx.update`/`cx.update_in` — enforced single-writer discipline
-  (per project `CLAUDE.md`, cross-checked against `gpui` crate structure).
-- **Scheduler abstraction**: `crates/scheduler/src/scheduler.rs:72 pub trait Scheduler` — deterministic
-  time abstraction backing timers, with a fake implementation for tests.
-- **Action dispatch**: `actions!()` macro (128 files) + `.on_action()` handlers (133 files) function as
-  the app's "controller layer" for user-triggered commands.
+  (per project `CLAUDE.md`).
+- **Scheduler abstraction**: `crates/scheduler` — deterministic time abstraction backing timers,
+  with a fake implementation for tests.
+- **Action dispatch**: `actions!()` macro + `.on_action()` handlers function as the app's
+  "controller layer" for user-triggered commands.
 
-## Client / Server Split (Collaboration)
+## Remote Development (replaces the old client/server collaboration split)
 
 ```mermaid
 sequenceDiagram
-    participant Desktop as Zed Desktop (client crate)
-    participant RPC as rpc/proto (wire protocol)
-    participant Collab as collab server (axum + sea-orm/postgres)
-    participant LiveKit as LiveKit (WebRTC)
+    participant Local as Zode (local machine)
+    participant SSH as SSH connection
+    participant Remote as remote_server (remote host)
 
-    Desktop->>RPC: encode proto message (auth, room join, channel op)
-    RPC->>Collab: WebSocket frame (async-tungstenite)
-    Collab->>Collab: sea-orm query against Postgres
-    Collab-->>RPC: proto response / broadcast
-    RPC-->>Desktop: decoded message routed to handler
-    Desktop->>LiveKit: join call room (audio/video)
+    Local->>SSH: establish direct SSH connection
+    SSH->>Remote: spawn remote_server binary
+    Remote-->>SSH: project/LSP/file operations over the same rpc/proto framing
+    SSH-->>Local: results routed back to the local UI
 ```
 
-This is the only client/server boundary in the system; it is optional (collaboration/AI-cloud
-features) — the core editing experience (Editor Core, Project/Filesystem, Language Intelligence)
-runs fully local with no network dependency.
+This is the only host-boundary-crossing path in the system, and it is entirely opt-in (the user
+explicitly connects to a remote host). The core editing experience (Editor Core,
+Project/Filesystem, Language Intelligence) runs fully local with no network dependency at all.
 
 ## Notes / Limits
 
-- Diagrams are derived from scout-report.md subsystem groupings plus direct `[dependencies]`
-  inspection of six representative crates (`editor`, `gpui`, `project`, `agent`, `collab`, `zed`);
-  not every one of the 241 workspace crates' Cargo.toml was individually verified — smaller
-  leaf/utility crates (e.g. `clock`, `paths`, `env_var`) are trusted from the scout report's
-  per-crate purpose descriptions rather than re-sampled here.
-- No REST/GraphQL/gRPC API surface exists (per scout report `## Detected API Kind: N/A`); the
-  "System Architecture" diagram intentionally has no API-gateway layer, unlike the generic template.
-- Edit-prediction (Zeta) and AI/Agent subsystems overlap in `edit_prediction*` vs `agent*` crates;
-  this doc treats them as sibling subsystems per scout grouping rather than merging them, since their
-  Cargo.toml dependency sets do not overlap significantly (edit_prediction depends on editor directly;
-  agent depends on project/language_model).
+- No REST/GraphQL/gRPC API surface exists; this app has no API-gateway layer.
+- SSH remote development is the single least-tested change in this fork relative to upstream Zed
+  — it was rebuilt rather than salvaged, since the original path assumed collaboration
+  infrastructure (`collab`) that no longer exists. See Phase 11's `network-verification.md` for
+  what's been verified so far.

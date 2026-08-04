@@ -1,33 +1,15 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # Business Rules (DRAFT)
 
-> [!CAUTION]
-> **STALE — do not treat this document as a description of the current code.**
-> It was generated on 2026-07-26 against the pre-fork tree of 240 packages /
-> 232 crates. The hard fork has since removed 54 crates and gutted several
-> more; the workspace is now 186 packages / 178 crates.
->
-> Anything here describing accounts, sign-in, collaboration, calls, channels,
-> AI agents, LLM providers, edit prediction, auto-update or crash reporting is
-> **fiction** — that code no longer exists. Feature codes F007, F008, F013,
-> F019, F020, F021 and F022 in particular no longer have an implementation.
->
-> Regeneration is deliberately deferred until the fork is green and verified
-> (`/tkm:rebuild-spec` after phase 11). Running it against a half-cut tree
-> would just produce a second stale document.
+**Rewritten 2026-08-04** against the post-fork tree (187 packages / 178 crates). This fork
+removed authentication, cloud/collaboration, AI/agent, edit-prediction, auto-update, and
+telemetry/crash-reporting. Two rules present in the original draft — "Collaboration Role Gates
+Both Visibility and Editing" and "Destructive Git Operations Are Host-Only Regardless of Role" —
+described the now-deleted real-time collaboration system and have been removed rather than
+rewritten, since no collaboration session of any kind exists in this fork.
 
-
-**Project**: Zed (zode)
-**Generated**: 2026-07-26
+**Project**: Zode
 **Status**: DRAFT — promoted from behavior-logic.md + data-model.md validation rules
-
-> **Source note**: `behavior-logic.md` for this pass contains no `BR-###`-coded business rules
-> (this is a `generic-source`, no-screen-list profile pass covering background/system logic
-> only — `docs/system/business-rules.md draft deferred` marker in that file confirms no
-> user-facing BR/DEC/SM/ALG material was extracted). The substantive product/system rules below
-> are instead summarized from the BL### item descriptions in `behavior-logic.md` and the
-> `Validation Rules` section of `data-model.md`, rewritten in plain language per instructions.
-> NO PERM### or BL### codes appear below.
 
 ### Extension Sandbox Capability Allowlisting
 
@@ -43,12 +25,11 @@ extension-authoring time.
 
 ### Buffer Read-Only Enforcement
 
-**Applies when:** A user or a remote collaborator attempts to edit an open file (or a combined
-multi-file view built from one or more open files).
-**Says:** Every open file carries its own editable/read-only status. Edits are silently rejected
-(no user-facing error) when the file's status is not fully editable — this covers files
-deliberately toggled to view-only as well as files a remote collaborator was never granted write
-access to.
+**Applies when:** A user attempts to edit an open file (or a combined multi-file view built from
+one or more open files).
+**Says:** Every open file carries its own editable/read-only status (e.g. from the
+`read_only_files` setting). Edits are silently rejected (no user-facing error) when the file's
+status is not fully editable.
 **Source artifact:** [Permissions](permissions.md)
 
 ---
@@ -62,29 +43,6 @@ settings, which win over built-in defaults. Whenever any settings file changes, 
 re-parses and re-applies this precedence order automatically; parse errors are tracked per file
 rather than failing the whole settings load.
 **Source artifact:** [Architecture](../system/architecture.md)
-
----
-
-### Collaboration Role Gates Both Visibility and Editing
-
-**Applies when:** A user joins someone else's shared coding session or channel.
-**Says:** The role they're assigned determines two independent things — whether they can see the
-shared project/channel content at all, and whether their edits are actually forwarded to the
-host. A viewer-only participant's edit attempts are turned away before reaching the host, not just
-hidden in their own UI.
-**Source artifact:** [Permissions](permissions.md)
-
----
-
-### Destructive Git Operations Are Host-Only Regardless of Role
-
-**Applies when:** A collaborator (of any role) attempts a small set of destructive git-worktree
-operations (removing/renaming a worktree, creating or restoring an archive checkpoint) inside a
-shared project.
-**Says:** These specific operations are always denied for non-hosting participants, independent of
-whether their assigned role otherwise permits editing. This is a fixed safety rule layered on top
-of the normal role system, not a configurable permission.
-**Source artifact:** [Permissions](permissions.md)
 
 ---
 
@@ -110,11 +68,10 @@ outright, so previously-published extensions keep working after a manifest schem
 
 ## Limits / What This Draft Does Not Cover
 
-- No feature-list or user-facing feature specs exist yet for this repo (`generic-source` profile,
-  no `--feature-specs` pass run) — these rules are system-level, not tied to any F### feature.
-- The 13 BL### items in `behavior-logic.md` are explicitly a representative sample of pattern
-  categories in a 1.3M-LOC codebase, not an exhaustive enumeration — additional business rules
-  likely exist in areas not sampled (LSP-specific behavior, per-vendor LLM integration quirks,
-  debugger/DAP session rules) and were not surfaced by this pass.
+- No feature-list or user-facing feature specs exist for this repo (`generic-source` profile, no
+  `--feature-specs` pass run) — these rules are system-level, not tied to any F### feature.
+- This is a representative sample of pattern categories, not an exhaustive enumeration —
+  additional business rules likely exist in areas not sampled (LSP-specific behavior, debugger/DAP
+  session rules, extension registry interaction) and were not surfaced by this pass.
 - This draft should be reviewed against `docs/decisions/ADR-*.md` (human-authored) if/when those
   exist, since ADRs often encode the *why* behind a rule that source alone cannot show.
