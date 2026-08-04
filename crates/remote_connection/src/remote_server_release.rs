@@ -222,7 +222,7 @@ async fn cleanup_cache(platform_dir: &Path, keep_path: &Path, limit: usize) -> R
         entries.push((path, modified));
     }
 
-    if entries.len() + 1 <= limit {
+    if entries.len() < limit {
         return Ok(());
     }
 
