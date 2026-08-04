@@ -1,7 +1,7 @@
 ---
 phase: 11
 title: "Green gates and privacy verification"
-status: pending
+status: "Gate A complete; Gate B/C need the user (GUI + sudo)"
 effort: "2d"
 ---
 
@@ -166,27 +166,27 @@ playback, or cut the dependency. Verify with `cargo tree -i libwebrtc`.
 
 ## Todo List
 
-- [ ] 11a `cargo check --workspace` **and** `--all-features` green
-- [ ] 11a `cargo build --release` green; binary size recorded
-- [ ] 11a Test suite green; no new failures vs Phase 10
-- [ ] 11a `script/clippy` clean (`--deny warnings`, `cargo machete`, `typos`)
-- [ ] 11a `cargo tree -i` reports "not found" for all sampled deleted crates
-- [ ] 11a Ripgrep sweep clean
-- [ ] 11a Dead `[patch.crates-io]` entries pruned
-- [ ] 11a `post-deletion-metrics.md` written
-- [ ] 11b Static endpoint sweep — only expected survivors
-- [ ] 11b `lsof` snapshot clean
-- [ ] 11b `nettop` session log clean
-- [ ] 11b Blackhole **Tier 1** (telemetry/crash/LLM/collab) — zero traffic
-- [ ] 11b Blackhole **Tier 2** (`api.zed.dev`, separate run) — graceful degradation, no crash/hang/retry storm
-- [ ] 11b Little Snitch session run and reviewed
-- [ ] 11b `network-verification.md` written
-- [ ] 11c Extension install works
-- [ ] 11c LSP auto-download works
-- [ ] 11c **SSH remote development works**
-- [ ] 11c Hang traces written to disk
-- [ ] 11c Legacy `settings.json`/`keymap.json` load cleanly
-- [ ] 11c All 7 base keymaps clean
+- [x] 11a `cargo check --workspace` **and** `--all-features` green
+- [x] 11a `cargo build --release` green; binary size recorded (216 MB, unchanged at this rounding)
+- [x] 11a Test suite green; no new failures vs Phase 10 (3993/4001, delta fully accounted for — see plan.md)
+- [x] 11a `script/clippy` clean (`--deny warnings`, `cargo machete`; `typos`/`buf` not installed, script degrades gracefully as designed)
+- [x] 11a `cargo tree -i` reports "not found" for all sampled deleted crates
+- [x] 11a Ripgrep sweep clean (one pre-existing, unrelated finding recorded: dormant `background_agent_mvp.yml` CI workflow, flagged not touched)
+- [x] 11a Dead `[patch.crates-io]` entries pruned (`libwebrtc`, `webrtc-sys`; `livekit` was already unpatched)
+- [x] 11a `post-deletion-metrics.md` written
+- [x] 11b Static endpoint sweep — only expected survivors, plus one new non-egress finding (`CIMD_URL`, handed to Phase 12)
+- [ ] 11b `lsof` snapshot clean — **needs the user**: requires launching the release GUI binary
+- [ ] 11b `nettop` session log clean — **needs the user**: requires `sudo`
+- [ ] 11b Blackhole **Tier 1** (telemetry/crash/LLM/collab) — zero traffic — **needs the user**: `/etc/hosts` edit under `sudo`
+- [ ] 11b Blackhole **Tier 2** (`api.zed.dev`, separate run) — graceful degradation, no crash/hang/retry storm — **needs the user**
+- [ ] 11b Little Snitch session run and reviewed — **needs the user**: third-party GUI app, not confirmed installed
+- [x] 11b `network-verification.md` written — records the static findings and the exact recipe for the runtime steps above
+- [ ] 11c Extension install works — **needs the user**: interactive GUI test
+- [ ] 11c LSP auto-download works — **needs the user**
+- [ ] 11c **SSH remote development works** — **needs the user**: requires a real remote host
+- [ ] 11c Hang traces written to disk — **needs the user**
+- [ ] 11c Legacy `settings.json`/`keymap.json` load cleanly — **needs the user**
+- [ ] 11c All 7 base keymaps clean — **needs the user**
 
 ## Success Criteria
 

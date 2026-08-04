@@ -64,7 +64,7 @@ Turn this Zed fork into an independent, privacy-first IDE: **no Zed account, no 
 | 8 | [Fix heavy survivors](./phase-08-fix-heavy-survivors.md) | Completed (8f closed as a no-op — MCP kept) |
 | 9 | [Data files keymaps and settings](./phase-09-data-files-keymaps-and-settings.md) | Completed — **the app launches** |
 | 10 | [Tests and docs](./phase-10-tests-and-docs.md) | Completed — **1 open regression handed to Phase 11** |
-| 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Pending |
+| 11 | [Green gates and privacy verification](./phase-11-green-gates-and-privacy-verification.md) | Gate A (mechanical) complete — Gate B/C (runtime, GUI) need the user |
 | 12 | [Rebrand and packaging](./phase-12-rebrand-and-packaging.md) | Pending |
 
 **Build-state map:** Phases 1–3 green · **Phase 4 goes RED** · Phases 5–7 red · **Phase 8 returns green
@@ -518,6 +518,62 @@ naming what is inapplicable; Phase 12 owns the replacement.
 **Deferred to Phase 11:** `tooling/xtask/src/tasks/workflows/` still generates CI steps that upload
 debug symbols to Sentry and deploy the deleted `collab` crate. These are **generated** files and
 `run_tests` fails CI on any hand edit to `.github`, so they are a generator change.
+
+### Phase 11 — 2026-08-04 · commits `c575bc3` `84917ef` `f8a667b` `f459957` `315d4e0`
+
+**Gate A (mechanical) is green: `cargo check --workspace` (+`--all-features`), `cargo build
+--release` (15m12s), `cargo nextest run --workspace --no-fail-fast`, and `./script/clippy`
+(`cargo clippy --release --all-targets --all-features -- --deny warnings` + `cargo machete`) all
+pass. `cargo machete` finds zero unused dependencies workspace-wide.**
+
+**`--deny warnings` under `--all-targets --all-features` is what finally forced the debt Phases
+5–10 deliberately deferred into the open.** A plain `cargo check` never compiles `#[cfg(test)]`
+code, so none of it had ever actually been checked for dead code until this phase ran the real
+gate. rustc's own dead-code lint found:
+
+- `crates/audio`'s `EchoCanceller` — the last thing in the workspace still pulling in
+  `libwebrtc`/`webrtc-sys`/`livekit`, and its owning `Audio` struct has had zero external callers
+  since collab voice calls left. Removed, along with the now-dead `[patch.crates-io]` entries.
+- `client`'s `connect_with_credentials`/`set_connection`/`establish_connection`/`rpc_url`/
+  `establish_websocket_connection` and the `proxy.rs`/`proxy/{http,socks}_proxy.rs` module they
+  were the only caller of — exactly the ~500 lines Phase 5 flagged as "kept on a false pretext."
+  26 warnings in one crate, all resolved. **Deliberately left**: the `authenticate`/
+  `establish_connection`/`rpc_url` fields and their `override_*` setters — genuine `pub` API at
+  the crate root (rustc correctly treats it as reachable), zero real callers, which is precisely
+  this phase's own bar for "may exist as a type but must have no caller."
+- 30 unused dependency entries across `client`, `zed`, `title_bar`, `settings_ui`, `file_finder`,
+  `onboarding`, and `audio` (cargo-machete, each verified individually with `rg` before removal).
+- Two dead builder-pattern methods on `settings_ui` components, and three unrelated pre-existing
+  clippy violations (`int_plus_one` in `remote_connection`, `redundant_clone` ×2 in `git_ui`/
+  `zed`, one unused import) — none tied to this fork's own deletions, all first-time-visible
+  because this is the first time the real gate command has ever completed against this branch.
+
+**Two false alarms, checked rather than assumed.** A plain `cargo build --release` (no
+`--all-targets`) flags `ProjectClientState::Collab` as never-constructed — but it *is* constructed,
+via Phase 8's deliberately-kept `mark_as_collab_for_testing` test helper, the moment `--all-targets`
+compiles test code. Confirmed with `cargo check -p project --all-targets --all-features`: zero
+warnings. Left untouched. Separately, a `--all-features`-only (dev-profile, `--all-targets`) build
+of `settings` hits a real `rust-embed`/`debug-embed` feature-unification quirk from
+`remote_server`'s optional debug-embed feature — reproduced on a clean baseline stash, so
+pre-existing and unrelated to this session. It does not reproduce under `--release`, which is what
+`script/clippy` actually runs, so it does not block this gate.
+
+**Tests: 3993 run (was 4001), 3992 passed, 1 failed, 11 skipped — same 193 binaries, same single
+failure.** The 8-test delta is exactly `client::proxy::{http_proxy,socks_proxy}` — the module just
+deleted. Verified by diffing against Phase 10's actual run log (not the separate all-features
+inventory list, which was never the right comparison). The one failure is the same
+`test_refresh_requested_multi_server` regression Phase 10 bisected to Phase 4 and left open.
+
+**Gate B and Gate C are not done — they need the user.** Static endpoint sweep is complete and
+recorded in `research/network-verification.md`: the only real background-egress path is the
+disclosed `build_zed_api_url` (extension registry / LSP downloads), plus a new, non-egress finding
+- `context_server/oauth.rs`'s `CIMD_URL` presents this fork as `zed.dev` to third-party MCP OAuth
+servers, a rebrand question handed to Phase 12. What's left - `lsof`/`nettop` snapshots, the
+two-tier `/etc/hosts` blackhole test, a Little Snitch/LuLu session, and the full functional pass
+(extension install, LSP auto-download, SSH remote dev, hang traces, legacy config, all 7 base
+keymaps) - all require launching the actual release GUI binary, editing `/etc/hosts` under `sudo`
+twice, and driving the app interactively. The recipe is written down in
+`research/network-verification.md` for whoever runs it.
 
 ## Execution rule: how to cut (learned the hard way in Phase 5)
 
