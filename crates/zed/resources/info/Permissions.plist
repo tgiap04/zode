@@ -1,18 +1,18 @@
 <key>NSSystemAdministrationUsageDescription</key>
-<string>The operation being performed by a program in Zed requires elevated permission.</string>
+<string>The operation being performed by a program in Zode requires elevated permission.</string>
 <key>NSAppleEventsUsageDescription</key>
-<string>An application in Zed wants to use AppleScript.</string>
+<string>An application in Zode wants to use AppleScript.</string>
 <key>NSBluetoothAlwaysUsageDescription</key>
-<string>An application in Zed wants to use Bluetooth.</string>
+<string>An application in Zode wants to use Bluetooth.</string>
 <key>NSCalendarsUsageDescription</key>
-<string>An application in Zed wants to use Calendar data.</string>
+<string>An application in Zode wants to use Calendar data.</string>
 <key>NSContactsUsageDescription</key>
-<string>An application in Zed wants to use your contacts.</string>
+<string>An application in Zode wants to use your contacts.</string>
 <key>NSLocationAlwaysUsageDescription</key>
-<string>An application in Zed wants to use your location information, even in the background.</string>
+<string>An application in Zode wants to use your location information, even in the background.</string>
 <key>NSLocationUsageDescription</key>
-<string>An application in Zed wants to use your location information.</string>
+<string>An application in Zode wants to use your location information.</string>
 <key>NSLocationWhenInUseUsageDescription</key>
-<string>An application in Zed wants to use your location information while active.</string>
+<string>An application in Zode wants to use your location information while active.</string>
 <key>NSRemindersUsageDescription</key>
-<string>An application in Zed wants to use your reminders.</string>
+<string>An application in Zode wants to use your reminders.</string>

@@ -3,7 +3,7 @@ use gpui::{App, ClipboardItem, PromptLevel, actions};
 use system_specs::{CopySystemSpecsIntoClipboard, SystemSpecs};
 use util::ResultExt;
 use workspace::Workspace;
-use zed_actions::feedback::{EmailZed, FileBugReport, RequestFeature};
+use zed_actions::feedback::{FileBugReport, RequestFeature};
 
 actions!(
     zed,
@@ -15,14 +15,14 @@ actions!(
     ]
 );
 
-const ZED_REPO_URL: &str = "https://github.com/zed-industries/zed";
+const ZED_REPO_URL: &str = "https://github.com/tgiap04/zode";
 
-const REQUEST_FEATURE_URL: &str = "https://github.com/zed-industries/zed/discussions/new/choose";
+const REQUEST_FEATURE_URL: &str = "https://github.com/tgiap04/zode/issues/new";
 
 fn file_bug_report_url(specs: &SystemSpecs) -> String {
     format!(
         concat!(
-            "https://github.com/zed-industries/zed/issues/new",
+            "https://github.com/tgiap04/zode/issues/new",
             "?",
             "template=10_bug_report.yml",
             "&",
@@ -30,18 +30,6 @@ fn file_bug_report_url(specs: &SystemSpecs) -> String {
         ),
         urlencoding::encode(&specs.to_string())
     )
-}
-
-fn email_zed_url(specs: &SystemSpecs) -> String {
-    format!(
-        concat!("mailto:hi@zed.dev", "?", "body={}"),
-        email_body(specs)
-    )
-}
-
-fn email_body(specs: &SystemSpecs) -> String {
-    let body = format!("\n\nSystem Information:\n\n{}", specs);
-    urlencoding::encode(&body).to_string()
 }
 
 pub fn init(cx: &mut App) {
@@ -88,17 +76,6 @@ pub fn init(cx: &mut App) {
                     let specs = specs.await;
                     cx.update(|_, cx| {
                         cx.open_url(&file_bug_report_url(&specs));
-                    })
-                    .log_err();
-                })
-                .detach();
-            })
-            .register_action(move |_, _: &EmailZed, window, cx| {
-                let specs = SystemSpecs::new(window, cx);
-                cx.spawn_in(window, async move |_, cx| {
-                    let specs = specs.await;
-                    cx.update(|_, cx| {
-                        cx.open_url(&email_zed_url(&specs));
                     })
                     .log_err();
                 })
