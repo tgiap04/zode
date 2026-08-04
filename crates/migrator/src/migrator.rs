@@ -253,6 +253,7 @@ pub fn migrate_settings(text: &str) -> Result<Option<String>> {
         MigrationType::Json(
             migrations::m_2026_04_17::promote_show_branch_icon_true_to_show_branch_status_icon,
         ),
+        MigrationType::Json(migrations::m_2026_07_27::remove_dead_subsystem_settings),
     ];
     run_migrations(text, migrations)
 }
@@ -795,23 +796,7 @@ mod tests {
                     }
                 }
             "#,
-            Some(
-                r#"
-                {
-                    "agent": {
-                        "profiles": {
-                            "custom": {
-                                "name": "Custom",
-                                "tools": {
-                                    "terminal": true,
-                                    "diagnostics": true
-                                }
-                            }
-                        }
-                    }
-                }
-            "#,
-            ),
+            Some("\n                {\n                    \n                }\n            "),
         )
     }
 
@@ -833,23 +818,7 @@ mod tests {
                     }
                 }
             "#,
-            Some(
-                r#"
-                {
-                    "agent": {
-                        "profiles": {
-                            "custom": {
-                                "name": "Custom",
-                                "tools": {
-                                    "terminal": false,
-                                    "diagnostics": true
-                                }
-                            }
-                        }
-                    }
-                }
-            "#,
-            ),
+            Some("\n                {\n                    \n                }\n            "),
         )
     }
 
@@ -872,24 +841,7 @@ mod tests {
                     }
                 }
             "#,
-            Some(
-                r#"
-                {
-                    "agent": {
-                        "profiles": {
-                            "custom": {
-                                "name": "Custom",
-                                "tools": {
-                                    "diagnostics": true,
-                                    "find_path": true,
-                                    "read_file": true
-                                }
-                            }
-                        }
-                    }
-                }
-            "#,
-            ),
+            Some("\n                {\n                    \n                }\n            "),
         )
     }
 
@@ -910,22 +862,7 @@ mod tests {
                     }
                 }
             "#,
-            Some(
-                r#"
-                {
-                    "agent": {
-                        "profiles": {
-                            "default": {
-                                "tools": {
-                                    "find_path": true,
-                                    "read_file": true
-                                }
-                            }
-                        }
-                    }
-                }
-            "#,
-            ),
+            Some("\n                {\n                    \n                }\n            "),
         );
     }
 
@@ -941,14 +878,7 @@ mod tests {
                 }
             }"#,
             Some(
-                r#"{
-                "agent": {
-                    "foo": "bar"
-                },
-                "edit_predictions": {
-                    "enabled_in_text_threads": false,
-                }
-            }"#,
+                "{\n                \"edit_predictions\": {\n                    \"enabled_in_text_threads\": false,\n                }\n            }",
             ),
         );
     }
@@ -970,19 +900,7 @@ mod tests {
             }
         "#,
             Some(
-                r#"{
-                /* Duplicated key auto-commented: "agent": {
-                    "name": "assistant-1",
-                "model": "gpt-4", // weird formatting
-                    "utf8": "привіт"
-                }, */
-                "something": "else",
-                "agent": {
-                    "name": "assistant-2",
-                    "model": "gemini-pro"
-                }
-            }
-        "#,
+                "{\n                /* Duplicated key auto-commented: \"agent\": {\n                    \"name\": \"assistant-1\",\n                \"model\": \"gpt-4\", // weird formatting\n                    \"utf8\": \"привіт\"\n                }, */\n                \"something\": \"else\"\n            }\n        ",
             ),
         );
     }
@@ -1272,32 +1190,11 @@ mod tests {
         }
     }
 }"#,
-            Some(
-                r#"{
-    "language_models": {
-        "anthropic": {
-            "api_url": "https://api.anthropic.com"
-        },
-        "openai": {
-            "api_url": "https://api.openai.com/v1"
-        }
-    },
-    "agent": {
-        "enabled": true,
-        "button": true,
-        "dock": "right",
-        "default_width": 640,
-        "default_height": 320,
-        "default_model": {
-            "provider": "zed.dev",
-            "model": "claude-sonnet-4"
-        }
-    }
-}"#,
-            ),
+            Some("{\n    \n}"),
         );
 
-        // Test that version fields in other contexts are not removed
+        // language_models is a dead subsystem key, so it gets stripped entirely;
+        // other_section is unaffected
         assert_migrate_settings(
             r#"{
     "language_models": {
@@ -1310,7 +1207,7 @@ mod tests {
         "version": "1"
     }
 }"#,
-            None,
+            Some("{\n    \"other_section\": {\n        \"version\": \"1\"\n    }\n}"),
         );
     }
 
@@ -5368,5 +5265,104 @@ mod tests {
             .unindent(),
             None,
         );
+    }
+
+    #[test]
+    fn test_remove_dead_subsystem_settings_at_root() {
+        assert_migrate_settings(
+            &r#"
+            {
+                "theme": "One Dark",
+                "agent": {
+                    "enabled": true,
+                    "button": true
+                },
+                "language_models": {
+                    "openai": {
+                        "api_url": "https://api.openai.com/v1"
+                    }
+                },
+                "collaboration_panel": {
+                    "button": true
+                },
+                "calls": {
+                    "mute_on_join": false
+                },
+                "message_editor": {
+                    "auto_replace_emoji_shortcode": true
+                },
+                "auto_update": false,
+                "show_call_status_icon": true,
+                "agent_ui_font_size": 14,
+                "agent_buffer_font_size": 12
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "theme": "One Dark"
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_remove_dead_subsystem_settings_leaves_other_keys_untouched() {
+        assert_migrate_settings(
+            &r#"
+            {
+                "theme": "One Dark",
+                "vim_mode": true,
+                "agent": {
+                    "enabled": true
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "theme": "One Dark",
+                    "vim_mode": true
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_remove_dead_subsystem_settings_in_platform_override() {
+        assert_migrate_settings(
+            &r#"
+            {
+                "linux": {
+                    "agent": {
+                        "enabled": true
+                    },
+                    "vim_mode": true
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "linux": {
+                        "vim_mode": true
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_remove_dead_subsystem_settings_no_change_when_absent() {
+        assert_migrate_settings(&r#"{ "theme": "One Dark" }"#.unindent(), None);
     }
 }
