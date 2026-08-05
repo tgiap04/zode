@@ -1,6 +1,13 @@
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
+* When a natural choice exists between algorithms/data structures of different complexity, prefer O(1) or O(log n) over O(n), and O(n) over O(n^2) or worse — but never at the cost of correctness or clarity, and never by adding speculative complexity to a path that doesn't need it (e.g. leave a linear scan over a small, bounded collection as-is).
+  - Reach for `HashMap`/`HashSet`/`BTreeMap` lookups instead of scanning a `Vec` when membership or key lookup happens repeatedly.
+  - Watch for accidental O(n^2): nested loops over the same collection, `.contains()`/`.find()` inside a loop, `Vec::insert(0, ..)` in a loop, or repeated `.clone()`/string concatenation (`format!`/`+=`) inside a loop instead of `with_capacity` + `push`/`push_str`.
+* Guard against memory leaks and unbounded growth:
+  - Avoid `Rc`/`Arc` reference cycles — use `Weak` for back-references (parent/child, observer/observed) so cycles don't keep memory alive forever.
+  - Don't let caches, logs, or buffers grow unbounded — cap size or evict, and make the eviction policy explicit.
+  - Make sure long-lived `Task`s, subscriptions, and event listeners are dropped/detached when no longer needed (see `## Concurrency` below for `Task` cancellation semantics).
 * Do not write organizational or comments that summarize the code. Comments should only be written in order to explain "why" the code is written in some way in the case there is a reason that is tricky / non-obvious.
 * Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many small files.
 * Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.
