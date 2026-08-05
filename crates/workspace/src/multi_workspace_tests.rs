@@ -4,10 +4,10 @@ use super::*;
 use crate::item::test::TestItem;
 use client::proto;
 use fs::{FakeFs, Fs};
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{TestAppContext, UpdateGlobal, VisualTestContext};
 use project::DisableAiSettings;
 use serde_json::json;
-use settings::SettingsStore;
+use settings::{MultiProjectContent, SettingsStore};
 use util::path;
 
 fn init_test(cx: &mut TestAppContext) {
@@ -16,6 +16,38 @@ fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings_store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         DisableAiSettings::register(cx);
+    });
+}
+
+/// Sets `workspace.multi_project.retain_background_projects` and
+/// immediately retains the currently active workspace, reproducing the
+/// retention side effect that `open_sidebar()` used to provide before
+/// retention was decoupled from the sidebar UI (phase 1 of
+/// multi-project-window-switching). Tests that only need retention
+/// enabled — not the sidebar panel itself — should use this instead of
+/// `open_sidebar()`.
+fn enable_background_project_retention(mw: &mut MultiWorkspace, cx: &mut Context<MultiWorkspace>) {
+    SettingsStore::update_global(cx, |settings, cx| {
+        settings.update_user_settings(cx, |settings| {
+            settings.workspace.multi_project = Some(MultiProjectContent {
+                retain_background_projects: Some(true),
+            });
+        });
+    });
+    mw.retain_active_workspace(cx);
+}
+
+/// Sets `workspace.multi_project.retain_background_projects` to `false`
+/// explicitly, rather than relying on the phase's current default, so
+/// tests pinning this behavior still hold once the default flips to
+/// `true` at the end of Phase 3.
+fn disable_background_project_retention(cx: &mut Context<MultiWorkspace>) {
+    SettingsStore::update_global(cx, |settings, cx| {
+        settings.update_user_settings(cx, |settings| {
+            settings.workspace.multi_project = Some(MultiProjectContent {
+                retain_background_projects: Some(false),
+            });
+        });
     });
 }
 
@@ -103,7 +135,7 @@ async fn test_project_group_keys_initial(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        mw.open_sidebar(cx);
+        enable_background_project_retention(mw, cx);
     });
 
     multi_workspace.read_with(cx, |mw, _cx| {
@@ -133,7 +165,7 @@ async fn test_project_group_keys_add_workspace(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        mw.open_sidebar(cx);
+        enable_background_project_retention(mw, cx);
     });
 
     multi_workspace.read_with(cx, |mw, _cx| {
@@ -275,7 +307,7 @@ async fn test_project_group_keys_duplicate_not_added(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        mw.open_sidebar(cx);
+        enable_background_project_retention(mw, cx);
     });
 
     multi_workspace.update_in(cx, |mw, window, cx| {
@@ -305,9 +337,10 @@ async fn test_adding_worktree_updates_project_group_key(cx: &mut TestAppContext)
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
 
-    // Open sidebar to retain the workspace and create the initial group.
+    // Enable retention so this workspace is retained and gets an initial
+    // project group.
     multi_workspace.update(cx, |mw, cx| {
-        mw.open_sidebar(cx);
+        enable_background_project_retention(mw, cx);
     });
     cx.run_until_parked();
 
@@ -481,7 +514,7 @@ async fn test_find_or_create_local_workspace_reuses_active_workspace_after_sideb
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        mw.open_sidebar(cx);
+        enable_background_project_retention(mw, cx);
     });
     cx.run_until_parked();
 
@@ -489,7 +522,7 @@ async fn test_find_or_create_local_workspace_reuses_active_workspace_after_sideb
         assert_eq!(
             mw.project_groups(cx).len(),
             1,
-            "opening the sidebar should retain the active workspace in a project group"
+            "enabling retention should retain the active workspace in a project group"
         );
         mw.workspace().clone()
     });
@@ -544,7 +577,7 @@ async fn test_close_workspace_prefers_already_loaded_neighboring_workspace(
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |multi_workspace, cx| {
-        multi_workspace.open_sidebar(cx);
+        enable_background_project_retention(multi_workspace, cx);
     });
     cx.run_until_parked();
 
@@ -680,7 +713,7 @@ async fn test_remote_project_root_dir_changes_update_groups(cx: &mut TestAppCont
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        mw.open_sidebar(cx);
+        enable_background_project_retention(mw, cx);
     });
     cx.run_until_parked();
 
@@ -785,7 +818,9 @@ async fn test_open_project_closes_empty_workspace_but_not_non_empty_ones(cx: &mu
     cx.run_until_parked();
 
     window
-        .update(cx, |mw, _window, cx| mw.open_sidebar(cx))
+        .update(cx, |mw, _window, cx| {
+            enable_background_project_retention(mw, cx)
+        })
         .unwrap();
     cx.run_until_parked();
 
@@ -902,4 +937,217 @@ async fn test_open_project_closes_empty_workspace_but_not_non_empty_ones(cx: &mu
         })
         .unwrap();
     assert!(workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_some()),);
+}
+
+#[gpui::test]
+async fn test_cycle_project_reaches_workspace_added_via_open_mode_add(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    // `zode /root_a` — first window, nothing retained yet under the
+    // default `retain_background_projects: false` policy.
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    // `zode /root_b` with the default `cli_default_open_behavior:
+    // existing_window` lands here via `OpenMode::Add`: retained, but not
+    // activated. Before this phase this was a dead end — no sidebar
+    // existed to cycle back to it.
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| Workspace::test_new(project_b.clone(), window, cx));
+        mw.add(workspace.clone(), &*window, cx);
+        workspace
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.workspace().entity_id(),
+            workspace_a.entity_id(),
+            "OpenMode::Add must not change the active workspace"
+        );
+        assert_eq!(
+            mw.workspaces().count(),
+            2,
+            "the added workspace must be reachable alongside the active one"
+        );
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.cycle_project(true, window, cx);
+    });
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.workspace().entity_id(),
+            workspace_b.entity_id(),
+            "NextProject must reach the workspace added via OpenMode::Add"
+        );
+    });
+}
+
+/// Covers the phase's success criterion literally: three projects opened
+/// into one window (the seed workspace plus two more added the way
+/// `OpenMode::Add` does), `NextProject` visits all three and wraps back
+/// to the first. This only holds with retention enabled — under the
+/// `false` default, cycling away from a workspace that was never
+/// explicitly retained detaches it by design (see
+/// `test_retain_background_projects_false_detaches_on_switch`), so a
+/// full round-trip that revisits the start requires
+/// `retain_background_projects: true` (the state Phase 3 will make the
+/// default once hibernation exists).
+#[gpui::test]
+async fn test_cycle_project_wraps_through_three_retained_workspaces(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    fs.insert_tree("/root_c", json!({ "file_c.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+    let project_c = Project::test(fs, ["/root_c".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    let workspace_a = multi_workspace.update(cx, |mw, cx| {
+        enable_background_project_retention(mw, cx);
+        mw.workspace().clone()
+    });
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| Workspace::test_new(project_b.clone(), window, cx));
+        mw.add(workspace.clone(), &*window, cx);
+        workspace
+    });
+    let workspace_c = multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| Workspace::test_new(project_c.clone(), window, cx));
+        mw.add(workspace.clone(), &*window, cx);
+        workspace
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.workspaces().count(),
+            3,
+            "all three projects should be simultaneously live"
+        );
+    });
+
+    let mut visited = Vec::new();
+    for _ in 0..3 {
+        visited.push(multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone()));
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.cycle_project(true, window, cx);
+        });
+    }
+
+    assert_eq!(
+        visited,
+        vec![workspace_a.clone(), workspace_b, workspace_c],
+        "NextProject should visit all three workspaces in retained order"
+    );
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.workspace(),
+            &workspace_a,
+            "the fourth NextProject press should wrap back to the first workspace"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_retain_background_projects_false_detaches_on_switch(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    // Pin the setting explicitly rather than relying on the phase's
+    // current default, so this regression test still holds once the
+    // default flips to `true` at the end of Phase 3.
+    multi_workspace.update(cx, |_mw, cx| {
+        disable_background_project_retention(cx);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    assert!(
+        workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_some()),
+        "initial active workspace should start attached to the session"
+    );
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx)
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(mw.workspace().entity_id(), workspace_b.entity_id());
+        assert_eq!(
+            mw.workspaces().count(),
+            1,
+            "retain_background_projects: false must keep at most one live workspace"
+        );
+    });
+    assert!(
+        workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_none()),
+        "switching away from workspace A with retention explicitly disabled should detach it"
+    );
+}
+
+#[gpui::test]
+async fn test_activate_provisional_workspace_honors_retain_background_projects_false(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    multi_workspace.update(cx, |_mw, cx| {
+        disable_background_project_retention(cx);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| Workspace::test_new(project_b.clone(), window, cx));
+        let key = workspace.read(cx).project_group_key(cx);
+        mw.activate_provisional_workspace(workspace.clone(), key, window, cx);
+        workspace
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.workspace().entity_id(),
+            workspace_b.entity_id(),
+            "the provisional workspace should become active"
+        );
+        assert_eq!(
+            mw.workspaces().count(),
+            1,
+            "retain_background_projects: false must not retain the provisional workspace's predecessor"
+        );
+    });
+    assert!(
+        workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_none()),
+        "the previous active workspace should be detached, matching activate()'s policy"
+    );
 }

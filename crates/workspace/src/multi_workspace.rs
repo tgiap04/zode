@@ -25,7 +25,7 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 use crate::open_remote_project_with_existing_connection;
 use crate::{
     CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
-    Panel, Workspace, WorkspaceId, client_side_decorations,
+    Panel, Workspace, WorkspaceId, WorkspaceSettings, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
 
@@ -92,6 +92,12 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
     ) {
     }
 
+    // TODO(phase-07): project cycling now lives on `MultiWorkspace::cycle_project`,
+    // driven directly by `retained_workspaces` order, so `NextProject`/
+    // `PreviousProject` no longer call this. Revisit both methods when the
+    // sidebar crate is rebuilt: decide whether the sidebar should still own
+    // thread cycling and/or intercept project cycling while its
+    // threads-list view is active (see `is_threads_list_view_active`).
     /// Activates the next or previous project.
     fn cycle_project(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
 
@@ -488,7 +494,7 @@ impl MultiWorkspace {
                 multi_workspace.workspaces().cloned().collect::<Vec<_>>()
             })?;
 
-            for workspace in workspaces {
+            for workspace in &workspaces {
                 let should_continue = workspace
                     .update_in(cx, |workspace, window, cx| {
                         workspace.prepare_to_close(CloseIntent::CloseWindow, window, cx)
@@ -498,6 +504,27 @@ impl MultiWorkspace {
                     return anyhow::Ok(());
                 }
             }
+
+            // Flush every workspace's pending debounced serialization before
+            // the window closes. If this turns out to be the last window,
+            // `remove_window()` below triggers `cx.quit()` directly (see
+            // `bind_on_window_closed` in zed.rs), which bypasses the `Quit`
+            // action's own manual flush loop (crates/zed/src/zed.rs
+            // `quit()`) — `app_will_quit` alone only covers this
+            // `MultiWorkspace`'s own state, not each workspace's pane
+            // layout. Best-effort: a flush failing here must not block the
+            // window from closing.
+            let flush_tasks: Vec<Task<()>> = workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    workspace
+                        .update_in(cx, |workspace, window, cx| {
+                            workspace.flush_serialization(window, cx)
+                        })
+                        .log_err()
+                })
+                .collect();
+            futures::future::join_all(flush_tasks).await;
 
             cx.update(|window, _cx| {
                 window.remove_window();
@@ -684,12 +711,16 @@ impl MultiWorkspace {
         }
 
         self.ensure_project_group_state(provisional_key);
-        if !self.is_workspace_retained(&workspace) {
+        // Routed through the same policy as `activate()` — see
+        // `should_retain()` — so this live, user-driven path (opening a
+        // remote/SSH project) doesn't retain in the background when
+        // `retain_background_projects` is `false`.
+        if self.should_retain(cx) && !self.is_workspace_retained(&workspace) {
             self.retained_workspaces.push(workspace.clone());
+            cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace.clone()));
         }
 
-        self.activate(workspace.clone(), None, window, cx);
-        cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace));
+        self.activate(workspace, None, window, cx);
     }
 
     fn register_workspace(
@@ -1350,8 +1381,20 @@ impl MultiWorkspace {
 
     /// Adds a workspace to this window as persistent without changing which
     /// workspace is active. Unlike `activate()`, this always inserts into the
-    /// persistent list regardless of sidebar state — it's used for system-
-    /// initiated additions like deserialization and worktree discovery.
+    /// persistent list regardless of the `retain_background_projects`
+    /// setting — it's used for system-initiated additions like
+    /// deserialization and worktree discovery.
+    ///
+    /// This is intentional, not an oversight: `add()`'s job is to
+    /// faithfully restore a workspace that was already persisted, so it
+    /// must not silently drop project groups just because the user's
+    /// *current* live setting says not to retain new ones going forward
+    /// (see NFR2 in the multi-project-window-switching plan — an old
+    /// session must deserialize without losing project groups). The live,
+    /// user-driven retention policy is enforced by `activate()` and
+    /// `activate_provisional_workspace()` instead; reachability for
+    /// anything `add()` retains is provided by `cycle_project()`, which
+    /// walks `workspaces()` regardless of how each entry got there.
     pub fn add(&mut self, workspace: Entity<Workspace>, window: &Window, cx: &mut Context<Self>) {
         if self.is_workspace_retained(&workspace) {
             return;
@@ -1370,6 +1413,21 @@ impl MultiWorkspace {
         cx.notify();
     }
 
+    /// Whether a workspace that loses focus should stay retained in the
+    /// background, per the `workspace.multi_project.retain_background_projects`
+    /// setting. This governs the live `activate()` retain/detach policy.
+    ///
+    /// It intentionally does NOT gate `add()` (used for deserialization and
+    /// other system-initiated insertions, which must always retain to
+    /// faithfully restore a previously-saved session regardless of the
+    /// user's current live setting) nor the sidebar UI panel's open/closed
+    /// state, which is now independent of retention.
+    fn should_retain(&self, cx: &App) -> bool {
+        WorkspaceSettings::get_global(cx)
+            .multi_project
+            .retain_background_projects
+    }
+
     /// Ensures the workspace is in the multiworkspace and makes it the active one.
     pub fn activate(
         &mut self,
@@ -1386,11 +1444,12 @@ impl MultiWorkspace {
         let old_active_workspace = self.active_workspace.clone();
         let old_active_was_retained = self.active_workspace_is_retained();
         let workspace_was_retained = self.is_workspace_retained(&workspace);
+        let should_retain = self.should_retain(cx);
 
         if !workspace_was_retained {
             self.register_workspace(&workspace, window, cx);
 
-            if self.sidebar_open {
+            if should_retain {
                 let key = workspace.read(cx).project_group_key(cx);
                 self.retain_workspace(workspace.clone(), key, cx);
             }
@@ -1403,7 +1462,7 @@ impl MultiWorkspace {
             group.last_active_workspace = Some(self.active_workspace.downgrade());
         }
 
-        if !self.sidebar_open && !old_active_was_retained {
+        if !should_retain && !old_active_was_retained {
             self.detach_workspace(&old_active_workspace, cx);
         }
 
@@ -1411,6 +1470,38 @@ impl MultiWorkspace {
         self.serialize(cx);
         self.focus_active_workspace(window, cx);
         cx.notify();
+    }
+
+    /// Activates the next (`forward = true`) or previous workspace in
+    /// `workspaces()` order, wrapping around at either end. A no-op when
+    /// fewer than two workspaces are open.
+    ///
+    /// This is what makes every retained workspace reachable regardless of
+    /// how it entered `retained_workspaces` (`add()`, `activate()`, or
+    /// `activate_provisional_workspace()`) — previously only a `Sidebar`
+    /// implementation could drive project switching, so a workspace added
+    /// while no sidebar existed (e.g. `OpenMode::Add` from a second CLI
+    /// invocation) was retained but unreachable.
+    pub fn cycle_project(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let workspaces: Vec<Entity<Workspace>> = self.workspaces().cloned().collect();
+        if workspaces.len() < 2 {
+            return;
+        }
+
+        let Some(current_index) = workspaces
+            .iter()
+            .position(|workspace| workspace == &self.active_workspace)
+        else {
+            return;
+        };
+
+        let next_index = if forward {
+            (current_index + 1) % workspaces.len()
+        } else {
+            (current_index + workspaces.len() - 1) % workspaces.len()
+        };
+
+        self.activate(workspaces[next_index].clone(), None, window, cx);
     }
 
     /// Promotes the currently active workspace to persistent if it is
@@ -2068,16 +2159,17 @@ impl Render for MultiWorkspace {
                             }
                         },
                     ))
+                    // Project cycling is driven by `MultiWorkspace` directly so it
+                    // works with no sidebar present (see `cycle_project`). A
+                    // rebuilt sidebar (phase-07) that wants to intercept this
+                    // while its own threads-list view is active should branch
+                    // on `this.is_threads_list_view_active(cx)` here.
                     .on_action(cx.listener(|this: &mut Self, _: &NextProject, window, cx| {
-                        if let Some(sidebar) = &this.sidebar {
-                            sidebar.cycle_project(true, window, cx);
-                        }
+                        this.cycle_project(true, window, cx);
                     }))
                     .on_action(
                         cx.listener(|this: &mut Self, _: &PreviousProject, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.cycle_project(false, window, cx);
-                            }
+                            this.cycle_project(false, window, cx);
                         }),
                     )
                     .on_action(cx.listener(|this: &mut Self, _: &NextThread, window, cx| {

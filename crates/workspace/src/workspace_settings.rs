@@ -36,6 +36,17 @@ pub struct WorkspaceSettings {
     pub zoomed_padding: bool,
     pub window_decorations: settings::WindowDecorations,
     pub focus_follows_mouse: FocusFollowsMouse,
+    pub multi_project: MultiProjectSettings,
+}
+
+/// Resolved settings governing multiple projects retained in a single window.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct MultiProjectSettings {
+    /// Whether a project that loses focus stays retained in the background
+    /// instead of being detached. See
+    /// `settings::MultiProjectContent::retain_background_projects` for the
+    /// full rationale and default.
+    pub retain_background_projects: bool,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -120,6 +131,13 @@ impl Settings for WorkspaceSettings {
             use_system_window_tabs: workspace.use_system_window_tabs.unwrap(),
             zoomed_padding: workspace.zoomed_padding.unwrap(),
             window_decorations: workspace.window_decorations.unwrap(),
+            multi_project: MultiProjectSettings {
+                retain_background_projects: workspace
+                    .multi_project
+                    .unwrap()
+                    .retain_background_projects
+                    .unwrap(),
+            },
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace
                     .focus_follows_mouse

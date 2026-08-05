@@ -50,6 +50,9 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: existing_window
     pub cli_default_open_behavior: Option<CliDefaultOpenBehavior>,
+    /// Settings for retaining and switching between multiple projects
+    /// opened into a single window.
+    pub multi_project: Option<MultiProjectContent>,
     /// Whether to attempt to restore previous file's state when opening it again.
     /// The state is stored per pane.
     /// When disabled, defaults are applied instead of the state restoration.
@@ -1022,4 +1025,22 @@ impl DocumentSymbols {
 pub struct FocusFollowsMouse {
     pub enabled: Option<bool>,
     pub debounce_ms: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct MultiProjectContent {
+    /// Whether a project that loses focus in a multi-project window is kept
+    /// alive in the background instead of being detached. When `false`,
+    /// only the currently active project stays live — at most one project
+    /// alive per window, matching the behavior before project retention
+    /// existed.
+    ///
+    /// Temporary flag: defaults to `false` until the resource-hibernation
+    /// governor lands, so background projects don't pay full LSP/worktree
+    /// cost while unsupervised; it is expected to default to `true` once
+    /// that governor ships.
+    ///
+    /// Default: false
+    pub retain_background_projects: Option<bool>,
 }

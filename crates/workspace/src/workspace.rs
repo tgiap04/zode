@@ -10868,7 +10868,7 @@ mod tests {
     };
     use project::{Project, ProjectEntryId};
     use serde_json::json;
-    use settings::SettingsStore;
+    use settings::{MultiProjectContent, SettingsStore};
     use util::path;
     use util::rel_path::rel_path;
 
@@ -11073,7 +11073,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                mw.open_sidebar(cx);
+                enable_background_project_retention(mw, cx);
             })
             .unwrap();
 
@@ -11159,7 +11159,9 @@ mod tests {
         cx.run_until_parked();
 
         multi_workspace_handle
-            .update(cx, |mw, _window, cx| mw.open_sidebar(cx))
+            .update(cx, |mw, _window, cx| {
+                enable_background_project_retention(mw, cx)
+            })
             .unwrap();
 
         let workspace_a = multi_workspace_handle
@@ -14978,7 +14980,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                mw.open_sidebar(cx);
+                enable_background_project_retention(mw, cx);
             })
             .unwrap();
 
@@ -15087,6 +15089,27 @@ mod tests {
             cx.set_global(db::AppDatabase::test_new());
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
+    }
+
+    /// Sets `workspace.multi_project.retain_background_projects` and
+    /// immediately retains the currently active workspace, reproducing the
+    /// retention side effect that `open_sidebar()` used to provide before
+    /// retention was decoupled from the sidebar UI (phase 1 of
+    /// multi-project-window-switching). Tests that need more than one
+    /// workspace to stay retained across `activate()` calls — not the
+    /// sidebar panel itself — should use this instead of `open_sidebar()`.
+    pub(crate) fn enable_background_project_retention(
+        mw: &mut MultiWorkspace,
+        cx: &mut Context<MultiWorkspace>,
+    ) {
+        SettingsStore::update_global(cx, |settings, cx| {
+            settings.update_user_settings(cx, |settings| {
+                settings.workspace.multi_project = Some(MultiProjectContent {
+                    retain_background_projects: Some(true),
+                });
+            });
+        });
+        mw.retain_active_workspace(cx);
     }
 
     #[gpui::test]

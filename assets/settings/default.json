@@ -144,6 +144,18 @@
   //     that are already part of an open project)
   //         "cli_default_open_behavior": "new_window"
   "cli_default_open_behavior": "existing_window",
+  // Settings for retaining and switching between multiple projects opened
+  // into a single window (e.g. via `cli_default_open_behavior:
+  // "existing_window"`).
+  "multi_project": {
+    // Whether a project that loses focus stays retained in the background
+    // instead of being detached. `false` keeps at most one project alive
+    // per window (today's behavior). This is a temporary flag that
+    // defaults to `false` until the resource-hibernation governor lands,
+    // and is expected to flip to `true` once background projects stop
+    // paying full LSP/worktree cost.
+    "retain_background_projects": false
+  },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
   // When disabled, defaults are applied instead of the state restoration.
