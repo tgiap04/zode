@@ -710,14 +710,14 @@ impl MultiWorkspace {
             self.register_workspace(&workspace, window, cx);
         }
 
-        self.ensure_project_group_state(provisional_key);
-        // Routed through the same policy as `activate()` — see
-        // `should_retain()` — so this live, user-driven path (opening a
-        // remote/SSH project) doesn't retain in the background when
-        // `retain_background_projects` is `false`.
-        if self.should_retain(cx) && !self.is_workspace_retained(&workspace) {
-            self.retained_workspaces.push(workspace.clone());
-            cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace.clone()));
+        // The project-group metadata is created either way — only the
+        // workspace's own retention is gated. Routed through the same
+        // policy as `activate()` (see `should_retain()`), so this live,
+        // user-driven path (opening a remote/SSH project) doesn't retain
+        // in the background when `retain_background_projects` is `false`.
+        self.ensure_project_group_state(provisional_key.clone());
+        if self.should_retain(cx) {
+            self.retain_workspace(workspace.clone(), provisional_key, cx);
         }
 
         self.activate(workspace, None, window, cx);
@@ -1230,6 +1230,14 @@ impl MultiWorkspace {
             let window_handle =
                 window_handle.ok_or_else(|| anyhow::anyhow!("Window is not a MultiWorkspace"))?;
 
+            // `open_remote_project_with_existing_connection` already routes
+            // through `activate()`/`activate_provisional_workspace()`
+            // internally (see `open_remote_project_inner`), which correctly
+            // apply `should_retain()`. Do NOT also call `add()` here — that
+            // would unconditionally re-retain the workspace those calls just
+            // correctly decided (possibly) not to retain, silently
+            // overriding the policy for every remote/SSH project opened
+            // this way.
             open_remote_project_with_existing_connection(
                 connection_options,
                 new_project,
@@ -1242,10 +1250,8 @@ impl MultiWorkspace {
             )
             .await?;
 
-            window_handle.update(cx, |multi_workspace, window, cx| {
-                let workspace = multi_workspace.workspace().clone();
-                multi_workspace.add(workspace.clone(), window, cx);
-                workspace
+            window_handle.update(cx, |multi_workspace, _window, _cx| {
+                multi_workspace.workspace().clone()
             })
         })
     }
@@ -1380,21 +1386,21 @@ impl MultiWorkspace {
     }
 
     /// Adds a workspace to this window as persistent without changing which
-    /// workspace is active. Unlike `activate()`, this always inserts into the
-    /// persistent list regardless of the `retain_background_projects`
-    /// setting — it's used for system-initiated additions like
-    /// deserialization and worktree discovery.
+    /// workspace is active, unconditionally — regardless of the
+    /// `retain_background_projects` setting. Only call this directly from
+    /// **session-restore/deserialization** call sites (`persistence.rs`'s
+    /// restore path, `open_workspace_by_id`), which must faithfully
+    /// reconstruct a previously-saved session rather than lose project
+    /// groups because the user's *current* live setting says not to retain
+    /// new ones going forward (see NFR2 in the multi-project-window-switching
+    /// plan — an old session must deserialize without losing project
+    /// groups).
     ///
-    /// This is intentional, not an oversight: `add()`'s job is to
-    /// faithfully restore a workspace that was already persisted, so it
-    /// must not silently drop project groups just because the user's
-    /// *current* live setting says not to retain new ones going forward
-    /// (see NFR2 in the multi-project-window-switching plan — an old
-    /// session must deserialize without losing project groups). The live,
-    /// user-driven retention policy is enforced by `activate()` and
-    /// `activate_provisional_workspace()` instead; reachability for
-    /// anything `add()` retains is provided by `cycle_project()`, which
-    /// walks `workspaces()` regardless of how each entry got there.
+    /// Live, user-driven flows that pass `OpenMode::Add` (e.g. creating or
+    /// switching a linked git worktree, or `find_or_create_workspace`'s
+    /// remote/SSH path) must go through `add_or_activate()` instead, so the
+    /// policy is actually enforced — calling `add()` directly from a live
+    /// flow silently overrides whatever `should_retain()` decided.
     pub fn add(&mut self, workspace: Entity<Workspace>, window: &Window, cx: &mut Context<Self>) {
         if self.is_workspace_retained(&workspace) {
             return;
@@ -1413,16 +1419,39 @@ impl MultiWorkspace {
         cx.notify();
     }
 
+    /// Adds `workspace` to this window, or activates it, depending on
+    /// `should_retain()`. This is the entry point live, user-driven flows
+    /// should use for a workspace they don't necessarily want to force into
+    /// the foreground (mirroring `OpenMode::Add`'s original intent) — when
+    /// retention is on, it's added in the background exactly like `add()`;
+    /// when retention is off, adding it in the background would leave it
+    /// unreachable once the caller's local scope ends (nothing retains it,
+    /// nothing keeps it active), so it's activated instead, matching
+    /// `activate()`'s own "at most one live project" policy.
+    pub fn add_or_activate(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.should_retain(cx) {
+            self.add(workspace, &*window, cx);
+        } else {
+            self.activate(workspace, None, window, cx);
+        }
+    }
+
     /// Whether a workspace that loses focus should stay retained in the
     /// background, per the `workspace.multi_project.retain_background_projects`
-    /// setting. This governs the live `activate()` retain/detach policy.
+    /// setting. This governs the live `activate()` retain/detach policy
+    /// (and, via `add_or_activate()`, live callers of `OpenMode::Add`).
     ///
-    /// It intentionally does NOT gate `add()` (used for deserialization and
-    /// other system-initiated insertions, which must always retain to
-    /// faithfully restore a previously-saved session regardless of the
-    /// user's current live setting) nor the sidebar UI panel's open/closed
-    /// state, which is now independent of retention.
-    fn should_retain(&self, cx: &App) -> bool {
+    /// It intentionally does NOT gate `add()` directly (used for
+    /// deserialization and other system-initiated insertions, which must
+    /// always retain to faithfully restore a previously-saved session
+    /// regardless of the user's current live setting) nor the sidebar UI
+    /// panel's open/closed state, which is now independent of retention.
+    pub(crate) fn should_retain(&self, cx: &App) -> bool {
         WorkspaceSettings::get_global(cx)
             .multi_project
             .retain_background_projects

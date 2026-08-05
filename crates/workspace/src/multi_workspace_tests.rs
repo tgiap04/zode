@@ -948,16 +948,21 @@ async fn test_cycle_project_reaches_workspace_added_via_open_mode_add(cx: &mut T
     let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
     let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
 
-    // `zode /root_a` — first window, nothing retained yet under the
-    // default `retain_background_projects: false` policy.
+    // Unit-level exercise of the `add()` + `cycle_project()` mechanism
+    // directly: `add()` always retains without activating (this is what
+    // deserialization uses, and what `add_or_activate()` falls back to
+    // when `retain_background_projects` is `true`). The real
+    // `cli_default_open_behavior: existing_window` CLI path does NOT call
+    // `add()` — it goes through `workspace::open_paths` with
+    // `OpenMode::Activate`, exercised end-to-end by
+    // `test_open_paths_reusing_existing_window_respects_retain_background_projects_false`
+    // below. What matters here: before this phase, a workspace retained via
+    // `add()` (or `add_or_activate` with retention on) but never activated
+    // was a dead end — no sidebar existed to cycle back to it.
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
     let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
 
-    // `zode /root_b` with the default `cli_default_open_behavior:
-    // existing_window` lands here via `OpenMode::Add`: retained, but not
-    // activated. Before this phase this was a dead end — no sidebar
-    // existed to cycle back to it.
     let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
         let workspace = cx.new(|cx| Workspace::test_new(project_b.clone(), window, cx));
         mw.add(workspace.clone(), &*window, cx);
@@ -989,6 +994,89 @@ async fn test_cycle_project_reaches_workspace_added_via_open_mode_add(cx: &mut T
             "NextProject must reach the workspace added via OpenMode::Add"
         );
     });
+}
+
+/// End-to-end regression test through the *real* CLI entry point
+/// (`workspace::open_paths`), not a direct `add()`/`activate()` call. This
+/// is the second `zode <dir>` scenario under the default settings
+/// (`cli_default_open_behavior: existing_window`, `add_dirs_to_sidebar:
+/// true`), which reuses the existing window rather than opening a new one.
+///
+/// A code review caught that `open_paths`'s "reuse an existing window"
+/// fallback used to call `multi_workspace.open_sidebar(cx)` unconditionally,
+/// which force-retained the window's active workspace via
+/// `apply_open_sidebar`'s `retain_active_workspace` call regardless of
+/// `retain_background_projects` — defeating the setting for exactly this
+/// scenario. Every other test in this file enables retention by calling
+/// `add()`/`activate()`/`activate_provisional_workspace()` directly, so none
+/// of them exercised `open_paths` and none caught it.
+#[gpui::test]
+async fn test_open_paths_reusing_existing_window_respects_retain_background_projects_false(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project_a"), json!({ "file_a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/project_b"), json!({ "file_b.txt": "" }))
+        .await;
+
+    let project_a = Project::test(app_state.fs.clone(), [path!("/project_a").as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    cx.run_until_parked();
+
+    let workspace_a = window
+        .read_with(cx, |mw, _cx| mw.workspace().clone())
+        .unwrap();
+    assert!(
+        workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_some()),
+        "workspace A should start attached to the session"
+    );
+
+    // No explicit `-e`/`-n` flag and no `requesting_window` — this is
+    // exactly what a second `zode /project_b` invocation looks like from
+    // the CLI's perspective. `open_paths` must discover the existing
+    // window itself via `workspace_windows_for_location`.
+    let open_result = cx
+        .update(|cx| {
+            open_paths(
+                &[PathBuf::from(path!("/project_b"))],
+                app_state,
+                OpenOptions::default(),
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    assert_eq!(
+        open_result.window, window,
+        "the second invocation should reuse the existing window, not open a new one"
+    );
+
+    window
+        .read_with(cx, |mw, _cx| {
+            assert_eq!(
+                mw.workspace().entity_id(),
+                open_result.workspace.entity_id(),
+                "the new directory should become the active workspace"
+            );
+            assert_eq!(
+                mw.workspaces().count(),
+                1,
+                "retain_background_projects: false must keep at most one live workspace \
+                 through the real open_paths CLI entry point, not just through add()/activate() \
+                 called directly"
+            );
+        })
+        .unwrap();
+    assert!(
+        workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_none()),
+        "workspace A must be detached, not force-retained by open_paths's reuse-window path"
+    );
 }
 
 /// Covers the phase's success criterion literally: three projects opened

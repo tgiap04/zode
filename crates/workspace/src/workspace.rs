@@ -1422,7 +1422,14 @@ struct FollowerView {
 pub enum OpenMode {
     /// Open the workspace in a new window.
     NewWindow,
-    /// Add to the window's multi workspace without activating it (used during deserialization).
+    /// Add to the window's multi workspace without necessarily activating
+    /// it. Used both for deserialization (which calls
+    /// `MultiWorkspace::add()` directly and always retains, to faithfully
+    /// restore a saved session) and by live flows like creating/switching a
+    /// linked git worktree (which route through `Workspace::new_local` and
+    /// `MultiWorkspace::add_or_activate()`, so it activates instead of
+    /// silently sitting unreachable in the background when
+    /// `retain_background_projects` is `false`).
     Add,
     /// Add to the window's multi workspace and activate it.
     #[default]
@@ -1970,7 +1977,15 @@ impl Workspace {
                                 multi_workspace.activate(workspace.clone(), None, window, cx);
                             }
                             OpenMode::Add => {
-                                multi_workspace.add(workspace.clone(), &*window, cx);
+                                // Live flows only (e.g. creating/switching a
+                                // linked git worktree) — deserialization
+                                // constructs workspaces and calls
+                                // `MultiWorkspace::add()` directly, without
+                                // going through `Workspace::new_local`.
+                                // `add_or_activate` respects
+                                // `retain_background_projects` instead of
+                                // always retaining.
+                                multi_workspace.add_or_activate(workspace.clone(), window, cx);
                             }
                             OpenMode::NewWindow => {
                                 unreachable!()
@@ -9706,9 +9721,21 @@ pub fn open_paths(
 
                 if let Some(window) = target_window {
                     open_options.requesting_window = Some(window);
+                    // Retain the window's current active workspace only if
+                    // the retention policy says to. This used to
+                    // unconditionally call `open_sidebar()`, which forced
+                    // retention regardless of `retain_background_projects`
+                    // (via `apply_open_sidebar`'s `retain_active_workspace`
+                    // call) — defeating the setting for exactly this, the
+                    // default `cli_default_open_behavior: existing_window`
+                    // scenario. `activate()`'s own gating (below, once the
+                    // new workspace is created) now decides whether this
+                    // workspace survives being switched away from.
                     window
                         .update(cx, |multi_workspace, _, cx| {
-                            multi_workspace.open_sidebar(cx);
+                            if multi_workspace.should_retain(cx) {
+                                multi_workspace.retain_active_workspace(cx);
+                            }
                         })
                         .log_err();
                 }

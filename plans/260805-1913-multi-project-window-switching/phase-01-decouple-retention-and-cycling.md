@@ -72,6 +72,38 @@ workspace, best-effort qua `.log_err()`) ngay trong `MultiWorkspace::close_windo
 `Window` — ngay trước `window.remove_window()`. Điều này chặn đúng lỗ hổng ở nguồn (khi đóng window
 cuối) mà không cần đụng tới chữ ký `app_will_quit` hay dựng lại `Window` từ App-quit hook.
 
+### Sửa theo code review — hai đường vòng qua should_retain() (Critical)
+
+Review đối kháng sau khi implement bắt được điều cả bản thân lẫn tester đều bỏ sót: `retain_background_projects: false` **không** thực sự chặn được `retained_workspaces` cho đúng kịch bản đầu bài (`zode dirA` rồi `zode dirB`), vì hai đường vòng qua `should_retain()`:
+
+1. **`workspace::open_paths` (:9711, trước khi sửa) gọi `multi_workspace.open_sidebar(cx)` không điều
+   kiện** — hàm này gọi `apply_open_sidebar` → `retain_active_workspace(cx)` không qua gate nào cả.
+   Đây chính xác là đường `cli_default_open_behavior: existing_window` (mặc định) đi qua — xác nhận
+   qua `open_listener.rs` không hề set `open_mode`, nên nó giữ nguyên `OpenMode::Activate`. Kết quả:
+   dirA bị ép retain bởi lời gọi này, sau đó `activate()` thấy `old_active_was_retained == true` nên
+   không bao giờ detach — bất kể setting là gì. **Sửa:** thay lời gọi `open_sidebar()` bằng
+   `if multi_workspace.should_retain(cx) { multi_workspace.retain_active_workspace(cx); }` — để
+   `activate()`'s gate tự quyết định, đúng như thiết kế ban đầu. `should_retain()` phải đổi từ private
+   sang `pub(crate)` để `open_paths` (ở module cha) gọi được.
+2. **`add()` có người gọi sống thật, không chỉ đường restore như giả định ban đầu:**
+   `git_ui/src/worktree_service.rs` (tạo/chuyển linked worktree, qua `Workspace::new_local`'s
+   `OpenMode::Add` branch) và `find_or_create_workspace_with_source_workspace`'s remote/SSH branch
+   (`multi_workspace.rs`) — nhánh SSH còn tệ hơn: gọi đúng `activate()`/`activate_provisional_workspace()`
+   đã gate rồi (qua `open_remote_project_inner`), nhưng NGAY SAU ĐÓ gọi `.add()` không điều kiện lên
+   kết quả — tự ghi đè quyết định đúng của chính mình trong cùng một request. **Sửa:** thêm
+   `MultiWorkspace::add_or_activate()` (add nếu `should_retain()`, activate nếu không) — route nhánh
+   worktree qua đây (đổi `Workspace::new_local`'s `OpenMode::Add` arm), xoá hẳn lời gọi `.add()` thừa
+   ở nhánh SSH (không cần gate, chỉ cần xoá — logic đúng đã chạy trước đó rồi). `add()` (không qua
+   `add_or_activate`) giờ chỉ còn được gọi trực tiếp bởi đúng 3 chỗ restore thật:
+   `persistence.rs` (3 chỗ) và `open_workspace_by_id`.
+
+**Bài học cho việc viết test:** toàn bộ test cũ (kể cả test mới viết ở phase này) bật retention bằng
+cách gọi `add()`/`activate()`/`activate_provisional_workspace()` trực tiếp — không test nào đi qua
+`workspace::open_paths` thật, nên không cái nào bắt được lỗi (1). Đã thêm
+`test_open_paths_reusing_existing_window_respects_retain_background_projects_false` trong
+`multi_workspace_tests.rs`, gọi thẳng `open_paths()` với `OpenOptions::default()` — xác minh bằng
+cách revert tạm lỗi (1) và thấy test fail đúng chỗ (`retained_workspaces` = 2) trước khi phục hồi fix.
+
 ## Requirements
 
 **Functional**
