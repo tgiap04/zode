@@ -47,6 +47,13 @@ pub struct MultiProjectSettings {
     /// `settings::MultiProjectContent::retain_background_projects` for the
     /// full rationale and default.
     pub retain_background_projects: bool,
+    /// How long an unfocused project may sit idle before the
+    /// resource-hibernation governor may hibernate it. `None` means
+    /// hibernation is disabled (the setting was `0`) — a project then stays
+    /// live for as long as it is retained. See
+    /// `settings::MultiProjectContent::hibernate_after_ms` for the full
+    /// rationale and default.
+    pub hibernate_after: Option<Duration>,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -137,6 +144,13 @@ impl Settings for WorkspaceSettings {
                     .unwrap()
                     .retain_background_projects
                     .unwrap(),
+                // `0` disables hibernation (see `MultiProjectContent::hibernate_after_ms`
+                // for why the sentinel is `0` and not `null`).
+                hibernate_after: {
+                    let hibernate_after_ms =
+                        workspace.multi_project.unwrap().hibernate_after_ms.unwrap();
+                    (hibernate_after_ms > 0).then(|| Duration::from_millis(hibernate_after_ms))
+                },
             },
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace

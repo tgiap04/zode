@@ -1043,4 +1043,16 @@ pub struct MultiProjectContent {
     ///
     /// Default: false
     pub retain_background_projects: Option<bool>,
+    /// How long, in milliseconds, a project can sit unfocused in the
+    /// background before the resource-hibernation governor is allowed to
+    /// hibernate it. Set to `0` to disable hibernation entirely — the
+    /// project then stays fully live for as long as it is retained.
+    ///
+    /// (Not `null`: settings layers merge such that an override layer's
+    /// `null` is indistinguishable from that layer simply not mentioning
+    /// this key, so it can never win over this default. `0` is a real value
+    /// and overrides correctly — the same convention as `edit_debounce_ms`.)
+    ///
+    /// Default: 300000 (5 minutes)
+    pub hibernate_after_ms: Option<u64>,
 }

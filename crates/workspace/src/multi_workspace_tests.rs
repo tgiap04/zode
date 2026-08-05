@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::*;
 use crate::item::test::TestItem;
 use client::proto;
 use fs::{FakeFs, Fs};
 use gpui::{TestAppContext, UpdateGlobal, VisualTestContext};
-use project::DisableAiSettings;
+use project::{DisableAiSettings, ProjectActivity};
 use serde_json::json;
 use settings::{MultiProjectContent, SettingsStore};
 use util::path;
@@ -28,6 +29,32 @@ fn disable_background_project_retention(cx: &mut Context<MultiWorkspace>) {
         settings.update_user_settings(cx, |settings| {
             settings.workspace.multi_project = Some(MultiProjectContent {
                 retain_background_projects: Some(false),
+                // `None` is a no-op merge here — this helper only pins
+                // retention, not hibernation.
+                hibernate_after_ms: None,
+            });
+        });
+    });
+}
+
+/// Sets both `retain_background_projects` and `hibernate_after_ms`
+/// explicitly in one shot. Deliberately does not compose with the other
+/// `Some(...)`/`None` helpers above by calling `update_user_settings`
+/// twice: each call replaces the *entire* `multi_project` content for the
+/// user layer, so a second call setting one field to `None` would silently
+/// erase a field the first call had set — not a merge. Every hibernate
+/// governor test below needs both fields pinned together, so this is the
+/// only helper they use.
+fn set_multi_project_settings(
+    cx: &mut Context<MultiWorkspace>,
+    retain_background_projects: bool,
+    hibernate_after_ms: u64,
+) {
+    SettingsStore::update_global(cx, |settings, cx| {
+        settings.update_user_settings(cx, |settings| {
+            settings.workspace.multi_project = Some(MultiProjectContent {
+                retain_background_projects: Some(retain_background_projects),
+                hibernate_after_ms: Some(hibernate_after_ms),
             });
         });
     });
@@ -1259,4 +1286,290 @@ async fn test_open_sidebar_does_not_force_retain_when_retain_background_projects
              retain_background_projects is false"
         );
     });
+}
+
+// Phase 2 (multi-project-window-switching) — `ProjectActivity` governor
+// tests. Retention must be on for these: with it off, `activate()` detaches
+// the outgoing workspace outright (Phase 1 behavior), which is a different
+// code path than the Warm/Hibernated timer this phase adds.
+
+#[gpui::test]
+async fn test_reactivating_before_idle_threshold_never_hibernates(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |_mw, cx| {
+        set_multi_project_settings(cx, true, 1000);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    // Activating B is what makes A lose focus; the returned handle to B
+    // itself isn't needed for this test.
+    let _workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "A should go Warm the moment B is activated"
+        );
+    });
+
+    // Reactivate A well before its 1s idle timer would expire.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.activate(workspace_a.clone(), None, window, cx);
+    });
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Active,
+            "re-activating A should cancel its timer and return it to Active synchronously"
+        );
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            !mw.has_pending_hibernate_timer(&workspace_a),
+            "A's original hibernate timer must have been cancelled, not just not-yet-fired"
+        );
+    });
+
+    // Advance well past what would have been A's original deadline. If the
+    // cancellation were merely racing the timer instead of truly cancelling
+    // it, this would flip A to Hibernated despite being Active again.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Active,
+            "A must never reach Hibernated once re-activated within the idle threshold"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernates_after_idle_threshold_elapses(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |_mw, cx| {
+        set_multi_project_settings(cx, true, 1000);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "A should hibernate once idle past the configured threshold"
+        );
+    });
+    project_b.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Active,
+            "B is the focused workspace and must stay Active throughout"
+        );
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            !mw.has_pending_hibernate_timer(&workspace_a),
+            "the timer should have removed its own map entry after firing"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_after_ms_zero_disables_hibernation(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |_mw, cx| {
+        // `0` disables hibernation entirely (see `MultiProjectContent`'s
+        // doc comment for why the sentinel is `0`, not `null`).
+        set_multi_project_settings(cx, true, 0);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "losing focus still moves a project to Warm even with hibernation disabled"
+        );
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            !mw.has_pending_hibernate_timer(&workspace_a),
+            "no timer should ever be scheduled while hibernate_after_ms is 0"
+        );
+    });
+
+    // However long we wait, A must never move past Warm.
+    cx.executor().advance_clock(Duration::from_secs(600));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "no transition beyond Active/Warm may occur while hibernation is disabled"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_disabling_hibernation_live_cancels_an_already_pending_timer(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |_mw, cx| {
+        set_multi_project_settings(cx, true, 1000);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            mw.has_pending_hibernate_timer(&workspace_a),
+            "A should have a live pending timer before the setting changes"
+        );
+    });
+
+    // Flip hibernation off *while A's timer is already pending* — this is
+    // the settings-observer path (`MultiWorkspace::new`'s
+    // `hibernate_settings_subscription`), distinct from the "never
+    // scheduled one in the first place" case covered by
+    // `test_hibernate_after_ms_zero_disables_hibernation` above.
+    multi_workspace.update(cx, |_mw, cx| {
+        set_multi_project_settings(cx, true, 0);
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            !mw.has_pending_hibernate_timer(&workspace_a),
+            "the live settings change must cancel A's already-pending timer"
+        );
+    });
+
+    // Advancing well past the original 1s deadline must not resurrect it.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "A must stay Warm — the cancelled timer must never fire late"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_closing_workspace_with_pending_hibernate_timer_does_not_leak(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_multi_project_settings(cx, true, 1000);
+        // `activate()` never retroactively retains the workspace it's
+        // switching *away* from — only an explicit retain call does (see
+        // `test_enable_background_retention`'s own doc comment). Without
+        // this, A would still go Warm like the other tests observe, but
+        // `close_workspace` below would find it was never in
+        // `retained_workspaces` and report nothing removed.
+        mw.retain_active_workspace(cx);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            mw.has_pending_hibernate_timer(&workspace_a),
+            "setup should leave A with a pending hibernate timer before it's closed"
+        );
+    });
+
+    let closed = multi_workspace
+        .update_in(cx, |mw, window, cx| {
+            mw.close_workspace(&workspace_a, window, cx)
+        })
+        .await
+        .expect("closing a background workspace with no unsaved changes should succeed");
+    assert!(closed, "close_workspace should report the workspace removed");
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            !mw.has_pending_hibernate_timer(&workspace_a),
+            "closing the workspace must cancel (drop) its pending timer, not leak it"
+        );
+    });
+
+    // Advancing the clock afterward must not panic even though the timer
+    // that used to be keyed on A's EntityId is gone.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
 }

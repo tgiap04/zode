@@ -1,4 +1,5 @@
 use anyhow::Result;
+use collections::HashMap;
 use fs::Fs;
 
 use gpui::{
@@ -7,7 +8,7 @@ use gpui::{
     WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
-use project::{DisableAiSettings, Project};
+use project::{DisableAiSettings, Project, ProjectActivity};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 pub use settings::SidebarSide;
@@ -262,6 +263,11 @@ pub struct MultiWorkspace {
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     previous_focus_handle: Option<FocusHandle>,
+    /// Pending hibernate-after-idle timers, keyed by the `EntityId` of the
+    /// workspace whose project they'll hibernate. Dropping the `Task`
+    /// cancels it (GPUI semantics), so removing an entry is the entire
+    /// cancellation mechanism — see `wake_project`/`schedule_hibernate`.
+    hibernate_timers: HashMap<EntityId, Task<()>>,
 }
 
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
@@ -299,6 +305,22 @@ impl MultiWorkspace {
                 }
             }
         });
+        // Hibernation can be turned off live (`hibernate_after_ms: 0`).
+        // Whenever settings change and it currently resolves to disabled,
+        // make sure no hibernate timer is left pending — dropping the
+        // `Task` cancels it. Re-checked unconditionally rather than only on
+        // a Some->None transition, since clearing an already-empty map is a
+        // harmless no-op and this avoids tracking yet another `previous_*`.
+        let hibernate_settings_subscription =
+            cx.observe_global_in::<settings::SettingsStore>(window, |this, _window, cx| {
+                if WorkspaceSettings::get_global(cx)
+                    .multi_project
+                    .hibernate_after
+                    .is_none()
+                {
+                    this.hibernate_timers.clear();
+                }
+            });
         Self::subscribe_to_workspace(&workspace, window, cx);
         let weak_self = cx.weak_entity();
         workspace.update(cx, |workspace, cx| {
@@ -318,8 +340,10 @@ impl MultiWorkspace {
                 release_subscription,
                 quit_subscription,
                 settings_subscription,
+                hibernate_settings_subscription,
             ],
             previous_focus_handle: None,
+            hibernate_timers: HashMap::default(),
         }
     }
 
@@ -1471,6 +1495,63 @@ impl MultiWorkspace {
             .retain_background_projects
     }
 
+    /// Clears any pending hibernate timer for `workspace` and marks its
+    /// project `Active` immediately (FR2 — synchronous, no task involved).
+    /// Safe to call on a workspace whose project is already `Active`:
+    /// `Project::set_activity` only emits/notifies when the value actually
+    /// changes.
+    fn wake_project(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        self.hibernate_timers.remove(&workspace.entity_id());
+        let project = workspace.read(cx).project().clone();
+        project.update(cx, |project, cx| {
+            project.set_activity(ProjectActivity::Active, cx);
+        });
+    }
+
+    /// Marks `workspace`'s project `Warm` and, unless hibernation is
+    /// disabled (`multi_project.hibernate_after` setting resolves to
+    /// `None`, i.e. `hibernate_after_ms: 0`), schedules a timer that moves
+    /// it to `Hibernated` once idle for that long. Replaces any previously
+    /// pending timer for this workspace.
+    fn schedule_hibernate(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let project = workspace.read(cx).project().clone();
+        project.update(cx, |project, cx| {
+            project.set_activity(ProjectActivity::Warm, cx);
+        });
+
+        let entity_id = workspace.entity_id();
+        let Some(hibernate_after) = WorkspaceSettings::get_global(cx).multi_project.hibernate_after
+        else {
+            // Dropping the previous entry (if any) cancels its timer.
+            self.hibernate_timers.remove(&entity_id);
+            return;
+        };
+
+        let weak_project = project.downgrade();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(hibernate_after).await;
+            // The workspace (and its project) may have been closed while
+            // this timer was pending — expected (see
+            // `detach_workspace`/`close_workspace`/`remove`), not an error,
+            // so a failed update here is a silent no-op rather than a
+            // logged failure. Mirrors `DebouncedDelay::fire_new`'s handling
+            // of the same "entity may be gone by the time the timer fires"
+            // race in this same crate.
+            if weak_project
+                .update(cx, |project, cx| {
+                    project.set_activity(ProjectActivity::Hibernated, cx);
+                })
+                .is_ok()
+            {
+                this.update(cx, |this, _cx| {
+                    this.hibernate_timers.remove(&entity_id);
+                })
+                .ok();
+            }
+        });
+        self.hibernate_timers.insert(entity_id, task);
+    }
+
     /// Ensures the workspace is in the multiworkspace and makes it the active one.
     pub fn activate(
         &mut self,
@@ -1497,6 +1578,16 @@ impl MultiWorkspace {
                 self.retain_workspace(workspace.clone(), key, cx);
             }
         }
+
+        // FR2/FR3: the incoming workspace's project goes `Active`
+        // synchronously; the outgoing one goes `Warm` and gets an idle
+        // timer. If `old_active_workspace` is about to be detached below
+        // (retention off and it wasn't already retained), that detach's own
+        // cleanup drops the timer `Task` we just scheduled, cancelling it —
+        // ordering this before the detach check is what makes that cleanup
+        // actually cancel it instead of racing it.
+        self.wake_project(&workspace, cx);
+        self.schedule_hibernate(&old_active_workspace, cx);
 
         self.active_workspace = workspace;
 
@@ -1584,7 +1675,15 @@ impl MultiWorkspace {
     /// Detaches a workspace: clears session state, DB binding, cached
     /// group key, and emits `WorkspaceRemoved`. The DB row is preserved
     /// so the workspace still appears in the recent-projects list.
+    ///
+    /// Also drops any pending hibernate timer for `workspace`, which
+    /// cancels it (GPUI `Task` semantics) — the single place this is
+    /// needed, since `close_workspace` and `remove` both call this for
+    /// every workspace they remove that was actually retained (the only
+    /// state a pending timer can exist in outside `activate()`'s own
+    /// synchronous body).
     fn detach_workspace(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        self.hibernate_timers.remove(&workspace.entity_id());
         self.retained_workspaces
             .retain(|retained| retained != workspace);
         for group in &mut self.project_groups {
@@ -1846,10 +1945,27 @@ impl MultiWorkspace {
             settings.update_user_settings(cx, |settings| {
                 settings.workspace.multi_project = Some(settings::MultiProjectContent {
                     retain_background_projects: Some(true),
+                    // `None` here is a no-op merge (see `MultiProjectContent`'s
+                    // own doc comment) — it leaves `hibernate_after_ms`
+                    // whatever the default/global layers already resolved
+                    // it to, since this helper exists to toggle retention,
+                    // not hibernation.
+                    hibernate_after_ms: None,
                 });
             });
         });
         self.retain_active_workspace(cx);
+    }
+
+    /// Whether `workspace` currently has a pending hibernate timer, i.e.
+    /// its project is `Warm` and will hibernate on its own unless woken or
+    /// re-hibernated first. Exposed only so tests can assert that a timer
+    /// was actually cancelled (e.g. on close) rather than merely inferring
+    /// it from the absence of a later, hard-to-time-deterministically
+    /// transition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_pending_hibernate_timer(&self, workspace: &Entity<Workspace>) -> bool {
+        self.hibernate_timers.contains_key(&workspace.entity_id())
     }
 
     #[cfg(any(test, feature = "test-support"))]

@@ -210,6 +210,7 @@ pub enum OpenedBufferEvent {
 /// Can be either local (for the project opened on the same host) or remote.(for collab projects, browsed by multiple remote users).
 pub struct Project {
     active_entry: Option<ProjectEntryId>,
+    activity: ProjectActivity,
     buffer_ordered_messages_tx: mpsc::UnboundedSender<BufferOrderedMessage>,
     languages: Arc<LanguageRegistry>,
     dap_store: Entity<DapStore>,
@@ -321,6 +322,28 @@ enum ProjectClientState {
     },
 }
 
+/// Where a project sits in the multi-project activity lifecycle, driven by
+/// `MultiWorkspace` based on window focus and an idle timer. Introduced as
+/// pure state in this phase: nothing yet reacts to a transition by starting
+/// or stopping a real resource (LSP, worktree, terminal) — later phases hang
+/// their own resource off `Event::ActivityChanged`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ProjectActivity {
+    /// This project's workspace is the one currently focused. Only
+    /// `Project::set_activity` can move a project out of `Active`, and
+    /// `MultiWorkspace` only ever does so for a workspace that just lost
+    /// focus — an `Active` project is never a hibernation candidate.
+    Active,
+    /// This project's workspace lost focus recently but is still fully
+    /// live. Moves to `Hibernated` once the configured idle timer expires,
+    /// or back to `Active` if its workspace is focused again first.
+    Warm,
+    /// This project's workspace has been unfocused long enough to
+    /// hibernate. Reserved for later phases to act on; this phase only
+    /// records the transition.
+    Hibernated,
+}
+
 /// A link to display in a toast notification, useful to point to documentation.
 #[derive(PartialEq, Debug, Clone)]
 pub struct ToastLink {
@@ -409,6 +432,7 @@ pub enum Event {
     WorkspaceEditApplied(ProjectTransaction),
     AgentLocationChanged,
     BufferEdited,
+    ActivityChanged(ProjectActivity),
 }
 
 pub struct AgentLocationChanged;
@@ -1308,6 +1332,7 @@ impl Project {
                 client_subscriptions: Vec::new(),
                 _subscriptions: vec![cx.on_release(Self::release)],
                 active_entry: None,
+                activity: ProjectActivity::Active,
                 snippets,
                 languages,
                 collab_client: client,
@@ -1556,6 +1581,7 @@ impl Project {
                     }),
                 ],
                 active_entry: None,
+                activity: ProjectActivity::Active,
                 snippets,
                 languages,
                 collab_client: client,
@@ -4643,6 +4669,35 @@ impl Project {
 
     pub fn active_entry(&self) -> Option<ProjectEntryId> {
         self.active_entry
+    }
+
+    /// This project's current position in the `Active -> Warm -> Hibernated`
+    /// lifecycle. See `ProjectActivity` for what each state means and
+    /// `MultiWorkspace` for what drives the transitions.
+    pub fn activity(&self) -> ProjectActivity {
+        self.activity
+    }
+
+    /// Moves this project to `activity`, emitting `Event::ActivityChanged`
+    /// and notifying observers only when the value actually changes — safe
+    /// to call redundantly (e.g. re-activating an already-`Active` project).
+    pub fn set_activity(&mut self, activity: ProjectActivity, cx: &mut Context<Self>) {
+        // FR6: an `Active` project is never hibernated — not even by some
+        // future caller (e.g. a memory-pressure fuse) jumping straight to
+        // `Hibernated`. The only intended path to `Hibernated` is through
+        // `Warm` (`Active` -> `Warm` -> `Hibernated`; see the state
+        // diagram in the multi-project-window-switching plan's phase-02
+        // doc), so this makes that a structural guarantee of the state
+        // machine itself rather than a convention every caller has to
+        // remember to honor.
+        if self.activity == ProjectActivity::Active && activity == ProjectActivity::Hibernated {
+            return;
+        }
+        if self.activity != activity {
+            self.activity = activity;
+            cx.emit(Event::ActivityChanged(activity));
+            cx.notify();
+        }
     }
 
     pub fn entry_for_path<'a>(&'a self, path: &ProjectPath, cx: &'a App) -> Option<&'a Entry> {

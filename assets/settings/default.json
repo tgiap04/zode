@@ -154,7 +154,14 @@
     // defaults to `false` until the resource-hibernation governor lands,
     // and is expected to flip to `true` once background projects stop
     // paying full LSP/worktree cost.
-    "retain_background_projects": false
+    "retain_background_projects": false,
+    // How long, in milliseconds, a retained-but-unfocused project may sit
+    // idle before it becomes eligible for hibernation. Set to 0 to disable
+    // hibernation entirely (a retained project then stays fully live for as
+    // long as it is retained). Use 0, not null, to turn this off in your own
+    // settings — null in a settings file is indistinguishable from the key
+    // being absent, so it can never override this default.
+    "hibernate_after_ms": 300000
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
