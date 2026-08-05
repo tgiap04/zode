@@ -2665,12 +2665,10 @@ mod tests {
     };
 
     use gpui::AppContext as _;
-    use gpui::{Context, UpdateGlobal};
     use pretty_assertions::assert_eq;
     use project::Project;
     use remote::SshConnectionOptions;
     use serde_json::json;
-    use settings::{MultiProjectContent, SettingsStore};
     use std::{thread, time::Duration};
 
     /// Creates a unique directory in a FakeFs, returning the path.
@@ -2679,27 +2677,6 @@ mod tests {
         let dir = PathBuf::from(format!("/test-dirs/{}-{}", prefix, uuid::Uuid::new_v4()));
         fs.insert_tree(&dir, json!({})).await;
         dir
-    }
-
-    /// Sets `workspace.multi_project.retain_background_projects` and
-    /// immediately retains the currently active workspace, reproducing the
-    /// retention side effect that `open_sidebar()` used to provide before
-    /// retention was decoupled from the sidebar UI (phase 1 of
-    /// multi-project-window-switching). Tests that need more than one
-    /// workspace to stay retained across `activate()` calls — not the
-    /// sidebar panel itself — should use this instead of `open_sidebar()`.
-    fn enable_background_project_retention(
-        mw: &mut MultiWorkspace,
-        cx: &mut Context<MultiWorkspace>,
-    ) {
-        SettingsStore::update_global(cx, |settings, cx| {
-            settings.update_user_settings(cx, |settings| {
-                settings.workspace.multi_project = Some(MultiProjectContent {
-                    retain_background_projects: Some(true),
-                });
-            });
-        });
-        mw.retain_active_workspace(cx);
     }
 
     #[gpui::test]
@@ -2714,7 +2691,7 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project1.clone(), window, cx));
 
         multi_workspace.update(cx, |mw, cx| {
-            mw.open_sidebar(cx);
+            mw.test_enable_background_retention(cx);
         });
 
         multi_workspace.update_in(cx, |mw, _, cx| {
@@ -4606,7 +4583,7 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project1.clone(), window, cx));
 
         multi_workspace.update(cx, |mw, cx| {
-            mw.open_sidebar(cx);
+            mw.test_enable_background_retention(cx);
         });
 
         multi_workspace.update_in(cx, |mw, _, cx| {
@@ -4704,7 +4681,7 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project1.clone(), window, cx));
 
         multi_workspace.update(cx, |mw, cx| {
-            mw.open_sidebar(cx);
+            mw.test_enable_background_retention(cx);
         });
 
         multi_workspace.update_in(cx, |mw, _, cx| {
@@ -4803,7 +4780,7 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project1.clone(), window, cx));
 
         multi_workspace.update(cx, |mw, cx| {
-            mw.open_sidebar(cx);
+            mw.test_enable_background_retention(cx);
         });
 
         multi_workspace.update_in(cx, |mw, _, cx| {
@@ -5200,7 +5177,7 @@ mod tests {
             .add_window_view(|window, cx| MultiWorkspace::test_new(project_2.clone(), window, cx));
 
         multi_workspace.update(cx, |mw, cx| {
-            enable_background_project_retention(mw, cx);
+            mw.test_enable_background_retention(cx);
         });
 
         multi_workspace.update_in(cx, |mw, window, cx| {
@@ -5337,7 +5314,7 @@ mod tests {
         let (multi_workspace, cx) = cx
             .add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
 
-        multi_workspace.update(cx, |mw, cx| enable_background_project_retention(mw, cx));
+        multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
 
         let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
             mw.test_add_workspace(project_b.clone(), window, cx)
@@ -5444,7 +5421,7 @@ mod tests {
         let (multi_workspace, cx) = cx
             .add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
 
-        multi_workspace.update(cx, |mw, cx| enable_background_project_retention(mw, cx));
+        multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
 
         let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
             mw.test_add_workspace(project_b.clone(), window, cx)

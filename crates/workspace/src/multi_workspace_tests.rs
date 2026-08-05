@@ -19,24 +19,6 @@ fn init_test(cx: &mut TestAppContext) {
     });
 }
 
-/// Sets `workspace.multi_project.retain_background_projects` and
-/// immediately retains the currently active workspace, reproducing the
-/// retention side effect that `open_sidebar()` used to provide before
-/// retention was decoupled from the sidebar UI (phase 1 of
-/// multi-project-window-switching). Tests that only need retention
-/// enabled — not the sidebar panel itself — should use this instead of
-/// `open_sidebar()`.
-fn enable_background_project_retention(mw: &mut MultiWorkspace, cx: &mut Context<MultiWorkspace>) {
-    SettingsStore::update_global(cx, |settings, cx| {
-        settings.update_user_settings(cx, |settings| {
-            settings.workspace.multi_project = Some(MultiProjectContent {
-                retain_background_projects: Some(true),
-            });
-        });
-    });
-    mw.retain_active_workspace(cx);
-}
-
 /// Sets `workspace.multi_project.retain_background_projects` to `false`
 /// explicitly, rather than relying on the phase's current default, so
 /// tests pinning this behavior still hold once the default flips to
@@ -135,7 +117,7 @@ async fn test_project_group_keys_initial(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
     });
 
     multi_workspace.read_with(cx, |mw, _cx| {
@@ -165,7 +147,7 @@ async fn test_project_group_keys_add_workspace(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
     });
 
     multi_workspace.read_with(cx, |mw, _cx| {
@@ -307,7 +289,7 @@ async fn test_project_group_keys_duplicate_not_added(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
     });
 
     multi_workspace.update_in(cx, |mw, window, cx| {
@@ -340,7 +322,7 @@ async fn test_adding_worktree_updates_project_group_key(cx: &mut TestAppContext)
     // Enable retention so this workspace is retained and gets an initial
     // project group.
     multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
     });
     cx.run_until_parked();
 
@@ -514,7 +496,7 @@ async fn test_find_or_create_local_workspace_reuses_active_workspace_after_sideb
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
     });
     cx.run_until_parked();
 
@@ -577,7 +559,7 @@ async fn test_close_workspace_prefers_already_loaded_neighboring_workspace(
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |multi_workspace, cx| {
-        enable_background_project_retention(multi_workspace, cx);
+        multi_workspace.test_enable_background_retention(cx);
     });
     cx.run_until_parked();
 
@@ -713,7 +695,7 @@ async fn test_remote_project_root_dir_changes_update_groups(cx: &mut TestAppCont
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
     });
     cx.run_until_parked();
 
@@ -819,7 +801,7 @@ async fn test_open_project_closes_empty_workspace_but_not_non_empty_ones(cx: &mu
 
     window
         .update(cx, |mw, _window, cx| {
-            enable_background_project_retention(mw, cx)
+            mw.test_enable_background_retention(cx)
         })
         .unwrap();
     cx.run_until_parked();
@@ -1104,7 +1086,7 @@ async fn test_cycle_project_wraps_through_three_retained_workspaces(cx: &mut Tes
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
     let workspace_a = multi_workspace.update(cx, |mw, cx| {
-        enable_background_project_retention(mw, cx);
+        mw.test_enable_background_retention(cx);
         mw.workspace().clone()
     });
 
@@ -1238,4 +1220,43 @@ async fn test_activate_provisional_workspace_honors_retain_background_projects_f
         workspace_a.read_with(cx, |workspace, _cx| workspace.session_id().is_none()),
         "the previous active workspace should be detached, matching activate()'s policy"
     );
+}
+
+/// `ToggleWorkspaceSidebar`/`FocusWorkspaceSidebar` are bound to real default
+/// keybindings (Cmd+Alt+J / Cmd+Alt+; on macOS) that reach `open_sidebar()`
+/// even though no sidebar renders anything yet (Phase 7 hasn't rebuilt it) —
+/// found while auditing for other paths like the two a code review caught in
+/// `open_paths()` and `add()`. `open_sidebar()` used to call
+/// `apply_open_sidebar`, which unconditionally called
+/// `retain_active_workspace()`, silently defeating
+/// `retain_background_projects: false` for anyone who ever pressed that
+/// keybinding.
+#[gpui::test]
+async fn test_open_sidebar_does_not_force_retain_when_retain_background_projects_false(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    let project_a = Project::test(fs, ["/root_a".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.open_sidebar(cx);
+    });
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            mw.sidebar_open(),
+            "the sidebar-open UI flag itself should still flip"
+        );
+        assert_eq!(
+            mw.retained_workspaces().len(),
+            0,
+            "opening the sidebar must not force-retain the active workspace when \
+             retain_background_projects is false"
+        );
+    });
 }

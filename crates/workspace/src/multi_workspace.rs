@@ -13,6 +13,9 @@ use settings::Settings;
 pub use settings::SidebarSide;
 use std::future::Future;
 
+#[cfg(any(test, feature = "test-support"))]
+use gpui::UpdateGlobal;
+
 use std::path::PathBuf;
 use ui::prelude::*;
 use util::ResultExt;
@@ -420,24 +423,35 @@ impl MultiWorkspace {
         }
     }
 
+    /// Opens the sidebar. This is a live, user-driven trigger — bound to a
+    /// real keybinding (`ToggleWorkspaceSidebar`/`FocusWorkspaceSidebar`)
+    /// even before Phase 7 rebuilds the sidebar UI — so retention respects
+    /// `should_retain()` like every other live path, rather than
+    /// unconditionally retaining the active workspace.
     pub fn open_sidebar(&mut self, cx: &mut Context<Self>) {
         let side = match self.sidebar_side(cx) {
             SidebarSide::Left => "left",
             SidebarSide::Right => "right",
         };
         telemetry::event!("Sidebar Toggled", action = "open", side = side);
-        self.apply_open_sidebar(cx);
+        self.apply_open_sidebar(true, cx);
     }
 
-    /// Restores the sidebar to open state from persisted session data without
-    /// firing a telemetry event, since this is not a user-initiated action.
+    /// Restores the sidebar to open state from persisted session data
+    /// without firing a telemetry event, since this is not a user-initiated
+    /// action. Always retains the active workspace regardless of the live
+    /// `retain_background_projects` setting — this is reconstructing a
+    /// previously-saved `sidebar_open: true` session (NFR2), not a new
+    /// user decision being made right now.
     pub(crate) fn restore_open_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.apply_open_sidebar(cx);
+        self.apply_open_sidebar(false, cx);
     }
 
-    fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
+    fn apply_open_sidebar(&mut self, respect_retention_policy: bool, cx: &mut Context<Self>) {
         self.sidebar_open = true;
-        self.retain_active_workspace(cx);
+        if !respect_retention_policy || self.should_retain(cx) {
+            self.retain_active_workspace(cx);
+        }
         let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
         for workspace in self.retained_workspaces.clone() {
             workspace.update(cx, |workspace, _cx| {
@@ -1443,15 +1457,15 @@ impl MultiWorkspace {
 
     /// Whether a workspace that loses focus should stay retained in the
     /// background, per the `workspace.multi_project.retain_background_projects`
-    /// setting. This governs the live `activate()` retain/detach policy
-    /// (and, via `add_or_activate()`, live callers of `OpenMode::Add`).
+    /// setting. This governs the live `activate()` retain/detach policy,
+    /// `apply_open_sidebar()`'s live (non-restore) path, and — via
+    /// `add_or_activate()` — live callers of `OpenMode::Add`.
     ///
     /// It intentionally does NOT gate `add()` directly (used for
     /// deserialization and other system-initiated insertions, which must
     /// always retain to faithfully restore a previously-saved session
-    /// regardless of the user's current live setting) nor the sidebar UI
-    /// panel's open/closed state, which is now independent of retention.
-    pub(crate) fn should_retain(&self, cx: &App) -> bool {
+    /// regardless of the user's current live setting).
+    fn should_retain(&self, cx: &App) -> bool {
         WorkspaceSettings::get_global(cx)
             .multi_project
             .retain_background_projects
@@ -1814,6 +1828,28 @@ impl MultiWorkspace {
         let workspace = cx.new(|cx| Workspace::test_new(project, window, cx));
         self.activate(workspace.clone(), None, window, cx);
         workspace
+    }
+
+    /// Sets `workspace.multi_project.retain_background_projects` and
+    /// immediately retains the currently active workspace, reproducing the
+    /// retention side effect that `open_sidebar()` used to provide
+    /// unconditionally before retention was decoupled from the sidebar UI
+    /// (phase 1 of multi-project-window-switching). `activate()` never
+    /// implicitly retains the *outgoing* workspace on its own — only an
+    /// explicit `retain_workspace()`/`add()`/`retain_active_workspace()`
+    /// call does — so tests across crates that need an earlier workspace to
+    /// survive once a second one activates in the same window should call
+    /// this instead of relying on `open_sidebar()`'s old side effect.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_enable_background_retention(&mut self, cx: &mut Context<Self>) {
+        settings::SettingsStore::update_global(cx, |settings, cx| {
+            settings.update_user_settings(cx, |settings| {
+                settings.workspace.multi_project = Some(settings::MultiProjectContent {
+                    retain_background_projects: Some(true),
+                });
+            });
+        });
+        self.retain_active_workspace(cx);
     }
 
     #[cfg(any(test, feature = "test-support"))]

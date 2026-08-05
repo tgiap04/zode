@@ -81,10 +81,15 @@ Review đối kháng sau khi implement bắt được điều cả bản thân l
    Đây chính xác là đường `cli_default_open_behavior: existing_window` (mặc định) đi qua — xác nhận
    qua `open_listener.rs` không hề set `open_mode`, nên nó giữ nguyên `OpenMode::Activate`. Kết quả:
    dirA bị ép retain bởi lời gọi này, sau đó `activate()` thấy `old_active_was_retained == true` nên
-   không bao giờ detach — bất kể setting là gì. **Sửa:** thay lời gọi `open_sidebar()` bằng
-   `if multi_workspace.should_retain(cx) { multi_workspace.retain_active_workspace(cx); }` — để
-   `activate()`'s gate tự quyết định, đúng như thiết kế ban đầu. `should_retain()` phải đổi từ private
-   sang `pub(crate)` để `open_paths` (ở module cha) gọi được.
+   không bao giờ detach — bất kể setting là gì.
+   **Sửa (bản cuối, sau khi tự phát hiện thêm — xem mục dưới):** `apply_open_sidebar` giờ nhận thêm
+   `respect_retention_policy: bool`; `open_sidebar()` (đường sống) truyền `true`, `restore_open_sidebar()`
+   (đường phục hồi session) truyền `false` để không vi phạm NFR2. `open_paths` **vẫn gọi
+   `multi_workspace.open_sidebar(cx)` như cũ** — không đổi thành gọi `retain_active_workspace` trực
+   tiếp — vì `open_sidebar()` còn set `sidebar_open = true` và bắn telemetry mà các test khác (ví dụ
+   `test_open_paths_action` ở crate `zed`) phụ thuộc vào; gọi thẳng `retain_active_workspace` sẽ làm
+   mất hai side-effect đó. `should_retain()` vẫn giữ private — không cần `pub(crate)` vì không còn nơi
+   nào ngoài `multi_workspace.rs` gọi trực tiếp.
 2. **`add()` có người gọi sống thật, không chỉ đường restore như giả định ban đầu:**
    `git_ui/src/worktree_service.rs` (tạo/chuyển linked worktree, qua `Workspace::new_local`'s
    `OpenMode::Add` branch) và `find_or_create_workspace_with_source_workspace`'s remote/SSH branch
@@ -103,6 +108,41 @@ cách gọi `add()`/`activate()`/`activate_provisional_workspace()` trực tiế
 `test_open_paths_reusing_existing_window_respects_retain_background_projects_false` trong
 `multi_workspace_tests.rs`, gọi thẳng `open_paths()` với `OpenOptions::default()` — xác minh bằng
 cách revert tạm lỗi (1) và thấy test fail đúng chỗ (`retained_workspaces` = 2) trước khi phục hồi fix.
+
+### Vòng thứ ba — đường thứ ba qua should_retain(), hợp nhất test helper, và một regression thứ 6
+
+Tự rà lại sau vòng review trên (không phải do reviewer chỉ ra) phát hiện **đường thứ ba**:
+`ToggleWorkspaceSidebar`/`FocusWorkspaceSidebar` (Cmd+Alt+J / Cmd+Alt+; — keybinding thật, có sẵn trên
+cả 3 platform, dù Phase 7 chưa dựng lại sidebar UI) gọi `open_sidebar()` → `apply_open_sidebar()` →
+`retain_active_workspace(cx)` không qua gate — bấm phím này (không hiện gì trên UI vì `self.sidebar`
+luôn `None`) vẫn âm thầm ép retain project đang active. **Sửa:** `apply_open_sidebar` nhận
+`respect_retention_policy: bool`; `open_sidebar()` (sống) → `true`, `restore_open_sidebar()` (restore)
+→ `false` (giữ nguyên NFR2). Test mới:
+`test_open_sidebar_does_not_force_retain_when_retain_background_projects_false` — xác minh bằng cách
+revert tạm và thấy fail (`retained_workspaces.len()` = 1 thay vì 0) trước khi phục hồi.
+
+Việc gate `open_sidebar()` làm hỏng 6 test cũ dùng `open_sidebar()`/`open_project(..., OpenMode::Add)`
+làm công tắc bật retention ngầm cho một workspace ĐẦU TIÊN (không qua `add()`) — 3 ở `persistence.rs`,
+3 ở `crates/zed/src/zed.rs` (crate khác, **`cargo test -p workspace` không bao giờ thấy được** — đúng
+lỗ hổng review đã cảnh báo). Sửa cả 6 bằng cùng một helper, giờ hợp nhất thành
+`MultiWorkspace::test_enable_background_retention()` (`#[cfg(any(test, feature = "test-support"))]`,
+`pub`) thay cho 3 bản copy riêng biệt (`workspace.rs`, `multi_workspace_tests.rs`, `persistence.rs`).
+
+**Regression thứ 6, tự bắt được nhờ chạy rộng `cargo test -p zode --bin zode --features
+test-support` (không filter) như review yêu cầu:** `test_open_paths_action` — xác nhận qua `git stash`
+là đã hỏng **từ trước** vòng sửa (1)/(2) ở trên, không phải do vòng gate `open_sidebar()` mới. Test này
+assert `workspaces().count() == 2` sau hai lần `open_paths()` riêng biệt tái dùng cùng window — đúng
+hành vi CŨ (bug) mà cả plan này tồn tại để sửa. Đã sửa assertion thành `== 1`, kèm comment giải thích
+đây là thay đổi hành vi có chủ đích của Phase 1, không phải lỗi.
+
+**Phát hiện phụ, không sửa (ngoài scope):** chạy đúng 5-6 test bị filter riêng (không phải cả suite)
+bằng test-thread song song cho kết quả **flaky** (fail ngẫu nhiên, khác test mỗi lần) — nhưng chạy
+`--test-threads=1` HOẶC chạy cả 52 test trong `zed::tests` (song song hay tuần tự đều được) thì xanh
+ổn định qua nhiều lần. Nguyên nhân là các test này share một DB/KVP toàn cục qua nhiều thread test
+song song (đã có tiền lệ: comment của `unique_test_dir` trong `persistence.rs` tự nhận "to avoid
+collisions with other tests sharing the global DB") — đặc điểm sẵn có của hạ tầng test, không phải do
+logic retention. Trước đây không thấy được vì cả 5 test này luôn fail (do bug retention) nên tính
+flaky của nó chưa từng lộ ra.
 
 ## Requirements
 

@@ -9721,21 +9721,22 @@ pub fn open_paths(
 
                 if let Some(window) = target_window {
                     open_options.requesting_window = Some(window);
-                    // Retain the window's current active workspace only if
-                    // the retention policy says to. This used to
-                    // unconditionally call `open_sidebar()`, which forced
-                    // retention regardless of `retain_background_projects`
-                    // (via `apply_open_sidebar`'s `retain_active_workspace`
-                    // call) — defeating the setting for exactly this, the
-                    // default `cli_default_open_behavior: existing_window`
+                    // `open_sidebar()` itself now gates its
+                    // `retain_active_workspace()` call on `should_retain()`
+                    // (see `MultiWorkspace::apply_open_sidebar`), so calling
+                    // it here is safe: it still flips `sidebar_open` and
+                    // fires the usual telemetry (both still expected by
+                    // e.g. `test_open_paths_action`), but no longer
+                    // force-retains the active workspace regardless of
+                    // `retain_background_projects` — that was the bug that
+                    // defeated the setting for exactly this, the default
+                    // `cli_default_open_behavior: existing_window`,
                     // scenario. `activate()`'s own gating (below, once the
-                    // new workspace is created) now decides whether this
+                    // new workspace is created) decides whether this
                     // workspace survives being switched away from.
                     window
                         .update(cx, |multi_workspace, _, cx| {
-                            if multi_workspace.should_retain(cx) {
-                                multi_workspace.retain_active_workspace(cx);
-                            }
+                            multi_workspace.open_sidebar(cx);
                         })
                         .log_err();
                 }
@@ -10895,7 +10896,7 @@ mod tests {
     };
     use project::{Project, ProjectEntryId};
     use serde_json::json;
-    use settings::{MultiProjectContent, SettingsStore};
+    use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
 
@@ -11100,7 +11101,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                enable_background_project_retention(mw, cx);
+                mw.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -11187,7 +11188,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                enable_background_project_retention(mw, cx)
+                mw.test_enable_background_retention(cx)
             })
             .unwrap();
 
@@ -15007,7 +15008,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                enable_background_project_retention(mw, cx);
+                mw.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -15116,27 +15117,6 @@ mod tests {
             cx.set_global(db::AppDatabase::test_new());
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
-    }
-
-    /// Sets `workspace.multi_project.retain_background_projects` and
-    /// immediately retains the currently active workspace, reproducing the
-    /// retention side effect that `open_sidebar()` used to provide before
-    /// retention was decoupled from the sidebar UI (phase 1 of
-    /// multi-project-window-switching). Tests that need more than one
-    /// workspace to stay retained across `activate()` calls — not the
-    /// sidebar panel itself — should use this instead of `open_sidebar()`.
-    pub(crate) fn enable_background_project_retention(
-        mw: &mut MultiWorkspace,
-        cx: &mut Context<MultiWorkspace>,
-    ) {
-        SettingsStore::update_global(cx, |settings, cx| {
-            settings.update_user_settings(cx, |settings| {
-                settings.workspace.multi_project = Some(MultiProjectContent {
-                    retain_background_projects: Some(true),
-                });
-            });
-        });
-        mw.retain_active_workspace(cx);
     }
 
     #[gpui::test]
