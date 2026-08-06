@@ -311,6 +311,24 @@ impl MultiWorkspace {
         // `Task` cancels it. Re-checked unconditionally rather than only on
         // a Some->None transition, since clearing an already-empty map is a
         // harmless no-op and this avoids tracking yet another `previous_*`.
+        //
+        // Deliberately one-directional (flagged in Phase 2 review, not
+        // fixed here): disabling does not wake an already-`Hibernated`
+        // project, and re-enabling does not retroactively schedule a timer
+        // for a project that's already `Warm`. Both are left to a later
+        // phase rather than guessed at now, because nothing consumes
+        // `ProjectActivity` for a real resource yet (every transition in
+        // this phase is a no-op with an event) — there is nothing to check
+        // a "wake to what" answer against. And it isn't just unvalidated,
+        // it's actively constrained: waking straight to `Active` would put
+        // an unfocused project in the one state defined as "the window's
+        // focused workspace" (see `ProjectActivity::Active`'s doc comment),
+        // and waking to `Warm` would require legitimizing the
+        // `Hibernated -> Warm` edge that `Project::set_activity` guards
+        // against precisely because it's off the state diagram. Whichever
+        // phase gives hibernation a real resource effect should design
+        // reactivation semantics against that effect, not against a guess
+        // made here.
         let hibernate_settings_subscription =
             cx.observe_global_in::<settings::SettingsStore>(window, |this, _window, cx| {
                 if WorkspaceSettings::get_global(cx)
@@ -1439,6 +1457,13 @@ impl MultiWorkspace {
     /// remote/SSH path) must go through `add_or_activate()` instead, so the
     /// policy is actually enforced — calling `add()` directly from a live
     /// flow silently overrides whatever `should_retain()` decided.
+    ///
+    /// Unlike retention, the `ProjectActivity` governor is not gated by any
+    /// setting: a workspace added here that isn't the active one is routed
+    /// through `schedule_hibernate()`, exactly like the outgoing workspace
+    /// in `activate()`. Without this, a workspace added in the background
+    /// would sit at `Active` forever and never become a hibernation
+    /// candidate.
     pub fn add(&mut self, workspace: Entity<Workspace>, window: &Window, cx: &mut Context<Self>) {
         if self.is_workspace_retained(&workspace) {
             return;
@@ -1446,6 +1471,7 @@ impl MultiWorkspace {
 
         if workspace != self.active_workspace {
             self.register_workspace(&workspace, window, cx);
+            self.schedule_hibernate(&workspace, cx);
         }
 
         let key = workspace.read(cx).project_group_key(cx);
@@ -1532,21 +1558,23 @@ impl MultiWorkspace {
             cx.background_executor().timer(hibernate_after).await;
             // The workspace (and its project) may have been closed while
             // this timer was pending — expected (see
-            // `detach_workspace`/`close_workspace`/`remove`), not an error,
-            // so a failed update here is a silent no-op rather than a
-            // logged failure. Mirrors `DebouncedDelay::fire_new`'s handling
-            // of the same "entity may be gone by the time the timer fires"
-            // race in this same crate.
+            // `detach_workspace`/`close_workspace`/`remove`) — but a failure
+            // still gets logged rather than silently discarded, per repo
+            // convention. Mirrors `DelayedDebouncedEditAction::fire_new`'s
+            // handling of the same "entity may be gone by the time the
+            // timer fires" race in this same crate: it uses `.log_err()`,
+            // not a bare `.ok()`/`.is_ok()`.
             if weak_project
                 .update(cx, |project, cx| {
                     project.set_activity(ProjectActivity::Hibernated, cx);
                 })
-                .is_ok()
+                .log_err()
+                .is_some()
             {
                 this.update(cx, |this, _cx| {
                     this.hibernate_timers.remove(&entity_id);
                 })
-                .ok();
+                .log_err();
             }
         });
         self.hibernate_timers.insert(entity_id, task);

@@ -221,7 +221,7 @@ và test nó.
 | Rủi ro | Mức | Giảm thiểu |
 |---|---|---|
 | ~~Hai workspace chia một `Project` → double transition~~ | **Đã loại** | Bước 0 kết luận: không có đường code nào tạo ra việc chia sẻ này (xem "Kết luận Bước 0" ở Key Insights). `set_activity` vẫn giữ idempotent như vệ sinh code chung, không phải vì cần cho case này |
-| Rò `Task` khi workspace bị drop lúc timer đang chờ | Trung bình | Timer dùng `WeakEntity`; xoá entry ở mọi đường thoát (`detach`, `close`, `remove`, `on_release`) |
+| Rò `Task` khi workspace bị drop lúc timer đang chờ | Trung bình | Timer dùng `WeakEntity`; xoá entry tường minh ở đường thoát của từng workspace (`detach_workspace`, được `close_workspace`/`remove` gọi tới cho mọi workspace chúng xoá). Không cần `on_release` riêng cho `hibernate_timers` — nếu cả `MultiWorkspace` bị drop (đóng cửa sổ) mà không đi qua từng `detach` lẻ, `Drop` mặc định của field `HashMap<EntityId, Task<()>>` tự cancel mọi timer còn sót, đúng hành vi mong muốn cho một entity đang biến mất |
 | Ngưỡng mặc định quá ngắn → user thấy giật khi quay lại | Trung bình | Mặc định 5 phút; Phase 6 đo rồi hiệu chỉnh bằng số thật |
 | `Duration` trong settings không có khuôn sẵn cho chuỗi `"5m"` | Thấp | Bắt chước `focus_follows_mouse.debounce`; nếu chỉ có dạng số thì dùng số giây, đừng tự phát minh parser |
 | `null` không thể override một default không phải `null` qua `MergeFrom` (khiến FR5 gốc không hoạt động) | Trung bình | **Đã sửa:** dùng `0` làm giá trị tắt, mirror đúng khuôn `edit_debounce_ms`/`scroll_debounce_ms` (xem Key Insights) |

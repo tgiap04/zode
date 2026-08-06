@@ -4682,15 +4682,24 @@ impl Project {
     /// and notifying observers only when the value actually changes — safe
     /// to call redundantly (e.g. re-activating an already-`Active` project).
     pub fn set_activity(&mut self, activity: ProjectActivity, cx: &mut Context<Self>) {
-        // FR6: an `Active` project is never hibernated — not even by some
-        // future caller (e.g. a memory-pressure fuse) jumping straight to
-        // `Hibernated`. The only intended path to `Hibernated` is through
-        // `Warm` (`Active` -> `Warm` -> `Hibernated`; see the state
-        // diagram in the multi-project-window-switching plan's phase-02
-        // doc), so this makes that a structural guarantee of the state
-        // machine itself rather than a convention every caller has to
-        // remember to honor.
-        if self.activity == ProjectActivity::Active && activity == ProjectActivity::Hibernated {
+        // Only two edges are off the state diagram in the
+        // multi-project-window-switching plan's phase-02 doc, and both are
+        // blocked here rather than left as a convention every caller has to
+        // remember:
+        // - FR6: `Active -> Hibernated` directly. An active project is
+        //   never hibernated, not even by some future caller (e.g. a
+        //   memory-pressure fuse) jumping straight there. The only intended
+        //   path is `Active -> Warm -> Hibernated`.
+        // - The mirror, `Hibernated -> Warm`: the diagram's only edge out of
+        //   `Hibernated` is back to `Active` via `activate()`. Nothing
+        //   wired today ever requests this edge, but guarding it now keeps
+        //   the invariant structural instead of re-derived once a future
+        //   phase adds a caller that could reach it.
+        if matches!(
+            (self.activity, activity),
+            (ProjectActivity::Active, ProjectActivity::Hibernated)
+                | (ProjectActivity::Hibernated, ProjectActivity::Warm)
+        ) {
             return;
         }
         if self.activity != activity {

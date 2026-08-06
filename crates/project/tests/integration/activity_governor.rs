@@ -148,3 +148,55 @@ async fn test_active_project_cannot_be_coerced_directly_to_hibernated(cx: &mut T
         );
     });
 }
+
+/// Symmetric to the guard above: `Hibernated -> Warm` is equally off the
+/// state diagram — the diagram's only edge out of `Hibernated` goes back to
+/// `Active` via `activate()`. Unreachable through any wired caller today
+/// (nothing calls `set_activity(Warm)` on a project that's currently
+/// `Hibernated`), but guarded anyway for the same reason FR6's guard exists:
+/// this state machine is what Phase 3/4/5 all hang their own resource logic
+/// off of, so the invariant is structural rather than a convention every
+/// future caller has to remember.
+#[gpui::test]
+async fn test_hibernated_project_cannot_be_coerced_directly_to_warm(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "file.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    project.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "setup should reach Hibernated via the normal Active -> Warm -> Hibernated path"
+        );
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+    });
+    project.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "a direct Hibernated -> Warm request must be ignored"
+        );
+    });
+
+    // The guard is specific to that one illegal edge, not a freeze: the
+    // normal Hibernated -> Active path still works.
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    project.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Active,
+            "Hibernated -> Active must still work normally"
+        );
+    });
+}

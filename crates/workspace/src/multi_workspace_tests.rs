@@ -1573,3 +1573,80 @@ async fn test_closing_workspace_with_pending_hibernate_timer_does_not_leak(
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
 }
+
+/// A code review caught that `add()` — the entry point deserialization uses
+/// (`open_workspace_by_id`) and that `add_or_activate()` falls through to
+/// when `retain_background_projects` is `true` — never routed a
+/// newly-added, non-active workspace through the hibernate governor at all.
+/// `Project::local`/`Project::remote` initialize `Active` unconditionally,
+/// and before this fix nothing on this path ever called
+/// `schedule_hibernate`, so a workspace added here would sit at `Active`
+/// forever and never become a hibernation candidate. Exercises `add()`
+/// directly (not `test_add_workspace()`, which routes through `activate()`
+/// and would not have caught this) while a different workspace is active.
+#[gpui::test]
+async fn test_add_routes_background_workspace_through_hibernate_governor(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |_mw, cx| {
+        set_multi_project_settings(cx, true, 1000);
+    });
+
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = cx.new(|cx| Workspace::test_new(project_b.clone(), window, cx));
+        mw.add(workspace.clone(), &*window, cx);
+        workspace
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.workspace().entity_id(),
+            workspace_a.entity_id(),
+            "add() must not change the active workspace"
+        );
+    });
+    project_a.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Active,
+            "the still-focused workspace must remain Active"
+        );
+    });
+    project_b.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "a workspace added in the background via add() must be routed through the \
+             hibernate governor, not left stuck at Active"
+        );
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            mw.has_pending_hibernate_timer(&workspace_b),
+            "the newly added background workspace should have a pending hibernate timer"
+        );
+    });
+
+    // And it actually hibernates once idle past the threshold, exactly like
+    // a workspace that lost focus via activate() would.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+
+    project_b.read_with(cx, |project, _cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "the added workspace should hibernate once idle past the configured threshold"
+        );
+    });
+}
