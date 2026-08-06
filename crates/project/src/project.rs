@@ -4830,6 +4830,15 @@ impl Project {
         if let Some(prettier_store) = self.lsp_store.read(cx).prettier_store() {
             prettier_store.update(cx, |prettier_store, cx| prettier_store.hibernate(cx));
         }
+        // FR1 (Phase 4): drop every worktree's background scanner + fs
+        // watcher too. Collected into a `Vec` first rather than iterating
+        // `self.worktrees(cx)` directly, so nothing here holds a borrow
+        // tied back to `self` while looping. `Worktree::pause_scanning`
+        // itself no-ops on a remote worktree, so no local/remote filter is
+        // needed here either.
+        for worktree in self.worktrees(cx).collect::<Vec<_>>() {
+            worktree.update(cx, |worktree, _cx| worktree.pause_scanning());
+        }
     }
 
     /// FR5/step 8: a running debugger is the user's active work. If one
@@ -4895,9 +4904,55 @@ impl Project {
     /// explicit action: it lazily starts a fresh instance on the next
     /// format request the same way it always has, now that `hibernate`
     /// dropped its cached one.
+    ///
+    /// Also undoes Phase 4's worktree pause (FR2, FR3, FR4, FR6) and
+    /// triggers one git-status refresh (FR7). `Worktree::resume_scanning`
+    /// is called unconditionally on every worktree rather than only ones
+    /// this same wake actually paused — it no-ops on a worktree that was
+    /// never paused (e.g. hibernation was deferred by a barrier before
+    /// `try_hibernate_resources` reached the pause loop), which is the
+    /// same guard-at-the-resource reasoning `LspStore::wake` already
+    /// applies for itself. Resuming reconciles open buffers with disk
+    /// (FR3/FR4) and clears early-detected stale diagnostics (FR6) purely
+    /// as a side effect of the rescan's `UpdatedEntries`/
+    /// `WorktreeUpdatedEntries` event reaching the subscribers already
+    /// wired for that in `buffer_store.rs` and `lsp_store.rs` — nothing
+    /// here diffs a snapshot by hand.
     fn wake_resources(&mut self, cx: &mut Context<Self>) {
         self.hibernate_retry.take();
         self.lsp_store.update(cx, |lsp_store, cx| lsp_store.wake(cx));
+
+        // FR2: resume worktrees with an open buffer first, so the rescan
+        // that matters most to what the user is actually looking at
+        // finishes sooner. This is a best-effort ordering, not a hard
+        // guarantee -- each worktree's resume is independent and correct
+        // regardless of order, since FR3/FR4's reconciliation is keyed by
+        // path, not by scan-completion order.
+        let worktrees_with_open_buffers: HashSet<WorktreeId> = self
+            .buffer_store
+            .read(cx)
+            .buffers()
+            .filter_map(|buffer| buffer.read(cx).file().map(|file| file.worktree_id(cx)))
+            .collect();
+        let mut worktrees: Vec<(bool, Entity<Worktree>)> = self
+            .worktrees(cx)
+            .map(|worktree| {
+                let has_open_buffer = worktrees_with_open_buffers.contains(&worktree.read(cx).id());
+                (has_open_buffer, worktree)
+            })
+            .collect();
+        worktrees.sort_by_key(|(has_open_buffer, _)| !*has_open_buffer);
+        for (_, worktree) in worktrees {
+            worktree.update(cx, |worktree, cx| worktree.resume_scanning(cx));
+        }
+
+        // FR7: a hibernated project's git status isn't kept fresh while
+        // paused -- refresh it exactly once now, rather than per-path as
+        // FR6 does for diagnostics, since git status is inherently
+        // project-wide rather than something a per-path event should
+        // re-trigger on every batch.
+        self.git_store
+            .update(cx, |git_store, cx| git_store.refresh_all_repositories(cx));
     }
 
     pub fn entry_for_path<'a>(&'a self, path: &ProjectPath, cx: &'a App) -> Option<&'a Entry> {

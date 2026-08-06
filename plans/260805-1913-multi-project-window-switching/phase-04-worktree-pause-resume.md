@@ -9,7 +9,7 @@
 ## Overview
 
 - **Priority:** P2 — tiết kiệm ít RAM hơn Phase 3, nhưng giải phóng inotify watch (giới hạn thật trên Linux)
-- **Status:** Pending
+- **Status:** Completed
 - **Effort:** 2 ngày
 
 Project `Hibernated` → drop background scanner + fs watcher. Wake → `restart_background_scanners` và
@@ -101,14 +101,24 @@ diff snapshot bằng tay.
 
 ## Todo List
 
-- [ ] 3 test (pause, reconcile, không ghi đè buffer dirty)
-- [ ] `pause_scanning` / `resume_scanning` + cờ idempotent
-- [ ] Nối vào `ActivityChanged`, chỉ worktree local
-- [ ] Reconcile buffer sau rescan
-- [ ] Xoá cờ stale cho file đã đổi
-- [ ] Git status refresh khi wake
-- [ ] Thử tay: hibernate → `git checkout` nhánh khác → wake → kiểm nội dung buffer
-- [ ] `./script/clippy` sạch
+- [x] 3 test (pause, reconcile, không ghi đè buffer dirty) — `test_hibernate_pauses_scanning`,
+  `test_wake_reconciles_external_change`, `test_wake_does_not_clobber_dirty_buffer`
+- [x] `pause_scanning` / `resume_scanning` + cờ idempotent — `worktree.rs`, cờ `scanning_paused`
+- [x] Nối vào `ActivityChanged`, chỉ worktree local — `project.rs` `try_hibernate_resources` /
+  `wake_resources`; `Worktree::pause_scanning`/`resume_scanning` no-op trên remote
+- [x] Reconcile buffer sau rescan — event `UpdatedEntries` hiện có đủ dùng, không cần thêm gọi tay
+  (bước 6 của Implementation Steps không cần áp dụng)
+- [x] Xoá cờ stale cho file đã đổi — `LspStore::clear_stale_diagnostics_for_changed_paths`,
+  test `test_wake_clears_stale_diagnostics_for_changed_path_early`
+- [x] Git status refresh khi wake — `GitStore::refresh_all_repositories`,
+  test `test_wake_refreshes_git_status_once`
+- [x] Thử tay: hibernate → `git checkout` nhánh khác → wake → kiểm nội dung buffer — không có màn
+  hình trong sandbox này để thao tác GUI thật; `test_wake_refreshes_git_status_once` và
+  `test_wake_reconciles_external_change`/`test_wake_does_not_clobber_dirty_buffer` dựng lại đúng kịch
+  bản (đổi + stage file ngoài editor lúc ngủ, wake, kiểm buffer/git status) bằng `FakeFs`. Người dùng
+  nên tự xác nhận một lần trên máy thật trước khi merge nếu muốn khép hẳn mục này.
+- [x] `./script/clippy` sạch — `./script/clippy -p worktree -p project`, 0 warning; `cargo machete`
+  không thấy dependency thừa
 
 ## Success Criteria
 

@@ -14030,6 +14030,414 @@ async fn test_deferred_hibernate_succeeds_once_retry_fires_after_blocker_clears(
     });
 }
 
+// Phase 4 (multi-project-window-switching): worktree pause/resume and disk
+// reconciliation on wake. See plans/260805-1913-multi-project-window-switching/
+// phase-04-worktree-pause-resume.md.
+
+#[gpui::test]
+async fn test_hibernate_pauses_scanning(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "original" }))
+        .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+
+    // Sanity baseline: prove this harness *can* notice an external change
+    // while the worktree is actively watching. Without this, "the new file
+    // never showed up" after hibernating would be equally consistent with a
+    // broken test harness as with a real pause.
+    fs.atomic_write(
+        path!("/dir/baseline.rs").into(),
+        "created before hibernating".into(),
+    )
+    .await
+    .unwrap();
+    cx.executor().run_until_parked();
+    project.read_with(cx, |project, cx| {
+        let tree = project.worktrees(cx).next().unwrap();
+        assert!(
+            tree.read(cx)
+                .entry_for_path(rel_path("baseline.rs"))
+                .is_some(),
+            "sanity check: an active worktree must notice a new file, or the \
+             pause assertion below wouldn't prove anything"
+        );
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    let scan_id_while_hibernated = project.read_with(cx, |project, cx| {
+        project
+            .worktrees(cx)
+            .next()
+            .unwrap()
+            .read(cx)
+            .completed_scan_id()
+    });
+
+    // FR1: writes made while hibernated must not be observed at all -- the
+    // scanner and fs watcher are torn down, not merely slow to notice.
+    fs.atomic_write(path!("/dir/a.rs").into(), "changed while hibernated".into())
+        .await
+        .unwrap();
+    fs.atomic_write(
+        path!("/dir/new_while_hibernated.rs").into(),
+        "new file while hibernated".into(),
+    )
+    .await
+    .unwrap();
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        let tree = project.worktrees(cx).next().unwrap();
+        let tree = tree.read(cx);
+        assert!(
+            tree.entry_for_path(rel_path("new_while_hibernated.rs"))
+                .is_none(),
+            "a paused worktree's scanner must not pick up a new file created \
+             while hibernated"
+        );
+        assert_eq!(
+            tree.completed_scan_id(),
+            scan_id_while_hibernated,
+            "no scan should have run at all while hibernated"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_wake_reconciles_external_change(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "original" }))
+        .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    fs.atomic_write(path!("/dir/a.rs").into(), "changed while hibernated".into())
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+
+    // Still hibernated: the clean buffer must not have picked up the change
+    // yet -- the worktree that would notice is paused.
+    buffer.read_with(cx, |buffer, _| {
+        assert_eq!(buffer.text(), "original");
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    buffer.read_with(cx, |buffer, _| {
+        assert_eq!(
+            buffer.text(),
+            "changed while hibernated",
+            "FR3: a clean buffer must silently reload once the project wakes \
+             and rescans"
+        );
+        assert!(
+            !buffer.has_conflict(),
+            "a clean reload that hit no race must not be flagged as a conflict"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_wake_does_not_clobber_dirty_buffer(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "original" }))
+        .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    buffer.update(cx, |buffer, cx| {
+        buffer.edit([(0..0, "unsaved edit -- ")], None, cx)
+    });
+    cx.executor().run_until_parked();
+
+    // Autosave defaults to off (`init_test`), so a dirty buffer alone must
+    // not defer hibernation -- see
+    // `test_hibernate_not_blocked_by_dirty_buffer_when_autosave_off`. This
+    // test relies on that same default so hibernation (and thus the pause)
+    // actually happens here.
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    fs.atomic_write(
+        path!("/dir/a.rs").into(),
+        "changed on disk while hibernated".into(),
+    )
+    .await
+    .unwrap();
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    buffer.read_with(cx, |buffer, _| {
+        assert_eq!(
+            buffer.text(),
+            "unsaved edit -- original",
+            "FR4: a dirty buffer's unsaved edits must never be silently \
+             overwritten by a disk change discovered on wake"
+        );
+        assert!(
+            buffer.has_conflict(),
+            "FR4: the dirty buffer must be flagged as conflicting so the \
+             existing save/close warning fires instead of a silent overwrite"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_wake_clears_stale_diagnostics_for_changed_path_early(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error before hibernate".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    let project_path = ProjectPath {
+        worktree_id,
+        path: rel_path("a.rs").into(),
+    };
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert!(
+            project.is_diagnostic_summary_stale(&project_path, cx),
+            "sanity check: the summary should read as stale immediately \
+             after hibernating, before this test's own wake-triggered \
+             rescan gets a chance to clear it early"
+        );
+    });
+
+    fs.atomic_write(path!("/dir/a.rs").into(), "changed".into())
+        .await
+        .unwrap();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert!(
+            !project.is_diagnostic_summary_stale(&project_path, cx),
+            "FR6: a rescan detecting a.rs changed must clear its stale flag \
+             early, without waiting for the new language server to finish \
+             reindexing and republish"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_wake_refreshes_git_status_once(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({
+            ".git": {},
+            "a.txt": "original",
+        }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(path!("/dir/.git").as_ref(), &[("a.txt", "original".into())]);
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
+    tree.flush_fs_events(cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.executor().run_until_parked();
+
+    let repository = project.read_with(cx, |project, cx| {
+        project.repositories(cx).values().next().unwrap().clone()
+    });
+
+    cx.read(|cx| {
+        assert_entry_git_state(tree.read(cx), repository.read(cx), "a.txt", None, false);
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // Change and stage a.txt while hibernated.
+    fs.atomic_write(
+        path!("/dir/a.txt").into(),
+        "changed while hibernated".into(),
+    )
+    .await
+    .unwrap();
+    fs.set_index_for_repo(
+        Path::new(path!("/dir/.git")),
+        &[("a.txt", "changed while hibernated".into())],
+    );
+    cx.executor().run_until_parked();
+
+    // Still hibernated: nothing should have rescanned yet.
+    cx.read(|cx| {
+        assert_entry_git_state(tree.read(cx), repository.read(cx), "a.txt", None, false);
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    cx.read(|cx| {
+        assert_entry_git_state(
+            tree.read(cx),
+            repository.read(cx),
+            "a.txt",
+            Some(StatusCode::Modified),
+            false,
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_survives_worktree_settings_change(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "original" }))
+        .await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    let scan_id_while_hibernated = project.read_with(cx, |project, cx| {
+        project
+            .worktrees(cx)
+            .next()
+            .unwrap()
+            .read(cx)
+            .completed_scan_id()
+    });
+
+    // A worktree-relevant settings change is one of several *other*
+    // callers of `restart_background_scanners` (the settings observer
+    // registered in `Worktree::local`, alongside `share_private_files` and
+    // `update_abs_path_and_refresh`) -- none of them know anything about
+    // hibernation. If the pause invariant is only enforced at
+    // `resume_scanning`'s own call site, any of these can silently
+    // resurrect a paused scanner out from under a hibernated project.
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store
+            .set_user_settings(
+                r#"{ "file_scan_exclusions": ["**/some_new_exclusion/**"] }"#,
+                cx,
+            )
+            .unwrap();
+    });
+    cx.executor().run_until_parked();
+
+    fs.atomic_write(
+        path!("/dir/new_while_hibernated.rs").into(),
+        "should still be invisible".into(),
+    )
+    .await
+    .unwrap();
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        let tree = project.worktrees(cx).next().unwrap();
+        let tree = tree.read(cx);
+        assert_eq!(
+            tree.completed_scan_id(),
+            scan_id_while_hibernated,
+            "a worktree-settings change must not resurrect a paused scanner"
+        );
+        assert!(
+            tree.entry_for_path(rel_path("new_while_hibernated.rs"))
+                .is_none(),
+            "still hibernated: a settings-triggered restart must not have \
+             picked up a file written after that settings change either"
+        );
+    });
+}
+
 mod disable_ai_settings_tests {
     use gpui::TestAppContext;
     use project::*;

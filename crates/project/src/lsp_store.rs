@@ -4493,6 +4493,7 @@ impl LspStore {
             }
             WorktreeStoreEvent::WorktreeUpdatedEntries(worktree_id, changes) => {
                 self.invalidate_diagnostic_summaries_for_removed_entries(*worktree_id, changes, cx);
+                self.clear_stale_diagnostics_for_changed_paths(*worktree_id, changes, cx);
             }
             WorktreeStoreEvent::WorktreeReleased(..)
             | WorktreeStoreEvent::WorktreeOrderChanged
@@ -8491,6 +8492,75 @@ impl LspStore {
                     paths: cleared_paths.clone(),
                 });
             }
+        }
+    }
+
+    /// FR6 (Phase 4 of multi-project-window-switching): a worktree rescan
+    /// just reported `changes` for `worktree_id`, most likely after waking
+    /// from hibernation. Any diagnostic summary entry still sitting under
+    /// a hibernated server generation (`stale_language_servers` locally,
+    /// `stale_paths` remotely) for one of the *changed* (not removed —
+    /// `invalidate_diagnostic_summaries_for_removed_entries` already
+    /// handles that) paths is cleared now, rather than waiting for that
+    /// generation's replacement server to finish reindexing
+    /// (`clear_stale_diagnostics_after_reindex`). This is strictly an
+    /// early-clear for the common case of the changed file itself: a file
+    /// that breaks for some other reason (e.g. a dependency changed, but
+    /// the file itself didn't) still needs that project-wide sweep once
+    /// reindexing finishes — this does not replace it, the two are
+    /// complementary.
+    fn clear_stale_diagnostics_for_changed_paths(
+        &mut self,
+        worktree_id: WorktreeId,
+        changes: &UpdatedEntriesSet,
+        cx: &mut Context<Self>,
+    ) {
+        let local = match &mut self.mode {
+            LspStoreMode::Local(local) => local,
+            LspStoreMode::Remote(remote) => {
+                for (path, _, change) in changes.iter() {
+                    if *change != PathChange::Removed {
+                        remote.stale_paths.remove(&(worktree_id, path.clone()));
+                    }
+                }
+                return;
+            }
+        };
+        if local.stale_language_servers.is_empty() {
+            return;
+        }
+
+        let Some(summaries_for_tree) = self.diagnostic_summaries.get_mut(&worktree_id) else {
+            return;
+        };
+
+        let mut cleared_paths_by_server: HashMap<LanguageServerId, Vec<ProjectPath>> =
+            HashMap::default();
+        for (path, _, _) in changes
+            .iter()
+            .filter(|(_, _, change)| *change != PathChange::Removed)
+        {
+            let Some(summaries_by_server_id) = summaries_for_tree.get_mut(path) else {
+                continue;
+            };
+            summaries_by_server_id.retain(|id, _| {
+                if local.stale_language_servers.contains_key(id) {
+                    cleared_paths_by_server
+                        .entry(*id)
+                        .or_default()
+                        .push(ProjectPath {
+                            worktree_id,
+                            path: path.clone(),
+                        });
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        for (server_id, paths) in cleared_paths_by_server {
+            cx.emit(LspStoreEvent::DiagnosticsUpdated { server_id, paths });
         }
     }
 
