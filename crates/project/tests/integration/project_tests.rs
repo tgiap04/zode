@@ -3648,6 +3648,39 @@ async fn test_transforming_diagnostics(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// Regression test: a worktree opened for a path that never exists on disk
+/// (Zed's documented behavior for a bare CLI path -- it's treated as a
+/// not-yet-created new file rather than rejected) never canonicalizes its
+/// root, so `File::abs_path` stays a relative string forever. Dropping the
+/// last `OpenLspBufferHandle` for such a buffer used to `debug_panic!` in
+/// `unregister_old_buffer_from_language_servers` because a relative path
+/// can't be converted to an LSP URI -- it must be handled the same way its
+/// sibling call site already handles the identical failure: log and move on.
+#[gpui::test]
+async fn test_unregister_buffer_for_uncanonicalized_worktree_does_not_panic(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    // Deliberately no `insert_tree` for this path -- it must never exist.
+    let project = Project::test(fs, [path!("never-created").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let _fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (_buffer, handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("never-created"), cx)
+        })
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+
+    drop(handle);
+    cx.executor().run_until_parked();
+}
+
 #[gpui::test]
 async fn test_empty_diagnostic_ranges(cx: &mut gpui::TestAppContext) {
     init_test(cx);
