@@ -13609,6 +13609,315 @@ async fn test_hibernate_skipped_when_debug_session_active(cx: &mut gpui::TestApp
     });
 }
 
+// Adversarial-review fix round on Phase 3 (LSP hibernate/wake). Critical
+// and High findings, each with a regression test that would have failed
+// against the code these tests were added alongside.
+
+#[gpui::test]
+async fn test_reactivating_from_warm_does_not_restart_language_servers(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    // Bounce Warm -> Active without ever reaching Hibernated -- the
+    // ordinary "switched to another project and back within the idle
+    // window" case that `MultiWorkspace::activate` produces on every
+    // project switch (wake_project the incoming project, schedule_hibernate
+    // the outgoing one -- Active -> Warm, not Active -> Hibernated).
+    // Nothing here was ever stopped, so nothing should restart.
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Active);
+    });
+    // If `wake_resources` had incorrectly fired on this transition (as it
+    // did before matching on the *previous* activity too), it would have
+    // called `LspStore::wake` -> `restart_all_language_servers`, which
+    // stops the existing server -- clearing its per-line diagnostics the
+    // way a real restart always does -- and starts a brand new one.
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "Warm -> Active must not touch language servers that were never stopped -- \
+             only Hibernated -> Active is a real wake"
+        );
+    });
+    assert!(
+        futures::FutureExt::now_or_never(futures::StreamExt::next(&mut fake_servers)).is_none(),
+        "no new language server should have been spawned for a Warm -> Active transition"
+    );
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_disk_based_diagnostics_finished_only_sweeps_its_own_server_generation(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x", "b.ts": "y" }))
+        .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    language_registry.register_test_language(LanguageConfig {
+        name: "OtherLang".into(),
+        matcher: LanguageMatcher {
+            path_suffixes: vec!["ts".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    // Distinct adapter `name`s are required here, not just distinct
+    // language names: `register_fake_lsp` keys its internal server-entry
+    // map by the adapter's own `name` field, so two `FakeLspAdapter::default()`
+    // calls (same default name) would silently collide -- the second
+    // registration replaces the first's map entry, dropping its sender
+    // and leaving the first language's receiver channel closed.
+    let mut fake_rust_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            name: "fake-rust-server",
+            ..Default::default()
+        },
+    );
+    let mut fake_other_servers = language_registry.register_fake_lsp(
+        "OtherLang",
+        FakeLspAdapter {
+            name: "fake-other-server",
+            ..Default::default()
+        },
+    );
+
+    let (_buffer_a, _handle_a) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let (_buffer_b, _handle_b) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/b.ts"), cx)
+        })
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+
+    let fake_rust_server = fake_rust_servers.next().await.unwrap();
+    let fake_other_server = fake_other_servers.next().await.unwrap();
+    fake_rust_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "a error".to_string(),
+            ..Default::default()
+        }],
+    });
+    fake_other_server.notify::<lsp::notification::PublishDiagnostics>(
+        lsp::PublishDiagnosticsParams {
+            uri: Uri::from_file_path(path!("/dir/b.ts")).unwrap(),
+            version: None,
+            diagnostics: vec![lsp::Diagnostic {
+                range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+                severity: Some(lsp::DiagnosticSeverity::WARNING),
+                message: "b warning".to_string(),
+                ..Default::default()
+            }],
+        },
+    );
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 1,
+            },
+        );
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // Both servers restart post-wake, but only the Rust one reports its
+    // indexing pass finished -- the OtherLang one is still "working".
+    let fake_rust_server = fake_rust_servers.next().await.unwrap();
+    let new_rust_server_id = fake_rust_server.server.server_id();
+    project.update(cx, |project, cx| {
+        project.lsp_store().update(cx, |lsp_store, cx| {
+            lsp_store.disk_based_diagnostics_finished(new_rust_server_id, cx);
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // b.ts's stale warning must survive: it belongs to a different
+    // server generation than the one that just reported finishing. This
+    // is the regression the adversarial review caught -- the sweep used
+    // to clear every stale id project-wide on ANY server's completion,
+    // which would have wiped this out too.
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 1,
+            },
+            "a sibling server's completion must not sweep away a still-legitimately-stale \
+             entry that belongs to a different server generation"
+        );
+    });
+
+    // Now the OtherLang server also finishes -- its own stale entry
+    // should finally clear too.
+    let fake_other_server = fake_other_servers.next().await.unwrap();
+    let new_other_server_id = fake_other_server.server.server_id();
+    project.update(cx, |project, cx| {
+        project.lsp_store().update(cx, |lsp_store, cx| {
+            lsp_store.disk_based_diagnostics_finished(new_other_server_id, cx);
+        });
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 0,
+            },
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_deferred_hibernate_succeeds_once_retry_fires_after_blocker_clears(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store
+            .set_user_settings(r#"{ "autosave": "on_focus_change" }"#, cx)
+            .unwrap();
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    buffer.update(cx, |buffer, cx| buffer.edit([(0..0, "z")], None, cx));
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // Deferred: the dirty buffer racing a live autosave setting blocks
+    // the first attempt (same contract as
+    // test_hibernate_deferred_by_autosave_on_focus_change_with_dirty_buffer).
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "hibernate should still be deferred immediately after the first attempt"
+        );
+    });
+
+    // Clear the blocker the same way a real save would, then advance the
+    // clock past the retry interval -- the scheduled retry should
+    // succeed entirely on its own, without any further call into
+    // set_activity from this test.
+    buffer.update(cx, |buffer, cx| {
+        let version = buffer.version();
+        let mtime = buffer.file().unwrap().disk_state().mtime();
+        buffer.did_save(version, mtime, cx);
+    });
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.executor().run_until_parked();
+
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            buffer.buffer_diagnostics(None).is_empty(),
+            "the deferred hibernate should succeed on its own once the retry timer fires and \
+             the blocker has cleared -- this is `schedule_hibernate_retry`'s entire contract"
+        );
+    });
+}
+
 mod disable_ai_settings_tests {
     use gpui::TestAppContext;
     use project::*;

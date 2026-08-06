@@ -2476,6 +2476,47 @@ async fn test_hibernate_ignores_stale_zero_diagnostic_summary_from_host(
              of FR1) would be wiped out by an incoming message instead of local code"
         );
     });
+
+    // M2: the guard above is scoped to `Hibernated`, not permanent --
+    // once woken, a genuine update from the host must actually apply
+    // again, replacing the stale summary rather than adding to it
+    // (FR4's remote counterpart, `RemoteLspStore::stale_paths`).
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Active);
+    });
+
+    // Waking sends `proto::RestartLanguageServers` to the host, which
+    // restarts the fake rust-analyzer -- a fresh instance shows up here.
+    let fake_lsp = fake_lsp_rx.next().await.unwrap();
+    fake_lsp.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: lsp::Uri::from_file_path(path!("/code/project1/src/lib.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::WARNING),
+            message: "fresh warning after wake".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 1,
+            },
+            "M2: once Active again, a genuine update from the host must actually apply and \
+             replace the stale summary, not coexist with it under the old server id -- the \
+             hibernated guard must not outlive Hibernated itself"
+        );
+    });
 }
 
 pub async fn init_test(

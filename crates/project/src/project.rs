@@ -4736,10 +4736,11 @@ impl Project {
             return;
         }
         if self.activity != activity {
+            let previous = self.activity;
             self.activity = activity;
             cx.emit(Event::ActivityChanged(activity));
             cx.notify();
-            self.reconcile_resource_activity(cx);
+            self.reconcile_resource_activity(previous, cx);
         }
     }
 
@@ -4748,17 +4749,35 @@ impl Project {
     /// committed to. Only called on an actual transition (see
     /// `set_activity`) — this is the resource-layer reaction Phase 2's
     /// pure state machine deliberately left for this phase to add.
-    fn reconcile_resource_activity(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `previous` matters here, not just the new label: `Active` is
+    /// reachable two ways — `Hibernated -> Active` (a real wake; servers
+    /// were actually stopped and need restarting) and `Warm -> Active`
+    /// (the project was merely defocused with its idle timer still
+    /// running; nothing was ever touched). Waking on the latter would
+    /// stop-then-restart every language server for a project that was
+    /// never hibernated in the first place — exactly what happens every
+    /// time `MultiWorkspace::activate()` switches back to a project
+    /// that's still within its idle window, i.e. on every ordinary
+    /// bounce between two retained projects. Matching on the new label
+    /// alone (an earlier version of this function did) misses that
+    /// distinction entirely.
+    fn reconcile_resource_activity(&mut self, previous: ProjectActivity, cx: &mut Context<Self>) {
         match self.activity {
             ProjectActivity::Hibernated => self.try_hibernate_resources(cx),
-            ProjectActivity::Active => self.wake_resources(cx),
-            ProjectActivity::Warm => {
-                // Only the Hibernated/Active edges touch real resources;
-                // Warm is a label-only waypoint. Nothing today reaches
-                // Warm with a hibernate retry in flight (the guard in
-                // `set_activity` forbids `Hibernated -> Warm` directly),
-                // but dropping any pending retry here keeps that true
-                // structurally rather than by convention.
+            ProjectActivity::Active if previous == ProjectActivity::Hibernated => {
+                self.wake_resources(cx)
+            }
+            _ => {
+                // Either `Warm -> Active` (nothing to undo, see above) or
+                // reaching `Warm` itself (a label-only waypoint; only the
+                // Hibernated/Active edges touch real resources). Dropping
+                // any pending hibernate retry here is still correct in
+                // both cases: `Warm -> Active` means the timer's premise
+                // ("still Hibernated when it fires") just became false
+                // early, and `-> Warm` can only be reached from `Active`
+                // (the guard in `set_activity` forbids `Hibernated ->
+                // Warm` directly), which never has a retry pending either.
                 self.hibernate_retry.take();
             }
         }
@@ -4778,6 +4797,21 @@ impl Project {
     ///   on its own, so a dirty buffer alone must never block
     ///   hibernation, or anyone who habitually leaves a tab dirty would
     ///   never get this feature's benefit at all.
+    ///
+    /// Accepted, narrow gap (decided rather than left implicit): the
+    /// debug-session check above only runs *before* `lsp_store.hibernate`
+    /// is kicked off. That call is a detached async task (the LSP
+    /// protocol shutdown itself takes real time), so a debug session that
+    /// starts in the window between the check passing and that task
+    /// actually finishing stopping servers will not stop or reverse it —
+    /// nothing today re-checks activity when a new `DapStore` session is
+    /// created. Left unclosed deliberately: the window is bounded by one
+    /// graceful LSP shutdown (not indefinite), and the common way a debug
+    /// session starts is the user focusing this project to launch it,
+    /// which independently reaches `Active` and calls `wake_resources`
+    /// right after — self-correcting through the ordinary focus path
+    /// rather than needing new event plumbing between `DapStore` and
+    /// `Project` for a race this narrow.
     fn try_hibernate_resources(&mut self, cx: &mut Context<Self>) {
         if self.has_active_debug_session(cx) {
             log::debug!("project hibernation: deferring, a debug session is running");
@@ -4817,11 +4851,25 @@ impl Project {
     /// dropping the format. Only a *live* autosave setting creates that
     /// race — `AutosaveSetting::Off` (the default) never saves on its
     /// own, so a dirty buffer under `Off` must not block hibernation.
+    ///
+    /// Resolved per dirty buffer, not at global scope: the real
+    /// autosave-triggering code (`ItemHandle::workspace_settings` in
+    /// `crates/workspace/src/item.rs`) reads the setting scoped to that
+    /// buffer's own `SettingsLocation`, so a worktree-local
+    /// `.zed/settings.json` override genuinely changes that worktree's
+    /// autosave behavior independent of the project-wide default.
+    /// Reading only `ProjectSettings::get_global` here would miss a
+    /// worktree that turned autosave on while the global default stayed
+    /// off, letting hibernate through into a race FR8 exists to prevent.
+    /// Short-circuits on the first dirty buffer that's actually racing.
     fn autosave_would_race_hibernate(&self, cx: &App) -> bool {
-        if self.dirty_buffers(cx).next().is_none() {
-            return false;
-        }
-        ProjectSettings::get_global(cx).autosave != AutosaveSetting::Off
+        self.dirty_buffers(cx).any(|project_path| {
+            let location = SettingsLocation {
+                worktree_id: project_path.worktree_id,
+                path: project_path.path.as_ref(),
+            };
+            ProjectSettings::get(Some(location), cx).autosave != AutosaveSetting::Off
+        })
     }
 
     /// Retries a deferred hibernate after a short delay, but only if this
