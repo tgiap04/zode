@@ -22,11 +22,9 @@ use std::time::{Duration, Instant};
 use ui::prelude::*;
 use util::ResultExt;
 use util::path_list::PathList;
-use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
-use crate::notifications::NotificationId;
 use crate::Toast;
-
+use crate::notifications::NotificationId;
 
 const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
@@ -50,12 +48,6 @@ actions!(
         NextProject,
         /// Activates the previous project in the sidebar.
         PreviousProject,
-        /// Activates the next thread in sidebar order.
-        NextThread,
-        /// Activates the previous thread in sidebar order.
-        PreviousThread,
-        /// Creates a new thread in the current workspace.
-        NewThread,
         /// Moves the active project to a new window.
         MoveProjectToNewWindow,
         /// Logs resource stats (language servers, buffers, worktree
@@ -90,31 +82,16 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
     fn has_notifications(&self, cx: &App) -> bool;
     fn side(&self, _cx: &App) -> SidebarSide;
 
-    fn is_threads_list_view_active(&self) -> bool {
-        true
-    }
     /// Makes focus reset back to the search editor upon toggling the sidebar from outside
     fn prepare_for_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
-    /// Opens or cycles the thread switcher popup.
-    fn toggle_thread_switcher(
-        &mut self,
-        _select_last: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
 
     // TODO(phase-07): project cycling now lives on `MultiWorkspace::cycle_project`,
     // driven directly by `retained_workspaces` order, so `NextProject`/
-    // `PreviousProject` no longer call this. Revisit both methods when the
-    // sidebar crate is rebuilt: decide whether the sidebar should still own
-    // thread cycling and/or intercept project cycling while its
-    // threads-list view is active (see `is_threads_list_view_active`).
+    // `PreviousProject` no longer call this. Revisit whether the sidebar
+    // should still own or intercept it now that the sidebar crate has been
+    // rebuilt as a plain project list with no secondary view to branch on.
     /// Activates the next or previous project.
     fn cycle_project(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
-
-    /// Activates the next or previous thread in sidebar order.
-    fn cycle_thread(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     /// Return an opaque JSON blob of sidebar-specific state to persist.
     fn serialized_state(&self, _cx: &App) -> Option<String> {
@@ -140,11 +117,7 @@ pub trait SidebarHandle: 'static + Send + Sync {
     fn has_notifications(&self, cx: &App) -> bool;
     fn to_any(&self) -> AnyView;
     fn entity_id(&self) -> EntityId;
-    fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App);
     fn cycle_project(&self, forward: bool, window: &mut Window, cx: &mut App);
-    fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App);
-
-    fn is_threads_list_view_active(&self, cx: &App) -> bool;
 
     fn side(&self, cx: &App) -> SidebarSide;
     fn serialized_state(&self, cx: &App) -> Option<String>;
@@ -194,15 +167,6 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
         Entity::entity_id(self)
     }
 
-    fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App) {
-        let entity = self.clone();
-        window.defer(cx, move |window, cx| {
-            entity.update(cx, |this, cx| {
-                this.toggle_thread_switcher(select_last, window, cx);
-            });
-        });
-    }
-
     fn cycle_project(&self, forward: bool, window: &mut Window, cx: &mut App) {
         let entity = self.clone();
         window.defer(cx, move |window, cx| {
@@ -210,19 +174,6 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
                 this.cycle_project(forward, window, cx);
             });
         });
-    }
-
-    fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App) {
-        let entity = self.clone();
-        window.defer(cx, move |window, cx| {
-            entity.update(cx, |this, cx| {
-                this.cycle_thread(forward, window, cx);
-            });
-        });
-    }
-
-    fn is_threads_list_view_active(&self, cx: &App) -> bool {
-        self.read(cx).is_threads_list_view_active()
     }
 
     fn side(&self, cx: &App) -> SidebarSide {
@@ -555,12 +506,6 @@ impl MultiWorkspace {
         self.sidebar
             .as_ref()
             .map_or(false, |s| s.has_notifications(cx))
-    }
-
-    pub fn is_threads_list_view_active(&self, cx: &App) -> bool {
-        self.sidebar
-            .as_ref()
-            .map_or(false, |s| s.is_threads_list_view_active(cx))
     }
 
     pub fn multi_workspace_enabled(&self, cx: &App) -> bool {
@@ -2726,18 +2671,8 @@ impl Render for MultiWorkspace {
                             this.focus_sidebar(window, cx);
                         },
                     ))
-                    .on_action(cx.listener(
-                        |this: &mut Self, action: &ToggleThreadSwitcher, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.toggle_thread_switcher(action.select_last, window, cx);
-                            }
-                        },
-                    ))
                     // Project cycling is driven by `MultiWorkspace` directly so it
-                    // works with no sidebar present (see `cycle_project`). A
-                    // rebuilt sidebar (phase-07) that wants to intercept this
-                    // while its own threads-list view is active should branch
-                    // on `this.is_threads_list_view_active(cx)` here.
+                    // works with no sidebar present (see `cycle_project`).
                     .on_action(cx.listener(|this: &mut Self, _: &NextProject, window, cx| {
                         this.cycle_project(true, window, cx);
                     }))
@@ -2751,18 +2686,6 @@ impl Render for MultiWorkspace {
                             this.dump_project_resource_stats(cx);
                         },
                     ))
-                    .on_action(cx.listener(|this: &mut Self, _: &NextThread, window, cx| {
-                        if let Some(sidebar) = &this.sidebar {
-                            sidebar.cycle_thread(true, window, cx);
-                        }
-                    }))
-                    .on_action(
-                        cx.listener(|this: &mut Self, _: &PreviousThread, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.cycle_thread(false, window, cx);
-                            }
-                        }),
-                    )
                     .when(self.project_group_keys().len() >= 2, |el| {
                         el.on_action(cx.listener(
                             |this: &mut Self, _: &MoveProjectToNewWindow, window, cx| {
