@@ -14506,6 +14506,86 @@ async fn test_resource_stats_reports_counts_and_activity(cx: &mut gpui::TestAppC
     });
 }
 
+// Phase 5 (multi-project-window-switching): terminal scrollback limiting
+// on hibernate. See
+// plans/260805-1913-multi-project-window-switching/phase-05-terminal-memory-policy.md
+// and reports/terminal-memory-measurement.md for why this is enabled at
+// all despite the RSS caveat recorded there.
+
+#[gpui::test]
+async fn test_hibernate_shrinks_and_wake_restores_terminal_scrollback(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    cx.executor().allow_parking();
+
+    cx.update(|cx| {
+        settings::SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{ "multi_project": { "background_scroll_history_lines": 500 } }"#,
+                    cx,
+                )
+                .unwrap();
+        });
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let terminal = project
+        .update(cx, |project, cx| project.create_terminal_shell(None, cx))
+        .await
+        .unwrap();
+
+    let mut generated = String::new();
+    for line in 0..2_000 {
+        generated.push_str(&format!("line {line}\n"));
+    }
+    terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+    cx.executor().run_until_parked();
+
+    let lines_before_hibernate = terminal.read_with(cx, |terminal, _| terminal.total_lines());
+    assert!(
+        lines_before_hibernate > 500,
+        "sanity check: the terminal must actually hold more than the configured limit \
+         before hibernating, or shrinking wouldn't prove anything (got {lines_before_hibernate})"
+    );
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // `total_lines()` = history_size + the terminal's (small, fixed) visible
+    // screen_lines -- the +50 margin absorbs that overhead without
+    // weakening what this actually proves (a shrink from 2000+ down to
+    // ~500 either way).
+    let lines_after_hibernate = terminal.read_with(cx, |terminal, _| terminal.total_lines());
+    assert!(
+        lines_after_hibernate <= 550,
+        "FR3: hibernating with background_scroll_history_lines set must shrink this \
+         project's terminal scrollback to that limit (got {lines_after_hibernate})"
+    );
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // FR6: the cap lifts, but the already-dropped lines don't come back --
+    // regrow past the shrunk limit to prove the cap is gone, not just that
+    // it happens to still read <= 500.
+    terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+    cx.executor().run_until_parked();
+    let lines_after_wake_and_regrow = terminal.read_with(cx, |terminal, _| terminal.total_lines());
+    assert!(
+        lines_after_wake_and_regrow > 500,
+        "FR6: waking must lift the scrollback cap so future output isn't still limited to \
+         the shrunk value (got {lines_after_wake_and_regrow})"
+    );
+}
+
 mod disable_ai_settings_tests {
     use gpui::TestAppContext;
     use project::*;

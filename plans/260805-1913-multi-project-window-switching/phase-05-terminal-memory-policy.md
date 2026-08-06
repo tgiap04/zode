@@ -100,20 +100,40 @@ Bước 2 (siết): ActivityChanged(Hibernated)
 
 ## Todo List
 
-- [ ] Đo RSS grid 10k dòng **bằng hạ tầng Phase 6**, ghi `reports/terminal-memory-measurement.md`
-- [ ] Xác minh `set_options` thu nhỏ history (đọc `history_size()`)
-- [ ] Quyết định: siết hay đóng phase là no-op
-- [ ] *(nếu siết)* `set_scroll_history_limit` + helper + setting default `null`
-- [ ] *(nếu siết)* Comment cảnh báo mất log trong `default.json`
-- [ ] Xác nhận test bất biến FR2 đã tồn tại và xanh ở Phase 2 (không viết lại ở đây)
-- [ ] `./script/clippy` sạch
+- [x] Đo RSS grid 10k dòng **bằng hạ tầng Phase 6** (đọc RSS của tiến trình Zode chính nó qua
+  `sysinfo`, cùng cơ chế), ghi `reports/terminal-memory-measurement.md` — test
+  `test_scrollback_grid_memory_measurement` trong `terminal.rs`. Kết quả: **~56MB cho 1 terminal
+  10k dòng × 200 cột — vượt xa ngưỡng 5MB**, đáng làm.
+- [x] Xác minh `set_options` thu nhỏ history (đọc `history_size()`) — xác nhận **có** thu nhỏ ngay
+  (đồng bộ, không trì hoãn) qua đọc source alacritty fork + thực nghiệm. **Phát hiện thêm ngoài dự
+  kiến:** thu nhỏ không giảm RSS quan sát được (allocator giữ lại vùng nhớ để tái dùng, không trả
+  OS ngay) — xem report § Step 3. Không đổi kết luận (vẫn nên siết, xem report § Decision).
+- [x] Quyết định: **siết** (không đóng làm no-op) — chi phí đủ lớn, và siết là điều kiện cần để bất
+  kỳ allocator nào (đặc biệt `mimalloc` mà build thật dùng) có cơ hội trả bộ nhớ về OS sau này.
+- [x] `set_scroll_history_limit` + helper + setting default `null` — `Terminal::limit_scroll_history`/
+  `restore_scroll_history_limit` (`terminal.rs`), `Project::limit_terminal_scroll_history`/
+  `restore_terminal_scroll_history` (`terminals.rs`), setting
+  `workspace.multi_project.background_scroll_history_lines` (default `null`)
+- [x] Comment cảnh báo mất log trong `default.json` — có, kèm số đo thật (~56MB) để người dùng
+  cân nhắc trước khi bật
+- [x] Xác nhận test bất biến FR2 đã tồn tại và xanh ở Phase 2 (không viết lại ở đây) —
+  `test_activity_transitions_never_disturb_a_running_terminal_process` trong
+  `crates/project/tests/integration/activity_governor.rs`, xanh. (Checkbox tương ứng ở phase-02.md
+  chưa từng được tick dù test đã tồn tại từ trước — doc-sync gap từ session trước, không phải thiếu
+  test; không sửa ở đây vì ngoài scope phase này.)
+- [x] `./script/clippy` sạch — `./script/clippy -p project -p workspace -p terminal -p settings_content`,
+  0 warning; `cargo machete` không thấy dependency thừa
 
 ## Success Criteria
 
-- Có con số đo thật trong `reports/`, không phải suy diễn.
-- Test bất biến FR2 xanh: hibernate không dừng tiến trình nào của user.
-- Nếu siết được bật: terminal project active không đổi hành vi; project ngủ giảm RSS đo được.
-- Nếu kết luận no-op: report nói rõ vì sao, để không ai phải đo lại.
+- [x] Có con số đo thật trong `reports/`, không phải suy diễn — `reports/terminal-memory-measurement.md`.
+- [x] Test bất biến FR2 xanh: hibernate không dừng tiến trình nào của user — xác nhận (test đã có
+  từ Phase 2, xanh, không cần viết lại).
+- [x] Siết được bật: terminal project active không đổi hành vi (chỉ terminal của project Hibernated
+  bị chạm tới — `limit_terminal_scroll_history` chỉ gọi khi `try_hibernate_resources` thực thi);
+  project ngủ giảm scrollback đo được (`history_size`/`total_lines` giảm đúng, xác nhận bằng test
+  tích hợp `test_hibernate_shrinks_and_wake_restores_terminal_scrollback`). RSS thực tế không giảm
+  ngay (xem report) — sự thật này được ghi lại trung thực, không giấu.
 
 ## Risk Assessment
 

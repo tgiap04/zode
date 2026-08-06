@@ -89,6 +89,20 @@ pub struct ProjectSettings {
     ///
     /// Default: "off"
     pub autosave: AutosaveSetting,
+
+    /// How many lines to shrink a hibernated project's terminals'
+    /// scrollback to. Read here for the same reason `autosave` is (see
+    /// its own doc comment above): `workspace.multi_project.*` is where
+    /// this setting's JSON key and full rationale live
+    /// (`settings::MultiProjectContent::background_scroll_history_lines`),
+    /// but `crates/project` can't depend on `crates/workspace`'s typed
+    /// `WorkspaceSettings` wrapper without a cycle, and project-level
+    /// hibernation (`Project::try_hibernate_resources`/`wake_resources`)
+    /// is what actually acts on it. `None` means disabled — hibernated
+    /// terminals keep their full scrollback.
+    ///
+    /// Default: null (disabled)
+    pub background_scroll_history_lines: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -741,6 +755,16 @@ impl Settings for ProjectSettings {
                 trust_all_worktrees: content.session.unwrap().trust_all_worktrees.unwrap(),
             },
             autosave: content.workspace.autosave.unwrap_or(AutosaveSetting::Off),
+            // Real `None`/`null` semantics, same reasoning as
+            // `settings::MultiProjectContent::background_scroll_history_lines`'s
+            // own doc comment: `None` is a legitimate, permanent
+            // "disabled" resolution here, not an unresolved-merge bug, so
+            // this isn't `.unwrap()`'d like `hibernate_after_ms`/
+            // `memory_pressure_threshold_percent` are in `workspace_settings.rs`.
+            background_scroll_history_lines: content
+                .workspace
+                .multi_project
+                .and_then(|multi_project| multi_project.background_scroll_history_lines),
         }
     }
 }

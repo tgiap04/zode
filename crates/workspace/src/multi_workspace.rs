@@ -2326,13 +2326,16 @@ impl MultiWorkspace {
                 settings.workspace.multi_project = Some(settings::MultiProjectContent {
                     retain_background_projects: Some(true),
                     // `None` here is a no-op merge (see `MultiProjectContent`'s
-                    // own doc comment) — it leaves `hibernate_after_ms` and
-                    // `memory_pressure_threshold_percent` whatever the
+                    // own doc comment) — it leaves `hibernate_after_ms`,
+                    // `memory_pressure_threshold_percent`, and
+                    // `background_scroll_history_lines` whatever the
                     // default/global layers already resolved them to,
                     // since this helper exists to toggle retention, not
-                    // hibernation or the memory fuse.
+                    // hibernation, the memory fuse, or terminal scroll
+                    // history.
                     hibernate_after_ms: None,
                     memory_pressure_threshold_percent: None,
+                    background_scroll_history_lines: None,
                 });
             });
         });

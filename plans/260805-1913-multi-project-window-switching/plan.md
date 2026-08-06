@@ -58,7 +58,7 @@ Không có quan hệ blocking. Hard-fork là **nguyên nhân** của trạng th�
 | 2 | [ProjectActivity state machine và governor driver](./phase-02-project-activity-governor.md) | Pending |
 | 3 | [LSP hibernate và wake, giữ diagnostic summary](./phase-03-lsp-hibernate-wake.md) | Pending |
 | 4 | [Worktree pause resume và đối chiếu đĩa](./phase-04-worktree-pause-resume.md) | Completed |
-| 5 | [Chính sách bộ nhớ terminal](./phase-05-terminal-memory-policy.md) | Pending |
+| 5 | [Chính sách bộ nhớ terminal](./phase-05-terminal-memory-policy.md) | Completed |
 | 6 | [Đo lường và cầu chì áp lực bộ nhớ](./phase-06-instrumentation-memory-fuse.md) | Completed (Go/TS measurement gap còn mở) |
 | 7 | [Project switcher sidebar salvage từ git](./phase-07-project-switcher-sidebar.md) | Pending |
 

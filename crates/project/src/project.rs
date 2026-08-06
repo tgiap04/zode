@@ -4862,6 +4862,20 @@ impl Project {
         for worktree in self.worktrees(cx).collect::<Vec<_>>() {
             worktree.update(cx, |worktree, _cx| worktree.pause_scanning());
         }
+        // FR3/FR5 (Phase 5): shrink every terminal's scrollback, if the
+        // user opted in — disabled (`None`) by default, since this is
+        // real, irrecoverable log loss (see the setting's own doc
+        // comment). Safe to call more than once in a row (e.g. if a
+        // future caller ever re-triggers hibernation mid-cycle):
+        // `Terminal::limit_scroll_history` is idempotent, a no-op once
+        // already shrunk. Not currently load-bearing -- this whole branch
+        // only runs on an actual `!= activity` transition
+        // (`reconcile_resource_activity`), so it's structurally reached at
+        // most once per hibernate today -- but the guard exists at the
+        // `Terminal` level regardless, so relying on it here costs nothing.
+        if let Some(lines) = ProjectSettings::get_global(cx).background_scroll_history_lines {
+            self.limit_terminal_scroll_history(lines, cx);
+        }
     }
 
     /// FR5/step 8: a running debugger is the user's active work. If one
@@ -4976,6 +4990,14 @@ impl Project {
         // re-trigger on every batch.
         self.git_store
             .update(cx, |git_store, cx| git_store.refresh_all_repositories(cx));
+
+        // FR6 (Phase 5): lift the scrollback cap for every terminal this
+        // project owns. Unconditional, mirroring every other wake path in
+        // this function -- a terminal that was never shrunk (the setting
+        // was off when this project last hibernated, or the terminal was
+        // created after wake) just no-ops. Does not recover lines a
+        // shrink already dropped; only future output stops being capped.
+        self.restore_terminal_scroll_history(cx);
     }
 
     /// FR4 (Phase 6): true if `try_hibernate_resources` would defer this

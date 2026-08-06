@@ -61,6 +61,12 @@ pub struct MultiProjectSettings {
     /// `settings::MultiProjectContent::memory_pressure_threshold_percent`
     /// for the full rationale and default.
     pub memory_pressure_threshold_percent: Option<f32>,
+    /// How many lines to shrink every terminal's scrollback to when its
+    /// project hibernates. `None` (the default) means hibernated
+    /// terminals keep their full scrollback, unshrunk. See
+    /// `settings::MultiProjectContent::background_scroll_history_lines`
+    /// for why this is real, irrecoverable data loss when enabled.
+    pub background_scroll_history_lines: Option<usize>,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -175,6 +181,16 @@ impl Settings for WorkspaceSettings {
                         .clamp(0.0, 100.0);
                     (threshold > 0.0).then_some(threshold)
                 },
+                // Real `None`/`null` semantics here, unlike the two
+                // fields above — see `MultiProjectContent::background_scroll_history_lines`'s
+                // own doc comment for why this field doesn't have their
+                // override-ambiguity problem. Not `.unwrap()`'d: `None`
+                // is a legitimate, permanent "disabled" resolution, not
+                // an unresolved-merge bug.
+                background_scroll_history_lines: workspace
+                    .multi_project
+                    .unwrap()
+                    .background_scroll_history_lines,
             },
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace

@@ -1072,4 +1072,28 @@ pub struct MultiProjectContent {
     /// measurements phase-06 of the multi-project-window-switching plan
     /// calls for (`reports/memory-measurements.md`).
     pub memory_pressure_threshold_percent: Option<f32>,
+    /// When a project hibernates, shrink every one of its terminals'
+    /// scrollback to this many lines, freeing whatever scrollback they'd
+    /// grown beyond it. `null` (the default) turns this off entirely —
+    /// hibernated terminals keep their full scrollback, unshrunk.
+    ///
+    /// **This is real, irrecoverable data loss when enabled**: shrinking
+    /// deletes the user's actual old log lines, exactly like scrolling a
+    /// terminal buffer off the top normally does, and there is no undo —
+    /// waking the project only lifts the cap for *future* output, it does
+    /// not restore what was already dropped. Only enable this if losing
+    /// old terminal output from hibernated (not actively-viewed) projects
+    /// is genuinely acceptable to you.
+    ///
+    /// Unlike `hibernate_after_ms`/`memory_pressure_threshold_percent`,
+    /// this really can use `null` as its disabling value rather than a `0`
+    /// sentinel: those two settings default to a real *enabled* value and
+    /// need a way for an override layer to explicitly disable them, which
+    /// `null` can't express (an override layer's `null` is indistinguishable
+    /// from that layer not mentioning the key at all). This setting's
+    /// default is disabled in the first place, so there's no equivalent
+    /// "disable it after some other layer enabled it" case to worry about.
+    ///
+    /// Default: null (disabled)
+    pub background_scroll_history_lines: Option<usize>,
 }

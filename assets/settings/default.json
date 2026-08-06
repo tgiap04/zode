@@ -174,7 +174,21 @@
     // above). This default is a placeholder pending real hardware
     // measurements -- see reports/memory-measurements.md in the
     // multi-project-window-switching plan.
-    "memory_pressure_threshold_percent": 10.0
+    "memory_pressure_threshold_percent": 10.0,
+    // When a project hibernates, shrink every one of its terminals'
+    // scrollback to this many lines. `null` (the default) leaves
+    // hibernated terminals' scrollback untouched.
+    //
+    // WARNING: enabling this deletes the user's actual old terminal
+    // output, permanently and without a way to undo it -- waking the
+    // project only lifts the cap for future output, it does not restore
+    // what shrinking already dropped. A real measurement
+    // (plans/260805-1913-multi-project-window-switching/reports/terminal-memory-measurement.md)
+    // found this is a genuinely large cost (~56MB for one full
+    // 10,000-line terminal) worth freeing, but only turn this on if
+    // losing old output from hibernated (not actively-viewed) projects'
+    // terminals is acceptable to you.
+    "background_scroll_history_lines": null
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
