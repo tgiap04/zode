@@ -1,0 +1,27 @@
+[
+  {
+    "command": "cargo test -p project --features test-support -- --skip test_file_status --skip test_git_repository_status --skip test_rename_work_directory --skip test_rescan_and_remote_updates",
+    "exitCode": 0,
+    "summary": "256 passed; 0 failed; 3 ignored; 4 filtered out"
+  },
+  {
+    "command": "cargo test -p workspace --all-features",
+    "exitCode": 0,
+    "summary": "200 passed; 0 failed"
+  },
+  {
+    "command": "cargo test -p remote_server --features test-support",
+    "exitCode": 0,
+    "summary": "25 passed; 0 failed"
+  },
+  {
+    "command": "cargo test -p zode --bin zode --features test-support",
+    "exitCode": 0,
+    "summary": "52 passed; 0 failed; 1 ignored"
+  },
+  {
+    "command": "./script/clippy",
+    "exitCode": 0,
+    "summary": "Release clippy clean, no warnings or errors"
+  }
+]
