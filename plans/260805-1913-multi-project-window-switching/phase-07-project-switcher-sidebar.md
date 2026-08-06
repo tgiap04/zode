@@ -11,7 +11,7 @@
 
 - **Priority:** P2 — tính năng chỉ "giống Discord/Slack" khi có sidebar; nhưng Phase 1 đã cho đường
   chuyển bằng keybinding nên phase này không chặn 2–6
-- **Status:** Pending
+- **Status:** Completed
 - **Effort:** 4–5 ngày
 - **Phụ thuộc:** chỉ Phase 1. Chạy song song với 2–6 được.
 
@@ -124,20 +124,35 @@ MultiWorkspace → Sidebar: observe + MultiWorkspaceEvent
 
 ## Todo List
 
-- [ ] Dump 2 file nguồn ra chỗ tạm, đọc hết trước khi viết
-- [ ] Crate rỗng + `register_sidebar` + `cmd-alt-j` mở panel trắng
-- [ ] `ListEntry`/`ActiveEntry`/`SidebarContents` (bỏ thread)
-- [ ] Render project + context menu
-- [ ] Fuzzy filter (`fuzzy_nucleo`)
-- [ ] Nút thêm project → `SidebarRecentProjects::popover`
-- [ ] Serialization + đọc được blob session cũ
-- [ ] Hiển thị `ProjectActivity` + badge đang index
-- [ ] Commit riêng: dọn trait + action thread + keymap
-- [ ] `SidebarSide` khỏi `agent.rs` (+ migration nếu đổi key)
-- [ ] Port test project-list chọn lọc
-- [ ] Gate `rg` symbol auth ⇒ 0 kết quả
-- [ ] Mọi file < 200 dòng
-- [ ] `./script/clippy` sạch
+- [x] Dump 2 file nguồn ra chỗ tạm, đọc hết trước khi viết
+- [x] Crate rỗng + `register_sidebar` + `cmd-alt-j` mở panel trắng
+- [x] `ListEntry`/`ActiveEntry`/`SidebarContents` (bỏ thread)
+- [x] Render project + context menu
+- [x] Fuzzy filter (port `fuzzy_match_positions` thủ công từ code cũ — code cũ
+  cũng không dùng `fuzzy_nucleo` cho việc này; không kéo thêm crate fuzzy nào)
+- [x] Nút thêm project → `SidebarRecentProjects::popover`
+- [x] Serialization + đọc được blob session cũ (`SerializedSidebar { width }`,
+  field lạ như `active_view` bị serde bỏ qua mặc định)
+- [x] Hiển thị `ProjectActivity` + badge đang index (`has_stale_diagnostics`)
+- [x] Commit riêng: dọn trait + action thread + keymap
+- [x] `SidebarSide` khỏi `agent.rs` → `workspace.rs`, thêm setting
+  `multi_project.sidebar_side` mới (không có key JSON cũ nào bị đổi tên nên
+  không cần migration)
+- [x] Port test project-list chọn lọc (giữ nguyên tinh thần keyboard-nav +
+  selection-clamp-on-removal của bộ test cũ, viết lại cho kiến trúc mới —
+  phát hiện và sửa 1 bug thật: `selection` không tự kẹp lại bounds khi
+  `contents.entries` co lại)
+- [x] Gate `rg` symbol auth ⇒ 0 kết quả
+- [x] Mọi file < 200 dòng, không ngoại lệ (14 file, lớn nhất 199 dòng)
+- [x] `./script/clippy` sạch, `cargo fmt --check` sạch, `cargo test -p sidebar
+  -p workspace` xanh (8 + 207)
+- [x] Review độc lập (agent `reviewer`): 1 High + 4 Medium tìm được, đã sửa hết
+  — border chọn không hiện do dùng `is_focused` sai (cần `contains_focused`),
+  context menu định danh theo index thay vì `ProjectGroupKey` (sai project khi
+  danh sách đổi thứ tự lúc menu đang mở), thiếu `cx.notify()` khi activate lại
+  project đang active, thiếu keymap `"Sidebar > Editor"` tường minh (trước đó
+  dựa ngầm vào `Editor::move_up/move_down` tự `propagate()`), `cargo fmt`
+  chưa sạch
 
 ## Success Criteria
 

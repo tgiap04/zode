@@ -2281,6 +2281,7 @@ impl MultiWorkspace {
                     hibernate_after_ms: None,
                     memory_pressure_threshold_percent: None,
                     background_scroll_history_lines: None,
+                    sidebar_side: None,
                 });
             });
         });

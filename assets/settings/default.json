@@ -188,7 +188,10 @@
     // 10,000-line terminal) worth freeing, but only turn this on if
     // losing old output from hibernated (not actively-viewed) projects'
     // terminals is acceptable to you.
-    "background_scroll_history_lines": null
+    "background_scroll_history_lines": null,
+    // Which side of the window the project switcher sidebar docks to.
+    // "left" or "right".
+    "sidebar_side": "left"
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.

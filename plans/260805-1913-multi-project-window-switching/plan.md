@@ -60,7 +60,7 @@ Không có quan hệ blocking. Hard-fork là **nguyên nhân** của trạng th�
 | 4 | [Worktree pause resume và đối chiếu đĩa](./phase-04-worktree-pause-resume.md) | Completed |
 | 5 | [Chính sách bộ nhớ terminal](./phase-05-terminal-memory-policy.md) | Completed |
 | 6 | [Đo lường và cầu chì áp lực bộ nhớ](./phase-06-instrumentation-memory-fuse.md) | Completed (Go/TS measurement gap còn mở) |
-| 7 | [Project switcher sidebar salvage từ git](./phase-07-project-switcher-sidebar.md) | Pending |
+| 7 | [Project switcher sidebar salvage từ git](./phase-07-project-switcher-sidebar.md) | Completed |
 
 **Thứ tự phụ thuộc:** 1 → 2 → {3, 4 song song được} → 6 → 5. Phase 7 chỉ cần Phase 1, chạy song song
 với 2–6 được. Phase 3 là phase đắt và nhạy cảm nhất — không gộp với bất kỳ phase nào khác.

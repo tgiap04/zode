@@ -542,6 +542,16 @@
     },
   },
   {
+    "context": "Sidebar > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "escape": "menu::Cancel",
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "ctrl-f": "sidebar::FocusSidebarFilter",
+    },
+  },
+  {
     "context": "Workspace && debugger_running",
     "use_key_equivalents": true,
     "bindings": {

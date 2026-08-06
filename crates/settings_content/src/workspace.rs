@@ -1027,6 +1027,30 @@ pub struct FocusFollowsMouse {
     pub debounce_ms: Option<u64>,
 }
 
+/// Which side of the window the multi-project switcher sidebar docks to.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarSide {
+    /// Dock the sidebar on the left side of the window.
+    #[default]
+    Left,
+    /// Dock the sidebar on the right side of the window.
+    Right,
+}
+
 #[with_fallible_options]
 #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct MultiProjectContent {
@@ -1096,4 +1120,9 @@ pub struct MultiProjectContent {
     ///
     /// Default: null (disabled)
     pub background_scroll_history_lines: Option<usize>,
+    /// FR8 (multi-project-window-switching, phase 7): which side of the
+    /// window the project switcher sidebar docks to.
+    ///
+    /// Default: left
+    pub sidebar_side: Option<SidebarSide>,
 }

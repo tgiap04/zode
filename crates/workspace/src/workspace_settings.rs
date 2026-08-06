@@ -67,6 +67,9 @@ pub struct MultiProjectSettings {
     /// `settings::MultiProjectContent::background_scroll_history_lines`
     /// for why this is real, irrecoverable data loss when enabled.
     pub background_scroll_history_lines: Option<usize>,
+    /// Which side of the window the project switcher sidebar docks to. See
+    /// `settings::MultiProjectContent::sidebar_side`.
+    pub sidebar_side: settings::SidebarSide,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -191,6 +194,7 @@ impl Settings for WorkspaceSettings {
                     .multi_project
                     .unwrap()
                     .background_scroll_history_lines,
+                sidebar_side: workspace.multi_project.unwrap().sidebar_side.unwrap(),
             },
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace

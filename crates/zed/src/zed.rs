@@ -408,6 +408,26 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 .unwrap_or(true)
         });
 
+        // Phase 7 (multi-project-window-switching): register the project
+        // switcher sidebar. Deferred (not built inline here) because
+        // `Sidebar::new` subscribes to the `MultiWorkspace` entity this
+        // closure is still constructing -- by the time the deferred
+        // callback runs, `cx.entity()` below is a fully live entity, not
+        // one still being initialized.
+        let multi_workspace_handle = cx.entity();
+        let window_handle = window.window_handle();
+        cx.defer(move |cx| {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    let sidebar = cx.new(|cx| {
+                        sidebar::Sidebar::new(multi_workspace_handle.clone(), window, cx)
+                    });
+                    multi_workspace_handle.update(cx, |multi_workspace, cx| {
+                        multi_workspace.register_sidebar(sidebar, cx);
+                    });
+                })
+                .ok();
+        });
     })
     .detach();
 
@@ -5036,6 +5056,7 @@ mod tests {
                 "search",
                 "settings_editor",
                 "settings_profile_selector",
+                "sidebar",
                 "snippets",
                 "stash_picker",
                 "svg",
