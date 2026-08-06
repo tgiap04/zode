@@ -140,13 +140,43 @@ impl Render for ProjectDiagnosticsEditor {
                 div().size_full().child(self.editor.clone())
             };
 
+        // FR3 (LSP hibernate/wake phase): while this project still has
+        // diagnostic summaries left over from a hibernated server
+        // generation, say so plainly instead of letting the numbers read
+        // as a verified, current result. rust-analyzer in particular has
+        // no on-disk index cache, so waking pays the full re-index cost —
+        // this banner is how the UI communicates that rather than
+        // silently showing possibly-stale counts as if they were fresh.
+        let is_reindexing = self.project.read(cx).has_stale_diagnostics(cx);
+
         div()
             .key_context("Diagnostics")
             .track_focus(&self.focus_handle(cx))
             .size_full()
             .on_action(cx.listener(Self::toggle_warnings))
             .on_action(cx.listener(Self::toggle_diagnostics_refresh))
-            .child(child)
+            .child(
+                v_flex()
+                    .size_full()
+                    .when(is_reindexing, |this| {
+                        this.child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .bg(cx.theme().colors().editor_background)
+                                .child(Icon::new(IconName::Warning).color(Color::Warning))
+                                .child(
+                                    Label::new(
+                                        "Project re-indexing after waking — some counts may be stale",
+                                    )
+                                    .color(Color::Muted),
+                                ),
+                        )
+                    })
+                    .child(child),
+            )
     }
 }
 

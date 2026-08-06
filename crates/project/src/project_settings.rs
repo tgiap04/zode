@@ -22,9 +22,9 @@ pub use settings::BinarySettings;
 pub use settings::DirenvSettings;
 pub use settings::LspSettings;
 use settings::{
-    DapSettingsContent, EditorconfigEvent, InvalidSettingsError, LocalSettingsKind,
-    LocalSettingsPath, RegisterSetting, SemanticTokenRules, Settings, SettingsLocation,
-    SettingsStore, parse_json_with_comments, watch_config_file,
+    AutosaveSetting, DapSettingsContent, EditorconfigEvent, InvalidSettingsError,
+    LocalSettingsKind, LocalSettingsPath, RegisterSetting, SemanticTokenRules, Settings,
+    SettingsLocation, SettingsStore, parse_json_with_comments, watch_config_file,
 };
 use std::{cell::OnceCell, collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use task::{DebugTaskFile, TaskTemplates, VsCodeDebugTaskFile, VsCodeTaskFile};
@@ -79,6 +79,16 @@ pub struct ProjectSettings {
 
     /// Configuration for session-related features
     pub session: SessionSettings,
+
+    /// When to automatically save edited buffers. Read here (in addition
+    /// to `workspace`'s own settings struct, which `crates/project` can't
+    /// depend on without a cycle) because project-level hibernation needs
+    /// to know whether a dirty buffer is racing an autosave before it
+    /// stops that project's language servers — see
+    /// `Project::autosave_would_race_hibernate`.
+    ///
+    /// Default: "off"
+    pub autosave: AutosaveSetting,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -730,6 +740,7 @@ impl Settings for ProjectSettings {
                 restore_unsaved_buffers: content.session.unwrap().restore_unsaved_buffers.unwrap(),
                 trust_all_worktrees: content.session.unwrap().trust_all_worktrees.unwrap(),
             },
+            autosave: content.workspace.autosave.unwrap_or(AutosaveSetting::Off),
         }
     }
 }

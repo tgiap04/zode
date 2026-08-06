@@ -114,7 +114,10 @@ use rpc::{
 };
 use search::{SearchInputKind, SearchQuery, SearchResult};
 use search_history::SearchHistory;
-use settings::{InvalidSettingsError, RegisterSetting, Settings, SettingsLocation, SettingsStore};
+use settings::{
+    AutosaveSetting, InvalidSettingsError, RegisterSetting, Settings, SettingsLocation,
+    SettingsStore,
+};
 use snippet::Snippet;
 pub use snippet_provider;
 use snippet_provider::SnippetProvider;
@@ -234,6 +237,13 @@ pub struct Project {
     context_server_store: Entity<ContextServerStore>,
     image_store: Entity<ImageStore>,
     lsp_store: Entity<LspStore>,
+    /// A pending retry for a hibernate that `try_hibernate_resources`
+    /// deferred (FR8: autosave-vs-hibernate race) or skipped (an active
+    /// debug session). Dropping this cancels the pending retry — done
+    /// whenever a fresher `set_activity` call supersedes it, so a
+    /// project that goes back `Active` before the retry fires never
+    /// hibernates out from under the user.
+    hibernate_retry: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
     buffers_needing_diff: HashSet<WeakEntity<Buffer>>,
     git_diff_debouncer: DebouncedDelay<Self>,
@@ -1125,6 +1135,12 @@ impl DisableAiSettings {
     }
 }
 
+/// How long to wait before re-attempting a hibernate that
+/// `try_hibernate_resources` deferred or skipped. Not user-configurable
+/// (yet) — this phase only needs "don't give up forever", not a tuned
+/// cadence; a later phase revisits timing against measured wake cost.
+const HIBERNATE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
 impl Project {
     pub fn init(client: &Arc<Client>, cx: &mut App) {
         connection_manager::init(client.clone(), cx);
@@ -1333,6 +1349,7 @@ impl Project {
                 _subscriptions: vec![cx.on_release(Self::release)],
                 active_entry: None,
                 activity: ProjectActivity::Active,
+                hibernate_retry: None,
                 snippets,
                 languages,
                 collab_client: client,
@@ -1582,6 +1599,7 @@ impl Project {
                 ],
                 active_entry: None,
                 activity: ProjectActivity::Active,
+                hibernate_retry: None,
                 snippets,
                 languages,
                 collab_client: client,
@@ -4667,6 +4685,21 @@ impl Project {
             .diagnostic_summaries(include_ignored, cx)
     }
 
+    /// Whether this project currently has any diagnostic summaries left
+    /// over from a hibernated server generation (FR3) — e.g. to drive a
+    /// "re-indexing" banner while waking. See `LspStore::has_stale_diagnostics`.
+    pub fn has_stale_diagnostics(&self, cx: &App) -> bool {
+        self.lsp_store.read(cx).has_stale_diagnostics()
+    }
+
+    /// Whether `path`'s diagnostic summary currently includes an entry
+    /// left over from a hibernated server generation (FR3) — e.g. to dim
+    /// that file's badge in a file tree. See
+    /// `LspStore::is_diagnostic_summary_stale`.
+    pub fn is_diagnostic_summary_stale(&self, path: &ProjectPath, cx: &App) -> bool {
+        self.lsp_store.read(cx).is_diagnostic_summary_stale(path)
+    }
+
     pub fn active_entry(&self) -> Option<ProjectEntryId> {
         self.active_entry
     }
@@ -4706,7 +4739,117 @@ impl Project {
             self.activity = activity;
             cx.emit(Event::ActivityChanged(activity));
             cx.notify();
+            self.reconcile_resource_activity(cx);
         }
+    }
+
+    /// Brings this project's real resources (language servers, Prettier,
+    /// DAP) in line with the activity label `set_activity` just
+    /// committed to. Only called on an actual transition (see
+    /// `set_activity`) — this is the resource-layer reaction Phase 2's
+    /// pure state machine deliberately left for this phase to add.
+    fn reconcile_resource_activity(&mut self, cx: &mut Context<Self>) {
+        match self.activity {
+            ProjectActivity::Hibernated => self.try_hibernate_resources(cx),
+            ProjectActivity::Active => self.wake_resources(cx),
+            ProjectActivity::Warm => {
+                // Only the Hibernated/Active edges touch real resources;
+                // Warm is a label-only waypoint. Nothing today reaches
+                // Warm with a hibernate retry in flight (the guard in
+                // `set_activity` forbids `Hibernated -> Warm` directly),
+                // but dropping any pending retry here keeps that true
+                // structurally rather than by convention.
+                self.hibernate_retry.take();
+            }
+        }
+    }
+
+    /// Attempts to actually hibernate this project's language servers and
+    /// Prettier instance (FR1, FR5). Two barriers can defer this rather
+    /// than cancel it outright — on either, a retry is scheduled so the
+    /// project still eventually hibernates once the blocker clears,
+    /// rather than leaving `activity() == Hibernated` permanently
+    /// diverged from the resources actually still running:
+    ///
+    /// - An active debug session (FR5/step 8): a running debugger is the
+    ///   user's active work, full stop — even the LSP stays up.
+    /// - A dirty buffer racing autosave (FR8): only when autosave is
+    ///   actually enabled: the default (`"autosave": "off"`) never fires
+    ///   on its own, so a dirty buffer alone must never block
+    ///   hibernation, or anyone who habitually leaves a tab dirty would
+    ///   never get this feature's benefit at all.
+    fn try_hibernate_resources(&mut self, cx: &mut Context<Self>) {
+        if self.has_active_debug_session(cx) {
+            log::debug!("project hibernation: deferring, a debug session is running");
+            self.schedule_hibernate_retry(cx);
+            return;
+        }
+        if self.autosave_would_race_hibernate(cx) {
+            log::debug!("project hibernation: deferring, autosave is enabled with a dirty buffer");
+            self.schedule_hibernate_retry(cx);
+            return;
+        }
+        self.hibernate_retry.take();
+        self.lsp_store
+            .update(cx, |lsp_store, cx| lsp_store.hibernate(cx))
+            .detach();
+        if let Some(prettier_store) = self.lsp_store.read(cx).prettier_store() {
+            prettier_store.update(cx, |prettier_store, cx| prettier_store.hibernate(cx));
+        }
+    }
+
+    /// FR5/step 8: a running debugger is the user's active work. If one
+    /// is attached to this project, hibernation is skipped entirely for
+    /// it (not even the LSP stops) rather than trying to hibernate around
+    /// it. Deliberately checks every session the project knows about, not
+    /// just whichever one currently has UI focus (`active_debug_session`
+    /// answers a different question — "which stack frame is selected" —
+    /// and would miss a session running in the background).
+    fn has_active_debug_session(&self, cx: &App) -> bool {
+        self.dap_store
+            .read(cx)
+            .sessions()
+            .any(|session| !session.read(cx).is_terminated())
+    }
+
+    /// FR8: hibernating while a dirty buffer's autosave is about to fire
+    /// would stop the language server mid-format-on-save, silently
+    /// dropping the format. Only a *live* autosave setting creates that
+    /// race — `AutosaveSetting::Off` (the default) never saves on its
+    /// own, so a dirty buffer under `Off` must not block hibernation.
+    fn autosave_would_race_hibernate(&self, cx: &App) -> bool {
+        if self.dirty_buffers(cx).next().is_none() {
+            return false;
+        }
+        ProjectSettings::get_global(cx).autosave != AutosaveSetting::Off
+    }
+
+    /// Retries a deferred hibernate after a short delay, but only if this
+    /// project is still `Hibernated` when the timer fires — if the user
+    /// refocused it in the meantime, `wake_resources` already dropped
+    /// this task (see `reconcile_resource_activity`), so this closure
+    /// simply won't run.
+    fn schedule_hibernate_retry(&mut self, cx: &mut Context<Self>) {
+        self.hibernate_retry = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(HIBERNATE_RETRY_INTERVAL)
+                .await;
+            this.update(cx, |this, cx| {
+                if this.activity == ProjectActivity::Hibernated {
+                    this.try_hibernate_resources(cx);
+                }
+            })
+            .log_err();
+        }));
+    }
+
+    /// Undoes `try_hibernate_resources` (FR2, FR5). Prettier needs no
+    /// explicit action: it lazily starts a fresh instance on the next
+    /// format request the same way it always has, now that `hibernate`
+    /// dropped its cached one.
+    fn wake_resources(&mut self, cx: &mut Context<Self>) {
+        self.hibernate_retry.take();
+        self.lsp_store.update(cx, |lsp_store, cx| lsp_store.wake(cx));
     }
 
     pub fn entry_for_path<'a>(&'a self, path: &ProjectPath, cx: &'a App) -> Option<&'a Entry> {

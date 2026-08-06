@@ -59,8 +59,10 @@ use parking_lot::Mutex;
 use paths::{config_dir, global_gitignore_path, tasks_file};
 use postage::stream::Stream as _;
 use pretty_assertions::{assert_eq, assert_matches};
+use dap::adapters::DebugAdapterName;
 use project::{
     Event, TaskContexts,
+    debugger::session::SessionQuirks,
     git_store::{GitStoreEvent, Repository, RepositoryEvent, StatusEntry, pending_op},
     search::{SearchQuery, SearchResult},
     task_store::{TaskSettingsLocation, TaskStore},
@@ -84,7 +86,7 @@ use std::{
     time::Duration,
 };
 use sum_tree::SumTree;
-use task::{ResolvedTask, ShellKind, TaskContext};
+use task::{ResolvedTask, SharedTaskContext, ShellKind, TaskContext};
 use text::{Anchor, PointUtf16, ReplicaId, ToOffset, Unclipped};
 use unindent::Unindent as _;
 use util::{
@@ -13005,6 +13007,605 @@ async fn test_read_only_files_with_lock_files(cx: &mut gpui::TestAppContext) {
 
     package_json.read_with(cx, |buffer, _| {
         assert!(!buffer.read_only(), "package.json should not be read-only");
+    });
+}
+
+// Phase 3 of the multi-project-window-switching plan: LSP hibernate/wake.
+// These tests exercise the real `Project::set_activity` transition, the
+// same entry point `MultiWorkspace`'s idle timer uses in production
+// (Active -> Warm -> Hibernated -> Active), rather than calling
+// `LspStore::hibernate`/`wake` directly, so they prove the whole wiring
+// end to end. NFR2 is a hard line: the 3
+// `test_diagnostic_summaries_cleared_*` tests directly above this comment
+// stay completely unmodified — hibernate is a separate code path that
+// skips exactly the `diagnostic_summaries` clear, and does not change
+// `stop_local_language_server`'s own contract.
+
+#[gpui::test]
+async fn test_hibernate_preserves_diagnostic_summaries(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error before hibernate".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+            "diagnostics should be visible before hibernating"
+        );
+    });
+
+    // Hibernate through the real activity transition -- a direct
+    // Active -> Hibernated jump is rejected by `set_activity` (phase 2),
+    // so go through Warm first, exactly like `MultiWorkspace` does.
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "nothing here should have blocked hibernation (no dirty buffer, no debug session)"
+        );
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+            "FR1: the aggregate summary must survive hibernation so the file tree doesn't look error-free"
+        );
+    });
+
+    // FR1 also requires the per-line squiggle to be gone even though the
+    // aggregate summary survives -- only the count is meant to persist.
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            buffer.buffer_diagnostics(None).is_empty(),
+            "per-line diagnostics should be cleared on hibernate, unlike the aggregate summary"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_wake_replaces_stale_summaries(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "stale error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+            "the stale summary should still be visible right after hibernating"
+        );
+    });
+
+    // Wake the project back up -- FR2: this restarts a language server for
+    // every currently open buffer (a.rs here).
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Active);
+    });
+
+    let fake_server = fake_servers.next().await.unwrap();
+
+    // FR4: the new server's first publish for a.rs must REPLACE the stale
+    // entry, not add to it -- one warning, not an error and a warning.
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::WARNING),
+            message: "fresh warning".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 1,
+            },
+            "the fresh publish must replace the stale summary, not add to it"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_disk_based_diagnostics_finished_clears_all_remaining_stale_summaries(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x", "b.rs": "y" }))
+        .await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (_buffer_a, _handle_a) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let (_buffer_b, _handle_b) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/b.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "a error".to_string(),
+            ..Default::default()
+        }],
+    });
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/b.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::WARNING),
+            message: "b warning".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 1,
+            },
+        );
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // Only a.rs gets a fresh publish (and it comes back clean); b.rs's
+    // stale warning is never itself re-published -- e.g. because nothing
+    // about b.rs changed -- so only FR4b's project-wide sweep on
+    // indexing-complete can clear it.
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![],
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 1,
+            },
+            "b.rs's stale warning should survive until the indexing-complete sweep, FR4 alone doesn't reach it"
+        );
+    });
+
+    let new_server_id = fake_server.server.server_id();
+    project.update(cx, |project, cx| {
+        project.lsp_store().update(cx, |lsp_store, cx| {
+            lsp_store.disk_based_diagnostics_finished(new_server_id, cx);
+        });
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 0,
+            },
+            "FR4b: the indexing-complete sweep should clear b.rs's stale warning project-wide"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_is_idempotent(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // FR6: calling `LspStore::hibernate` again on an already-hibernated
+    // project (nothing left running) must not error or double-stop, and
+    // must not somehow clear the summary it's already preserving.
+    project.update(cx, |project, cx| {
+        project
+            .lsp_store()
+            .update(cx, |lsp_store, cx| lsp_store.hibernate(cx))
+            .detach();
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        assert_eq!(project.activity(), ProjectActivity::Hibernated);
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+            "a second, redundant hibernate call must not disturb the preserved summary"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_deferred_by_autosave_after_delay_with_dirty_buffer(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store
+            .set_user_settings(
+                r#"{ "autosave": { "after_delay": { "milliseconds": 1000 } } }"#,
+                cx,
+            )
+            .unwrap();
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    buffer.update(cx, |buffer, cx| buffer.edit([(0..0, "z")], None, cx));
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // The activity label still commits per Phase 2's pure state machine
+    // (this phase was told not to change that) -- what FR8 actually
+    // guarantees is that the *resource* hibernation itself is deferred,
+    // which is observable as the language server still being alive: its
+    // per-line diagnostics haven't been cleared the way a real hibernate
+    // would clear them.
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Hibernated);
+    });
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "FR8: autosave (after_delay) enabled + a dirty buffer must defer the actual \
+             resource hibernation, so the language server must still be running"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_deferred_by_autosave_on_focus_change_with_dirty_buffer(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store
+            .set_user_settings(r#"{ "autosave": "on_focus_change" }"#, cx)
+            .unwrap();
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    buffer.update(cx, |buffer, cx| buffer.edit([(0..0, "z")], None, cx));
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Hibernated);
+    });
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "FR8: autosave (on_focus_change) enabled + a dirty buffer must defer the actual \
+             resource hibernation, so the language server must still be running"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_not_blocked_by_dirty_buffer_when_autosave_off(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    // "off" is the default (`assets/settings/default.json`), but set it
+    // explicitly so this test documents the exact contract it's pinning.
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store
+            .set_user_settings(r#"{ "autosave": "off" }"#, cx)
+            .unwrap();
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    buffer.update(cx, |buffer, cx| buffer.edit([(0..0, "z")], None, cx));
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "FR8: a dirty buffer alone (autosave off, the default) must never block hibernation \
+             -- otherwise anyone who habitually leaves a tab dirty would never get this feature"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_hibernate_skipped_when_debug_session_active(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    // A session that's booted but not yet (or never) terminated, without
+    // actually spawning a debug adapter process -- `new_session` alone is
+    // enough to exercise the "is there a live session" barrier, which is
+    // what `has_active_debug_session` checks (`Session::is_terminated`).
+    project.update(cx, |project, cx| {
+        project.dap_store().update(cx, |dap_store, cx| {
+            dap_store.new_session(
+                None,
+                DebugAdapterName("fake-adapter".into()),
+                SharedTaskContext::default(),
+                None,
+                SessionQuirks::default(),
+                cx,
+            )
+        });
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // Same as the autosave barriers above: the activity label still
+    // commits, but step 8 requires the actual LSP stop to be skipped
+    // entirely while a debug session is running -- not even attempted,
+    // let alone retried once the session ends (that's a possible future
+    // refinement, not part of this phase's contract).
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Hibernated);
+    });
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "step 8: an active debug session must skip hibernation entirely for this project, \
+             so the language server must still be running"
+        );
     });
 }
 
