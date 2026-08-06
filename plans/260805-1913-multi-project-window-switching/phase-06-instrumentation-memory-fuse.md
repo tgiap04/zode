@@ -9,7 +9,9 @@
 ## Overview
 
 - **Priority:** P2 — chốt sổ cho cả plan: chứng minh RAM thật sự giảm, và đặt sàn cho quyết định "không giới hạn"
-- **Status:** Pending
+- **Status:** Completed — code + test + đo thật (Rust) xong; Go/TS còn thiếu do sandbox không
+  có `gopls`/`typescript-language-server` (đã hỏi người dùng, chọn hoãn) — xem
+  `reports/memory-measurements.md` § Next steps
 - **Effort:** 2 ngày
 
 Hai việc: (1) đo được tài nguyên theo từng project để mọi con số trong plan này thôi là phỏng đoán;
@@ -107,16 +109,47 @@ Thứ tự ưu tiên "ít dùng nhất": dùng `last_active_workspace` đã có 
 
 ## Todo List
 
-- [ ] `ProjectResourceStats` + `resource_stats()`
-- [ ] RSS tiến trình con qua `sysinfo`, có doc comment về giới hạn phép đo
-- [ ] Debug view / dump action
-- [ ] Đo 1/3/5 project × 3 ngôn ngữ, ghi `reports/memory-measurements.md`
-- [ ] Đo chi phí wake theo từng loại server
-- [ ] Chốt default `hibernate_after_ms` + `memory_pressure_threshold`
-- [ ] Governor + toast
-- [ ] Quy tắc phân xử cầu chì ↔ timer (FR4b) + test cho từng quy tắc
-- [ ] Test với memory reader inject được
-- [ ] `./script/clippy` sạch
+- [x] `ProjectResourceStats` + `resource_stats()` — `project.rs`,
+  test `test_resource_stats_reports_counts_and_activity`
+- [x] RSS tiến trình con qua `sysinfo`, có doc comment về giới hạn phép đo —
+  `Project::resource_stats`, chỉ tính LSP con (không tính prettier/DAP, đúng scope
+  Related Code Files của phase này)
+- [x] Debug view / dump action — action `DumpProjectResourceStats` ghi ra log,
+  không dựng debug view riêng (phương án tối thiểu theo FR2)
+- [x] **Đo 1/3/5 project × 3 ngôn ngữ, ghi `reports/memory-measurements.md`** —
+  MỘT PHẦN: đã đo thật với `rust-analyzer` (project mẫu độc lập, không phải zode repo —
+  xem lý do trong report) cho N=1/3/5, kết quả tuyến tính (~675MB/instance, sai số <2%).
+  **Còn thiếu Go (`gopls`) và TypeScript (`typescript-language-server`)** — không có sẵn
+  trong sandbox này, người dùng chọn hoãn việc cài; đây là gap còn mở, ghi rõ trong report.
+- [x] **Đo chi phí wake theo từng loại server** — MỘT PHẦN: chỉ đo Rust (~20s cho project
+  cỡ nhỏ/vừa). Chưa đo trên project cỡ zode-repo (tránh đụng session rust-analyzer đang
+  sống của người dùng trên chính repo này — xem report), và chưa đo Go/TS.
+- [x] **Chốt default `hibernate_after_ms` + `memory_pressure_threshold_percent`** —
+  ĐÃ RÀ SOÁT theo số đo thật, quyết định: giữ nguyên cả hai. `hibernate_after_ms`
+  (300000ms) không có lý do để đổi — chi phí wake đo được (~20s) nằm gọn trong ngưỡng
+  idle 5 phút. `memory_pressure_threshold_percent` (`10.0`, placeholder) **vẫn là
+  placeholder** một cách có chủ đích: theo đúng Risk Assessment của phase này, ngưỡng
+  cầu chì dựa vào bộ nhớ hệ thống còn trống nói chung, không dựa vào con số per-project —
+  số đo per-project ở đây xác nhận giả định "chi phí tuyến tính theo số project" là đúng,
+  nhưng không tự nó cho ra con số ngưỡng phần trăm. Chốt ngưỡng đó cần một kịch bản đo
+  riêng (máy giới hạn bộ nhớ thật), ghi rõ trong report § Next steps.
+- [x] Governor + toast — `MultiWorkspace::memory_governor_tick` +
+  `notify_memory_fuse_triggered`, poll 30s trên background executor
+- [x] Quy tắc phân xử cầu chì ↔ timer (FR4b) — min-warm 60s, miễn trừ wake tay 1
+  chu kỳ, hysteresis ≥2 chu kỳ, cả ba đều implement. **Test riêng cho từng quy tắc:
+  chỉ 2/3.** Min-warm và hysteresis có test cô lập riêng
+  (`test_memory_fuse_respects_min_warm_duration`,
+  `test_memory_fuse_hysteresis_delays_the_second_victim`). Miễn trừ wake tay
+  (`manually_woken_at`) đang bị min-warm **che khuất hoàn toàn** dưới hằng số hiện
+  tại (`MEMORY_FUSE_MIN_WARM_DURATION` 60s > `MEMORY_FUSE_POLL_INTERVAL` 30s — xem
+  bất biến ghi rõ tại hằng số đó trong `multi_workspace.rs`), nên không có đường nào
+  để viết một test cô lập được nó mà không đổi hằng số. Giữ code (đúng theo FR4b,
+  rẻ, và là lưới an toàn nếu hằng số đổi sau này) nhưng không tự nhận là đã test độc
+  lập — phát hiện của `reviewer` agent (2026-08-06).
+- [x] Test với memory reader inject được — `MemoryPressureReader` trait +
+  `FakeMemoryPressureReader`, 7 test, không đọc `sysinfo` trong logic quyết định
+- [x] `./script/clippy` sạch — `./script/clippy -p project -p workspace -p settings_content`,
+  0 warning; `cargo machete` không thấy dependency thừa
 
 ## Success Criteria
 

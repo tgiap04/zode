@@ -1,8 +1,12 @@
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use super::*;
 use crate::item::test::TestItem;
+use crate::multi_workspace::{MemoryPressureFuseToast, MemoryPressureReader};
+use crate::notifications::NotificationId;
 use client::proto;
 use fs::{FakeFs, Fs};
 use gpui::{TestAppContext, UpdateGlobal, VisualTestContext};
@@ -30,8 +34,9 @@ fn disable_background_project_retention(cx: &mut Context<MultiWorkspace>) {
             settings.workspace.multi_project = Some(MultiProjectContent {
                 retain_background_projects: Some(false),
                 // `None` is a no-op merge here — this helper only pins
-                // retention, not hibernation.
+                // retention, not hibernation or the memory fuse.
                 hibernate_after_ms: None,
+                memory_pressure_threshold_percent: None,
             });
         });
     });
@@ -55,9 +60,49 @@ fn set_multi_project_settings(
             settings.workspace.multi_project = Some(MultiProjectContent {
                 retain_background_projects: Some(retain_background_projects),
                 hibernate_after_ms: Some(hibernate_after_ms),
+                // `None` is a no-op merge here — this helper only pins
+                // retention and hibernation, not the memory fuse.
+                memory_pressure_threshold_percent: None,
             });
         });
     });
+}
+
+/// Sets `retain_background_projects`, `hibernate_after_ms`, and
+/// `memory_pressure_threshold_percent` explicitly in one shot, for the
+/// Phase 6 memory-fuse tests below. `hibernate_after_ms` is nearly always
+/// `0` (idle-timer hibernation disabled) in those tests, so the fuse —
+/// not the ordinary idle timer — is unambiguously what causes any
+/// `Hibernated` transition being asserted on.
+fn set_memory_fuse_settings(
+    cx: &mut Context<MultiWorkspace>,
+    retain_background_projects: bool,
+    hibernate_after_ms: u64,
+    memory_pressure_threshold_percent: f32,
+) {
+    SettingsStore::update_global(cx, |settings, cx| {
+        settings.update_user_settings(cx, |settings| {
+            settings.workspace.multi_project = Some(MultiProjectContent {
+                retain_background_projects: Some(retain_background_projects),
+                hibernate_after_ms: Some(hibernate_after_ms),
+                memory_pressure_threshold_percent: Some(memory_pressure_threshold_percent),
+            });
+        });
+    });
+}
+
+/// Test double for `MemoryPressureReader` (Phase 6): reports whatever
+/// `available_percent` currently holds, so a test can move memory
+/// pressure up or down over time via the shared `Rc<Cell<_>>` without
+/// re-injecting a new reader.
+struct FakeMemoryPressureReader {
+    available_percent: Rc<Cell<f32>>,
+}
+
+impl MemoryPressureReader for FakeMemoryPressureReader {
+    fn available_memory_percent(&mut self) -> Option<f32> {
+        Some(self.available_percent.get())
+    }
 }
 
 #[gpui::test]
@@ -1672,4 +1717,383 @@ async fn test_add_routes_background_workspace_through_hibernate_governor(cx: &mu
             "the added workspace should hibernate once idle past the configured threshold"
         );
     });
+}
+
+// Phase 6 (multi-project-window-switching) — memory-pressure fuse tests.
+// Every test here sets `hibernate_after_ms: 0` (idle-timer hibernation
+// disabled) so the fuse, not the ordinary idle timer, is unambiguously
+// what causes any `Warm -> Hibernated` transition being asserted on.
+
+#[gpui::test]
+async fn test_memory_fuse_disabled_never_triggers(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        // `0` is the disabling sentinel (see `MultiProjectContent::memory_pressure_threshold_percent`).
+        set_memory_fuse_settings(cx, true, 0, 0.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Warm);
+    });
+
+    // Comfortably past several poll cycles and the min-warm duration —
+    // with the fuse disabled, none of it should matter.
+    cx.executor().advance_clock(Duration::from_secs(150));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "memory_pressure_threshold_percent: 0 must disable the fuse entirely, \
+             even under sustained severe simulated pressure"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_memory_fuse_never_selects_active_project(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    let project_a = Project::test(fs, ["/root_a".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_memory_fuse_settings(cx, true, 0, 50.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    // A single workspace that's never lost focus is never routed through
+    // `schedule_hibernate`, so it's never `Warm` — but assert the outcome
+    // (still `Active`) rather than the internal path, and cover several
+    // poll cycles well past the min-warm duration.
+    cx.executor().advance_clock(Duration::from_secs(150));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Active,
+            "FR4: the fuse must never touch the currently-focused (Active) project, \
+             no matter how severe the simulated memory pressure"
+        );
+    });
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(
+            !mw.workspace()
+                .read(cx)
+                .notification_ids()
+                .contains(&NotificationId::unique::<MemoryPressureFuseToast>()),
+            "the fuse must not have triggered at all, so no toast should have shown"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_memory_fuse_respects_min_warm_duration(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_memory_fuse_settings(cx, true, 0, 50.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    // First poll (t=30s): A has been Warm for only ~30s, under the 60s
+    // minimum — the fuse must leave it alone even though pressure is
+    // already well under the threshold.
+    cx.executor().advance_clock(Duration::from_secs(35));
+    cx.run_until_parked();
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "FR4b: a project must sit Warm at least 60s before the fuse may pick it, \
+             even under pressure"
+        );
+    });
+
+    // Second poll (t=60s): A has now been Warm long enough.
+    cx.executor().advance_clock(Duration::from_secs(30));
+    cx.run_until_parked();
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "once past the 60s minimum, the fuse should pick A on the next poll"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_memory_fuse_shows_toast_on_trigger(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_memory_fuse_settings(cx, true, 0, 50.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(65));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Hibernated);
+    });
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(
+            mw.workspace()
+                .read(cx)
+                .notification_ids()
+                .contains(&NotificationId::unique::<MemoryPressureFuseToast>()),
+            "FR6: the fuse must tell the user it acted, not hibernate silently"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_memory_fuse_picks_least_recently_active_first(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    fs.insert_tree("/root_c", json!({ "file_c.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+    let project_c = Project::test(fs, ["/root_c".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_memory_fuse_settings(cx, true, 0, 50.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    // A becomes Warm now; B becomes Warm 10s later — deterministically
+    // older `warm_since` for A.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(10));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_c.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    // By t ~= 75s (A warm ~75s, B warm ~65s), both are past the 60s
+    // minimum and both are otherwise eligible — the fuse must pick the
+    // older one (A) first, one victim per tick.
+    cx.executor().advance_clock(Duration::from_secs(65));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "FR4: among equally-eligible Warm candidates, the one that's been \
+             Warm the longest (least recently active) must be picked first"
+        );
+    });
+    project_b.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "B is eligible too but must wait its turn behind the older candidate A"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_memory_fuse_skips_project_that_would_defer_hibernation(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store
+            .set_user_settings(
+                r#"{ "autosave": { "after_delay": { "milliseconds": 1000 } } }"#,
+                cx,
+            )
+            .unwrap();
+    });
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    fs.insert_tree("/root_c", json!({ "file_c.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+    let project_c = Project::test(fs, ["/root_c".as_ref()], cx).await;
+
+    // A dirty buffer + autosave enabled makes A defer hibernation (Phase 3
+    // FR8) — the fuse must respect the exact same barrier, not just the
+    // ordinary idle timer.
+    let buffer_a = project_a
+        .update(cx, |project, cx| {
+            project.open_local_buffer("/root_a/file_a.txt", cx)
+        })
+        .await
+        .unwrap();
+    buffer_a.update(cx, |buffer, cx| buffer.edit([(0..0, "x")], None, cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_memory_fuse_settings(cx, true, 0, 50.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_c.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    // A (blocked) is older and would otherwise be picked first; give both
+    // A and B time to clear the 60s minimum and several poll cycles for
+    // the fuse to reach B once it skips A.
+    cx.executor().advance_clock(Duration::from_secs(95));
+    cx.run_until_parked();
+
+    project_a.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Warm,
+            "FR4: a project with autosave racing a dirty buffer must never be picked \
+             as a fuse victim — no shortcut through the same barrier Phase 3 defined"
+        );
+    });
+    project_b.read_with(cx, |project, _| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "the fuse must skip the blocked candidate and pick the eligible one instead"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_memory_fuse_hysteresis_delays_the_second_victim(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    fs.insert_tree("/root_c", json!({ "file_c.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), ["/root_b".as_ref()], cx).await;
+    let project_c = Project::test(fs, ["/root_c".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        set_memory_fuse_settings(cx, true, 0, 50.0);
+        mw.set_memory_pressure_reader_for_test(Box::new(FakeMemoryPressureReader {
+            available_percent: Rc::new(Cell::new(1.0)),
+        }));
+    });
+
+    // A and B become Warm at the same simulated instant (no clock advance
+    // between the two `test_add_workspace` calls) — both cross the 60s
+    // minimum on the same poll cycle, so the outcome doesn't depend on
+    // which of the two the fuse happens to pick first.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_c.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    let hibernated_count = |cx: &mut TestAppContext| {
+        [&project_a, &project_b]
+            .iter()
+            .filter(|project| {
+                project.read_with(cx, |project, _| {
+                    project.activity() == ProjectActivity::Hibernated
+                })
+            })
+            .count()
+    };
+
+    // t=60s poll: both A and B are eligible; exactly one is hibernated.
+    cx.executor().advance_clock(Duration::from_secs(65));
+    cx.run_until_parked();
+    assert_eq!(
+        hibernated_count(cx),
+        1,
+        "the first eligible poll must hibernate exactly one victim"
+    );
+
+    // t=90s poll: hysteresis (2 cycles = 60s since t=60) has not elapsed
+    // yet — the second, still-eligible candidate must not be touched.
+    cx.executor().advance_clock(Duration::from_secs(30));
+    cx.run_until_parked();
+    assert_eq!(
+        hibernated_count(cx),
+        1,
+        "FR4b: hysteresis must block a second trigger within 2 poll cycles \
+         of the first, even with an eligible victim still sitting there"
+    );
+
+    // t=120s poll: hysteresis has now cleared (120 - 60 = 60s >= 2 cycles)
+    // — the remaining candidate is picked.
+    cx.executor().advance_clock(Duration::from_secs(30));
+    cx.run_until_parked();
+    assert_eq!(
+        hibernated_count(cx),
+        2,
+        "once hysteresis clears, the fuse must pick up the remaining eligible victim"
+    );
 }

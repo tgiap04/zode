@@ -54,6 +54,13 @@ pub struct MultiProjectSettings {
     /// `settings::MultiProjectContent::hibernate_after_ms` for the full
     /// rationale and default.
     pub hibernate_after: Option<Duration>,
+    /// Minimum percentage of total system memory that must stay
+    /// available before the memory-pressure fuse hibernates `Warm`
+    /// projects outright. `None` means the fuse is disabled (the setting
+    /// was `0`). See
+    /// `settings::MultiProjectContent::memory_pressure_threshold_percent`
+    /// for the full rationale and default.
+    pub memory_pressure_threshold_percent: Option<f32>,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -150,6 +157,23 @@ impl Settings for WorkspaceSettings {
                     let hibernate_after_ms =
                         workspace.multi_project.unwrap().hibernate_after_ms.unwrap();
                     (hibernate_after_ms > 0).then(|| Duration::from_millis(hibernate_after_ms))
+                },
+                // `0` disables the fuse (see
+                // `MultiProjectContent::memory_pressure_threshold_percent`
+                // for why the sentinel is `0` and not `null`). Clamped to
+                // the documented 0-100 range: nothing else validates a
+                // user-typo'd value, and an out-of-range one would either
+                // permanently disable the fuse (misread as `<= 0`) or make
+                // it permanently maximally aggressive (misread as `>
+                // 100`) with no warning either way.
+                memory_pressure_threshold_percent: {
+                    let threshold = workspace
+                        .multi_project
+                        .unwrap()
+                        .memory_pressure_threshold_percent
+                        .unwrap()
+                        .clamp(0.0, 100.0);
+                    (threshold > 0.0).then_some(threshold)
                 },
             },
             focus_follows_mouse: FocusFollowsMouse {

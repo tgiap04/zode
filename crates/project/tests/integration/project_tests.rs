@@ -14438,6 +14438,74 @@ async fn test_hibernate_survives_worktree_settings_change(cx: &mut gpui::TestApp
     });
 }
 
+// Phase 6 (multi-project-window-switching): `ProjectResourceStats` /
+// `Project::resource_stats`. See
+// plans/260805-1913-multi-project-window-switching/phase-06-instrumentation-memory-fuse.md.
+
+#[gpui::test]
+async fn test_resource_stats_reports_counts_and_activity(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({ "a.rs": "x", "b.rs": "y", "c.rs": "z" }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    project.read_with(cx, |project, cx| {
+        let stats = project.resource_stats(cx);
+        assert_eq!(stats.activity, ProjectActivity::Active);
+        assert_eq!(stats.open_buffers, 0);
+        assert_eq!(stats.running_language_servers, 0);
+        assert_eq!(
+            stats.language_server_rss_bytes, None,
+            "no server running -- nothing to measure"
+        );
+        assert_eq!(
+            stats.worktree_entries, 4,
+            "the 3 files inserted above plus the root directory entry itself, cheaply read \
+             off the worktree's own summary"
+        );
+    });
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    fake_servers.next().await.unwrap();
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        let stats = project.resource_stats(cx);
+        assert_eq!(stats.open_buffers, 1);
+        assert_eq!(
+            stats.running_language_servers, 1,
+            "the fake server counts as running once past FakeLspAdapter's Initialize handshake"
+        );
+        // Fake test servers never have a real OS process (their inner
+        // `Child` handle is always `None` -- see `FakeLanguageServer::new`
+        // in crates/lsp/src/lsp.rs), so `process_id()` returns `None` for
+        // them and there is nothing for `sysinfo` to measure. This
+        // assertion documents that honestly rather than asserting a real
+        // RSS reading no test double can produce.
+        assert_eq!(stats.language_server_rss_bytes, None);
+    });
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+    });
+    project.read_with(cx, |project, cx| {
+        assert_eq!(project.resource_stats(cx).activity, ProjectActivity::Warm);
+    });
+}
+
 mod disable_ai_settings_tests {
     use gpui::TestAppContext;
     use project::*;

@@ -134,6 +134,7 @@ use std::{
     time::Duration,
 };
 
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use task_store::TaskStore;
 use terminals::Terminals;
 use text::{Anchor, BufferId, OffsetRangeExt, Point, Rope};
@@ -165,8 +166,8 @@ pub use task_inventory::{
 pub use buffer_store::ProjectTransaction;
 pub use lsp_store::{
     DiagnosticSummary, InvalidationStrategy, LanguageServerLogType, LanguageServerProgress,
-    LanguageServerPromptRequest, LanguageServerStatus, LanguageServerToQuery, LspStore,
-    LspStoreEvent, ProgressToken, SERVER_PROGRESS_THROTTLE_TIMEOUT,
+    LanguageServerPromptRequest, LanguageServerState, LanguageServerStatus, LanguageServerToQuery,
+    LspStore, LspStoreEvent, ProgressToken, SERVER_PROGRESS_THROTTLE_TIMEOUT,
 };
 pub use toolchain_store::{ToolchainStore, Toolchains};
 const MAX_PROJECT_SEARCH_HISTORY_SIZE: usize = 500;
@@ -352,6 +353,28 @@ pub enum ProjectActivity {
     /// hibernate. Reserved for later phases to act on; this phase only
     /// records the transition.
     Hibernated,
+}
+
+/// FR1 (Phase 6 of multi-project-window-switching): a snapshot of this
+/// project's resource footprint, for the debug dump action (FR2) and for
+/// `reports/memory-measurements.md`. See `Project::resource_stats`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectResourceStats {
+    pub activity: ProjectActivity,
+    pub running_language_servers: usize,
+    pub open_buffers: usize,
+    pub worktree_entries: usize,
+    pub terminal_scrollback_lines: usize,
+    /// Combined RSS, in bytes, of this project's running language server
+    /// child processes, or `None` if none are running or none could be
+    /// read (e.g. a process exited between listing its PID and reading
+    /// its memory). This is deliberately **not** "this project's total
+    /// memory cost": Zode hosts every project in one process, so its own
+    /// heap growth per project can't be isolated here, and Prettier/DAP
+    /// child processes aren't counted either (out of scope for this
+    /// phase — see phase-06's Related Code Files). It is, however, the
+    /// largest externally-measurable share of that cost.
+    pub language_server_rss_bytes: Option<u64>,
 }
 
 /// A link to display in a toast notification, useful to point to documentation.
@@ -4953,6 +4976,94 @@ impl Project {
         // re-trigger on every batch.
         self.git_store
             .update(cx, |git_store, cx| git_store.refresh_all_repositories(cx));
+    }
+
+    /// FR4 (Phase 6): true if `try_hibernate_resources` would defer this
+    /// project rather than actually stopping its resources right now.
+    /// Shared by `try_hibernate_resources` itself and the memory-pressure
+    /// fuse's victim selection (`MultiWorkspace`, `crates/workspace`) — the
+    /// fuse must skip a project in this state as a *candidate* entirely
+    /// (FR4: "no shortcut through the same barriers"), not merely attempt
+    /// it and let it silently defer. Attempting anyway would flip this
+    /// project's `activity()` label to `Hibernated` without actually
+    /// freeing anything, which is exactly the label/resource divergence
+    /// `try_hibernate_resources`'s own barriers exist to prevent in the
+    /// first place.
+    pub fn would_defer_hibernation(&self, cx: &App) -> bool {
+        self.has_active_debug_session(cx) || self.autosave_would_race_hibernate(cx)
+    }
+
+    /// FR1/FR2 (Phase 6): counts + child-process RSS described by
+    /// `ProjectResourceStats`. Cheap: every count here reads an
+    /// already-maintained summary or length rather than scanning
+    /// anything, and the `sysinfo` call only refreshes the specific PIDs
+    /// this project's language servers report — see that struct's doc
+    /// comment for what this measurement does and doesn't cover.
+    ///
+    /// On a remote/guest project (no local language servers to query),
+    /// `running_language_servers` reads `0` and `language_server_rss_bytes`
+    /// reads `None` — there is no local process to count or measure.
+    pub fn resource_stats(&self, cx: &App) -> ProjectResourceStats {
+        let local_lsp_store = self.lsp_store.read(cx).as_local();
+        let running_language_servers = local_lsp_store
+            .map(|local| {
+                local
+                    .language_servers
+                    .values()
+                    .filter(|state| matches!(state, LanguageServerState::Running { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+        let server_pids: Vec<Pid> = local_lsp_store
+            .map(|local| {
+                local
+                    .language_servers
+                    .values()
+                    .filter_map(|state| match state {
+                        LanguageServerState::Running { server, .. } => server.process_id(),
+                        LanguageServerState::Starting { .. } => None,
+                    })
+                    .map(Pid::from_u32)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let language_server_rss_bytes = if server_pids.is_empty() {
+            None
+        } else {
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&server_pids),
+                false,
+                ProcessRefreshKind::nothing().with_memory(),
+            );
+            Some(
+                server_pids
+                    .iter()
+                    .filter_map(|pid| system.process(*pid))
+                    .map(|process| process.memory())
+                    .sum(),
+            )
+        };
+
+        let worktree_entries = self
+            .worktrees(cx)
+            .map(|worktree| worktree.read(cx).snapshot().entry_count())
+            .sum();
+        let terminal_scrollback_lines = self
+            .local_terminal_handles()
+            .iter()
+            .filter_map(|handle| handle.upgrade())
+            .map(|terminal| terminal.read(cx).total_lines())
+            .sum();
+
+        ProjectResourceStats {
+            activity: self.activity,
+            running_language_servers,
+            open_buffers: self.buffer_store.read(cx).buffers().count(),
+            worktree_entries,
+            terminal_scrollback_lines,
+            language_server_rss_bytes,
+        }
     }
 
     pub fn entry_for_path<'a>(&'a self, path: &ProjectPath, cx: &'a App) -> Option<&'a Entry> {

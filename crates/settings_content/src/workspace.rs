@@ -1055,4 +1055,21 @@ pub struct MultiProjectContent {
     ///
     /// Default: 300000 (5 minutes)
     pub hibernate_after_ms: Option<u64>,
+    /// Minimum percentage (0-100) of total system memory that must stay
+    /// available. When available memory drops below this, the
+    /// memory-pressure fuse immediately hibernates the least-recently-used
+    /// `Warm` project(s) — bypassing `hibernate_after_ms`'s idle timer —
+    /// until pressure eases or only `Active`/ineligible projects remain
+    /// (an active debug session or a dirty buffer racing autosave makes a
+    /// project ineligible, same as the idle timer). Set to `0` to disable
+    /// the fuse entirely.
+    ///
+    /// (Not `null`, same reasoning as `hibernate_after_ms`: a settings
+    /// override layer's `null` can never win over this default, so `0` is
+    /// the real "disabled" sentinel.)
+    ///
+    /// Default: 10.0 — a placeholder pending the real hardware
+    /// measurements phase-06 of the multi-project-window-switching plan
+    /// calls for (`reports/memory-measurements.md`).
+    pub memory_pressure_threshold_percent: Option<f32>,
 }
