@@ -673,6 +673,13 @@ async fn test_switching_projects_with_sidebar_closed_detaches_old_active_workspa
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
 
+    // Pin the setting explicitly rather than relying on the phase's
+    // current default, so this regression test still holds once the
+    // default flips to `true` at the end of Phase 3.
+    multi_workspace.update(cx, |_mw, cx| {
+        disable_background_project_retention(cx);
+    });
+
     let workspace_a = multi_workspace.read_with(cx, |mw, cx| {
         assert!(
             mw.project_groups(cx).is_empty(),
@@ -1036,6 +1043,15 @@ async fn test_open_paths_reusing_existing_window_respects_retain_background_proj
     let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
     cx.run_until_parked();
 
+    // Pin the setting explicitly rather than relying on the phase's
+    // current default, so this regression test still holds once the
+    // default flips to `true` at the end of Phase 3.
+    window
+        .update(cx, |_mw, _window, cx| {
+            disable_background_project_retention(cx);
+        })
+        .unwrap();
+
     let workspace_a = window
         .read_with(cx, |mw, _cx| mw.workspace().clone())
         .unwrap();
@@ -1269,6 +1285,13 @@ async fn test_open_sidebar_does_not_force_retain_when_retain_background_projects
 
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+
+    // Pin the setting explicitly rather than relying on the phase's
+    // current default, so this regression test still holds once the
+    // default flips to `true` at the end of Phase 3.
+    multi_workspace.update(cx, |_mw, cx| {
+        disable_background_project_retention(cx);
+    });
 
     multi_workspace.update(cx, |mw, cx| {
         mw.open_sidebar(cx);

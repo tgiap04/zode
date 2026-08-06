@@ -149,12 +149,16 @@
   // "existing_window"`).
   "multi_project": {
     // Whether a project that loses focus stays retained in the background
-    // instead of being detached. `false` keeps at most one project alive
-    // per window (today's behavior). This is a temporary flag that
-    // defaults to `false` until the resource-hibernation governor lands,
-    // and is expected to flip to `true` once background projects stop
-    // paying full LSP/worktree cost.
-    "retain_background_projects": false,
+    // instead of being detached. `false` would keep at most one project
+    // alive per window (pre-hibernation behavior). Now that a project
+    // going idle actually stops its language servers, Prettier, and DAP
+    // (the LSP hibernate/wake phase of the multi-project-window-switching
+    // plan) rather than just sitting there paying full cost, this
+    // defaults to `true`. Worktree scanning and terminal memory still
+    // follow later in that plan, so background projects aren't yet as
+    // cheap as they'll eventually be -- but the largest cost (language
+    // servers) is already handled.
+    "retain_background_projects": true,
     // How long, in milliseconds, a retained-but-unfocused project may sit
     // idle before it becomes eligible for hibernation. Set to 0 to disable
     // hibernation entirely (a retained project then stays fully live for as

@@ -2441,13 +2441,17 @@ mod tests {
         cx.run_until_parked();
         multi_workspace_1
             .update(cx, |multi_workspace, _window, cx| {
-                // Retention is now governed by `retain_background_projects`
-                // (default `false`), not by `sidebar_open` staying set once
-                // any multi-open flow has touched this window — the a/b
-                // workspace opened earlier is detached once c/d activates,
-                // so only one workspace is live here. `sidebar_open` itself
-                // still flips independently of retention.
-                assert_eq!(multi_workspace.workspaces().count(), 1);
+                // Retention is governed by `retain_background_projects`,
+                // not by `sidebar_open` staying set once any multi-open
+                // flow has touched this window. Its default flipped to
+                // `true` once LSP hibernate/wake (multi-project-window-switching
+                // phase 3) made retaining a background project actually
+                // affordable, so the a/b workspace opened earlier stays
+                // retained (rather than being detached) once c/d
+                // activates -- two workspaces live here, not one.
+                // `sidebar_open` itself still flips independently of
+                // retention.
+                assert_eq!(multi_workspace.workspaces().count(), 2);
                 assert!(multi_workspace.sidebar_open());
                 let workspace = multi_workspace.workspace().read(cx);
                 assert_eq!(
