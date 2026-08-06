@@ -13689,6 +13689,118 @@ async fn test_reactivating_from_warm_does_not_restart_language_servers(
 }
 
 #[gpui::test]
+async fn test_reactivating_during_deferred_hibernate_does_not_restart_language_servers(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp("Rust", FakeLspAdapter::default());
+
+    let (buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/dir/a.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    fake_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.executor().run_until_parked();
+
+    // A live debug session defers hibernate entirely -- see
+    // test_hibernate_skipped_when_debug_session_active. This test goes
+    // on to reactivate the project *while the session is still running*,
+    // which is the second, unbounded way to reach the bug `LspStore::wake`'s
+    // own guard now closes: `try_hibernate_resources` commits the
+    // `Hibernated` label in `set_activity` before it ever checks this
+    // barrier, then bails out without calling `LspStore::hibernate` --
+    // so `LspStore.hibernated` stays `false` even though
+    // `Project::activity()` reads `Hibernated`. The retry re-arms every
+    // `HIBERNATE_RETRY_INTERVAL` for as long as the session runs, so any
+    // ordinary "glance at another project, tab back while still
+    // debugging" hits this -- not bounded by a single retry window the
+    // way the autosave-race variant is.
+    project.update(cx, |project, cx| {
+        project.dap_store().update(cx, |dap_store, cx| {
+            dap_store.new_session(
+                None,
+                DebugAdapterName("fake-adapter".into()),
+                SharedTaskContext::default(),
+                None,
+                SessionQuirks::default(),
+                cx,
+            )
+        });
+    });
+    cx.executor().run_until_parked();
+
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.executor().run_until_parked();
+
+    // Deferred: the debug session blocks the actual stop. The label
+    // commits regardless (Phase 2's contract), but the server was never
+    // touched.
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "hibernate should still be deferred while the debug session is running"
+        );
+    });
+
+    // Reactivate *without* the debug session ever ending. Before the
+    // fix, `previous` read as `Hibernated` (the label never reverted
+    // while deferred), so `reconcile_resource_activity` took the wake
+    // branch and called `LspStore::wake()` unconditionally -- restarting
+    // a server that was never stopped, flashing the file tree
+    // error-free and throwing away rust-analyzer's index for nothing.
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.executor().run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Active);
+    });
+    buffer.read_with(cx, |buffer, _| {
+        assert!(
+            !buffer.buffer_diagnostics(None).is_empty(),
+            "reactivating during a deferred hibernate must not restart a language server that \
+             was never actually stopped"
+        );
+    });
+    assert!(
+        futures::FutureExt::now_or_never(futures::StreamExt::next(&mut fake_servers)).is_none(),
+        "no new language server should have been spawned"
+    );
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_disk_based_diagnostics_finished_only_sweeps_its_own_server_generation(
     cx: &mut gpui::TestAppContext,
 ) {

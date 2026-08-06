@@ -8045,34 +8045,44 @@ impl LspStore {
 
     /// Whether this project currently has any diagnostic summaries left
     /// over from a hibernated server generation (FR3) — i.e. whether a
-    /// project-wide "re-indexing" banner should be shown. See
-    /// `stale_language_servers` for how these eventually get cleared.
+    /// project-wide "re-indexing" banner should be shown. Checks both
+    /// modes: `LocalLspStore::stale_language_servers` for a local
+    /// project, `RemoteLspStore::stale_paths` for a remote/guest one —
+    /// see whichever this project is in for how these eventually get
+    /// cleared.
     pub fn has_stale_diagnostics(&self) -> bool {
-        self.as_local()
-            .is_some_and(|local| !local.stale_language_servers.is_empty())
+        match &self.mode {
+            LspStoreMode::Local(local) => !local.stale_language_servers.is_empty(),
+            LspStoreMode::Remote(remote) => !remote.stale_paths.is_empty(),
+        }
     }
 
     /// Whether `path`'s diagnostic summary currently includes an entry
     /// left over from a hibernated server generation (FR3) — used to
     /// render that one file's badge differently (e.g. dimmed) until a
-    /// fresh publish or that seed's post-wake reindex sweep clears it.
-    /// See `update_worktree_diagnostics` and
-    /// `clear_stale_diagnostics_after_reindex`.
+    /// fresh publish or that seed's post-wake reindex sweep clears it
+    /// (local), or the equivalent purge/sweep on the remote side clears
+    /// it (`handle_update_diagnostic_summary`,
+    /// `clear_stale_diagnostics_after_reindex_remote`).
     pub fn is_diagnostic_summary_stale(&self, path: &ProjectPath) -> bool {
-        let Some(local) = self.as_local() else {
-            return false;
-        };
-        if local.stale_language_servers.is_empty() {
-            return false;
+        match &self.mode {
+            LspStoreMode::Local(local) => {
+                if local.stale_language_servers.is_empty() {
+                    return false;
+                }
+                self.diagnostic_summaries
+                    .get(&path.worktree_id)
+                    .and_then(|paths| paths.get(&path.path))
+                    .is_some_and(|by_server_id| {
+                        by_server_id
+                            .keys()
+                            .any(|id| local.stale_language_servers.contains_key(id))
+                    })
+            }
+            LspStoreMode::Remote(remote) => remote
+                .stale_paths
+                .contains(&(path.worktree_id, path.path.clone())),
         }
-        self.diagnostic_summaries
-            .get(&path.worktree_id)
-            .and_then(|paths| paths.get(&path.path))
-            .is_some_and(|by_server_id| {
-                by_server_id
-                    .keys()
-                    .any(|id| local.stale_language_servers.contains_key(id))
-            })
     }
 
     pub fn diagnostic_summaries<'a>(
@@ -11612,6 +11622,25 @@ impl LspStore {
     /// own remote branch (FR7), which already sends
     /// `proto::RestartLanguageServers` with the open buffer ids.
     pub fn wake(&mut self, cx: &mut Context<Self>) {
+        // Mirrors `hibernate()`'s own idempotency check, and for the same
+        // underlying reason: `Project::try_hibernate_resources` can commit
+        // the `Hibernated` activity label (in `set_activity`) and then
+        // bail out *before* ever calling this store's `hibernate()` --
+        // an active debug session or an autosave race defers the actual
+        // stop via `schedule_hibernate_retry` without touching
+        // `hibernated`. If the project reactivates while still in that
+        // deferred window, `Project::reconcile_resource_activity` sees
+        // `previous == Hibernated` (the label never reverted) and calls
+        // `wake()` anyway. Without this guard, `wake()` would
+        // unconditionally stop-and-restart every language server for a
+        // project that was never actually hibernated -- the same
+        // user-visible bug the `previous`-tracking fix in
+        // `reconcile_resource_activity` closed for the `Warm -> Active`
+        // case, reached here instead through a deferred hibernate that
+        // never ran.
+        if !self.hibernated {
+            return;
+        }
         self.hibernated = false;
         self.restart_all_language_servers(cx);
     }

@@ -22,7 +22,7 @@ use lsp::{
 };
 use node_runtime::NodeRuntime;
 use project::{
-    DiagnosticSummary, ProgressToken, Project, ProjectActivity,
+    DiagnosticSummary, ProgressToken, Project, ProjectActivity, ProjectPath,
     agent_server_store::AgentServerCommand,
     search::{SearchQuery, SearchResult},
 };
@@ -2475,6 +2475,22 @@ async fn test_hibernate_ignores_stale_zero_diagnostic_summary_from_host(
              dropped by the client while Hibernated, or the preserved summary (the whole point \
              of FR1) would be wiped out by an incoming message instead of local code"
         );
+        // M-A: the preserved summary above is also real staleness data --
+        // `has_stale_diagnostics`/`is_diagnostic_summary_stale` must
+        // report it for a remote project too (via `RemoteLspStore::stale_paths`),
+        // not just keep the count correct while never surfacing it in
+        // the UI (project_panel dimming, the diagnostics re-indexing
+        // banner).
+        let stale_path: ProjectPath = (worktree_id, rel_path("src/lib.rs")).into();
+        assert!(
+            project.has_stale_diagnostics(cx),
+            "M-A: a remote project's stale summary must be reported as stale, not just kept \
+             correct in count"
+        );
+        assert!(
+            project.is_diagnostic_summary_stale(&stale_path, cx),
+            "M-A: the specific stale path must be reported as stale too"
+        );
     });
 
     // M2: the guard above is scoped to `Hibernated`, not permanent --
@@ -2515,6 +2531,12 @@ async fn test_hibernate_ignores_stale_zero_diagnostic_summary_from_host(
             "M2: once Active again, a genuine update from the host must actually apply and \
              replace the stale summary, not coexist with it under the old server id -- the \
              hibernated guard must not outlive Hibernated itself"
+        );
+        // M-A, other half: once the fresh update has replaced it, the
+        // path must stop reading as stale too.
+        assert!(
+            !project.has_stale_diagnostics(cx),
+            "M-A: staleness must clear once a fresh update replaces it"
         );
     });
 }
