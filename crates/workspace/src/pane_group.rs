@@ -241,8 +241,13 @@ impl PaneGroup {
             return element;
         }
 
+        // `flex_1`, not `size_full`: a 100% width/height box plus a margin adds
+        // up to more than the parent, and the parent clips the overflow — which
+        // silently eats the very seam the margin is there to create. Growing
+        // into the remaining space (and stretching on the cross axis) leaves
+        // room for the margin on all four sides.
         div()
-            .size_full()
+            .flex_1()
             .workspace_surface(cx)
             .child(element)
             .into_any_element()

@@ -2688,10 +2688,11 @@ impl Render for MultiWorkspace {
                 // The sidebar is a sibling of the whole `Workspace`, not one of
                 // its docks, so it never passes through `render_dock` — it has
                 // to claim the surface treatment for itself.
+                // No `h_full` — an explicit 100% height beats `self_stretch` and,
+                // together with the surface margin, overflows the row.
                 div()
                     .id("sidebar-container")
                     .relative()
-                    .h_full()
                     .w(sidebar_width)
                     .flex_shrink_0()
                     .workspace_surface(cx)
