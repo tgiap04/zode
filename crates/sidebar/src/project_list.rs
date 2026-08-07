@@ -30,6 +30,11 @@ pub(crate) struct ListEntry {
 #[derive(Default)]
 pub(crate) struct SidebarContents {
     pub(crate) entries: Vec<ListEntry>,
+    /// Every project group, ignoring the filter query. The rail is always
+    /// visible and is the only way to switch projects when the panel is
+    /// closed, so narrowing it by a query typed into the panel would hide
+    /// projects the user can no longer reach any other way.
+    pub(crate) rail_entries: Vec<ListEntry>,
     pub(crate) has_open_projects: bool,
 }
 
@@ -94,20 +99,12 @@ pub(crate) fn rebuild_contents(
     let path_detail_map: HashMap<PathBuf, usize> =
         all_paths.into_iter().zip(path_details).collect();
 
-    let mut entries = Vec::new();
+    let mut rail_entries = Vec::new();
     for group in &groups {
         if group.key.path_list().paths().is_empty() {
             continue;
         }
         let label = group.key.display_name(&path_detail_map);
-        let highlight_positions = if query.is_empty() {
-            Vec::new()
-        } else {
-            match fuzzy_match_positions(query, &label) {
-                Some(positions) => positions,
-                None => continue,
-            }
-        };
         let is_active = group.workspaces.contains(&active_workspace);
         let (activity, is_reindexing) = group
             .workspaces
@@ -117,18 +114,34 @@ pub(crate) fn rebuild_contents(
                 (Some(project.activity()), project.has_stale_diagnostics(cx))
             })
             .unwrap_or((None, false));
-        entries.push(ListEntry {
+        rail_entries.push(ListEntry {
             key: group.key.clone(),
             label,
-            highlight_positions,
+            highlight_positions: Vec::new(),
             is_active,
             activity,
             is_reindexing,
         });
     }
 
+    let entries = if query.is_empty() {
+        rail_entries.clone()
+    } else {
+        rail_entries
+            .iter()
+            .filter_map(|entry| {
+                let highlight_positions = fuzzy_match_positions(query, &entry.label)?;
+                Some(ListEntry {
+                    highlight_positions,
+                    ..entry.clone()
+                })
+            })
+            .collect()
+    };
+
     SidebarContents {
         entries,
+        rail_entries,
         has_open_projects,
     }
 }

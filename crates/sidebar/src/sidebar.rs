@@ -8,6 +8,7 @@ mod navigation;
 mod navigation_tests;
 mod project_item;
 mod project_list;
+mod rail;
 mod refresh;
 mod render;
 mod serialization;
@@ -152,6 +153,10 @@ impl WorkspaceSidebar for Sidebar {
         self.width = width.unwrap_or(DEFAULT_WIDTH);
         self.serialize(cx);
         cx.notify();
+    }
+
+    fn rail_width(&self, _cx: &App) -> Pixels {
+        crate::rail::RAIL_WIDTH
     }
 
     fn has_notifications(&self, _cx: &App) -> bool {

@@ -55,6 +55,14 @@ async fn test_filter_query_narrows_entries(cx: &mut TestAppContext) {
             !sidebar.contents.entries[0].highlight_positions.is_empty(),
             "a matching entry should carry highlight positions for its match"
         );
+        // The rail is the only project switcher visible while the panel is
+        // closed, so a query typed into the panel must not be able to hide a
+        // project from it.
+        assert_eq!(
+            sidebar.contents.rail_entries.len(),
+            2,
+            "the rail must keep listing every project regardless of the filter"
+        );
     });
 }
 

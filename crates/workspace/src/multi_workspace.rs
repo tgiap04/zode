@@ -59,8 +59,22 @@ actions!(
 
 #[derive(Default)]
 pub struct SidebarRenderState {
+    /// Whether the wide project panel is showing.
     pub open: bool,
+    /// Whether the always-visible project rail is present. Independent of
+    /// `open`: the rail occupies the window's `side` edge even with the
+    /// panel closed, which is what decides whether the title bar still has
+    /// to leave room for the platform's window controls.
+    pub rail: bool,
     pub side: SidebarSide,
+}
+
+impl SidebarRenderState {
+    /// Whether the sidebar covers the window edge on `side` -- either
+    /// component is enough to push the title bar off that edge.
+    pub fn occupies(&self, side: SidebarSide) -> bool {
+        self.side == side && (self.open || self.rail)
+    }
 }
 
 pub enum MultiWorkspaceEvent {
@@ -77,8 +91,15 @@ pub enum SidebarEvent {
 }
 
 pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
+    /// Width of the wide project panel alone, excluding the rail.
     fn width(&self, cx: &App) -> Pixels;
     fn set_width(&mut self, width: Option<Pixels>, cx: &mut Context<Self>);
+    /// Width of the always-visible rail, which the sidebar renders whether
+    /// or not the panel is open. `MultiWorkspace` needs it to size the
+    /// sidebar container and to offset the panel's resize drag.
+    fn rail_width(&self, _cx: &App) -> Pixels {
+        px(0.0)
+    }
     fn has_notifications(&self, cx: &App) -> bool;
     fn side(&self, _cx: &App) -> SidebarSide;
 
@@ -111,6 +132,7 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
 pub trait SidebarHandle: 'static + Send + Sync {
     fn width(&self, cx: &App) -> Pixels;
     fn set_width(&self, width: Option<Pixels>, cx: &mut App);
+    fn rail_width(&self, cx: &App) -> Pixels;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn focus(&self, window: &mut Window, cx: &mut App);
     fn prepare_for_focus(&self, window: &mut Window, cx: &mut App);
@@ -140,6 +162,10 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
 
     fn set_width(&self, width: Option<Pixels>, cx: &mut App) {
         self.update(cx, |this, cx| this.set_width(width, cx))
+    }
+
+    fn rail_width(&self, cx: &App) -> Pixels {
+        self.read(cx).rail_width(cx)
     }
 
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -365,8 +391,10 @@ impl MultiWorkspace {
     }
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
+        let enabled = self.multi_workspace_enabled(cx);
         SidebarRenderState {
-            open: self.sidebar_open() && self.multi_workspace_enabled(cx),
+            open: self.sidebar_open() && enabled,
+            rail: self.sidebar.is_some() && enabled,
             side: self.sidebar_side(cx),
         }
     }
@@ -1672,7 +1700,9 @@ impl MultiWorkspace {
             entity_id,
             (cx.background_executor().now(), project.downgrade()),
         );
-        let Some(hibernate_after) = WorkspaceSettings::get_global(cx).multi_project.hibernate_after
+        let Some(hibernate_after) = WorkspaceSettings::get_global(cx)
+            .multi_project
+            .hibernate_after
         else {
             // Dropping the previous entry (if any) cancels its timer.
             self.hibernate_timers.remove(&entity_id);
@@ -1771,8 +1801,7 @@ impl MultiWorkspace {
             return; // FR4b hysteresis: still cooling down from the last trigger.
         }
 
-        let Some(available_percent) = self.memory_pressure_reader.available_memory_percent()
-        else {
+        let Some(available_percent) = self.memory_pressure_reader.available_memory_percent() else {
             return; // Could not read memory this cycle; try again next poll.
         };
         if available_percent >= threshold_percent {
@@ -2576,11 +2605,20 @@ impl Render for MultiWorkspace {
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
 
-        let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
+        let panel_open = self.sidebar_open();
+        let sidebar: Option<AnyElement> = if multi_workspace_enabled {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
 
-                let sidebar_width = sidebar_handle.width(cx);
+                // The rail is always drawn; the panel only when open. The
+                // sidebar view renders both, so the container has to
+                // reserve the sum.
+                let sidebar_width = sidebar_handle.rail_width(cx)
+                    + if panel_open {
+                        sidebar_handle.width(cx)
+                    } else {
+                        px(0.)
+                    };
                 let resize_handle = deferred(
                     div()
                         .id("sidebar-resize-handle")
@@ -2629,7 +2667,9 @@ impl Render for MultiWorkspace {
                     .w(sidebar_width)
                     .flex_shrink_0()
                     .child(sidebar_handle.to_any())
-                    .child(resize_handle)
+                    // Nothing to resize while only the rail is showing --
+                    // its width is fixed.
+                    .when(panel_open, |this| this.child(resize_handle))
                     .into_any_element()
             })
         } else {
@@ -2707,12 +2747,15 @@ impl Render for MultiWorkspace {
                                   window,
                                   cx| {
                                 if let Some(sidebar) = &this.sidebar {
+                                    // The pointer is over the outer edge of
+                                    // rail + panel, but `width` measures the
+                                    // panel alone.
                                     let new_width = if sidebar_on_right {
                                         window.bounds().size.width - e.event.position.x
                                     } else {
                                         e.event.position.x
-                                    };
-                                    sidebar.set_width(Some(new_width), cx);
+                                    } - sidebar.rail_width(cx);
+                                    sidebar.set_width(Some(new_width.max(px(0.))), cx);
                                 }
                             },
                         ))
