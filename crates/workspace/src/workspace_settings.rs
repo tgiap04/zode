@@ -36,6 +36,40 @@ pub struct WorkspaceSettings {
     pub zoomed_padding: bool,
     pub window_decorations: settings::WindowDecorations,
     pub focus_follows_mouse: FocusFollowsMouse,
+    pub multi_project: MultiProjectSettings,
+}
+
+/// Resolved settings governing multiple projects retained in a single window.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct MultiProjectSettings {
+    /// Whether a project that loses focus stays retained in the background
+    /// instead of being detached. See
+    /// `settings::MultiProjectContent::retain_background_projects` for the
+    /// full rationale and default.
+    pub retain_background_projects: bool,
+    /// How long an unfocused project may sit idle before the
+    /// resource-hibernation governor may hibernate it. `None` means
+    /// hibernation is disabled (the setting was `0`) — a project then stays
+    /// live for as long as it is retained. See
+    /// `settings::MultiProjectContent::hibernate_after_ms` for the full
+    /// rationale and default.
+    pub hibernate_after: Option<Duration>,
+    /// Minimum percentage of total system memory that must stay
+    /// available before the memory-pressure fuse hibernates `Warm`
+    /// projects outright. `None` means the fuse is disabled (the setting
+    /// was `0`). See
+    /// `settings::MultiProjectContent::memory_pressure_threshold_percent`
+    /// for the full rationale and default.
+    pub memory_pressure_threshold_percent: Option<f32>,
+    /// How many lines to shrink every terminal's scrollback to when its
+    /// project hibernates. `None` (the default) means hibernated
+    /// terminals keep their full scrollback, unshrunk. See
+    /// `settings::MultiProjectContent::background_scroll_history_lines`
+    /// for why this is real, irrecoverable data loss when enabled.
+    pub background_scroll_history_lines: Option<usize>,
+    /// Which side of the window the project switcher sidebar docks to. See
+    /// `settings::MultiProjectContent::sidebar_side`.
+    pub sidebar_side: settings::SidebarSide,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -120,6 +154,48 @@ impl Settings for WorkspaceSettings {
             use_system_window_tabs: workspace.use_system_window_tabs.unwrap(),
             zoomed_padding: workspace.zoomed_padding.unwrap(),
             window_decorations: workspace.window_decorations.unwrap(),
+            multi_project: MultiProjectSettings {
+                retain_background_projects: workspace
+                    .multi_project
+                    .unwrap()
+                    .retain_background_projects
+                    .unwrap(),
+                // `0` disables hibernation (see `MultiProjectContent::hibernate_after_ms`
+                // for why the sentinel is `0` and not `null`).
+                hibernate_after: {
+                    let hibernate_after_ms =
+                        workspace.multi_project.unwrap().hibernate_after_ms.unwrap();
+                    (hibernate_after_ms > 0).then(|| Duration::from_millis(hibernate_after_ms))
+                },
+                // `0` disables the fuse (see
+                // `MultiProjectContent::memory_pressure_threshold_percent`
+                // for why the sentinel is `0` and not `null`). Clamped to
+                // the documented 0-100 range: nothing else validates a
+                // user-typo'd value, and an out-of-range one would either
+                // permanently disable the fuse (misread as `<= 0`) or make
+                // it permanently maximally aggressive (misread as `>
+                // 100`) with no warning either way.
+                memory_pressure_threshold_percent: {
+                    let threshold = workspace
+                        .multi_project
+                        .unwrap()
+                        .memory_pressure_threshold_percent
+                        .unwrap()
+                        .clamp(0.0, 100.0);
+                    (threshold > 0.0).then_some(threshold)
+                },
+                // Real `None`/`null` semantics here, unlike the two
+                // fields above — see `MultiProjectContent::background_scroll_history_lines`'s
+                // own doc comment for why this field doesn't have their
+                // override-ambiguity problem. Not `.unwrap()`'d: `None`
+                // is a legitimate, permanent "disabled" resolution, not
+                // an unresolved-merge bug.
+                background_scroll_history_lines: workspace
+                    .multi_project
+                    .unwrap()
+                    .background_scroll_history_lines,
+                sidebar_side: workspace.multi_project.unwrap().sidebar_side.unwrap(),
+            },
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace
                     .focus_follows_mouse

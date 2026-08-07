@@ -10547,6 +10547,7 @@ dependencies = [
  "snippet",
  "snippet_provider",
  "sum_tree",
+ "sysinfo 0.37.2",
  "task",
  "tempfile",
  "terminal",
@@ -12755,6 +12756,30 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "sidebar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "fs",
+ "gpui",
+ "menu",
+ "project",
+ "recent_projects",
+ "remote",
+ "remote_connection",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
 
 [[package]]
 name = "signal-hook"
@@ -17742,6 +17767,7 @@ dependencies = [
  "smallvec",
  "sqlez",
  "strum",
+ "sysinfo 0.37.2",
  "task",
  "telemetry",
  "tempfile",
@@ -18578,6 +18604,7 @@ dependencies = [
  "settings_profile_selector",
  "settings_ui",
  "shellexpand",
+ "sidebar",
  "smol",
  "snippet_provider",
  "snippets_ui",

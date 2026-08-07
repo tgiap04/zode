@@ -50,6 +50,9 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: existing_window
     pub cli_default_open_behavior: Option<CliDefaultOpenBehavior>,
+    /// Settings for retaining and switching between multiple projects
+    /// opened into a single window.
+    pub multi_project: Option<MultiProjectContent>,
     /// Whether to attempt to restore previous file's state when opening it again.
     /// The state is stored per pane.
     /// When disabled, defaults are applied instead of the state restoration.
@@ -1022,4 +1025,104 @@ impl DocumentSymbols {
 pub struct FocusFollowsMouse {
     pub enabled: Option<bool>,
     pub debounce_ms: Option<u64>,
+}
+
+/// Which side of the window the multi-project switcher sidebar docks to.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarSide {
+    /// Dock the sidebar on the left side of the window.
+    #[default]
+    Left,
+    /// Dock the sidebar on the right side of the window.
+    Right,
+}
+
+#[with_fallible_options]
+#[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct MultiProjectContent {
+    /// Whether a project that loses focus in a multi-project window is kept
+    /// alive in the background instead of being detached. When `false`,
+    /// only the currently active project stays live — at most one project
+    /// alive per window, matching the behavior before project retention
+    /// existed.
+    ///
+    /// Temporary flag: defaults to `false` until the resource-hibernation
+    /// governor lands, so background projects don't pay full LSP/worktree
+    /// cost while unsupervised; it is expected to default to `true` once
+    /// that governor ships.
+    ///
+    /// Default: false
+    pub retain_background_projects: Option<bool>,
+    /// How long, in milliseconds, a project can sit unfocused in the
+    /// background before the resource-hibernation governor is allowed to
+    /// hibernate it. Set to `0` to disable hibernation entirely — the
+    /// project then stays fully live for as long as it is retained.
+    ///
+    /// (Not `null`: settings layers merge such that an override layer's
+    /// `null` is indistinguishable from that layer simply not mentioning
+    /// this key, so it can never win over this default. `0` is a real value
+    /// and overrides correctly — the same convention as `edit_debounce_ms`.)
+    ///
+    /// Default: 300000 (5 minutes)
+    pub hibernate_after_ms: Option<u64>,
+    /// Minimum percentage (0-100) of total system memory that must stay
+    /// available. When available memory drops below this, the
+    /// memory-pressure fuse immediately hibernates the least-recently-used
+    /// `Warm` project(s) — bypassing `hibernate_after_ms`'s idle timer —
+    /// until pressure eases or only `Active`/ineligible projects remain
+    /// (an active debug session or a dirty buffer racing autosave makes a
+    /// project ineligible, same as the idle timer). Set to `0` to disable
+    /// the fuse entirely.
+    ///
+    /// (Not `null`, same reasoning as `hibernate_after_ms`: a settings
+    /// override layer's `null` can never win over this default, so `0` is
+    /// the real "disabled" sentinel.)
+    ///
+    /// Default: 10.0 — a placeholder pending the real hardware
+    /// measurements phase-06 of the multi-project-window-switching plan
+    /// calls for (`reports/memory-measurements.md`).
+    pub memory_pressure_threshold_percent: Option<f32>,
+    /// When a project hibernates, shrink every one of its terminals'
+    /// scrollback to this many lines, freeing whatever scrollback they'd
+    /// grown beyond it. `null` (the default) turns this off entirely —
+    /// hibernated terminals keep their full scrollback, unshrunk.
+    ///
+    /// **This is real, irrecoverable data loss when enabled**: shrinking
+    /// deletes the user's actual old log lines, exactly like scrolling a
+    /// terminal buffer off the top normally does, and there is no undo —
+    /// waking the project only lifts the cap for *future* output, it does
+    /// not restore what was already dropped. Only enable this if losing
+    /// old terminal output from hibernated (not actively-viewed) projects
+    /// is genuinely acceptable to you.
+    ///
+    /// Unlike `hibernate_after_ms`/`memory_pressure_threshold_percent`,
+    /// this really can use `null` as its disabling value rather than a `0`
+    /// sentinel: those two settings default to a real *enabled* value and
+    /// need a way for an override layer to explicitly disable them, which
+    /// `null` can't express (an override layer's `null` is indistinguishable
+    /// from that layer not mentioning the key at all). This setting's
+    /// default is disabled in the first place, so there's no equivalent
+    /// "disable it after some other layer enabled it" case to worry about.
+    ///
+    /// Default: null (disabled)
+    pub background_scroll_history_lines: Option<usize>,
+    /// FR8 (multi-project-window-switching, phase 7): which side of the
+    /// window the project switcher sidebar docks to.
+    ///
+    /// Default: left
+    pub sidebar_side: Option<SidebarSide>,
 }

@@ -386,6 +386,7 @@ impl TerminalBuilder {
             completion_tx: None,
             term,
             term_config: config,
+            pre_hibernate_scroll_history: None,
             title_override: None,
             events: VecDeque::with_capacity(10),
             last_content: Default::default(),
@@ -617,6 +618,7 @@ impl TerminalBuilder {
                 completion_tx,
                 term,
                 term_config: config,
+                pre_hibernate_scroll_history: None,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 last_content: Default::default(),
@@ -854,6 +856,15 @@ pub struct Terminal {
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<FairMutex<Term<ZedListener>>>,
     term_config: Config,
+    /// FR3/FR6 (Phase 5 of multi-project-window-switching): this
+    /// terminal's `term_config.scrolling_history` value from before
+    /// `limit_scroll_history` last shrank it, or `None` if it was never
+    /// shrunk (the common case). Lets `restore_scroll_history_limit`
+    /// return each terminal to its own real cap on wake -- an interactive
+    /// terminal's user-configured limit and a task terminal's
+    /// `MAX_SCROLL_HISTORY_LINES` are different values, so there is no
+    /// single "the default" to restore to without remembering this.
+    pre_hibernate_scroll_history: Option<usize>,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
     last_mouse: Option<(AlacPoint, AlacDirection)>,
@@ -1294,6 +1305,49 @@ impl Terminal {
 
     pub fn set_cursor_shape(&mut self, cursor_shape: CursorShape) {
         self.term_config.default_cursor_style = cursor_shape.into();
+        self.term.lock().set_options(self.term_config.clone());
+    }
+
+    /// FR3/FR5 (Phase 5 of multi-project-window-switching): shrinks this
+    /// terminal's scrollback to `lines`, freeing the dropped rows'
+    /// allocations immediately (`Term::set_options` -> `Grid::update_history`
+    /// -> `Storage::shrink_lines`/`truncate` -- confirmed by reading the
+    /// vendored alacritty fork, and empirically in
+    /// `test_scrollback_grid_memory_measurement`). This is real,
+    /// irrecoverable data loss for the user's scrollback -- see
+    /// `workspace.multi_project.background_scroll_history_lines`'s own doc
+    /// comment for why the caller must gate this behind that setting
+    /// rather than ever calling it unconditionally.
+    ///
+    /// No-op if already shrunk: hibernate can be requested more than once
+    /// for the same reason every other resource-hibernation path in this
+    /// plan treats a repeat call as a no-op, and re-shrinking from an
+    /// already-shrunk value would overwrite the *real* original with the
+    /// already-reduced one, corrupting what `restore_scroll_history_limit`
+    /// would restore to.
+    pub fn limit_scroll_history(&mut self, lines: usize) {
+        if self.pre_hibernate_scroll_history.is_some() {
+            return;
+        }
+        self.pre_hibernate_scroll_history = Some(self.term_config.scrolling_history);
+        self.term_config.scrolling_history = lines;
+        self.term.lock().set_options(self.term_config.clone());
+    }
+
+    /// Undoes `limit_scroll_history`, restoring this terminal's own
+    /// original cap (an interactive terminal's user-configured limit and
+    /// a task terminal's `MAX_SCROLL_HISTORY_LINES` are different values
+    /// -- there is no single shared "default" to restore to). Does **not**
+    /// recover the scrollback lines `limit_scroll_history` already
+    /// dropped; only lifts the cap so future output isn't artificially
+    /// limited to the shrunk value. No-op if this terminal was never
+    /// shrunk (e.g. it was created after wake, or the setting was off
+    /// when this project last hibernated).
+    pub fn restore_scroll_history_limit(&mut self) {
+        let Some(original) = self.pre_hibernate_scroll_history.take() else {
+            return;
+        };
+        self.term_config.scrolling_history = original;
         self.term.lock().set_options(self.term_config.clone());
     }
 
@@ -3343,6 +3397,207 @@ mod tests {
         assert!(
             content.contains("done"),
             "Output should still be present after no-op kill, got: {content}"
+        );
+    }
+
+    // Phase 5 (multi-project-window-switching): a real measurement, not
+    // inference, deciding whether shrinking a hibernated project's terminal
+    // scrollback is worth building at all. See
+    // plans/260805-1913-multi-project-window-switching/reports/terminal-memory-measurement.md
+    // for the recorded numbers and the phase's decision. Run with
+    // `--nocapture` to see the printed RSS deltas; the `history_size`
+    // assertions are the only part of this that's a real correctness check
+    // -- raw RSS is inherently noisy across machines, so it's printed for a
+    // human to read into the report rather than asserted against a threshold.
+    #[gpui::test]
+    async fn test_scrollback_grid_memory_measurement(cx: &mut TestAppContext) {
+        fn own_rss_bytes() -> u64 {
+            let mut system = sysinfo::System::new();
+            let pid = sysinfo::get_current_pid().expect("failed to get current process id");
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                false,
+                sysinfo::ProcessRefreshKind::nothing().with_memory(),
+            );
+            system.process(pid).map(|process| process.memory()).unwrap_or(0)
+        }
+
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                CursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .unwrap()
+            .subscribe(cx)
+        });
+
+        // 200 columns, matching the plan's "10k lines x 200 cols" scenario --
+        // row count barely matters here, scrollback capacity is independent
+        // of the visible screen height.
+        terminal.update(cx, |terminal, _| {
+            terminal.term.lock().resize(TerminalBounds::new(
+                px(20.0),
+                px(10.0),
+                bounds(point(px(0.), px(0.)), size(px(2000.), px(1000.))),
+            ));
+        });
+
+        let rss_before_fill = own_rss_bytes();
+
+        // `DEFAULT_SCROLL_HISTORY_LINES` (10_000, matching a fresh
+        // interactive terminal's real default) caps how much of this
+        // actually lands in scrollback -- write comfortably past it so the
+        // grid is genuinely full, not partially warmed up.
+        let mut generated = String::new();
+        for line in 0..12_000 {
+            generated.push_str(&format!(
+                "line {line:05}: {}\n",
+                "x".repeat(150) // ~200 cols total with the "line NNNNN: " prefix
+            ));
+        }
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(generated.as_bytes(), cx);
+        });
+        cx.run_until_parked();
+
+        let history_size_filled = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        let rss_after_fill = own_rss_bytes();
+
+        assert_eq!(
+            history_size_filled, DEFAULT_SCROLL_HISTORY_LINES,
+            "scrollback should have filled to the default cap, not partially"
+        );
+
+        // Step 2: does `set_options` with a smaller `scrolling_history`
+        // actually shrink the grid, or just cap future growth?
+        let shrunk_target = 2_000;
+        terminal.update(cx, |terminal, _| {
+            terminal.term_config.scrolling_history = shrunk_target;
+            let config = terminal.term_config.clone();
+            terminal.term.lock().set_options(config);
+        });
+
+        let history_size_shrunk = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        let rss_after_shrink = own_rss_bytes();
+
+        assert!(
+            history_size_shrunk <= shrunk_target,
+            "set_options must shrink existing history immediately, not just cap future growth \
+             (history_size={history_size_shrunk}, target={shrunk_target})"
+        );
+
+        // Step 3: if shrinking freed the underlying `Vec<Row<Cell>>`
+        // allocations (confirmed by reading `Storage::shrink_lines` in the
+        // vendored alacritty fork -- it calls `truncate()`, which drops
+        // them) but RSS didn't drop, the likely explanation is the
+        // allocator keeping those pages in its own free list for reuse
+        // rather than returning them to the OS. Growing back to the
+        // original size and comparing against `fill_delta` distinguishes
+        // that from "the shrink didn't really free anything": a much
+        // smaller second-fill delta means the allocator is satisfying the
+        // regrowth from memory it already owns, not asking the OS for more.
+        terminal.update(cx, |terminal, _| {
+            terminal.term_config.scrolling_history = DEFAULT_SCROLL_HISTORY_LINES;
+            let config = terminal.term_config.clone();
+            terminal.term.lock().set_options(config);
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(generated.as_bytes(), cx);
+        });
+        cx.run_until_parked();
+        let history_size_regrown = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        let rss_after_regrow = own_rss_bytes();
+
+        eprintln!(
+            "PHASE5 MEASUREMENT: rss_before_fill={rss_before_fill} rss_after_fill={rss_after_fill} \
+             fill_delta={} history_size_filled={history_size_filled} rss_after_shrink={rss_after_shrink} \
+             shrink_delta={} history_size_shrunk={history_size_shrunk} rss_after_regrow={rss_after_regrow} \
+             regrow_delta={} history_size_regrown={history_size_regrown}",
+            rss_after_fill.saturating_sub(rss_before_fill),
+            rss_after_fill.saturating_sub(rss_after_shrink),
+            rss_after_regrow.saturating_sub(rss_after_shrink),
+        );
+    }
+
+    /// FR3/FR6 (Phase 5): functional round-trip for
+    /// `limit_scroll_history`/`restore_scroll_history_limit`, independent
+    /// of the memory measurement above. Covers: shrinking caps existing
+    /// history, restoring lifts the cap back to this terminal's own
+    /// original value (not some shared default), a repeat `limit` call is
+    /// a no-op that doesn't clobber the remembered original, and `restore`
+    /// on a never-shrunk terminal is a no-op.
+    #[gpui::test]
+    async fn test_limit_and_restore_scroll_history(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                CursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .unwrap()
+            .subscribe(cx)
+        });
+
+        // Restoring a terminal that was never shrunk must be a no-op, not
+        // a panic or a spurious `set_options` call with a garbage value.
+        terminal.update(cx, |terminal, _| terminal.restore_scroll_history_limit());
+        assert_eq!(
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size()),
+            0,
+            "restoring a never-shrunk terminal must be a no-op"
+        );
+
+        let mut generated = String::new();
+        for line in 0..12_000 {
+            generated.push_str(&format!("line {line}\n"));
+        }
+        terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+        cx.run_until_parked();
+        let original_history_size =
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        assert_eq!(original_history_size, DEFAULT_SCROLL_HISTORY_LINES);
+
+        terminal.update(cx, |terminal, _| terminal.limit_scroll_history(500));
+        assert!(
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size()) <= 500,
+            "limit_scroll_history must shrink existing history immediately"
+        );
+
+        // A repeat `limit` call must not overwrite the remembered
+        // pre-hibernate value with the already-shrunk one -- if it did,
+        // `restore` below would only bring the cap back to 100, not the
+        // real original of 10_000.
+        terminal.update(cx, |terminal, _| terminal.limit_scroll_history(100));
+        assert!(
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size()) > 100,
+            "a repeat limit_scroll_history call while already shrunk must be a no-op"
+        );
+
+        terminal.update(cx, |terminal, _| terminal.restore_scroll_history_limit());
+        terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size()),
+            original_history_size,
+            "restore_scroll_history_limit must lift the cap back to this terminal's own \
+             original value, letting it regrow past the shrunk limit"
         );
     }
 

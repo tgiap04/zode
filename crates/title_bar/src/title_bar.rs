@@ -30,13 +30,11 @@ use settings::Settings;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
-    ButtonLike, IconWithIndicator, Indicator, PopoverMenu,
-    TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    ButtonLike, IconWithIndicator, Indicator, PopoverMenu, TintColor, Tooltip, prelude::*,
+    utils::platform_title_bar_height,
 };
 use util::ResultExt;
-use workspace::{
-    MultiWorkspace, ToggleWorktreeSecurity, Workspace,
-};
+use workspace::{MultiWorkspace, ToggleWorktreeSecurity, Workspace};
 
 use zed_actions::OpenRemote;
 
@@ -215,6 +213,8 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
+        children.push(self.render_search_bar(cx));
+
         if title_bar_settings.show_onboarding_banner {
             if let Some(banner) = &self.banner {
                 children.push(banner.clone().into_any_element())
@@ -339,12 +339,75 @@ impl TitleBar {
             banner: None,
         };
 
-
         this
     }
 
     fn worktree_count(&self, cx: &App) -> usize {
         self.project.read(cx).visible_worktrees(cx).count()
+    }
+
+    /// A VS Code-style command centre: a click target in the middle of the
+    /// title bar that opens the file finder. Wrapped in a flexible spacer so
+    /// it stays centred as the project/branch group on its left changes
+    /// width.
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let placeholder = self
+            .effective_active_worktree(cx)
+            .and_then(|worktree| {
+                worktree
+                    .read(cx)
+                    .root_name()
+                    .file_name()
+                    .map(|name| format!("Search {name}"))
+            })
+            .unwrap_or_else(|| "Search".to_string());
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .justify_center()
+            .px_2()
+            .child(
+                h_flex()
+                    .id("title-bar-search")
+                    .h(rems_from_px(22.))
+                    .w(rems_from_px(360.))
+                    .max_w_full()
+                    .px_2()
+                    .gap_1p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.editor_background)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.element_hover))
+                    .child(
+                        Icon::new(IconName::MagnifyingGlass)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(placeholder)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+                    .on_click(|_, window, cx| {
+                        window
+                            .dispatch_action(Box::new(workspace::ToggleFileFinder::default()), cx);
+                    })
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action(
+                            "Search Files",
+                            &workspace::ToggleFileFinder::default(),
+                            cx,
+                        )
+                    }),
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .into_any_element()
     }
 
     /// Returns the worktree to display in the title bar.
@@ -605,14 +668,7 @@ impl TitleBar {
             .unwrap_or(false)
             && PlatformTitleBar::is_multi_workspace_enabled(cx);
 
-        let is_threads_list_view_active = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map(|mw| mw.read(cx).is_threads_list_view_active(cx))
-            .unwrap_or(false);
-
-        if is_sidebar_open && is_threads_list_view_active {
+        if is_sidebar_open {
             return self
                 .render_recent_projects_popover(display_name, is_project_selected, cx)
                 .into_any_element();
@@ -900,5 +956,4 @@ impl TitleBar {
             })
             .ok();
     }
-
 }

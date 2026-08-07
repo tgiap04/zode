@@ -238,11 +238,17 @@ impl Render for PlatformTitleBar {
                     })
             })
             .map(|this| {
+                // The rail sits on the window edge even with the panel
+                // closed, so macOS's window controls (drawn by the OS over
+                // that same corner) land on the sidebar, not here -- but the
+                // in-title-bar controls Linux draws start to the right of the
+                // sidebar and stay visible.
+                let left_edge_free = !sidebar.occupies(SidebarSide::Left);
                 let show_left_controls = !(sidebar.open && sidebar.side == SidebarSide::Left);
 
                 if window.is_fullscreen() {
                     this.pl_2()
-                } else if self.platform_style == PlatformStyle::Mac && show_left_controls {
+                } else if self.platform_style == PlatformStyle::Mac && left_edge_free {
                     this.pl(px(TRAFFIC_LIGHT_PADDING))
                 } else if let Some(controls) = show_left_controls
                     .then(|| {
@@ -263,13 +269,11 @@ impl Render for PlatformTitleBar {
                 Decorations::Server => el,
                 Decorations::Client { tiling, .. } => el
                     .when(
-                        !(tiling.top || tiling.right)
-                            && !(sidebar.open && sidebar.side == SidebarSide::Right),
+                        !(tiling.top || tiling.right) && !sidebar.occupies(SidebarSide::Right),
                         |el| el.rounded_tr(theme::CLIENT_SIDE_DECORATION_ROUNDING),
                     )
                     .when(
-                        !(tiling.top || tiling.left)
-                            && !(sidebar.open && sidebar.side == SidebarSide::Left),
+                        !(tiling.top || tiling.left) && !sidebar.occupies(SidebarSide::Left),
                         |el| el.rounded_tl(theme::CLIENT_SIDE_DECORATION_ROUNDING),
                     )
                     // this border is to avoid a transparent gap in the rounded corners

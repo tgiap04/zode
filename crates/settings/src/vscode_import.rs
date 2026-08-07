@@ -981,6 +981,7 @@ impl VsCodeSettings {
             } else {
                 None
             },
+            multi_project: None,
             on_last_window_closed: None,
             pane_split_direction_horizontal: None,
             pane_split_direction_vertical: None,

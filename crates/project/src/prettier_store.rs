@@ -104,6 +104,25 @@ impl PrettierStore {
         .detach();
     }
 
+    /// Drops every Prettier instance this project is holding, so
+    /// hibernating actually frees the process (FR5) instead of just
+    /// leaving it idle. Reuses `remove_worktree`'s per-worktree cleanup
+    /// (which already tears down `prettiers_per_worktree` and
+    /// `prettier_instances` correctly) for every worktree, then resets
+    /// `default_prettier` too, since `remove_worktree` never touches it.
+    /// The next format request lazily starts a fresh instance the same
+    /// way it always has (see `prettier_instance_for_buffer` and
+    /// `PrettierInstance::prettier_task`, which only reuses a cached
+    /// instance when `self.prettier_instances`/`default_prettier` still
+    /// has one) — nothing else needs to react to wake.
+    pub fn hibernate(&mut self, cx: &mut Context<Self>) {
+        let worktree_ids: Vec<WorktreeId> = self.prettiers_per_worktree.keys().copied().collect();
+        for worktree_id in worktree_ids {
+            self.remove_worktree(worktree_id, cx);
+        }
+        self.default_prettier = DefaultPrettier::default();
+    }
+
     fn prettier_instance_for_buffer(
         &mut self,
         buffer: &Entity<Buffer>,
@@ -999,4 +1018,87 @@ async fn should_write_prettier_server_file(fs: &dyn Fs) -> bool {
         return true;
     };
     prettier_server_file_contents != prettier::PRETTIER_SERVER_JS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worktree_store::WorktreeIdCounter;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use language::LanguageRegistry;
+    use node_runtime::NodeRuntime;
+
+    // Phase 3 of the multi-project-window-switching plan (LSP hibernate/
+    // wake), FR5: Prettier follows the same hibernate rhythm as LSP. This
+    // doesn't need a live Prettier process to prove correct -- `hibernate`
+    // is a synchronous cache-clearing operation, and what matters is that
+    // it actually clears every place a stale instance could hide, not
+    // just the ones a real format request happens to touch.
+    #[gpui::test]
+    async fn test_hibernate_drops_held_prettier_instances(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        let languages = Arc::new(LanguageRegistry::test(cx.executor()));
+        let worktree_store =
+            cx.new(|_| WorktreeStore::local(false, fs.clone(), WorktreeIdCounter::default()));
+        let node = NodeRuntime::unavailable();
+
+        let prettier_store =
+            cx.new(|cx| PrettierStore::new(node, fs, languages, worktree_store, cx));
+
+        let worktree_id = WorktreeId::from_usize(1);
+        let local_prettier_path = PathBuf::from("/fake/prettier");
+        prettier_store.update(cx, |prettier_store, _| {
+            // Simulate a previously-started local Prettier install for
+            // one worktree (`Some(path)` in `prettiers_per_worktree`
+            // corresponds to a `prettier_instances` entry keyed by that
+            // same path -- `None` would mean "no local install, fall
+            // back to the default instance" instead), plus a default
+            // (no-local-install) instance -- the same shapes
+            // `prettier_instance_for_buffer` produces for a real format
+            // request. `hibernate` should drop both without needing a
+            // live process to prove it.
+            prettier_store.prettiers_per_worktree.insert(
+                worktree_id,
+                HashSet::from_iter([Some(local_prettier_path.clone())]),
+            );
+            prettier_store.prettier_instances.insert(
+                local_prettier_path,
+                PrettierInstance {
+                    attempt: 0,
+                    prettier: None,
+                },
+            );
+            prettier_store.default_prettier.prettier =
+                PrettierInstallation::Installed(PrettierInstance {
+                    attempt: 0,
+                    prettier: None,
+                });
+        });
+
+        prettier_store.update(cx, |prettier_store, cx| {
+            prettier_store.hibernate(cx);
+        });
+        cx.executor().run_until_parked();
+
+        prettier_store.read_with(cx, |prettier_store, _| {
+            assert!(
+                prettier_store.prettiers_per_worktree.is_empty(),
+                "hibernate should drop every worktree's held prettier instance"
+            );
+            assert!(
+                prettier_store.prettier_instances.is_empty(),
+                "hibernate should drop the instance cache so the next format request lazily \
+                 starts a fresh one instead of reusing a dead process"
+            );
+            assert!(
+                matches!(
+                    prettier_store.default_prettier.prettier,
+                    PrettierInstallation::NotInstalled { .. }
+                ),
+                "hibernate should reset the no-local-install default instance too, since \
+                 `remove_worktree` alone never touches it"
+            );
+        });
+    }
 }

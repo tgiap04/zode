@@ -144,6 +144,55 @@
   //     that are already part of an open project)
   //         "cli_default_open_behavior": "new_window"
   "cli_default_open_behavior": "existing_window",
+  // Settings for retaining and switching between multiple projects opened
+  // into a single window (e.g. via `cli_default_open_behavior:
+  // "existing_window"`).
+  "multi_project": {
+    // Whether a project that loses focus stays retained in the background
+    // instead of being detached. `false` would keep at most one project
+    // alive per window (pre-hibernation behavior). Now that a project
+    // going idle actually stops its language servers, Prettier, and DAP
+    // (the LSP hibernate/wake phase of the multi-project-window-switching
+    // plan) rather than just sitting there paying full cost, this
+    // defaults to `true`. Worktree scanning and terminal memory still
+    // follow later in that plan, so background projects aren't yet as
+    // cheap as they'll eventually be -- but the largest cost (language
+    // servers) is already handled.
+    "retain_background_projects": true,
+    // How long, in milliseconds, a retained-but-unfocused project may sit
+    // idle before it becomes eligible for hibernation. Set to 0 to disable
+    // hibernation entirely (a retained project then stays fully live for as
+    // long as it is retained). Use 0, not null, to turn this off in your own
+    // settings — null in a settings file is indistinguishable from the key
+    // being absent, so it can never override this default.
+    "hibernate_after_ms": 300000,
+    // Minimum percentage (0-100) of total system memory that must stay
+    // available. Below this, the memory-pressure fuse immediately
+    // hibernates the least-recently-used Warm project(s), bypassing
+    // hibernate_after_ms's idle timer, until pressure eases. Set to 0,
+    // not null, to disable the fuse (same reasoning as hibernate_after_ms
+    // above). This default is a placeholder pending real hardware
+    // measurements -- see reports/memory-measurements.md in the
+    // multi-project-window-switching plan.
+    "memory_pressure_threshold_percent": 10.0,
+    // When a project hibernates, shrink every one of its terminals'
+    // scrollback to this many lines. `null` (the default) leaves
+    // hibernated terminals' scrollback untouched.
+    //
+    // WARNING: enabling this deletes the user's actual old terminal
+    // output, permanently and without a way to undo it -- waking the
+    // project only lifts the cap for future output, it does not restore
+    // what shrinking already dropped. A real measurement
+    // (plans/260805-1913-multi-project-window-switching/reports/terminal-memory-measurement.md)
+    // found this is a genuinely large cost (~56MB for one full
+    // 10,000-line terminal) worth freeing, but only turn this on if
+    // losing old output from hibernated (not actively-viewed) projects'
+    // terminals is acceptable to you.
+    "background_scroll_history_lines": null,
+    // Which side of the window the project switcher sidebar docks to.
+    // "left" or "right".
+    "sidebar_side": "left"
+  },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
   // When disabled, defaults are applied instead of the state restoration.

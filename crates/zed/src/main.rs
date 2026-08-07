@@ -595,6 +595,10 @@ fn main() {
 
         audio::init(cx);
         workspace::init(app_state.clone(), cx);
+        // Used to be reached via `collab_ui::init`; that crate is gone, so the
+        // title bar has to be initialized directly or no workspace ever gets
+        // one (`Workspace::titlebar_item` stays `None` and renders nothing).
+        title_bar::init(cx);
         ui_prompt::init(cx);
 
         go_to_line::init(cx);

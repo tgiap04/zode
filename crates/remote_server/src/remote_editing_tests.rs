@@ -22,7 +22,7 @@ use lsp::{
 };
 use node_runtime::NodeRuntime;
 use project::{
-    ProgressToken, Project,
+    DiagnosticSummary, ProgressToken, Project, ProjectActivity, ProjectPath,
     agent_server_store::AgentServerCommand,
     search::{SearchQuery, SearchResult},
 };
@@ -2319,6 +2319,226 @@ async fn test_remote_external_agent_server(
             ]))
         }
     );
+}
+
+// Phase 3 of the multi-project-window-switching plan: LSP hibernate/wake,
+// FR7 (remote/SSH in scope). Hibernate/wake themselves just reuse the
+// existing `StopLanguageServers`/`RestartLanguageServers` proto round
+// trip (see `LspStore::hibernate`/`wake` in `crates/project/src/lsp_store.rs`),
+// already exercised indirectly by other tests in this file. What's
+// specific to this phase, and only testable with a real host+client pair
+// like this one, is the problem FR7 calls out: the *host* clears its own
+// diagnostics for real when asked to stop all servers, and pushes a
+// zeroed `UpdateDiagnosticSummary` down to the client -- which would
+// otherwise wipe out the stale-but-informative summary the client is
+// deliberately keeping while hibernated.
+#[gpui::test]
+async fn test_hibernate_ignores_stale_zero_diagnostic_summary_from_host(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                "src": {
+                    "lib.rs": "fn one() -> usize { 1 }"
+                }
+            },
+        }),
+    )
+    .await;
+
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+
+    // Without an explicit binary path, the real rust-analyzer adapter
+    // fails before the fake-server substitution below ever gets a chance
+    // to run ("no language server download dir defined") -- matching
+    // `test_remote_cancel_language_server_work`'s setup exactly.
+    fs.insert_tree(
+        path!("/code/project1/.zed"),
+        json!({
+            "settings.json": r#"
+          {
+            "languages": {"Rust":{"language_servers":["rust-analyzer"]}},
+            "lsp": {
+              "rust-analyzer": {
+                "binary": {
+                  "path": "~/.cargo/bin/rust-analyzer"
+                }
+              }
+            }
+          }"#
+        }),
+    )
+    .await;
+
+    cx.update_entity(&project, |project, _| {
+        project.languages().register_test_language(LanguageConfig {
+            name: "Rust".into(),
+            matcher: LanguageMatcher {
+                path_suffixes: vec!["rs".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        project.languages().register_fake_lsp_adapter(
+            "Rust",
+            FakeLspAdapter {
+                name: "rust-analyzer",
+                ..Default::default()
+            },
+        )
+    });
+
+    let mut fake_lsp_rx = server_cx.update(|cx| {
+        headless.read(cx).languages.register_fake_lsp_server(
+            LanguageServerName("rust-analyzer".into()),
+            Default::default(),
+            None,
+        )
+    });
+
+    cx.run_until_parked();
+
+    let worktree_id = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap()
+        .0
+        .read_with(cx, |worktree, _| worktree.id());
+
+    cx.run_until_parked();
+
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_buffer_with_lsp((worktree_id, rel_path("src/lib.rs")), cx)
+        })
+        .await
+        .unwrap();
+
+    cx.run_until_parked();
+
+    let fake_lsp = fake_lsp_rx.next().await.unwrap();
+    fake_lsp.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: lsp::Uri::from_file_path(path!("/code/project1/src/lib.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::ERROR),
+            message: "remote error".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+            "the summary should have propagated down from the host before hibernating"
+        );
+    });
+
+    // Hibernate the client project. `LspStore::hibernate`'s remote branch
+    // sends `proto::StopLanguageServers { all: true }` to the host, which
+    // the host handles via its own *ordinary* `handle_stop_language_servers`
+    // -> `stop_all_language_servers` path -- the same one a normal
+    // restart uses, unaware of hibernation, so it genuinely clears its
+    // diagnostics and pushes a zeroed `UpdateDiagnosticSummary` down to
+    // the client exactly as FR7 describes.
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Warm, cx);
+        project.set_activity(ProjectActivity::Hibernated, cx);
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.activity(),
+            ProjectActivity::Hibernated,
+            "nothing here should have blocked hibernation"
+        );
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 1,
+                warning_count: 0,
+            },
+            "FR7: the host's real, hibernate-triggered zeroed UpdateDiagnosticSummary must be \
+             dropped by the client while Hibernated, or the preserved summary (the whole point \
+             of FR1) would be wiped out by an incoming message instead of local code"
+        );
+        // M-A: the preserved summary above is also real staleness data --
+        // `has_stale_diagnostics`/`is_diagnostic_summary_stale` must
+        // report it for a remote project too (via `RemoteLspStore::stale_paths`),
+        // not just keep the count correct while never surfacing it in
+        // the UI (project_panel dimming, the diagnostics re-indexing
+        // banner).
+        let stale_path: ProjectPath = (worktree_id, rel_path("src/lib.rs")).into();
+        assert!(
+            project.has_stale_diagnostics(cx),
+            "M-A: a remote project's stale summary must be reported as stale, not just kept \
+             correct in count"
+        );
+        assert!(
+            project.is_diagnostic_summary_stale(&stale_path, cx),
+            "M-A: the specific stale path must be reported as stale too"
+        );
+    });
+
+    // M2: the guard above is scoped to `Hibernated`, not permanent --
+    // once woken, a genuine update from the host must actually apply
+    // again, replacing the stale summary rather than adding to it
+    // (FR4's remote counterpart, `RemoteLspStore::stale_paths`).
+    project.update(cx, |project, cx| {
+        project.set_activity(ProjectActivity::Active, cx);
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert_eq!(project.activity(), ProjectActivity::Active);
+    });
+
+    // Waking sends `proto::RestartLanguageServers` to the host, which
+    // restarts the fake rust-analyzer -- a fresh instance shows up here.
+    let fake_lsp = fake_lsp_rx.next().await.unwrap();
+    fake_lsp.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
+        uri: lsp::Uri::from_file_path(path!("/code/project1/src/lib.rs")).unwrap(),
+        version: None,
+        diagnostics: vec![lsp::Diagnostic {
+            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+            severity: Some(lsp::DiagnosticSeverity::WARNING),
+            message: "fresh warning after wake".to_string(),
+            ..Default::default()
+        }],
+    });
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.diagnostic_summary(false, cx),
+            DiagnosticSummary {
+                error_count: 0,
+                warning_count: 1,
+            },
+            "M2: once Active again, a genuine update from the host must actually apply and \
+             replace the stale summary, not coexist with it under the old server id -- the \
+             hibernated guard must not outlive Hibernated itself"
+        );
+        // M-A, other half: once the fresh update has replaced it, the
+        // path must stop reading as stale too.
+        assert!(
+            !project.has_stale_diagnostics(cx),
+            "M-A: staleness must clear once a fresh update replaces it"
+        );
+    });
 }
 
 pub async fn init_test(

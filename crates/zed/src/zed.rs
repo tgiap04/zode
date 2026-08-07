@@ -408,6 +408,26 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 .unwrap_or(true)
         });
 
+        // Phase 7 (multi-project-window-switching): register the project
+        // switcher sidebar. Deferred (not built inline here) because
+        // `Sidebar::new` subscribes to the `MultiWorkspace` entity this
+        // closure is still constructing -- by the time the deferred
+        // callback runs, `cx.entity()` below is a fully live entity, not
+        // one still being initialized.
+        let multi_workspace_handle = cx.entity();
+        let window_handle = window.window_handle();
+        cx.defer(move |cx| {
+            window_handle
+                .update(cx, |_, window, cx| {
+                    let sidebar = cx.new(|cx| {
+                        sidebar::Sidebar::new(multi_workspace_handle.clone(), window, cx)
+                    });
+                    multi_workspace_handle.update(cx, |multi_workspace, cx| {
+                        multi_workspace.register_sidebar(sidebar, cx);
+                    });
+                })
+                .ok();
+        });
     })
     .detach();
 
@@ -2441,6 +2461,16 @@ mod tests {
         cx.run_until_parked();
         multi_workspace_1
             .update(cx, |multi_workspace, _window, cx| {
+                // Retention is governed by `retain_background_projects`,
+                // not by `sidebar_open` staying set once any multi-open
+                // flow has touched this window. Its default flipped to
+                // `true` once LSP hibernate/wake (multi-project-window-switching
+                // phase 3) made retaining a background project actually
+                // affordable, so the a/b workspace opened earlier stays
+                // retained (rather than being detached) once c/d
+                // activates -- two workspaces live here, not one.
+                // `sidebar_open` itself still flips independently of
+                // retention.
                 assert_eq!(multi_workspace.workspaces().count(), 2);
                 assert!(multi_workspace.sidebar_open());
                 let workspace = multi_workspace.workspace().read(cx);
@@ -5026,6 +5056,7 @@ mod tests {
                 "search",
                 "settings_editor",
                 "settings_profile_selector",
+                "sidebar",
                 "snippets",
                 "stash_picker",
                 "svg",
@@ -5522,7 +5553,7 @@ mod tests {
         });
         window
             .update(cx, |multi_workspace, _, cx| {
-                multi_workspace.open_sidebar(cx);
+                multi_workspace.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -5722,7 +5753,7 @@ mod tests {
         });
         window1
             .update(cx, |multi_workspace, _, cx| {
-                multi_workspace.open_sidebar(cx);
+                multi_workspace.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -5753,7 +5784,7 @@ mod tests {
         });
         window2
             .update(cx, |multi_workspace, _, cx| {
-                multi_workspace.open_sidebar(cx);
+                multi_workspace.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -6017,7 +6048,7 @@ mod tests {
 
         window_a
             .update(cx, |multi_workspace, _, cx| {
-                multi_workspace.open_sidebar(cx);
+                multi_workspace.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -6049,7 +6080,7 @@ mod tests {
 
         window_b
             .update(cx, |multi_workspace, _, cx| {
-                multi_workspace.open_sidebar(cx);
+                multi_workspace.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -6233,7 +6264,9 @@ mod tests {
             .await
             .expect("failed to open workspace");
 
-        window.update(cx, |mw, _, cx| mw.open_sidebar(cx)).unwrap();
+        window
+            .update(cx, |mw, _, cx| mw.test_enable_background_retention(cx))
+            .unwrap();
 
         window
             .update(cx, |mw, window, cx| {
@@ -6375,7 +6408,9 @@ mod tests {
             .await
             .unwrap();
 
-        window.update(cx, |mw, _, cx| mw.open_sidebar(cx)).unwrap();
+        window
+            .update(cx, |mw, _, cx| mw.test_enable_background_retention(cx))
+            .unwrap();
         cx.background_executor.run_until_parked();
 
         let project_key = ProjectGroupKey::new(None, PathList::new(&[path!("/my-project")]));

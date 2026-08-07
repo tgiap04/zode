@@ -585,6 +585,44 @@ impl Project {
         &self.terminals.local_handles
     }
 
+    /// FR3/FR5 (Phase 5 of multi-project-window-switching): shrinks
+    /// scrollback for every local terminal this project owns, including
+    /// task terminals — FR5's highest-leverage case, since those always
+    /// use `MAX_SCROLL_HISTORY_LINES` (100_000) regardless of user
+    /// settings and are the terminals most likely to be holding real
+    /// memory when hibernated (e.g. a long-running `npm run dev` left in
+    /// the background). See `Terminal::limit_scroll_history` for why a
+    /// repeat call per terminal is a safe no-op.
+    ///
+    /// Only reaches terminals that already exist at the moment this is
+    /// called (the `Warm -> Hibernated` transition). Assumes nothing
+    /// creates a *new* terminal for an already-`Hibernated` project
+    /// in between hibernate and wake — true today, since terminal
+    /// creation is normally a user action against the `Active` project.
+    /// If that ever changes, such a terminal would keep its full
+    /// scrollback until the next hibernate cycle catches it.
+    pub(crate) fn limit_terminal_scroll_history(&self, lines: usize, cx: &mut Context<Self>) {
+        for terminal in self.local_terminal_handles() {
+            if let Some(terminal) = terminal.upgrade() {
+                terminal.update(cx, |terminal, _cx| terminal.limit_scroll_history(lines));
+            }
+        }
+    }
+
+    /// Undoes `limit_terminal_scroll_history` for every local terminal
+    /// this project owns. Called unconditionally on wake, same
+    /// guard-at-the-resource reasoning as every other wake path in this
+    /// plan: a terminal this project never actually shrunk (e.g. it was
+    /// created after wake, or the setting was off when this project last
+    /// hibernated) simply no-ops.
+    pub(crate) fn restore_terminal_scroll_history(&self, cx: &mut Context<Self>) {
+        for terminal in self.local_terminal_handles() {
+            if let Some(terminal) = terminal.upgrade() {
+                terminal.update(cx, |terminal, _cx| terminal.restore_scroll_history_limit());
+            }
+        }
+    }
+
     fn resolve_directory_environment(
         &self,
         shell: &str,

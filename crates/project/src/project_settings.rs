@@ -22,9 +22,9 @@ pub use settings::BinarySettings;
 pub use settings::DirenvSettings;
 pub use settings::LspSettings;
 use settings::{
-    DapSettingsContent, EditorconfigEvent, InvalidSettingsError, LocalSettingsKind,
-    LocalSettingsPath, RegisterSetting, SemanticTokenRules, Settings, SettingsLocation,
-    SettingsStore, parse_json_with_comments, watch_config_file,
+    AutosaveSetting, DapSettingsContent, EditorconfigEvent, InvalidSettingsError,
+    LocalSettingsKind, LocalSettingsPath, RegisterSetting, SemanticTokenRules, Settings,
+    SettingsLocation, SettingsStore, parse_json_with_comments, watch_config_file,
 };
 use std::{cell::OnceCell, collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use task::{DebugTaskFile, TaskTemplates, VsCodeDebugTaskFile, VsCodeTaskFile};
@@ -79,6 +79,30 @@ pub struct ProjectSettings {
 
     /// Configuration for session-related features
     pub session: SessionSettings,
+
+    /// When to automatically save edited buffers. Read here (in addition
+    /// to `workspace`'s own settings struct, which `crates/project` can't
+    /// depend on without a cycle) because project-level hibernation needs
+    /// to know whether a dirty buffer is racing an autosave before it
+    /// stops that project's language servers — see
+    /// `Project::autosave_would_race_hibernate`.
+    ///
+    /// Default: "off"
+    pub autosave: AutosaveSetting,
+
+    /// How many lines to shrink a hibernated project's terminals'
+    /// scrollback to. Read here for the same reason `autosave` is (see
+    /// its own doc comment above): `workspace.multi_project.*` is where
+    /// this setting's JSON key and full rationale live
+    /// (`settings::MultiProjectContent::background_scroll_history_lines`),
+    /// but `crates/project` can't depend on `crates/workspace`'s typed
+    /// `WorkspaceSettings` wrapper without a cycle, and project-level
+    /// hibernation (`Project::try_hibernate_resources`/`wake_resources`)
+    /// is what actually acts on it. `None` means disabled — hibernated
+    /// terminals keep their full scrollback.
+    ///
+    /// Default: null (disabled)
+    pub background_scroll_history_lines: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -730,6 +754,17 @@ impl Settings for ProjectSettings {
                 restore_unsaved_buffers: content.session.unwrap().restore_unsaved_buffers.unwrap(),
                 trust_all_worktrees: content.session.unwrap().trust_all_worktrees.unwrap(),
             },
+            autosave: content.workspace.autosave.unwrap_or(AutosaveSetting::Off),
+            // Real `None`/`null` semantics, same reasoning as
+            // `settings::MultiProjectContent::background_scroll_history_lines`'s
+            // own doc comment: `None` is a legitimate, permanent
+            // "disabled" resolution here, not an unresolved-merge bug, so
+            // this isn't `.unwrap()`'d like `hibernate_after_ms`/
+            // `memory_pressure_threshold_percent` are in `workspace_settings.rs`.
+            background_scroll_history_lines: content
+                .workspace
+                .multi_project
+                .and_then(|multi_project| multi_project.background_scroll_history_lines),
         }
     }
 }

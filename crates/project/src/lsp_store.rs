@@ -294,6 +294,27 @@ pub struct LocalLspStore {
     fs: Arc<dyn Fs>,
     languages: Arc<LanguageRegistry>,
     language_server_ids: HashMap<LanguageServerSeed, UnifiedLanguageServer>,
+    /// For each `LanguageServerId` stopped by `hibernate()` rather than a
+    /// normal restart, the `LanguageServerSeed` it used to occupy.
+    /// `diagnostic_summaries` entries under these ids were deliberately
+    /// left in place (see `stop_local_language_server_inner`) so the file
+    /// tree and status bar don't look error-free while the project
+    /// sleeps. Purged per-path as a fresh, non-stale publish supersedes
+    /// them for that path (see `update_worktree_diagnostics`), and
+    /// per-seed once that seed's replacement server finishes its first
+    /// post-wake indexing pass (see
+    /// `clear_stale_diagnostics_after_reindex`) — a file that never
+    /// itself changed but broke because a dependency changed would
+    /// otherwise keep reporting its old, now-wrong "clean" summary
+    /// forever. Keyed by seed rather than one flat set precisely so that
+    /// sweep is scoped to one seed's own stale generation: a project
+    /// running two language servers where one restarts slower than the
+    /// other must not have its still-legitimately-unverified entries
+    /// deleted early just because the faster one finished first — that
+    /// would flip an accepted false positive (stale-but-shown) into
+    /// exactly the false negative (reads as verified-clean) FR4b exists
+    /// to prevent.
+    stale_language_servers: HashMap<LanguageServerId, LanguageServerSeed>,
     yarn: Entity<YarnPathStore>,
     pub language_servers: HashMap<LanguageServerId, LanguageServerState>,
     buffers_being_formatted: HashSet<BufferId>,
@@ -2985,8 +3006,7 @@ impl LocalLspStore {
             None => return,
         };
 
-        let Ok(file_url) = lsp::Uri::from_file_path(old_path.as_path()) else {
-            debug_panic!("{old_path:?} is not parseable as an URI");
+        let Some(file_url) = file_path_to_lsp_url(old_path.as_path()).log_err() else {
             return;
         };
         self.unregister_buffer_from_language_servers(buffer, &file_url, cx);
@@ -3934,6 +3954,26 @@ pub struct FormattableBuffer {
 pub struct RemoteLspStore {
     upstream_client: Option<AnyProtoClient>,
     upstream_project_id: u64,
+    /// Paths whose `diagnostic_summaries` entry existed the moment
+    /// `hibernate()` was called on this remote/guest `LspStore` — kept
+    /// around only long enough to purge the old entry once fresh data
+    /// for that same path supersedes it (see the purge in
+    /// `handle_update_diagnostic_summary`, FR4's remote counterpart) or
+    /// the first post-wake reindex-complete signal relayed from the host
+    /// sweeps whatever's left (`clear_stale_diagnostics_after_reindex_remote`).
+    ///
+    /// Tracked by path only, not partitioned by server id/seed the way
+    /// `LocalLspStore::stale_language_servers` is: the client doesn't
+    /// manage `LanguageServerId`s itself, it only mirrors whatever the
+    /// host reports, so there's no local notion of "this id's
+    /// replacement" to partition by. A remote project running multiple
+    /// language servers where one restarts slower than the other could
+    /// see the same early-sweep risk the local partitioning exists to
+    /// prevent — accepted for v1 (remote hibernation is already the less
+    /// common path; FR7 saves RAM on the host, not the local machine)
+    /// rather than asking the host to additionally relay seed identity
+    /// just for this.
+    stale_paths: HashSet<(WorktreeId, Arc<RelPath>)>,
 }
 
 pub(crate) enum LspStoreMode {
@@ -3961,6 +4001,29 @@ pub struct LspStore {
     _maintain_buffer_languages: Task<()>,
     diagnostic_summaries:
         HashMap<WorktreeId, HashMap<Arc<RelPath>, HashMap<LanguageServerId, DiagnosticSummary>>>,
+    /// Set by `hibernate()`, cleared by `wake()` — true exactly while
+    /// this `LspStore`'s own local-or-remote stop/restart is in effect.
+    /// This is *not* a precise mirror of
+    /// `Project::activity() == ProjectActivity::Hibernated`: `Project`
+    /// can defer the actual call into `hibernate()` (an active debug
+    /// session, or a dirty buffer racing a live autosave setting — see
+    /// `Project::try_hibernate_resources`), in which case `activity()`
+    /// already reads `Hibernated` while this field is still `false`
+    /// because nothing has actually stopped yet. That divergence during a
+    /// deferred-retry window is correct, not a bug to close — this field
+    /// answers "have I, this `LspStore`, actually hibernated", not
+    /// "does the project's activity label say `Hibernated`".
+    ///
+    /// Only meaningful when `mode` is `Remote`: while true, an incoming
+    /// `UpdateDiagnosticSummary` reporting zero errors/warnings is dropped
+    /// rather than applied (see `handle_update_diagnostic_summary`),
+    /// because the *host's* own hibernate path clears diagnostics for real
+    /// and would otherwise push a zeroed summary down to us, overwriting
+    /// the stale-but-informative counts we deliberately kept (FR7). A
+    /// genuine "0 errors now" update landing at that exact moment is
+    /// dropped too — acceptable, since the whole project is already
+    /// flagged stale regardless.
+    hibernated: bool,
     pub lsp_server_capabilities: HashMap<LanguageServerId, lsp::ServerCapabilities>,
     semantic_token_config: SemanticTokenConfig,
     lsp_data: HashMap<BufferId, BufferLspData>,
@@ -4245,6 +4308,7 @@ impl LspStore {
                 supplementary_language_servers: Default::default(),
                 languages: languages.clone(),
                 language_server_ids: Default::default(),
+                stale_language_servers: HashMap::default(),
                 language_servers: Default::default(),
                 last_workspace_edits_by_language_server: Default::default(),
                 language_server_watched_paths: Default::default(),
@@ -4289,6 +4353,7 @@ impl LspStore {
             language_server_statuses: Default::default(),
             nonce: StdRng::from_os_rng().random(),
             diagnostic_summaries: HashMap::default(),
+            hibernated: false,
             lsp_server_capabilities: HashMap::default(),
             semantic_token_config: SemanticTokenConfig::new(cx),
             lsp_data: HashMap::default(),
@@ -4342,6 +4407,7 @@ impl LspStore {
             mode: LspStoreMode::Remote(RemoteLspStore {
                 upstream_client: Some(upstream_client),
                 upstream_project_id: project_id,
+                stale_paths: HashSet::default(),
             }),
             downstream_client: None,
             last_formatting_failure: None,
@@ -4351,6 +4417,7 @@ impl LspStore {
             language_server_statuses: Default::default(),
             nonce: StdRng::from_os_rng().random(),
             diagnostic_summaries: HashMap::default(),
+            hibernated: false,
             lsp_server_capabilities: HashMap::default(),
             semantic_token_config: SemanticTokenConfig::new(cx),
             next_hint_id: Arc::default(),
@@ -4425,6 +4492,7 @@ impl LspStore {
             }
             WorktreeStoreEvent::WorktreeUpdatedEntries(worktree_id, changes) => {
                 self.invalidate_diagnostic_summaries_for_removed_entries(*worktree_id, changes, cx);
+                self.clear_stale_diagnostics_for_changed_paths(*worktree_id, changes, cx);
             }
             WorktreeStoreEvent::WorktreeReleased(..)
             | WorktreeStoreEvent::WorktreeOrderChanged
@@ -7975,6 +8043,48 @@ impl LspStore {
         }
     }
 
+    /// Whether this project currently has any diagnostic summaries left
+    /// over from a hibernated server generation (FR3) — i.e. whether a
+    /// project-wide "re-indexing" banner should be shown. Checks both
+    /// modes: `LocalLspStore::stale_language_servers` for a local
+    /// project, `RemoteLspStore::stale_paths` for a remote/guest one —
+    /// see whichever this project is in for how these eventually get
+    /// cleared.
+    pub fn has_stale_diagnostics(&self) -> bool {
+        match &self.mode {
+            LspStoreMode::Local(local) => !local.stale_language_servers.is_empty(),
+            LspStoreMode::Remote(remote) => !remote.stale_paths.is_empty(),
+        }
+    }
+
+    /// Whether `path`'s diagnostic summary currently includes an entry
+    /// left over from a hibernated server generation (FR3) — used to
+    /// render that one file's badge differently (e.g. dimmed) until a
+    /// fresh publish or that seed's post-wake reindex sweep clears it
+    /// (local), or the equivalent purge/sweep on the remote side clears
+    /// it (`handle_update_diagnostic_summary`,
+    /// `clear_stale_diagnostics_after_reindex_remote`).
+    pub fn is_diagnostic_summary_stale(&self, path: &ProjectPath) -> bool {
+        match &self.mode {
+            LspStoreMode::Local(local) => {
+                if local.stale_language_servers.is_empty() {
+                    return false;
+                }
+                self.diagnostic_summaries
+                    .get(&path.worktree_id)
+                    .and_then(|paths| paths.get(&path.path))
+                    .is_some_and(|by_server_id| {
+                        by_server_id
+                            .keys()
+                            .any(|id| local.stale_language_servers.contains_key(id))
+                    })
+            }
+            LspStoreMode::Remote(remote) => remote
+                .stale_paths
+                .contains(&(path.worktree_id, path.path.clone())),
+        }
+    }
+
     pub fn diagnostic_summaries<'a>(
         &'a self,
         include_ignored: bool,
@@ -8384,6 +8494,75 @@ impl LspStore {
         }
     }
 
+    /// FR6 (Phase 4 of multi-project-window-switching): a worktree rescan
+    /// just reported `changes` for `worktree_id`, most likely after waking
+    /// from hibernation. Any diagnostic summary entry still sitting under
+    /// a hibernated server generation (`stale_language_servers` locally,
+    /// `stale_paths` remotely) for one of the *changed* (not removed —
+    /// `invalidate_diagnostic_summaries_for_removed_entries` already
+    /// handles that) paths is cleared now, rather than waiting for that
+    /// generation's replacement server to finish reindexing
+    /// (`clear_stale_diagnostics_after_reindex`). This is strictly an
+    /// early-clear for the common case of the changed file itself: a file
+    /// that breaks for some other reason (e.g. a dependency changed, but
+    /// the file itself didn't) still needs that project-wide sweep once
+    /// reindexing finishes — this does not replace it, the two are
+    /// complementary.
+    fn clear_stale_diagnostics_for_changed_paths(
+        &mut self,
+        worktree_id: WorktreeId,
+        changes: &UpdatedEntriesSet,
+        cx: &mut Context<Self>,
+    ) {
+        let local = match &mut self.mode {
+            LspStoreMode::Local(local) => local,
+            LspStoreMode::Remote(remote) => {
+                for (path, _, change) in changes.iter() {
+                    if *change != PathChange::Removed {
+                        remote.stale_paths.remove(&(worktree_id, path.clone()));
+                    }
+                }
+                return;
+            }
+        };
+        if local.stale_language_servers.is_empty() {
+            return;
+        }
+
+        let Some(summaries_for_tree) = self.diagnostic_summaries.get_mut(&worktree_id) else {
+            return;
+        };
+
+        let mut cleared_paths_by_server: HashMap<LanguageServerId, Vec<ProjectPath>> =
+            HashMap::default();
+        for (path, _, _) in changes
+            .iter()
+            .filter(|(_, _, change)| *change != PathChange::Removed)
+        {
+            let Some(summaries_by_server_id) = summaries_for_tree.get_mut(path) else {
+                continue;
+            };
+            summaries_by_server_id.retain(|id, _| {
+                if local.stale_language_servers.contains_key(id) {
+                    cleared_paths_by_server
+                        .entry(*id)
+                        .or_default()
+                        .push(ProjectPath {
+                            worktree_id,
+                            path: path.clone(),
+                        });
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        for (server_id, paths) in cleared_paths_by_server {
+            cx.emit(LspStoreEvent::DiagnosticsUpdated { server_id, paths });
+        }
+    }
+
     pub fn shared(
         &mut self,
         project_id: u64,
@@ -8670,6 +8849,24 @@ impl LspStore {
             .remove(&server_id)
             .unwrap_or_default();
 
+        // FR4: this publish is from `server_id`, which is running right
+        // now (it's the one calling this) and therefore can never itself
+        // be a hibernated/stale id. So any OTHER entry still sitting under
+        // this path from a hibernated generation is superseded by this
+        // fresh data, whether or not this particular publish is
+        // non-empty — otherwise a file that used to have diagnostics and
+        // now genuinely has none would keep reporting its old, wrong
+        // count forever (until the project-wide sweep in
+        // `clear_stale_diagnostics_after_reindex`).
+        let purged_stale = if local.stale_language_servers.is_empty() {
+            false
+        } else {
+            let stale_ids = &local.stale_language_servers;
+            let count_before = summaries_by_server_id.len();
+            summaries_by_server_id.retain(|id, _| !stale_ids.contains_key(id));
+            summaries_by_server_id.len() != count_before
+        };
+
         let new_summary = DiagnosticSummary::new(&diagnostics);
         if diagnostics.is_empty() {
             if let Some(diagnostics_by_server_id) = diagnostics_for_tree.get_mut(&path_in_worktree)
@@ -8708,8 +8905,21 @@ impl LspStore {
                     },
                 ))))
             } else {
+                // `None` here just means "nothing to push downstream" —
+                // reached only when `self.downstream_client` is itself
+                // `None`, so there is by construction no downstream
+                // client left to notify. The caller
+                // (`merge_diagnostic_entries`) still emits
+                // `DiagnosticsUpdated` locally for `Continue(_)` either
+                // way; only the proto push is conditional.
                 Ok(ControlFlow::Continue(None))
             }
+        } else if purged_stale {
+            // Nothing changed for `server_id` itself, but a stale entry
+            // from before hibernation just got superseded — still worth
+            // telling the caller so `DiagnosticsUpdated` fires and the UI
+            // drops the stale styling for this path.
+            Ok(ControlFlow::Continue(None))
         } else {
             Ok(ControlFlow::Break(()))
         }
@@ -9570,6 +9780,24 @@ impl LspStore {
                 };
 
                 if summary.is_empty() {
+                    // FR7: while this project is `Hibernated`, our own
+                    // hibernate path deliberately keeps the last known
+                    // summary so the file tree doesn't look error-free.
+                    // But on a remote/SSH project the *host* clears
+                    // diagnostics for real when it hibernates its own
+                    // servers, and pushes exactly this zeroed
+                    // `UpdateDiagnosticSummary` down to us — which would
+                    // otherwise wipe the stale-but-informative counts
+                    // we're trying to preserve, defeating the point of
+                    // this phase for remote projects. So: drop a
+                    // zero-count update while hibernated. Trade-off,
+                    // accepted: a genuine "0 errors now" update landing at
+                    // this exact moment is dropped too — acceptable,
+                    // since the whole project is already flagged stale
+                    // regardless.
+                    if lsp_store.hibernated {
+                        continue;
+                    }
                     if let Some(worktree_summaries) =
                         lsp_store.diagnostic_summaries.get_mut(&worktree_id)
                         && let Some(summaries) = worktree_summaries.get_mut(&path)
@@ -9580,6 +9808,23 @@ impl LspStore {
                         }
                     }
                 } else {
+                    // FR4's remote counterpart: if this path was marked
+                    // stale at hibernate time, any existing entry here
+                    // (under whatever `LanguageServerId` the pre-hibernate
+                    // host used) is presumptively from that old
+                    // generation — clear it wholesale before inserting
+                    // the fresh one, or the two would coexist and double
+                    // the aggregate count. Coarser than the local side's
+                    // per-id tracking (see `RemoteLspStore::stale_paths`):
+                    // the client doesn't manage ids itself, so "which
+                    // specific id is stale" isn't information it has.
+                    if let LspStoreMode::Remote(remote) = &mut lsp_store.mode
+                        && remote.stale_paths.remove(&(worktree_id, path.clone()))
+                        && let Some(worktree_summaries) =
+                            lsp_store.diagnostic_summaries.get_mut(&worktree_id)
+                    {
+                        worktree_summaries.remove(&path);
+                    }
                     lsp_store
                         .diagnostic_summaries
                         .entry(worktree_id)
@@ -9901,7 +10146,162 @@ impl LspStore {
             message: proto::update_language_server::Variant::DiskBasedDiagnosticsUpdated(
                 Default::default(),
             ),
-        })
+        });
+
+        // FR4b: the first post-wake indexing pass to finish for a given
+        // seed is the signal that it's safe to drop every summary still
+        // attributed to *that seed's* hibernated generation — not just
+        // the paths that happened to get a fresh publish along the way
+        // (`update_worktree_diagnostics` handles those already). Without
+        // this, a file that never itself changed but broke because a
+        // *dependency* changed would keep reporting its old, now-wrong
+        // "clean" summary indefinitely, silently hiding real errors
+        // (including security-relevant lints). `language_server_id` here
+        // always belongs to a currently-running server (this fires from
+        // its own progress stream), so it can never itself be one of the
+        // stale ids being swept.
+        //
+        // Accepted v1 limitation, decided rather than left implicit:
+        // this only fires for adapters that set
+        // `disk_based_diagnostics_progress_token` — today, only
+        // rust-analyzer among this codebase's bundled adapters
+        // (`crates/languages/src/rust.rs`); every other adapter uses the
+        // trait default of `None`. For those, the only existing fallback
+        // that can still reach `disk_based_diagnostics_finished` is
+        // `simulate_disk_based_diagnostics_events_if_needed`, and that
+        // one is gated on the user *saving* a buffer served by the
+        // server, not on wake itself. So for a TypeScript/Go/Python
+        // project, FR4b's project-wide safety net doesn't fire
+        // immediately post-wake — it fires on whichever save happens
+        // first afterwards, same as it always has outside of hibernation.
+        // Not a permanent hole (FR4's own per-path purge in
+        // `update_worktree_diagnostics` still works independently of
+        // this, and the delay is bounded by "until the next save," not
+        // indefinite) but a real, conscious trade-off: a wake-scoped
+        // proactive fallback was considered and rejected for this pass,
+        // since correctly telling "this seed's replacement lacks a
+        // token, safe to time out" apart from "it has one and is still
+        // legitimately indexing" needs its own careful mechanism, and
+        // getting that wrong would risk exactly the false-negative this
+        // phase's partitioned sweep was just written to prevent.
+        self.clear_stale_diagnostics_after_reindex(language_server_id, cx);
+    }
+
+    /// Dispatches to the local or remote sweep depending on `mode` — the
+    /// two need genuinely different logic (see each for why), not just a
+    /// different data source.
+    fn clear_stale_diagnostics_after_reindex(
+        &mut self,
+        finished_language_server_id: LanguageServerId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.as_local().is_some() {
+            self.clear_stale_diagnostics_after_reindex_local(finished_language_server_id, cx);
+        } else if self.as_remote().is_some() {
+            self.clear_stale_diagnostics_after_reindex_remote(finished_language_server_id, cx);
+        }
+    }
+
+    /// Sweeps every `diagnostic_summaries` entry still attributed to
+    /// `finished_language_server_id`'s own hibernated generation —
+    /// scoped to that one `LanguageServerSeed`, not every stale entry
+    /// project-wide. See `stale_language_servers` for why: a project
+    /// running two language servers where one restarts slower than the
+    /// other must not have its still-legitimately-unverified entries
+    /// swept early just because the faster one's replacement finished
+    /// first.
+    fn clear_stale_diagnostics_after_reindex_local(
+        &mut self,
+        finished_language_server_id: LanguageServerId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(local) = self.as_local_mut() else {
+            return;
+        };
+        if local.stale_language_servers.is_empty() {
+            return;
+        }
+        let Some(finished_seed) = local
+            .language_server_ids
+            .iter()
+            .find(|(_, state)| state.id == finished_language_server_id)
+            .map(|(seed, _)| seed.clone())
+        else {
+            return;
+        };
+        let ids_to_sweep: Vec<LanguageServerId> = local
+            .stale_language_servers
+            .iter()
+            .filter(|(_, seed)| **seed == finished_seed)
+            .map(|(id, _)| *id)
+            .collect();
+        if ids_to_sweep.is_empty() {
+            return;
+        }
+        for id in &ids_to_sweep {
+            local.stale_language_servers.remove(id);
+        }
+
+        let mut cleared_paths_by_server: HashMap<LanguageServerId, Vec<ProjectPath>> =
+            HashMap::default();
+        for (worktree_id, paths) in self.diagnostic_summaries.iter_mut() {
+            paths.retain(|path, summaries_by_server_id| {
+                for stale_id in &ids_to_sweep {
+                    if summaries_by_server_id.remove(stale_id).is_some() {
+                        cleared_paths_by_server
+                            .entry(*stale_id)
+                            .or_default()
+                            .push(ProjectPath {
+                                worktree_id: *worktree_id,
+                                path: path.clone(),
+                            });
+                    }
+                }
+                !summaries_by_server_id.is_empty()
+            });
+        }
+        for (server_id, paths) in cleared_paths_by_server {
+            cx.emit(LspStoreEvent::DiagnosticsUpdated { server_id, paths });
+        }
+    }
+
+    /// Remote counterpart of `clear_stale_diagnostics_after_reindex_local`:
+    /// sweeps every path in `RemoteLspStore::stale_paths` unconditionally
+    /// on this signal, rather than scoping to one seed's generation —
+    /// the client has no seed identity to partition by (see that
+    /// field's own doc comment for the accepted trade-off this implies
+    /// for a remote project running multiple language servers).
+    /// `finished_language_server_id` is only used to label the resulting
+    /// `DiagnosticsUpdated` event; the sweep itself isn't scoped to it.
+    fn clear_stale_diagnostics_after_reindex_remote(
+        &mut self,
+        finished_language_server_id: LanguageServerId,
+        cx: &mut Context<Self>,
+    ) {
+        let LspStoreMode::Remote(remote) = &mut self.mode else {
+            return;
+        };
+        if remote.stale_paths.is_empty() {
+            return;
+        }
+        let stale_paths = std::mem::take(&mut remote.stale_paths);
+        let mut cleared_paths = Vec::new();
+        for (worktree_id, path) in &stale_paths {
+            if let Some(worktree_summaries) = self.diagnostic_summaries.get_mut(worktree_id)
+                && worktree_summaries.remove(path).is_some()
+            {
+                cleared_paths.push(ProjectPath {
+                    worktree_id: *worktree_id,
+                    path: path.clone(),
+                });
+            }
+        }
+        if !cleared_paths.is_empty() {
+            cx.emit(LspStoreEvent::DiagnosticsUpdated {
+                server_id: finished_language_server_id,
+                paths: cleared_paths,
+            });
+        }
     }
 
     // After saving a buffer using a language server that doesn't provide a disk-based progress token,
@@ -11025,6 +11425,29 @@ impl LspStore {
         server_id: LanguageServerId,
         cx: &mut Context<Self>,
     ) -> Task<()> {
+        self.stop_local_language_server_inner(server_id, true, cx)
+    }
+
+    /// Shared body for stopping one local language server. `clear_diagnostics`
+    /// controls only whether `diagnostic_summaries` gets zeroed for this
+    /// server — every other cleanup (buffer squiggles, `local.diagnostics`,
+    /// watched paths, removing the server from `language_server_ids`)
+    /// always happens, restart or hibernate alike.
+    ///
+    /// A normal restart/stop (`stop_local_language_server`, above) always
+    /// passes `true` for `clear_diagnostics` — this is the contract
+    /// `test_diagnostic_summaries_cleared_on_server_restart` and its two
+    /// neighbors in `project_tests.rs` pin down, and this split changes
+    /// none of it. `hibernate` (below) passes `false`, so the file tree
+    /// and status bar don't look error-free while the project sleeps
+    /// (FR1) — see `stale_language_servers` for how those leftover
+    /// entries eventually get cleared for real.
+    fn stop_local_language_server_inner(
+        &mut self,
+        server_id: LanguageServerId,
+        clear_diagnostics: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         let local = match &mut self.mode {
             LspStoreMode::Local(local) => local,
             _ => {
@@ -11045,40 +11468,42 @@ impl LspStore {
             }
         });
 
-        let mut cleared_paths: Vec<ProjectPath> = Vec::new();
-        for (worktree_id, summaries) in self.diagnostic_summaries.iter_mut() {
-            summaries.retain(|path, summaries_by_server_id| {
-                if summaries_by_server_id.remove(&server_id).is_some() {
-                    if let Some((client, project_id)) = self.downstream_client.clone() {
-                        client
-                            .send(proto::UpdateDiagnosticSummary {
-                                project_id,
-                                worktree_id: worktree_id.to_proto(),
-                                summary: Some(proto::DiagnosticSummary {
-                                    path: path.as_ref().to_proto(),
-                                    language_server_id: server_id.0 as u64,
-                                    error_count: 0,
-                                    warning_count: 0,
-                                }),
-                                more_summaries: Vec::new(),
-                            })
-                            .log_err();
+        if clear_diagnostics {
+            let mut cleared_paths: Vec<ProjectPath> = Vec::new();
+            for (worktree_id, summaries) in self.diagnostic_summaries.iter_mut() {
+                summaries.retain(|path, summaries_by_server_id| {
+                    if summaries_by_server_id.remove(&server_id).is_some() {
+                        if let Some((client, project_id)) = self.downstream_client.clone() {
+                            client
+                                .send(proto::UpdateDiagnosticSummary {
+                                    project_id,
+                                    worktree_id: worktree_id.to_proto(),
+                                    summary: Some(proto::DiagnosticSummary {
+                                        path: path.as_ref().to_proto(),
+                                        language_server_id: server_id.0 as u64,
+                                        error_count: 0,
+                                        warning_count: 0,
+                                    }),
+                                    more_summaries: Vec::new(),
+                                })
+                                .log_err();
+                        }
+                        cleared_paths.push(ProjectPath {
+                            worktree_id: *worktree_id,
+                            path: path.clone(),
+                        });
+                        !summaries_by_server_id.is_empty()
+                    } else {
+                        true
                     }
-                    cleared_paths.push(ProjectPath {
-                        worktree_id: *worktree_id,
-                        path: path.clone(),
-                    });
-                    !summaries_by_server_id.is_empty()
-                } else {
-                    true
-                }
-            });
-        }
-        if !cleared_paths.is_empty() {
-            cx.emit(LspStoreEvent::DiagnosticsUpdated {
-                server_id,
-                paths: cleared_paths,
-            });
+                });
+            }
+            if !cleared_paths.is_empty() {
+                cx.emit(LspStoreEvent::DiagnosticsUpdated {
+                    server_id,
+                    paths: cleared_paths,
+                });
+            }
         }
 
         let local = self.as_local_mut().unwrap();
@@ -11169,9 +11594,124 @@ impl LspStore {
         }
     }
 
+    /// Stops every local language server for this project for hibernation
+    /// (FR1), preserving `diagnostic_summaries` so the file tree and
+    /// status bar don't look like the project suddenly became
+    /// error-free — this otherwise mirrors `shutdown_all_language_servers`
+    /// closely, but calls the `clear_diagnostics: false` inner path and
+    /// marks every stopped server's id as stale. Idempotent (FR6):
+    /// nothing running means nothing to do.
+    ///
+    /// On a remote/SSH project (FR7), asks the host to stop its language
+    /// servers instead of touching anything locally — the SSH connection
+    /// itself is untouched, and this saves RAM on the *remote* machine,
+    /// not the local one. See `hibernated` and
+    /// `handle_update_diagnostic_summary` for the other half of FR7: the
+    /// host's own hibernate-triggered zeroed summaries must not be
+    /// allowed to wipe the stale-but-informative counts kept here.
+    pub fn hibernate(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.hibernated = true;
+        if let Some((client, project_id)) = self.upstream_client() {
+            // Snapshot every path with a current summary before asking
+            // the host to stop — see `RemoteLspStore::stale_paths` for
+            // why: without it, a fresh publish arriving after wake would
+            // just add to the old entry instead of replacing it,
+            // doubling the aggregate count (FR4's remote counterpart).
+            let stale_paths: Vec<(WorktreeId, Arc<RelPath>)> = self
+                .diagnostic_summaries
+                .iter()
+                .flat_map(|(worktree_id, paths)| {
+                    paths.keys().map(move |path| (*worktree_id, path.clone()))
+                })
+                .collect();
+            if let LspStoreMode::Remote(remote) = &mut self.mode {
+                remote.stale_paths.extend(stale_paths);
+            }
+            let request = client.request(proto::StopLanguageServers {
+                project_id,
+                buffer_ids: Vec::new(),
+                also_servers: Vec::new(),
+                all: true,
+            });
+            return cx.background_spawn(async move {
+                request.await.log_err();
+            });
+        }
+        let Some(local) = self.as_local_mut() else {
+            return Task::ready(());
+        };
+        let language_servers_to_stop: BTreeSet<LanguageServerId> = local
+            .language_server_ids
+            .values()
+            .map(|state| state.id)
+            .collect();
+        if language_servers_to_stop.is_empty() {
+            return Task::ready(());
+        }
+        local.lsp_tree.remove_nodes(&language_servers_to_stop);
+        // Capture which seed each id being stopped belongs to *before*
+        // `stop_local_language_server_inner` removes it from
+        // `language_server_ids` below — this is what lets the eventual
+        // sweep (`clear_stale_diagnostics_after_reindex`) scope itself to
+        // one seed's stale generation instead of clearing everything.
+        let stopped_seeds: Vec<(LanguageServerId, LanguageServerSeed)> = local
+            .language_server_ids
+            .iter()
+            .filter(|(_, state)| language_servers_to_stop.contains(&state.id))
+            .map(|(seed, state)| (state.id, seed.clone()))
+            .collect();
+        local.stale_language_servers.extend(stopped_seeds);
+        let tasks = language_servers_to_stop
+            .into_iter()
+            .map(|server| self.stop_local_language_server_inner(server, false, cx))
+            .collect::<Vec<_>>();
+        cx.background_spawn(async move {
+            futures::future::join_all(tasks).await;
+        })
+    }
+
     pub fn restart_all_language_servers(&mut self, cx: &mut Context<Self>) {
         let buffers = self.buffer_store.read(cx).buffers().collect();
         self.restart_language_servers_for_buffers(buffers, HashSet::default(), cx);
+    }
+
+    /// Re-registers every currently open buffer with its language servers,
+    /// undoing `hibernate` (FR2). Deliberately does not try to resurrect
+    /// every server that ever ran for this project — only buffers that
+    /// are open right now get one, exactly like the normal start-on-open
+    /// path (`register_buffer_with_language_servers` /
+    /// `get_or_insert_language_server`), which naturally starts fresh
+    /// servers here since `hibernate` already cleared
+    /// `language_server_ids`. Does not block: server startup (and for
+    /// rust-analyzer, the full re-index, since it has no on-disk cache)
+    /// continues in the background while the UI stays responsive (NFR1).
+    ///
+    /// On a remote/SSH project this is fully handled by reusing
+    /// `restart_all_language_servers` → `restart_language_servers_for_buffers`'s
+    /// own remote branch (FR7), which already sends
+    /// `proto::RestartLanguageServers` with the open buffer ids.
+    pub fn wake(&mut self, cx: &mut Context<Self>) {
+        // Mirrors `hibernate()`'s own idempotency check, and for the same
+        // underlying reason: `Project::try_hibernate_resources` can commit
+        // the `Hibernated` activity label (in `set_activity`) and then
+        // bail out *before* ever calling this store's `hibernate()` --
+        // an active debug session or an autosave race defers the actual
+        // stop via `schedule_hibernate_retry` without touching
+        // `hibernated`. If the project reactivates while still in that
+        // deferred window, `Project::reconcile_resource_activity` sees
+        // `previous == Hibernated` (the label never reverted) and calls
+        // `wake()` anyway. Without this guard, `wake()` would
+        // unconditionally stop-and-restart every language server for a
+        // project that was never actually hibernated -- the same
+        // user-visible bug the `previous`-tracking fix in
+        // `reconcile_resource_activity` closed for the `Warm -> Active`
+        // case, reached here instead through a deferred hibernate that
+        // never ran.
+        if !self.hibernated {
+            return;
+        }
+        self.hibernated = false;
+        self.restart_all_language_servers(cx);
     }
 
     pub fn restart_language_servers_for_buffers(

@@ -32,9 +32,9 @@ pub use crate::notifications::NotificationFrame;
 pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectToNewWindow,
-    MultiWorkspace, MultiWorkspaceEvent, NewThread, NextProject, NextThread, PreviousProject,
-    PreviousThread, ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, Sidebar,
-    SidebarEvent, SidebarHandle, SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject, ProjectGroup,
+    ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
+    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -1422,7 +1422,14 @@ struct FollowerView {
 pub enum OpenMode {
     /// Open the workspace in a new window.
     NewWindow,
-    /// Add to the window's multi workspace without activating it (used during deserialization).
+    /// Add to the window's multi workspace without necessarily activating
+    /// it. Used both for deserialization (which calls
+    /// `MultiWorkspace::add()` directly and always retains, to faithfully
+    /// restore a saved session) and by live flows like creating/switching a
+    /// linked git worktree (which route through `Workspace::new_local` and
+    /// `MultiWorkspace::add_or_activate()`, so it activates instead of
+    /// silently sitting unreachable in the background when
+    /// `retain_background_projects` is `false`).
     Add,
     /// Add to the window's multi workspace and activate it.
     #[default]
@@ -1970,7 +1977,15 @@ impl Workspace {
                                 multi_workspace.activate(workspace.clone(), None, window, cx);
                             }
                             OpenMode::Add => {
-                                multi_workspace.add(workspace.clone(), &*window, cx);
+                                // Live flows only (e.g. creating/switching a
+                                // linked git worktree) — deserialization
+                                // constructs workspaces and calls
+                                // `MultiWorkspace::add()` directly, without
+                                // going through `Workspace::new_local`.
+                                // `add_or_activate` respects
+                                // `retain_background_projects` instead of
+                                // always retaining.
+                                multi_workspace.add_or_activate(workspace.clone(), window, cx);
                             }
                             OpenMode::NewWindow => {
                                 unreachable!()
@@ -9706,6 +9721,19 @@ pub fn open_paths(
 
                 if let Some(window) = target_window {
                     open_options.requesting_window = Some(window);
+                    // `open_sidebar()` itself now gates its
+                    // `retain_active_workspace()` call on `should_retain()`
+                    // (see `MultiWorkspace::apply_open_sidebar`), so calling
+                    // it here is safe: it still flips `sidebar_open` and
+                    // fires the usual telemetry (both still expected by
+                    // e.g. `test_open_paths_action`), but no longer
+                    // force-retains the active workspace regardless of
+                    // `retain_background_projects` — that was the bug that
+                    // defeated the setting for exactly this, the default
+                    // `cli_default_open_behavior: existing_window`,
+                    // scenario. `activate()`'s own gating (below, once the
+                    // new workspace is created) decides whether this
+                    // workspace survives being switched away from.
                     window
                         .update(cx, |multi_workspace, _, cx| {
                             multi_workspace.open_sidebar(cx);
@@ -11073,7 +11101,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                mw.open_sidebar(cx);
+                mw.test_enable_background_retention(cx);
             })
             .unwrap();
 
@@ -11159,7 +11187,9 @@ mod tests {
         cx.run_until_parked();
 
         multi_workspace_handle
-            .update(cx, |mw, _window, cx| mw.open_sidebar(cx))
+            .update(cx, |mw, _window, cx| {
+                mw.test_enable_background_retention(cx)
+            })
             .unwrap();
 
         let workspace_a = multi_workspace_handle
@@ -14978,7 +15008,7 @@ mod tests {
 
         multi_workspace_handle
             .update(cx, |mw, _window, cx| {
-                mw.open_sidebar(cx);
+                mw.test_enable_background_retention(cx);
             })
             .unwrap();
 

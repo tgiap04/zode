@@ -152,6 +152,13 @@ pub struct ProjectPanel {
     workspace: WeakEntity<Workspace>,
     diagnostics: HashMap<(WorktreeId, Arc<RelPath>), DiagnosticSeverity>,
     diagnostic_counts: HashMap<(WorktreeId, Arc<RelPath>), DiagnosticCount>,
+    /// Paths whose diagnostic summary currently includes an entry left
+    /// over from a hibernated server generation (FR3 of the LSP
+    /// hibernate/wake phase) — rendered dimmed in `render_entry` instead
+    /// of the normal error/warning color, so a re-indexing project after
+    /// wake doesn't look indistinguishable from one with a live, verified
+    /// count.
+    stale_diagnostic_paths: HashSet<(WorktreeId, Arc<RelPath>)>,
     diagnostic_summary_update: Task<()>,
     // We keep track of the mouse down state on entries so we don't flash the UI
     // in case a user clicks to open a file.
@@ -281,6 +288,11 @@ struct EntryDetails {
     filename_text_color: Color,
     diagnostic_severity: Option<DiagnosticSeverity>,
     diagnostic_count: Option<DiagnosticCount>,
+    /// FR3 (LSP hibernate/wake phase): true when `diagnostic_severity`/
+    /// `diagnostic_count` above include an entry left over from a
+    /// hibernated server generation, rather than a value the current
+    /// (possibly still re-indexing) servers have verified.
+    is_diagnostic_stale: bool,
     git_status: GitSummary,
     is_private: bool,
     worktree_id: WorktreeId,
@@ -709,7 +721,17 @@ impl ProjectPanel {
                         cx.emit(PanelEvent::Activate);
                     }
                     project::Event::DiskBasedDiagnosticsFinished { .. }
-                    | project::Event::DiagnosticsUpdated { .. } => {
+                    | project::Event::DiagnosticsUpdated { .. }
+                    // Hibernating deliberately does NOT clear
+                    // `diagnostic_summaries` (that's the whole point of
+                    // FR1), so it never emits `DiagnosticsUpdated` either
+                    // — the counts genuinely haven't changed. But
+                    // `stale_diagnostic_paths` has, and that's exactly
+                    // what a hibernate/wake transition flips, so refresh
+                    // on this event too or the dimmed styling would only
+                    // ever catch up whenever some unrelated diagnostics
+                    // event happened to fire next.
+                    | project::Event::ActivityChanged(_) => {
                         if ProjectPanelSettings::get_global(cx).show_diagnostics
                             != ShowDiagnostics::Off
                         {
@@ -881,6 +903,7 @@ impl ProjectPanel {
                 workspace: workspace.weak_handle(),
                 diagnostics: Default::default(),
                 diagnostic_counts: Default::default(),
+                stale_diagnostic_paths: Default::default(),
                 diagnostic_summary_update: Task::ready(()),
                 scroll_handle,
                 mouse_down: false,
@@ -1057,6 +1080,28 @@ impl ProjectPanel {
             } else {
                 Default::default()
             };
+
+        // FR3 (LSP hibernate/wake phase): which exact file paths currently
+        // carry a stale (hibernated-generation) diagnostic entry, so
+        // `render_entry` can dim their badge/icon instead of drawing them
+        // as a verified, current error/warning. Exact-path only — unlike
+        // `self.diagnostics` above, this deliberately does not propagate
+        // to ancestor folders, matching `diagnostic_counts`'s own
+        // granularity.
+        self.stale_diagnostic_paths = if show_diagnostics_setting != ShowDiagnostics::Off {
+            self.project
+                .read(cx)
+                .diagnostic_summaries(false, cx)
+                .filter_map(|(project_path, _, _)| {
+                    self.project
+                        .read(cx)
+                        .is_diagnostic_summary_stale(&project_path, cx)
+                        .then_some((project_path.worktree_id, project_path.path))
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
     }
 
     fn update_strongest_diagnostic_severity(
@@ -5301,6 +5346,7 @@ impl ProjectPanel {
         let filename_text_color = details.filename_text_color;
         let diagnostic_severity = details.diagnostic_severity;
         let diagnostic_count = details.diagnostic_count;
+        let is_diagnostic_stale = details.is_diagnostic_stale;
         let item_colors = get_item_color(is_sticky, cx);
 
         let canonical_path = details
@@ -5771,11 +5817,31 @@ impl ProjectPanel {
                                     .flex_none()
                                     .pr_3()
                                     .when_some(diagnostic_count, |this, count| {
+                                        // FR3 (LSP hibernate/wake phase): a
+                                        // stale count is left over from
+                                        // before the project last
+                                        // hibernated, not something the
+                                        // current (possibly still
+                                        // re-indexing) servers have
+                                        // verified — render it muted
+                                        // rather than the normal
+                                        // error/warning color so it reads
+                                        // as "last known", not "current".
+                                        let error_color = if is_diagnostic_stale {
+                                            Color::Muted
+                                        } else {
+                                            Color::Error
+                                        };
+                                        let warning_color = if is_diagnostic_stale {
+                                            Color::Muted
+                                        } else {
+                                            Color::Warning
+                                        };
                                         this.when(count.error_count > 0, |this| {
                                             this.child(
                                                 Label::new(count.capped_error_count())
                                                     .size(LabelSize::Small)
-                                                    .color(Color::Error),
+                                                    .color(error_color),
                                             )
                                         })
                                         .when(
@@ -5784,7 +5850,7 @@ impl ProjectPanel {
                                                 this.child(
                                                     Label::new(count.capped_warning_count())
                                                         .size(LabelSize::Small)
-                                                        .color(Color::Warning),
+                                                        .color(warning_color),
                                                 )
                                             },
                                         )
@@ -5815,6 +5881,16 @@ impl ProjectPanel {
                             let is_warning = diagnostic_severity
                                 .map(|severity| matches!(severity, DiagnosticSeverity::WARNING))
                                 .unwrap_or(false);
+                            // FR3 (LSP hibernate/wake phase): dim the
+                            // decoration when it reflects a stale,
+                            // hibernated-generation summary rather than a
+                            // current one — see the count badge above for
+                            // the same treatment and why.
+                            let decoration_color = if is_diagnostic_stale {
+                                Color::Muted.color(cx)
+                            } else {
+                                decoration_color.color(cx)
+                            };
                             div().child(
                                 DecoratedIcon::new(
                                     Icon::from_path(icon.clone()).color(Color::Muted),
@@ -5834,7 +5910,7 @@ impl ProjectPanel {
                                         )
                                         .group_name(Some(GROUP_NAME.into()))
                                         .knockout_hover_color(bg_hover_color)
-                                        .color(decoration_color.color(cx))
+                                        .color(decoration_color)
                                         .position(Point {
                                             x: px(-2.),
                                             y: px(-2.),
@@ -5849,6 +5925,11 @@ impl ProjectPanel {
                     } else if let Some((icon_name, color)) =
                         entry_diagnostic_aware_icon_name_and_color(diagnostic_severity)
                     {
+                        let color = if is_diagnostic_stale {
+                            Color::Muted
+                        } else {
+                            color
+                        };
                         h_flex()
                             .size(IconSize::default().rems())
                             .child(Icon::new(icon_name).color(color).size(IconSize::Small))
@@ -6222,6 +6303,10 @@ impl ProjectPanel {
             .get(&(worktree_id, entry.path.clone()))
             .copied();
 
+        let is_diagnostic_stale = self
+            .stale_diagnostic_paths
+            .contains(&(worktree_id, entry.path.clone()));
+
         let filename_text_color =
             entry_git_aware_label_color(git_status, entry.is_ignored, is_marked);
 
@@ -6247,6 +6332,7 @@ impl ProjectPanel {
             filename_text_color,
             diagnostic_severity,
             diagnostic_count,
+            is_diagnostic_stale,
             git_status,
             is_private: entry.is_private,
             worktree_id,

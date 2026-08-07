@@ -132,6 +132,11 @@ pub struct LocalWorktree {
     is_scanning: (watch::Sender<bool>, watch::Receiver<bool>),
     snapshot_subscriptions: VecDeque<(usize, oneshot::Sender<()>)>,
     _background_scanner_tasks: Vec<Task<()>>,
+    /// Set by `pause_scanning`, cleared by `resume_scanning` (Phase 4 of
+    /// the multi-project-window-switching plan). Exists so `resume_scanning`
+    /// is idempotent: calling it on a worktree that was never paused, or
+    /// calling it twice, must not spawn a duplicate background scanner.
+    scanning_paused: bool,
     update_observer: Option<UpdateObservationState>,
     fs: Arc<dyn Fs>,
     fs_case_sensitive: bool,
@@ -495,6 +500,7 @@ impl Worktree {
                 scan_requests_tx,
                 path_prefixes_to_scan_tx,
                 _background_scanner_tasks: Vec::new(),
+                scanning_paused: false,
                 fs,
                 fs_case_sensitive,
                 visible,
@@ -670,6 +676,23 @@ impl Worktree {
 
     pub fn is_remote(&self) -> bool {
         !self.is_local()
+    }
+
+    /// See `LocalWorktree::pause_scanning`. No-op on a remote worktree —
+    /// those are backed by an SSH/collab connection, not a local fs
+    /// watcher, and are out of scope for Phase 4 (see the phase doc's risk
+    /// table: pausing must never touch that connection's own state).
+    pub fn pause_scanning(&mut self) {
+        if let Worktree::Local(worktree) = self {
+            worktree.pause_scanning();
+        }
+    }
+
+    /// See `LocalWorktree::resume_scanning`.
+    pub fn resume_scanning(&mut self, cx: &Context<Worktree>) {
+        if let Worktree::Local(worktree) = self {
+            worktree.resume_scanning(cx);
+        }
     }
 
     pub fn settings_location(&self, _: &Context<Self>) -> SettingsLocation<'static> {
@@ -1119,6 +1142,20 @@ impl LocalWorktree {
     }
 
     fn restart_background_scanners(&mut self, cx: &Context<Worktree>) {
+        // Guarded here rather than at each caller: this function has four
+        // callers today (the settings-change observer registered in
+        // `Worktree::local`, `share_private_files`,
+        // `update_abs_path_and_refresh`, and `resume_scanning`), and only
+        // the last one is allowed to actually restart scanning while
+        // paused. None of the other three know anything about hibernation
+        // -- a worktree-relevant settings change, for instance, must not
+        // itself resurrect a paused scanner. Whatever state those callers
+        // update on `self` before calling this (e.g. `self.settings`)
+        // still lands, so it takes effect on the next real scan once
+        // `resume_scanning` clears the pause and calls back in here.
+        if self.scanning_paused {
+            return;
+        }
         let (scan_requests_tx, scan_requests_rx) = channel::unbounded();
         let (path_prefixes_to_scan_tx, path_prefixes_to_scan_rx) = channel::unbounded();
         self.scan_requests_tx = scan_requests_tx;
@@ -1134,6 +1171,46 @@ impl LocalWorktree {
         // Cleans up old always included entries to ensure they get updated properly. Otherwise,
         // nested always included entries may not get updated and will result in out-of-date info.
         self.refresh_entries_for_paths(always_included_entries);
+    }
+
+    /// Drops this worktree's background scanner and filesystem watcher
+    /// (Phase 4 of the multi-project-window-switching plan: a hibernated
+    /// project's worktrees stop watching disk entirely, rather than merely
+    /// deferring work, so hibernating actually releases OS resources —
+    /// inotify watches on Linux have a real per-user limit). Dropping
+    /// `_background_scanner_tasks` cancels the running scan immediately
+    /// (`Task`'s drop-cancels-immediately semantics), which in turn drops
+    /// the scan-request channels' receiver halves. A scan/refresh request
+    /// sent right as this fires is therefore discarded, not queued for
+    /// replay on `resume_scanning` — the same outcome
+    /// `restart_background_scanners` already produces for a prior
+    /// generation's queue on every ordinary restart, so this introduces no
+    /// new discard behavior, just an earlier occasion for it. No-op if
+    /// already paused.
+    fn pause_scanning(&mut self) {
+        if self.scanning_paused {
+            return;
+        }
+        self.scanning_paused = true;
+        self._background_scanner_tasks.clear();
+        // No scan can be in flight once the tasks driving it are gone —
+        // reflect that now rather than leaving a stale `true` that would
+        // hang any future `scan_complete()` caller forever.
+        *self.is_scanning.0.borrow_mut() = false;
+    }
+
+    /// Restarts scanning after `pause_scanning`. No-op if this worktree was
+    /// never paused — safe to call unconditionally on every wake regardless
+    /// of whether hibernation actually reached this worktree (e.g. a
+    /// barrier deferred it before `pause_scanning` was ever called),
+    /// mirroring the guard-at-the-resource pattern `LspStore::wake` already
+    /// uses for the identical reason.
+    fn resume_scanning(&mut self, cx: &Context<Worktree>) {
+        if !self.scanning_paused {
+            return;
+        }
+        self.scanning_paused = false;
+        self.restart_background_scanners(cx);
     }
 
     fn start_background_scanner(

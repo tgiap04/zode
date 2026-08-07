@@ -1847,6 +1847,22 @@ impl GitStore {
         &self.repositories
     }
 
+    /// FR7 (Phase 4 of multi-project-window-switching): a hibernated
+    /// project's git status is not kept fresh while paused — nothing
+    /// rescans it (see `Worktree::pause_scanning`). Call this once when
+    /// the project wakes so every repository's status reflects disk
+    /// rather than a stale, pre-hibernation snapshot. Fire-and-forget,
+    /// exactly like every other `schedule_scan` call site in this file
+    /// (e.g. `update_repositories_from_worktree`): each repository's own
+    /// background worker performs the actual scan and reports back
+    /// through its usual `RepositoryEvent`s, so this never blocks the
+    /// caller.
+    pub fn refresh_all_repositories(&mut self, cx: &mut Context<Self>) {
+        for repository in self.repositories.values() {
+            repository.update(cx, |repository, cx| repository.schedule_scan(None, cx));
+        }
+    }
+
     /// Returns the original (main) repository working directory for the given worktree.
     /// For normal checkouts this equals the worktree's own path; for linked
     /// worktrees it points back to the original repo.

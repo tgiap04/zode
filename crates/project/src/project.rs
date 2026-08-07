@@ -114,7 +114,10 @@ use rpc::{
 };
 use search::{SearchInputKind, SearchQuery, SearchResult};
 use search_history::SearchHistory;
-use settings::{InvalidSettingsError, RegisterSetting, Settings, SettingsLocation, SettingsStore};
+use settings::{
+    AutosaveSetting, InvalidSettingsError, RegisterSetting, Settings, SettingsLocation,
+    SettingsStore,
+};
 use snippet::Snippet;
 pub use snippet_provider;
 use snippet_provider::SnippetProvider;
@@ -131,6 +134,7 @@ use std::{
     time::Duration,
 };
 
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use task_store::TaskStore;
 use terminals::Terminals;
 use text::{Anchor, BufferId, OffsetRangeExt, Point, Rope};
@@ -162,8 +166,8 @@ pub use task_inventory::{
 pub use buffer_store::ProjectTransaction;
 pub use lsp_store::{
     DiagnosticSummary, InvalidationStrategy, LanguageServerLogType, LanguageServerProgress,
-    LanguageServerPromptRequest, LanguageServerStatus, LanguageServerToQuery, LspStore,
-    LspStoreEvent, ProgressToken, SERVER_PROGRESS_THROTTLE_TIMEOUT,
+    LanguageServerPromptRequest, LanguageServerState, LanguageServerStatus, LanguageServerToQuery,
+    LspStore, LspStoreEvent, ProgressToken, SERVER_PROGRESS_THROTTLE_TIMEOUT,
 };
 pub use toolchain_store::{ToolchainStore, Toolchains};
 const MAX_PROJECT_SEARCH_HISTORY_SIZE: usize = 500;
@@ -210,6 +214,7 @@ pub enum OpenedBufferEvent {
 /// Can be either local (for the project opened on the same host) or remote.(for collab projects, browsed by multiple remote users).
 pub struct Project {
     active_entry: Option<ProjectEntryId>,
+    activity: ProjectActivity,
     buffer_ordered_messages_tx: mpsc::UnboundedSender<BufferOrderedMessage>,
     languages: Arc<LanguageRegistry>,
     dap_store: Entity<DapStore>,
@@ -233,6 +238,13 @@ pub struct Project {
     context_server_store: Entity<ContextServerStore>,
     image_store: Entity<ImageStore>,
     lsp_store: Entity<LspStore>,
+    /// A pending retry for a hibernate that `try_hibernate_resources`
+    /// deferred (FR8: autosave-vs-hibernate race) or skipped (an active
+    /// debug session). Dropping this cancels the pending retry — done
+    /// whenever a fresher `set_activity` call supersedes it, so a
+    /// project that goes back `Active` before the retry fires never
+    /// hibernates out from under the user.
+    hibernate_retry: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
     buffers_needing_diff: HashSet<WeakEntity<Buffer>>,
     git_diff_debouncer: DebouncedDelay<Self>,
@@ -319,6 +331,50 @@ enum ProjectClientState {
         remote_id: u64,
         replica_id: ReplicaId,
     },
+}
+
+/// Where a project sits in the multi-project activity lifecycle, driven by
+/// `MultiWorkspace` based on window focus and an idle timer. Introduced as
+/// pure state in this phase: nothing yet reacts to a transition by starting
+/// or stopping a real resource (LSP, worktree, terminal) — later phases hang
+/// their own resource off `Event::ActivityChanged`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ProjectActivity {
+    /// This project's workspace is the one currently focused. Only
+    /// `Project::set_activity` can move a project out of `Active`, and
+    /// `MultiWorkspace` only ever does so for a workspace that just lost
+    /// focus — an `Active` project is never a hibernation candidate.
+    Active,
+    /// This project's workspace lost focus recently but is still fully
+    /// live. Moves to `Hibernated` once the configured idle timer expires,
+    /// or back to `Active` if its workspace is focused again first.
+    Warm,
+    /// This project's workspace has been unfocused long enough to
+    /// hibernate. Reserved for later phases to act on; this phase only
+    /// records the transition.
+    Hibernated,
+}
+
+/// FR1 (Phase 6 of multi-project-window-switching): a snapshot of this
+/// project's resource footprint, for the debug dump action (FR2) and for
+/// `reports/memory-measurements.md`. See `Project::resource_stats`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ProjectResourceStats {
+    pub activity: ProjectActivity,
+    pub running_language_servers: usize,
+    pub open_buffers: usize,
+    pub worktree_entries: usize,
+    pub terminal_scrollback_lines: usize,
+    /// Combined RSS, in bytes, of this project's running language server
+    /// child processes, or `None` if none are running or none could be
+    /// read (e.g. a process exited between listing its PID and reading
+    /// its memory). This is deliberately **not** "this project's total
+    /// memory cost": Zode hosts every project in one process, so its own
+    /// heap growth per project can't be isolated here, and Prettier/DAP
+    /// child processes aren't counted either (out of scope for this
+    /// phase — see phase-06's Related Code Files). It is, however, the
+    /// largest externally-measurable share of that cost.
+    pub language_server_rss_bytes: Option<u64>,
 }
 
 /// A link to display in a toast notification, useful to point to documentation.
@@ -409,6 +465,7 @@ pub enum Event {
     WorkspaceEditApplied(ProjectTransaction),
     AgentLocationChanged,
     BufferEdited,
+    ActivityChanged(ProjectActivity),
 }
 
 pub struct AgentLocationChanged;
@@ -1101,6 +1158,12 @@ impl DisableAiSettings {
     }
 }
 
+/// How long to wait before re-attempting a hibernate that
+/// `try_hibernate_resources` deferred or skipped. Not user-configurable
+/// (yet) — this phase only needs "don't give up forever", not a tuned
+/// cadence; a later phase revisits timing against measured wake cost.
+const HIBERNATE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
 impl Project {
     pub fn init(client: &Arc<Client>, cx: &mut App) {
         connection_manager::init(client.clone(), cx);
@@ -1308,6 +1371,8 @@ impl Project {
                 client_subscriptions: Vec::new(),
                 _subscriptions: vec![cx.on_release(Self::release)],
                 active_entry: None,
+                activity: ProjectActivity::Active,
+                hibernate_retry: None,
                 snippets,
                 languages,
                 collab_client: client,
@@ -1556,6 +1621,8 @@ impl Project {
                     }),
                 ],
                 active_entry: None,
+                activity: ProjectActivity::Active,
+                hibernate_retry: None,
                 snippets,
                 languages,
                 collab_client: client,
@@ -4641,8 +4708,384 @@ impl Project {
             .diagnostic_summaries(include_ignored, cx)
     }
 
+    /// Whether this project currently has any diagnostic summaries left
+    /// over from a hibernated server generation (FR3) — e.g. to drive a
+    /// "re-indexing" banner while waking. See `LspStore::has_stale_diagnostics`.
+    pub fn has_stale_diagnostics(&self, cx: &App) -> bool {
+        self.lsp_store.read(cx).has_stale_diagnostics()
+    }
+
+    /// Whether `path`'s diagnostic summary currently includes an entry
+    /// left over from a hibernated server generation (FR3) — e.g. to dim
+    /// that file's badge in a file tree. See
+    /// `LspStore::is_diagnostic_summary_stale`.
+    pub fn is_diagnostic_summary_stale(&self, path: &ProjectPath, cx: &App) -> bool {
+        self.lsp_store.read(cx).is_diagnostic_summary_stale(path)
+    }
+
     pub fn active_entry(&self) -> Option<ProjectEntryId> {
         self.active_entry
+    }
+
+    /// This project's current position in the `Active -> Warm -> Hibernated`
+    /// lifecycle. See `ProjectActivity` for what each state means and
+    /// `MultiWorkspace` for what drives the transitions.
+    pub fn activity(&self) -> ProjectActivity {
+        self.activity
+    }
+
+    /// Moves this project to `activity`, emitting `Event::ActivityChanged`
+    /// and notifying observers only when the value actually changes — safe
+    /// to call redundantly (e.g. re-activating an already-`Active` project).
+    pub fn set_activity(&mut self, activity: ProjectActivity, cx: &mut Context<Self>) {
+        // Only two edges are off the state diagram in the
+        // multi-project-window-switching plan's phase-02 doc, and both are
+        // blocked here rather than left as a convention every caller has to
+        // remember:
+        // - FR6: `Active -> Hibernated` directly. An active project is
+        //   never hibernated, not even by some future caller (e.g. a
+        //   memory-pressure fuse) jumping straight there. The only intended
+        //   path is `Active -> Warm -> Hibernated`.
+        // - The mirror, `Hibernated -> Warm`: the diagram's only edge out of
+        //   `Hibernated` is back to `Active` via `activate()`. Nothing
+        //   wired today ever requests this edge, but guarding it now keeps
+        //   the invariant structural instead of re-derived once a future
+        //   phase adds a caller that could reach it.
+        if matches!(
+            (self.activity, activity),
+            (ProjectActivity::Active, ProjectActivity::Hibernated)
+                | (ProjectActivity::Hibernated, ProjectActivity::Warm)
+        ) {
+            return;
+        }
+        if self.activity != activity {
+            let previous = self.activity;
+            self.activity = activity;
+            cx.emit(Event::ActivityChanged(activity));
+            cx.notify();
+            self.reconcile_resource_activity(previous, cx);
+        }
+    }
+
+    /// Brings this project's real resources (language servers, Prettier,
+    /// DAP) in line with the activity label `set_activity` just
+    /// committed to. Only called on an actual transition (see
+    /// `set_activity`) — this is the resource-layer reaction Phase 2's
+    /// pure state machine deliberately left for this phase to add.
+    ///
+    /// `previous` matters here, not just the new label: `Active` is
+    /// reachable two ways — `Hibernated -> Active` (a real wake; servers
+    /// were actually stopped and need restarting) and `Warm -> Active`
+    /// (the project was merely defocused with its idle timer still
+    /// running; nothing was ever touched). Waking on the latter would
+    /// stop-then-restart every language server for a project that was
+    /// never hibernated in the first place — exactly what happens every
+    /// time `MultiWorkspace::activate()` switches back to a project
+    /// that's still within its idle window, i.e. on every ordinary
+    /// bounce between two retained projects. Matching on the new label
+    /// alone (an earlier version of this function did) misses that
+    /// distinction entirely.
+    fn reconcile_resource_activity(&mut self, previous: ProjectActivity, cx: &mut Context<Self>) {
+        match self.activity {
+            ProjectActivity::Hibernated => self.try_hibernate_resources(cx),
+            ProjectActivity::Active if previous == ProjectActivity::Hibernated => {
+                self.wake_resources(cx)
+            }
+            _ => {
+                // Either `Warm -> Active` (nothing to undo, see above) or
+                // reaching `Warm` itself (a label-only waypoint; only the
+                // Hibernated/Active edges touch real resources). Dropping
+                // any pending hibernate retry here is still correct in
+                // both cases: `Warm -> Active` means the timer's premise
+                // ("still Hibernated when it fires") just became false
+                // early, and `-> Warm` can only be reached from `Active`
+                // (the guard in `set_activity` forbids `Hibernated ->
+                // Warm` directly), which never has a retry pending either.
+                self.hibernate_retry.take();
+            }
+        }
+    }
+
+    /// Attempts to actually hibernate this project's language servers and
+    /// Prettier instance (FR1, FR5). Two barriers can defer this rather
+    /// than cancel it outright — on either, a retry is scheduled so the
+    /// project still eventually hibernates once the blocker clears,
+    /// rather than leaving `activity() == Hibernated` permanently
+    /// diverged from the resources actually still running:
+    ///
+    /// - An active debug session (FR5/step 8): a running debugger is the
+    ///   user's active work, full stop — even the LSP stays up.
+    /// - A dirty buffer racing autosave (FR8): only when autosave is
+    ///   actually enabled: the default (`"autosave": "off"`) never fires
+    ///   on its own, so a dirty buffer alone must never block
+    ///   hibernation, or anyone who habitually leaves a tab dirty would
+    ///   never get this feature's benefit at all.
+    ///
+    /// Accepted, narrow gap (decided rather than left implicit): the
+    /// debug-session check above only runs *before* `lsp_store.hibernate`
+    /// is kicked off. That call is a detached async task (the LSP
+    /// protocol shutdown itself takes real time), so a debug session that
+    /// starts in the window between the check passing and that task
+    /// actually finishing stopping servers will not stop or reverse it —
+    /// nothing today re-checks activity when a new `DapStore` session is
+    /// created. Left unclosed deliberately: the window is bounded by one
+    /// graceful LSP shutdown (not indefinite), and the common way a debug
+    /// session starts is the user focusing this project to launch it,
+    /// which independently reaches `Active` and calls `wake_resources`
+    /// right after — self-correcting through the ordinary focus path
+    /// rather than needing new event plumbing between `DapStore` and
+    /// `Project` for a race this narrow.
+    fn try_hibernate_resources(&mut self, cx: &mut Context<Self>) {
+        if self.has_active_debug_session(cx) {
+            log::debug!("project hibernation: deferring, a debug session is running");
+            self.schedule_hibernate_retry(cx);
+            return;
+        }
+        if self.autosave_would_race_hibernate(cx) {
+            log::debug!("project hibernation: deferring, autosave is enabled with a dirty buffer");
+            self.schedule_hibernate_retry(cx);
+            return;
+        }
+        self.hibernate_retry.take();
+        self.lsp_store
+            .update(cx, |lsp_store, cx| lsp_store.hibernate(cx))
+            .detach();
+        if let Some(prettier_store) = self.lsp_store.read(cx).prettier_store() {
+            prettier_store.update(cx, |prettier_store, cx| prettier_store.hibernate(cx));
+        }
+        // FR1 (Phase 4): drop every worktree's background scanner + fs
+        // watcher too. Collected into a `Vec` first rather than iterating
+        // `self.worktrees(cx)` directly, so nothing here holds a borrow
+        // tied back to `self` while looping. `Worktree::pause_scanning`
+        // itself no-ops on a remote worktree, so no local/remote filter is
+        // needed here either.
+        for worktree in self.worktrees(cx).collect::<Vec<_>>() {
+            worktree.update(cx, |worktree, _cx| worktree.pause_scanning());
+        }
+        // FR3/FR5 (Phase 5): shrink every terminal's scrollback, if the
+        // user opted in — disabled (`None`) by default, since this is
+        // real, irrecoverable log loss (see the setting's own doc
+        // comment). Safe to call more than once in a row (e.g. if a
+        // future caller ever re-triggers hibernation mid-cycle):
+        // `Terminal::limit_scroll_history` is idempotent, a no-op once
+        // already shrunk. Not currently load-bearing -- this whole branch
+        // only runs on an actual `!= activity` transition
+        // (`reconcile_resource_activity`), so it's structurally reached at
+        // most once per hibernate today -- but the guard exists at the
+        // `Terminal` level regardless, so relying on it here costs nothing.
+        if let Some(lines) = ProjectSettings::get_global(cx).background_scroll_history_lines {
+            self.limit_terminal_scroll_history(lines, cx);
+        }
+    }
+
+    /// FR5/step 8: a running debugger is the user's active work. If one
+    /// is attached to this project, hibernation is skipped entirely for
+    /// it (not even the LSP stops) rather than trying to hibernate around
+    /// it. Deliberately checks every session the project knows about, not
+    /// just whichever one currently has UI focus (`active_debug_session`
+    /// answers a different question — "which stack frame is selected" —
+    /// and would miss a session running in the background).
+    fn has_active_debug_session(&self, cx: &App) -> bool {
+        self.dap_store
+            .read(cx)
+            .sessions()
+            .any(|session| !session.read(cx).is_terminated())
+    }
+
+    /// FR8: hibernating while a dirty buffer's autosave is about to fire
+    /// would stop the language server mid-format-on-save, silently
+    /// dropping the format. Only a *live* autosave setting creates that
+    /// race — `AutosaveSetting::Off` (the default) never saves on its
+    /// own, so a dirty buffer under `Off` must not block hibernation.
+    ///
+    /// Resolved per dirty buffer, not at global scope: the real
+    /// autosave-triggering code (`ItemHandle::workspace_settings` in
+    /// `crates/workspace/src/item.rs`) reads the setting scoped to that
+    /// buffer's own `SettingsLocation`, so a worktree-local
+    /// `.zed/settings.json` override genuinely changes that worktree's
+    /// autosave behavior independent of the project-wide default.
+    /// Reading only `ProjectSettings::get_global` here would miss a
+    /// worktree that turned autosave on while the global default stayed
+    /// off, letting hibernate through into a race FR8 exists to prevent.
+    /// Short-circuits on the first dirty buffer that's actually racing.
+    fn autosave_would_race_hibernate(&self, cx: &App) -> bool {
+        self.dirty_buffers(cx).any(|project_path| {
+            let location = SettingsLocation {
+                worktree_id: project_path.worktree_id,
+                path: project_path.path.as_ref(),
+            };
+            ProjectSettings::get(Some(location), cx).autosave != AutosaveSetting::Off
+        })
+    }
+
+    /// Retries a deferred hibernate after a short delay, but only if this
+    /// project is still `Hibernated` when the timer fires — if the user
+    /// refocused it in the meantime, `wake_resources` already dropped
+    /// this task (see `reconcile_resource_activity`), so this closure
+    /// simply won't run.
+    fn schedule_hibernate_retry(&mut self, cx: &mut Context<Self>) {
+        self.hibernate_retry = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(HIBERNATE_RETRY_INTERVAL)
+                .await;
+            this.update(cx, |this, cx| {
+                if this.activity == ProjectActivity::Hibernated {
+                    this.try_hibernate_resources(cx);
+                }
+            })
+            .log_err();
+        }));
+    }
+
+    /// Undoes `try_hibernate_resources` (FR2, FR5). Prettier needs no
+    /// explicit action: it lazily starts a fresh instance on the next
+    /// format request the same way it always has, now that `hibernate`
+    /// dropped its cached one.
+    ///
+    /// Also undoes Phase 4's worktree pause (FR2, FR3, FR4, FR6) and
+    /// triggers one git-status refresh (FR7). `Worktree::resume_scanning`
+    /// is called unconditionally on every worktree rather than only ones
+    /// this same wake actually paused — it no-ops on a worktree that was
+    /// never paused (e.g. hibernation was deferred by a barrier before
+    /// `try_hibernate_resources` reached the pause loop), which is the
+    /// same guard-at-the-resource reasoning `LspStore::wake` already
+    /// applies for itself. Resuming reconciles open buffers with disk
+    /// (FR3/FR4) and clears early-detected stale diagnostics (FR6) purely
+    /// as a side effect of the rescan's `UpdatedEntries`/
+    /// `WorktreeUpdatedEntries` event reaching the subscribers already
+    /// wired for that in `buffer_store.rs` and `lsp_store.rs` — nothing
+    /// here diffs a snapshot by hand.
+    fn wake_resources(&mut self, cx: &mut Context<Self>) {
+        self.hibernate_retry.take();
+        self.lsp_store.update(cx, |lsp_store, cx| lsp_store.wake(cx));
+
+        // FR2: resume worktrees with an open buffer first, so the rescan
+        // that matters most to what the user is actually looking at
+        // finishes sooner. This is a best-effort ordering, not a hard
+        // guarantee -- each worktree's resume is independent and correct
+        // regardless of order, since FR3/FR4's reconciliation is keyed by
+        // path, not by scan-completion order.
+        let worktrees_with_open_buffers: HashSet<WorktreeId> = self
+            .buffer_store
+            .read(cx)
+            .buffers()
+            .filter_map(|buffer| buffer.read(cx).file().map(|file| file.worktree_id(cx)))
+            .collect();
+        let mut worktrees: Vec<(bool, Entity<Worktree>)> = self
+            .worktrees(cx)
+            .map(|worktree| {
+                let has_open_buffer = worktrees_with_open_buffers.contains(&worktree.read(cx).id());
+                (has_open_buffer, worktree)
+            })
+            .collect();
+        worktrees.sort_by_key(|(has_open_buffer, _)| !*has_open_buffer);
+        for (_, worktree) in worktrees {
+            worktree.update(cx, |worktree, cx| worktree.resume_scanning(cx));
+        }
+
+        // FR7: a hibernated project's git status isn't kept fresh while
+        // paused -- refresh it exactly once now, rather than per-path as
+        // FR6 does for diagnostics, since git status is inherently
+        // project-wide rather than something a per-path event should
+        // re-trigger on every batch.
+        self.git_store
+            .update(cx, |git_store, cx| git_store.refresh_all_repositories(cx));
+
+        // FR6 (Phase 5): lift the scrollback cap for every terminal this
+        // project owns. Unconditional, mirroring every other wake path in
+        // this function -- a terminal that was never shrunk (the setting
+        // was off when this project last hibernated, or the terminal was
+        // created after wake) just no-ops. Does not recover lines a
+        // shrink already dropped; only future output stops being capped.
+        self.restore_terminal_scroll_history(cx);
+    }
+
+    /// FR4 (Phase 6): true if `try_hibernate_resources` would defer this
+    /// project rather than actually stopping its resources right now.
+    /// Shared by `try_hibernate_resources` itself and the memory-pressure
+    /// fuse's victim selection (`MultiWorkspace`, `crates/workspace`) — the
+    /// fuse must skip a project in this state as a *candidate* entirely
+    /// (FR4: "no shortcut through the same barriers"), not merely attempt
+    /// it and let it silently defer. Attempting anyway would flip this
+    /// project's `activity()` label to `Hibernated` without actually
+    /// freeing anything, which is exactly the label/resource divergence
+    /// `try_hibernate_resources`'s own barriers exist to prevent in the
+    /// first place.
+    pub fn would_defer_hibernation(&self, cx: &App) -> bool {
+        self.has_active_debug_session(cx) || self.autosave_would_race_hibernate(cx)
+    }
+
+    /// FR1/FR2 (Phase 6): counts + child-process RSS described by
+    /// `ProjectResourceStats`. Cheap: every count here reads an
+    /// already-maintained summary or length rather than scanning
+    /// anything, and the `sysinfo` call only refreshes the specific PIDs
+    /// this project's language servers report — see that struct's doc
+    /// comment for what this measurement does and doesn't cover.
+    ///
+    /// On a remote/guest project (no local language servers to query),
+    /// `running_language_servers` reads `0` and `language_server_rss_bytes`
+    /// reads `None` — there is no local process to count or measure.
+    pub fn resource_stats(&self, cx: &App) -> ProjectResourceStats {
+        let local_lsp_store = self.lsp_store.read(cx).as_local();
+        let running_language_servers = local_lsp_store
+            .map(|local| {
+                local
+                    .language_servers
+                    .values()
+                    .filter(|state| matches!(state, LanguageServerState::Running { .. }))
+                    .count()
+            })
+            .unwrap_or(0);
+        let server_pids: Vec<Pid> = local_lsp_store
+            .map(|local| {
+                local
+                    .language_servers
+                    .values()
+                    .filter_map(|state| match state {
+                        LanguageServerState::Running { server, .. } => server.process_id(),
+                        LanguageServerState::Starting { .. } => None,
+                    })
+                    .map(Pid::from_u32)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let language_server_rss_bytes = if server_pids.is_empty() {
+            None
+        } else {
+            let mut system = System::new();
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&server_pids),
+                false,
+                ProcessRefreshKind::nothing().with_memory(),
+            );
+            Some(
+                server_pids
+                    .iter()
+                    .filter_map(|pid| system.process(*pid))
+                    .map(|process| process.memory())
+                    .sum(),
+            )
+        };
+
+        let worktree_entries = self
+            .worktrees(cx)
+            .map(|worktree| worktree.read(cx).snapshot().entry_count())
+            .sum();
+        let terminal_scrollback_lines = self
+            .local_terminal_handles()
+            .iter()
+            .filter_map(|handle| handle.upgrade())
+            .map(|terminal| terminal.read(cx).total_lines())
+            .sum();
+
+        ProjectResourceStats {
+            activity: self.activity,
+            running_language_servers,
+            open_buffers: self.buffer_store.read(cx).buffers().count(),
+            worktree_entries,
+            terminal_scrollback_lines,
+            language_server_rss_bytes,
+        }
     }
 
     pub fn entry_for_path<'a>(&'a self, path: &ProjectPath, cx: &'a App) -> Option<&'a Entry> {

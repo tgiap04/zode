@@ -57,13 +57,6 @@ pub enum SidebarDockPosition {
     Right,
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum SidebarSide {
-    #[default]
-    Left,
-    Right,
-}
-
 /// How thinking blocks should be displayed by default in the agent panel.
 #[derive(
     Clone,

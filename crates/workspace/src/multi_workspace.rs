@@ -1,4 +1,5 @@
 use anyhow::Result;
+use collections::HashMap;
 use fs::Fs;
 
 use gpui::{
@@ -7,25 +8,30 @@ use gpui::{
     WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
-use project::{DisableAiSettings, Project};
+use project::{DisableAiSettings, Project, ProjectActivity};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 pub use settings::SidebarSide;
 use std::future::Future;
 
+#[cfg(any(test, feature = "test-support"))]
+use gpui::UpdateGlobal;
+
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use ui::prelude::*;
 use util::ResultExt;
 use util::path_list::PathList;
-use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
+use crate::Toast;
+use crate::notifications::NotificationId;
 
 const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::open_remote_project_with_existing_connection;
 use crate::{
     CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
-    Panel, Workspace, WorkspaceId, client_side_decorations,
+    Panel, Workspace, WorkspaceId, WorkspaceSettings, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
 
@@ -42,21 +48,33 @@ actions!(
         NextProject,
         /// Activates the previous project in the sidebar.
         PreviousProject,
-        /// Activates the next thread in sidebar order.
-        NextThread,
-        /// Activates the previous thread in sidebar order.
-        PreviousThread,
-        /// Creates a new thread in the current workspace.
-        NewThread,
         /// Moves the active project to a new window.
         MoveProjectToNewWindow,
+        /// Logs resource stats (language servers, buffers, worktree
+        /// entries, terminal scrollback, activity) for every project
+        /// tracked by this window.
+        DumpProjectResourceStats,
     ]
 );
 
 #[derive(Default)]
 pub struct SidebarRenderState {
+    /// Whether the wide project panel is showing.
     pub open: bool,
+    /// Whether the always-visible project rail is present. Independent of
+    /// `open`: the rail occupies the window's `side` edge even with the
+    /// panel closed, which is what decides whether the title bar still has
+    /// to leave room for the platform's window controls.
+    pub rail: bool,
     pub side: SidebarSide,
+}
+
+impl SidebarRenderState {
+    /// Whether the sidebar covers the window edge on `side` -- either
+    /// component is enough to push the title bar off that edge.
+    pub fn occupies(&self, side: SidebarSide) -> bool {
+        self.side == side && (self.open || self.rail)
+    }
 }
 
 pub enum MultiWorkspaceEvent {
@@ -73,30 +91,28 @@ pub enum SidebarEvent {
 }
 
 pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
+    /// Width of the wide project panel alone, excluding the rail.
     fn width(&self, cx: &App) -> Pixels;
     fn set_width(&mut self, width: Option<Pixels>, cx: &mut Context<Self>);
+    /// Width of the always-visible rail, which the sidebar renders whether
+    /// or not the panel is open. `MultiWorkspace` needs it to size the
+    /// sidebar container and to offset the panel's resize drag.
+    fn rail_width(&self, _cx: &App) -> Pixels {
+        px(0.0)
+    }
     fn has_notifications(&self, cx: &App) -> bool;
     fn side(&self, _cx: &App) -> SidebarSide;
 
-    fn is_threads_list_view_active(&self) -> bool {
-        true
-    }
     /// Makes focus reset back to the search editor upon toggling the sidebar from outside
     fn prepare_for_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
-    /// Opens or cycles the thread switcher popup.
-    fn toggle_thread_switcher(
-        &mut self,
-        _select_last: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
 
+    // TODO(phase-07): project cycling now lives on `MultiWorkspace::cycle_project`,
+    // driven directly by `retained_workspaces` order, so `NextProject`/
+    // `PreviousProject` no longer call this. Revisit whether the sidebar
+    // should still own or intercept it now that the sidebar crate has been
+    // rebuilt as a plain project list with no secondary view to branch on.
     /// Activates the next or previous project.
     fn cycle_project(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
-
-    /// Activates the next or previous thread in sidebar order.
-    fn cycle_thread(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     /// Return an opaque JSON blob of sidebar-specific state to persist.
     fn serialized_state(&self, _cx: &App) -> Option<String> {
@@ -116,17 +132,14 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
 pub trait SidebarHandle: 'static + Send + Sync {
     fn width(&self, cx: &App) -> Pixels;
     fn set_width(&self, width: Option<Pixels>, cx: &mut App);
+    fn rail_width(&self, cx: &App) -> Pixels;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn focus(&self, window: &mut Window, cx: &mut App);
     fn prepare_for_focus(&self, window: &mut Window, cx: &mut App);
     fn has_notifications(&self, cx: &App) -> bool;
     fn to_any(&self) -> AnyView;
     fn entity_id(&self) -> EntityId;
-    fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App);
     fn cycle_project(&self, forward: bool, window: &mut Window, cx: &mut App);
-    fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App);
-
-    fn is_threads_list_view_active(&self, cx: &App) -> bool;
 
     fn side(&self, cx: &App) -> SidebarSide;
     fn serialized_state(&self, cx: &App) -> Option<String>;
@@ -149,6 +162,10 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
 
     fn set_width(&self, width: Option<Pixels>, cx: &mut App) {
         self.update(cx, |this, cx| this.set_width(width, cx))
+    }
+
+    fn rail_width(&self, cx: &App) -> Pixels {
+        self.read(cx).rail_width(cx)
     }
 
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -176,15 +193,6 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
         Entity::entity_id(self)
     }
 
-    fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App) {
-        let entity = self.clone();
-        window.defer(cx, move |window, cx| {
-            entity.update(cx, |this, cx| {
-                this.toggle_thread_switcher(select_last, window, cx);
-            });
-        });
-    }
-
     fn cycle_project(&self, forward: bool, window: &mut Window, cx: &mut App) {
         let entity = self.clone();
         window.defer(cx, move |window, cx| {
@@ -192,19 +200,6 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
                 this.cycle_project(forward, window, cx);
             });
         });
-    }
-
-    fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App) {
-        let entity = self.clone();
-        window.defer(cx, move |window, cx| {
-            entity.update(cx, |this, cx| {
-                this.cycle_thread(forward, window, cx);
-            });
-        });
-    }
-
-    fn is_threads_list_view_active(&self, cx: &App) -> bool {
-        self.read(cx).is_threads_list_view_active()
     }
 
     fn side(&self, cx: &App) -> SidebarSide {
@@ -241,6 +236,84 @@ pub struct ProjectGroupState {
     pub last_active_workspace: Option<WeakEntity<Workspace>>,
 }
 
+/// FR3 (Phase 6 of multi-project-window-switching): how the memory-pressure
+/// fuse learns about system memory pressure, abstracted behind a trait so
+/// the fuse's victim-selection logic (see `MultiWorkspace::memory_governor_tick`)
+/// is unit-testable without touching the real OS. Production uses
+/// `SysinfoMemoryPressureReader`; tests inject their own — deliberately
+/// never read `sysinfo` directly from the decision logic itself (phase-06's
+/// Implementation Steps, step 7).
+pub trait MemoryPressureReader {
+    /// Percentage (0.0-100.0) of total system memory currently available,
+    /// or `None` if it could not be read this cycle (e.g. the platform
+    /// call failed) — the fuse treats that as "try again next poll"
+    /// rather than as pressure.
+    fn available_memory_percent(&mut self) -> Option<f32>;
+}
+
+struct SysinfoMemoryPressureReader {
+    system: sysinfo::System,
+}
+
+impl SysinfoMemoryPressureReader {
+    fn new() -> Self {
+        Self {
+            system: sysinfo::System::new(),
+        }
+    }
+}
+
+impl MemoryPressureReader for SysinfoMemoryPressureReader {
+    fn available_memory_percent(&mut self) -> Option<f32> {
+        // Memory-only refresh (no process list) — matches
+        // `system_specs.rs`'s existing convention and NFR1's "polling must
+        // not cost anything noticeable".
+        self.system.refresh_memory();
+        let total = self.system.total_memory();
+        if total == 0 {
+            return None;
+        }
+        Some(self.system.available_memory() as f32 / total as f32 * 100.0)
+    }
+}
+
+/// FR3: how often the memory-pressure fuse polls system memory. NFR1
+/// requires this to be infrequent and off the foreground thread — the
+/// governor task runs entirely on `cx.background_executor()`.
+const MEMORY_FUSE_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// FR4b: a project must have sat `Warm` for at least this long before the
+/// fuse may pick it as a victim — it must never hibernate a project the
+/// user only just defocused.
+///
+/// **Invariant this relies on staying true:** this must stay `>
+/// MEMORY_FUSE_POLL_INTERVAL`. `manually_woken_at`'s own "immune for one
+/// poll cycle after a manual wake" check (`select_memory_fuse_victim`) can
+/// only ever matter for a candidate this check has *not* already
+/// rejected, because `wake_project` and `schedule_hibernate` always stamp
+/// `manually_woken_at` and `warm_since` at the same moment (a workspace
+/// only re-enters `Warm` by losing focus, and the same `activate()` call
+/// that stamps a fresh `manually_woken_at` for the incoming workspace also
+/// stamps a fresh `warm_since` for the outgoing one) — so
+/// `now - manually_woken_at` and `now - warm_since` can never diverge by
+/// more than one `activate()` round trip. If this constant is ever
+/// lowered to `<= MEMORY_FUSE_POLL_INTERVAL`, the manual-wake-immunity
+/// check becomes live (not merely redundant) and needs its own isolated
+/// test — today it is provably always shadowed by this one, which is why
+/// no such test exists yet (see phase-06's Todo List).
+const MEMORY_FUSE_MIN_WARM_DURATION: Duration = Duration::from_secs(60);
+
+/// FR4b hysteresis: once the fuse hibernates a victim, it will not trigger
+/// again for this many poll cycles, even if pressure is still (or once
+/// more) under the threshold. Prevents the fuse from re-arming and
+/// flapping while memory oscillates right at the boundary.
+const MEMORY_FUSE_HYSTERESIS_CYCLES: u32 = 2;
+
+/// Marker type for the fuse's toast notification (`NotificationId::unique`
+/// needs a type, not a value) — see `MultiWorkspace::notify_memory_fuse_triggered`.
+/// `pub(crate)` so tests can assert on it via `Workspace::notification_ids`.
+pub(crate) struct MemoryPressureFuseToast;
+
 pub struct MultiWorkspace {
     window_id: WindowId,
     retained_workspaces: Vec<Entity<Workspace>>,
@@ -253,6 +326,59 @@ pub struct MultiWorkspace {
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     previous_focus_handle: Option<FocusHandle>,
+    /// Pending hibernate-after-idle timers, keyed by the `EntityId` of the
+    /// workspace whose project they'll hibernate. Dropping the `Task`
+    /// cancels it (GPUI semantics), so removing an entry is the entire
+    /// cancellation mechanism — see `wake_project`/`schedule_hibernate`.
+    hibernate_timers: HashMap<EntityId, Task<()>>,
+    /// FR4b: instant a workspace's project most recently entered `Warm`,
+    /// plus a weak handle to that *project*, keyed by the workspace's
+    /// `EntityId`. Lets the memory-pressure fuse require a project to have
+    /// sat idle at least `MEMORY_FUSE_MIN_WARM_DURATION` before picking it
+    /// as a victim, and enumerate every `Warm` project directly rather
+    /// than through `self.workspaces()` — that iterator is
+    /// `retained_workspaces` plus the active workspace, and `activate()`'s
+    /// outgoing workspace is deliberately *not* added to
+    /// `retained_workspaces` unless it already was (see `activate()`'s own
+    /// comment), so a window's very first workspace going `Warm` for the
+    /// first time would otherwise be invisible to victim selection despite
+    /// legitimately being `Warm`.
+    ///
+    /// Deliberately a *project* handle, not a workspace one: nothing in
+    /// `MultiWorkspace` keeps a defocused, never-independently-retained
+    /// workspace's `Entity<Workspace>` alive at all once `activate()`
+    /// reassigns `self.active_workspace` away from it (the struct's only
+    /// strong reference to it) — the shell can be dropped out from under
+    /// this bookkeeping while its `Project` lives on, held by its buffers,
+    /// editors, and everything else that actually cares about project
+    /// state. A `WeakEntity<Workspace>` here would go stale exactly when
+    /// that happens; the project itself does not.
+    ///
+    /// The handle is `Weak` regardless (matching `hibernate_timers`'s own
+    /// `weak_project` inside its timer closure, and
+    /// `ProjectGroupState::last_active_workspace`'s convention in this
+    /// file) so this map is never what keeps a project alive either;
+    /// `detach_workspace` still removes the entry outright on close. Set
+    /// in `schedule_hibernate`, cleared in `wake_project` and
+    /// `detach_workspace` so a stale entry never outlives the `Warm` state
+    /// it describes.
+    warm_since: HashMap<EntityId, (Instant, WeakEntity<Project>)>,
+    /// FR4b: instant a workspace was last woken *manually* via
+    /// `activate()`, keyed by `EntityId`. The fuse skips a project for one
+    /// full poll cycle after this — "a manual wake always beats the
+    /// fuse". Set in `wake_project`, cleared in `detach_workspace`.
+    manually_woken_at: HashMap<EntityId, Instant>,
+    /// FR4b hysteresis: instant the fuse last actually hibernated a
+    /// victim, or `None` before the first trigger.
+    fuse_last_triggered_at: Option<Instant>,
+    /// FR3: how the fuse reads system memory pressure. Boxed so tests can
+    /// inject synthetic pressure (see `MemoryPressureReader`) — production
+    /// always starts with `SysinfoMemoryPressureReader`.
+    memory_pressure_reader: Box<dyn MemoryPressureReader>,
+    /// FR3: recurring background timer driving `memory_governor_tick`.
+    /// Stored so dropping `MultiWorkspace` cancels it (GPUI `Task` drop
+    /// semantics) rather than leaking a loop that outlives its window.
+    _memory_governor_task: Task<()>,
 }
 
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
@@ -265,8 +391,10 @@ impl MultiWorkspace {
     }
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
+        let enabled = self.multi_workspace_enabled(cx);
         SidebarRenderState {
-            open: self.sidebar_open() && self.multi_workspace_enabled(cx),
+            open: self.sidebar_open() && enabled,
+            rail: self.sidebar.is_some() && enabled,
             side: self.sidebar_side(cx),
         }
     }
@@ -290,10 +418,64 @@ impl MultiWorkspace {
                 }
             }
         });
+        // Hibernation can be turned off live (`hibernate_after_ms: 0`).
+        // Whenever settings change and it currently resolves to disabled,
+        // make sure no hibernate timer is left pending — dropping the
+        // `Task` cancels it. Re-checked unconditionally rather than only on
+        // a Some->None transition, since clearing an already-empty map is a
+        // harmless no-op and this avoids tracking yet another `previous_*`.
+        //
+        // Deliberately one-directional (flagged in Phase 2 review, not
+        // fixed here): disabling does not wake an already-`Hibernated`
+        // project, and re-enabling does not retroactively schedule a timer
+        // for a project that's already `Warm`. Both are left to a later
+        // phase rather than guessed at now, because nothing consumes
+        // `ProjectActivity` for a real resource yet (every transition in
+        // this phase is a no-op with an event) — there is nothing to check
+        // a "wake to what" answer against. And it isn't just unvalidated,
+        // it's actively constrained: waking straight to `Active` would put
+        // an unfocused project in the one state defined as "the window's
+        // focused workspace" (see `ProjectActivity::Active`'s doc comment),
+        // and waking to `Warm` would require legitimizing the
+        // `Hibernated -> Warm` edge that `Project::set_activity` guards
+        // against precisely because it's off the state diagram. Whichever
+        // phase gives hibernation a real resource effect should design
+        // reactivation semantics against that effect, not against a guess
+        // made here.
+        let hibernate_settings_subscription =
+            cx.observe_global_in::<settings::SettingsStore>(window, |this, _window, cx| {
+                if WorkspaceSettings::get_global(cx)
+                    .multi_project
+                    .hibernate_after
+                    .is_none()
+                {
+                    this.hibernate_timers.clear();
+                }
+            });
         Self::subscribe_to_workspace(&workspace, window, cx);
         let weak_self = cx.weak_entity();
         workspace.update(cx, |workspace, cx| {
             workspace.set_multi_workspace(weak_self, cx);
+        });
+        // FR3: one long-lived poll loop per window, started unconditionally
+        // — `memory_governor_tick` itself checks
+        // `multi_project.memory_pressure_threshold_percent` every cycle and
+        // no-ops when the fuse is disabled, the same "always running,
+        // cheaply re-checks settings" shape as `hibernate_settings_subscription`
+        // above, so there's nothing to start/stop when the setting changes live.
+        let memory_governor_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(MEMORY_FUSE_POLL_INTERVAL)
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.memory_governor_tick(cx))
+                    .log_err()
+                    .is_none()
+                {
+                    break;
+                }
+            }
         });
         Self {
             window_id: window.window_handle().window_id(),
@@ -309,8 +491,15 @@ impl MultiWorkspace {
                 release_subscription,
                 quit_subscription,
                 settings_subscription,
+                hibernate_settings_subscription,
             ],
             previous_focus_handle: None,
+            hibernate_timers: HashMap::default(),
+            warm_since: HashMap::default(),
+            manually_woken_at: HashMap::default(),
+            fuse_last_triggered_at: None,
+            memory_pressure_reader: Box::new(SysinfoMemoryPressureReader::new()),
+            _memory_governor_task: memory_governor_task,
         }
     }
 
@@ -345,12 +534,6 @@ impl MultiWorkspace {
         self.sidebar
             .as_ref()
             .map_or(false, |s| s.has_notifications(cx))
-    }
-
-    pub fn is_threads_list_view_active(&self, cx: &App) -> bool {
-        self.sidebar
-            .as_ref()
-            .map_or(false, |s| s.is_threads_list_view_active(cx))
     }
 
     pub fn multi_workspace_enabled(&self, cx: &App) -> bool {
@@ -414,24 +597,35 @@ impl MultiWorkspace {
         }
     }
 
+    /// Opens the sidebar. This is a live, user-driven trigger — bound to a
+    /// real keybinding (`ToggleWorkspaceSidebar`/`FocusWorkspaceSidebar`)
+    /// even before Phase 7 rebuilds the sidebar UI — so retention respects
+    /// `should_retain()` like every other live path, rather than
+    /// unconditionally retaining the active workspace.
     pub fn open_sidebar(&mut self, cx: &mut Context<Self>) {
         let side = match self.sidebar_side(cx) {
             SidebarSide::Left => "left",
             SidebarSide::Right => "right",
         };
         telemetry::event!("Sidebar Toggled", action = "open", side = side);
-        self.apply_open_sidebar(cx);
+        self.apply_open_sidebar(true, cx);
     }
 
-    /// Restores the sidebar to open state from persisted session data without
-    /// firing a telemetry event, since this is not a user-initiated action.
+    /// Restores the sidebar to open state from persisted session data
+    /// without firing a telemetry event, since this is not a user-initiated
+    /// action. Always retains the active workspace regardless of the live
+    /// `retain_background_projects` setting — this is reconstructing a
+    /// previously-saved `sidebar_open: true` session (NFR2), not a new
+    /// user decision being made right now.
     pub(crate) fn restore_open_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.apply_open_sidebar(cx);
+        self.apply_open_sidebar(false, cx);
     }
 
-    fn apply_open_sidebar(&mut self, cx: &mut Context<Self>) {
+    fn apply_open_sidebar(&mut self, respect_retention_policy: bool, cx: &mut Context<Self>) {
         self.sidebar_open = true;
-        self.retain_active_workspace(cx);
+        if !respect_retention_policy || self.should_retain(cx) {
+            self.retain_active_workspace(cx);
+        }
         let sidebar_focus_handle = self.sidebar.as_ref().map(|s| s.focus_handle(cx));
         for workspace in self.retained_workspaces.clone() {
             workspace.update(cx, |workspace, _cx| {
@@ -488,7 +682,7 @@ impl MultiWorkspace {
                 multi_workspace.workspaces().cloned().collect::<Vec<_>>()
             })?;
 
-            for workspace in workspaces {
+            for workspace in &workspaces {
                 let should_continue = workspace
                     .update_in(cx, |workspace, window, cx| {
                         workspace.prepare_to_close(CloseIntent::CloseWindow, window, cx)
@@ -498,6 +692,27 @@ impl MultiWorkspace {
                     return anyhow::Ok(());
                 }
             }
+
+            // Flush every workspace's pending debounced serialization before
+            // the window closes. If this turns out to be the last window,
+            // `remove_window()` below triggers `cx.quit()` directly (see
+            // `bind_on_window_closed` in zed.rs), which bypasses the `Quit`
+            // action's own manual flush loop (crates/zed/src/zed.rs
+            // `quit()`) — `app_will_quit` alone only covers this
+            // `MultiWorkspace`'s own state, not each workspace's pane
+            // layout. Best-effort: a flush failing here must not block the
+            // window from closing.
+            let flush_tasks: Vec<Task<()>> = workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    workspace
+                        .update_in(cx, |workspace, window, cx| {
+                            workspace.flush_serialization(window, cx)
+                        })
+                        .log_err()
+                })
+                .collect();
+            futures::future::join_all(flush_tasks).await;
 
             cx.update(|window, _cx| {
                 window.remove_window();
@@ -683,13 +898,17 @@ impl MultiWorkspace {
             self.register_workspace(&workspace, window, cx);
         }
 
-        self.ensure_project_group_state(provisional_key);
-        if !self.is_workspace_retained(&workspace) {
-            self.retained_workspaces.push(workspace.clone());
+        // The project-group metadata is created either way — only the
+        // workspace's own retention is gated. Routed through the same
+        // policy as `activate()` (see `should_retain()`), so this live,
+        // user-driven path (opening a remote/SSH project) doesn't retain
+        // in the background when `retain_background_projects` is `false`.
+        self.ensure_project_group_state(provisional_key.clone());
+        if self.should_retain(cx) {
+            self.retain_workspace(workspace.clone(), provisional_key, cx);
         }
 
-        self.activate(workspace.clone(), None, window, cx);
-        cx.emit(MultiWorkspaceEvent::WorkspaceAdded(workspace));
+        self.activate(workspace, None, window, cx);
     }
 
     fn register_workspace(
@@ -1199,6 +1418,14 @@ impl MultiWorkspace {
             let window_handle =
                 window_handle.ok_or_else(|| anyhow::anyhow!("Window is not a MultiWorkspace"))?;
 
+            // `open_remote_project_with_existing_connection` already routes
+            // through `activate()`/`activate_provisional_workspace()`
+            // internally (see `open_remote_project_inner`), which correctly
+            // apply `should_retain()`. Do NOT also call `add()` here — that
+            // would unconditionally re-retain the workspace those calls just
+            // correctly decided (possibly) not to retain, silently
+            // overriding the policy for every remote/SSH project opened
+            // this way.
             open_remote_project_with_existing_connection(
                 connection_options,
                 new_project,
@@ -1211,10 +1438,8 @@ impl MultiWorkspace {
             )
             .await?;
 
-            window_handle.update(cx, |multi_workspace, window, cx| {
-                let workspace = multi_workspace.workspace().clone();
-                multi_workspace.add(workspace.clone(), window, cx);
-                workspace
+            window_handle.update(cx, |multi_workspace, _window, _cx| {
+                multi_workspace.workspace().clone()
             })
         })
     }
@@ -1349,9 +1574,28 @@ impl MultiWorkspace {
     }
 
     /// Adds a workspace to this window as persistent without changing which
-    /// workspace is active. Unlike `activate()`, this always inserts into the
-    /// persistent list regardless of sidebar state — it's used for system-
-    /// initiated additions like deserialization and worktree discovery.
+    /// workspace is active, unconditionally — regardless of the
+    /// `retain_background_projects` setting. Only call this directly from
+    /// **session-restore/deserialization** call sites (`persistence.rs`'s
+    /// restore path, `open_workspace_by_id`), which must faithfully
+    /// reconstruct a previously-saved session rather than lose project
+    /// groups because the user's *current* live setting says not to retain
+    /// new ones going forward (see NFR2 in the multi-project-window-switching
+    /// plan — an old session must deserialize without losing project
+    /// groups).
+    ///
+    /// Live, user-driven flows that pass `OpenMode::Add` (e.g. creating or
+    /// switching a linked git worktree, or `find_or_create_workspace`'s
+    /// remote/SSH path) must go through `add_or_activate()` instead, so the
+    /// policy is actually enforced — calling `add()` directly from a live
+    /// flow silently overrides whatever `should_retain()` decided.
+    ///
+    /// Unlike retention, the `ProjectActivity` governor is not gated by any
+    /// setting: a workspace added here that isn't the active one is routed
+    /// through `schedule_hibernate()`, exactly like the outgoing workspace
+    /// in `activate()`. Without this, a workspace added in the background
+    /// would sit at `Active` forever and never become a hibernation
+    /// candidate.
     pub fn add(&mut self, workspace: Entity<Workspace>, window: &Window, cx: &mut Context<Self>) {
         if self.is_workspace_retained(&workspace) {
             return;
@@ -1359,6 +1603,7 @@ impl MultiWorkspace {
 
         if workspace != self.active_workspace {
             self.register_workspace(&workspace, window, cx);
+            self.schedule_hibernate(&workspace, cx);
         }
 
         let key = workspace.read(cx).project_group_key(cx);
@@ -1368,6 +1613,271 @@ impl MultiWorkspace {
             workspace_count = self.retained_workspaces.len()
         );
         cx.notify();
+    }
+
+    /// Adds `workspace` to this window, or activates it, depending on
+    /// `should_retain()`. This is the entry point live, user-driven flows
+    /// should use for a workspace they don't necessarily want to force into
+    /// the foreground (mirroring `OpenMode::Add`'s original intent) — when
+    /// retention is on, it's added in the background exactly like `add()`;
+    /// when retention is off, adding it in the background would leave it
+    /// unreachable once the caller's local scope ends (nothing retains it,
+    /// nothing keeps it active), so it's activated instead, matching
+    /// `activate()`'s own "at most one live project" policy.
+    pub fn add_or_activate(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.should_retain(cx) {
+            self.add(workspace, &*window, cx);
+        } else {
+            self.activate(workspace, None, window, cx);
+        }
+    }
+
+    /// Whether a workspace that loses focus should stay retained in the
+    /// background, per the `workspace.multi_project.retain_background_projects`
+    /// setting. This governs the live `activate()` retain/detach policy,
+    /// `apply_open_sidebar()`'s live (non-restore) path, and — via
+    /// `add_or_activate()` — live callers of `OpenMode::Add`.
+    ///
+    /// It intentionally does NOT gate `add()` directly (used for
+    /// deserialization and other system-initiated insertions, which must
+    /// always retain to faithfully restore a previously-saved session
+    /// regardless of the user's current live setting).
+    fn should_retain(&self, cx: &App) -> bool {
+        WorkspaceSettings::get_global(cx)
+            .multi_project
+            .retain_background_projects
+    }
+
+    /// Clears any pending hibernate timer for `workspace` and marks its
+    /// project `Active` immediately (FR2 — synchronous, no task involved).
+    /// Safe to call on a workspace whose project is already `Active`:
+    /// `Project::set_activity` only emits/notifies when the value actually
+    /// changes.
+    ///
+    /// This is the multi-workspace's *only* manual-wake path (the reverse
+    /// of `schedule_hibernate`, called only from `activate()`), so it also
+    /// records the memory-pressure fuse's FR4b guarantees: `warm_since` no
+    /// longer applies (the project isn't `Warm` anymore), and
+    /// `manually_woken_at` is stamped so the fuse gives this project at
+    /// least one full poll cycle of immunity — "a manual wake always beats
+    /// the fuse."
+    fn wake_project(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let entity_id = workspace.entity_id();
+        self.hibernate_timers.remove(&entity_id);
+        self.warm_since.remove(&entity_id);
+        self.manually_woken_at
+            .insert(entity_id, cx.background_executor().now());
+        let project = workspace.read(cx).project().clone();
+        project.update(cx, |project, cx| {
+            project.set_activity(ProjectActivity::Active, cx);
+        });
+    }
+
+    /// Marks `workspace`'s project `Warm` and, unless hibernation is
+    /// disabled (`multi_project.hibernate_after` setting resolves to
+    /// `None`, i.e. `hibernate_after_ms: 0`), schedules a timer that moves
+    /// it to `Hibernated` once idle for that long. Replaces any previously
+    /// pending timer for this workspace.
+    ///
+    /// Also stamps `warm_since` (FR4b): the memory-pressure fuse requires a
+    /// project to have sat `Warm` for at least
+    /// `MEMORY_FUSE_MIN_WARM_DURATION` before it's eligible as a victim, and
+    /// this is the only place a project's activity transitions *into*
+    /// `Warm`.
+    fn schedule_hibernate(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let project = workspace.read(cx).project().clone();
+        project.update(cx, |project, cx| {
+            project.set_activity(ProjectActivity::Warm, cx);
+        });
+
+        let entity_id = workspace.entity_id();
+        self.warm_since.insert(
+            entity_id,
+            (cx.background_executor().now(), project.downgrade()),
+        );
+        let Some(hibernate_after) = WorkspaceSettings::get_global(cx)
+            .multi_project
+            .hibernate_after
+        else {
+            // Dropping the previous entry (if any) cancels its timer.
+            self.hibernate_timers.remove(&entity_id);
+            return;
+        };
+
+        let weak_project = project.downgrade();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(hibernate_after).await;
+            // The workspace (and its project) may have been closed while
+            // this timer was pending — expected (see
+            // `detach_workspace`/`close_workspace`/`remove`) — but a failure
+            // still gets logged rather than silently discarded, per repo
+            // convention. Mirrors `DelayedDebouncedEditAction::fire_new`'s
+            // handling of the same "entity may be gone by the time the
+            // timer fires" race in this same crate: it uses `.log_err()`,
+            // not a bare `.ok()`/`.is_ok()`.
+            if weak_project
+                .update(cx, |project, cx| {
+                    project.set_activity(ProjectActivity::Hibernated, cx);
+                })
+                .log_err()
+                .is_some()
+            {
+                this.update(cx, |this, _cx| {
+                    this.hibernate_timers.remove(&entity_id);
+                })
+                .log_err();
+            }
+        });
+        self.hibernate_timers.insert(entity_id, task);
+    }
+
+    /// Evicts stale entries from `warm_since`/`manually_woken_at`, run at
+    /// the top of every tick regardless of whether the fuse itself is
+    /// enabled (these maps are populated by ordinary Warm/Active
+    /// transitions, independent of the fuse setting):
+    ///
+    /// - `warm_since`: dropped once its `WeakEntity<Project>` fails to
+    ///   upgrade. `detach_workspace` already removes an entry on an
+    ///   ordinary close, but it can't see the one case that bypasses it —
+    ///   a workspace that goes `Warm` via `schedule_hibernate` without
+    ///   ever having been independently retained (e.g. a window's very
+    ///   first workspace, the first time it loses focus; see
+    ///   `warm_since`'s own doc comment) has no strong reference left
+    ///   anywhere once `activate()` reassigns `self.active_workspace`
+    ///   away from it, and its `Entity<Workspace>` — though not its
+    ///   `Project` — can vanish without `detach_workspace` ever running.
+    ///   Left unpruned, that would be exactly one permanently-dead entry
+    ///   per such workspace: bounded, not unbounded, but still a cache
+    ///   with no eviction policy, which this closes.
+    /// - `manually_woken_at`: evicted once older than
+    ///   `MEMORY_FUSE_POLL_INTERVAL` outright, alive or not — past that
+    ///   age an entry can never again satisfy the immunity check
+    ///   (`select_memory_fuse_victim`), so there is no reason to wait for
+    ///   `detach_workspace` to clear it.
+    fn prune_dead_warm_entries(&mut self, now: Instant) {
+        self.warm_since
+            .retain(|_, (_, weak_project)| weak_project.upgrade().is_some());
+        self.manually_woken_at
+            .retain(|_, woken_at| now.duration_since(*woken_at) < MEMORY_FUSE_POLL_INTERVAL);
+    }
+
+    /// FR3/FR4/FR4b: one poll cycle of the memory-pressure fuse. Reads
+    /// system memory pressure through the injected `memory_pressure_reader`
+    /// (never `sysinfo` directly — see `MemoryPressureReader`'s own doc
+    /// comment) and, if it's under the configured threshold, hibernates at
+    /// most one eligible victim.
+    ///
+    /// Deliberately at most one victim per tick rather than looping inside
+    /// a single tick until pressure eases: `Project::set_activity` kicks
+    /// off `LspStore::hibernate`'s shutdown as a *detached* async task
+    /// (see its own doc comment — the LSP protocol shutdown takes real
+    /// time), so a same-tick re-measurement would not yet reflect memory
+    /// the just-hibernated victim is in the process of freeing. Spacing
+    /// victims one per `MEMORY_FUSE_POLL_INTERVAL` gives that shutdown
+    /// time to actually land before the next reading is trusted — the
+    /// alternative (loop within one tick) would, given that timing gap,
+    /// degenerate into hibernating every eligible project in one shot
+    /// rather than the measured, one-at-a-time response FR4b calls for.
+    fn memory_governor_tick(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        self.prune_dead_warm_entries(now);
+
+        let Some(threshold_percent) = WorkspaceSettings::get_global(cx)
+            .multi_project
+            .memory_pressure_threshold_percent
+        else {
+            return; // Fuse disabled (`memory_pressure_threshold_percent: 0`).
+        };
+
+        if let Some(last_triggered) = self.fuse_last_triggered_at
+            && now.duration_since(last_triggered)
+                < MEMORY_FUSE_POLL_INTERVAL * MEMORY_FUSE_HYSTERESIS_CYCLES
+        {
+            return; // FR4b hysteresis: still cooling down from the last trigger.
+        }
+
+        let Some(available_percent) = self.memory_pressure_reader.available_memory_percent() else {
+            return; // Could not read memory this cycle; try again next poll.
+        };
+        if available_percent >= threshold_percent {
+            return; // Pressure is within bounds.
+        }
+
+        let Some(victim) = self.select_memory_fuse_victim(now, cx) else {
+            return; // No eligible `Warm` victim this cycle; try again next poll.
+        };
+        victim.update(cx, |project, cx| {
+            project.set_activity(ProjectActivity::Hibernated, cx);
+        });
+        self.fuse_last_triggered_at = Some(now);
+        self.notify_memory_fuse_triggered(cx);
+    }
+
+    /// FR4/FR4b: the best memory-fuse victim among this window's tracked
+    /// workspaces, or `None` if none are eligible right now. Eligible
+    /// means: currently `Warm` (never `Active` — FR4 — and `Hibernated`
+    /// is already done, not a candidate); has sat `Warm` for at least
+    /// `MEMORY_FUSE_MIN_WARM_DURATION` (FR4b); not within one poll cycle
+    /// of a manual wake (FR4b — "a manual wake always beats the fuse");
+    /// and not blocked by the exact same barriers
+    /// `Project::try_hibernate_resources` itself checks (FR4 — "no
+    /// shortcut through the same barriers": picking a debugging project,
+    /// or one with autosave racing a dirty buffer, would flip its
+    /// `activity()` label to `Hibernated` without its resources actually
+    /// stopping). Among eligible candidates, the one that has sat `Warm`
+    /// the longest is picked, matching phase-06's "least recently active"
+    /// intent.
+    fn select_memory_fuse_victim(&self, now: Instant, cx: &App) -> Option<Entity<Project>> {
+        self.warm_since
+            .iter()
+            .filter_map(|(entity_id, (warm_since, weak_project))| {
+                let warm_since = *warm_since;
+                if now.duration_since(warm_since) < MEMORY_FUSE_MIN_WARM_DURATION {
+                    return None;
+                }
+                if let Some(woken_at) = self.manually_woken_at.get(entity_id)
+                    && now.duration_since(*woken_at) < MEMORY_FUSE_POLL_INTERVAL
+                {
+                    return None;
+                }
+                // A dead weak handle means the project closed without
+                // `detach_workspace` cleaning up this entry yet (or ever,
+                // in some future refactor) — treat it the same as any
+                // other "not a candidate", rather than panicking or
+                // asserting an invariant this map doesn't itself enforce.
+                let project = weak_project.upgrade()?;
+                if project.read(cx).activity() != ProjectActivity::Warm {
+                    return None;
+                }
+                if project.read(cx).would_defer_hibernation(cx) {
+                    return None;
+                }
+                Some((warm_since, project))
+            })
+            .min_by_key(|(warm_since, _)| *warm_since)
+            .map(|(_, project)| project)
+    }
+
+    /// FR6: tells the user the fuse just acted, rather than silently
+    /// hibernating a project and leaving them to wonder why it slowed
+    /// down. Shown on the active workspace's window since the victim
+    /// itself (by construction, not `Active`) may not have any window
+    /// surface currently focused to show it on.
+    fn notify_memory_fuse_triggered(&self, cx: &mut Context<Self>) {
+        self.active_workspace.update(cx, |workspace, cx| {
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<MemoryPressureFuseToast>(),
+                    "Hibernated 1 project to free up memory",
+                ),
+                cx,
+            );
+        });
     }
 
     /// Ensures the workspace is in the multiworkspace and makes it the active one.
@@ -1386,15 +1896,26 @@ impl MultiWorkspace {
         let old_active_workspace = self.active_workspace.clone();
         let old_active_was_retained = self.active_workspace_is_retained();
         let workspace_was_retained = self.is_workspace_retained(&workspace);
+        let should_retain = self.should_retain(cx);
 
         if !workspace_was_retained {
             self.register_workspace(&workspace, window, cx);
 
-            if self.sidebar_open {
+            if should_retain {
                 let key = workspace.read(cx).project_group_key(cx);
                 self.retain_workspace(workspace.clone(), key, cx);
             }
         }
+
+        // FR2/FR3: the incoming workspace's project goes `Active`
+        // synchronously; the outgoing one goes `Warm` and gets an idle
+        // timer. If `old_active_workspace` is about to be detached below
+        // (retention off and it wasn't already retained), that detach's own
+        // cleanup drops the timer `Task` we just scheduled, cancelling it —
+        // ordering this before the detach check is what makes that cleanup
+        // actually cancel it instead of racing it.
+        self.wake_project(&workspace, cx);
+        self.schedule_hibernate(&old_active_workspace, cx);
 
         self.active_workspace = workspace;
 
@@ -1403,7 +1924,7 @@ impl MultiWorkspace {
             group.last_active_workspace = Some(self.active_workspace.downgrade());
         }
 
-        if !self.sidebar_open && !old_active_was_retained {
+        if !should_retain && !old_active_was_retained {
             self.detach_workspace(&old_active_workspace, cx);
         }
 
@@ -1411,6 +1932,62 @@ impl MultiWorkspace {
         self.serialize(cx);
         self.focus_active_workspace(window, cx);
         cx.notify();
+    }
+
+    /// Activates the next (`forward = true`) or previous workspace in
+    /// `workspaces()` order, wrapping around at either end. A no-op when
+    /// fewer than two workspaces are open.
+    ///
+    /// This is what makes every retained workspace reachable regardless of
+    /// how it entered `retained_workspaces` (`add()`, `activate()`, or
+    /// `activate_provisional_workspace()`) — previously only a `Sidebar`
+    /// implementation could drive project switching, so a workspace added
+    /// while no sidebar existed (e.g. `OpenMode::Add` from a second CLI
+    /// invocation) was retained but unreachable.
+    pub fn cycle_project(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let workspaces: Vec<Entity<Workspace>> = self.workspaces().cloned().collect();
+        if workspaces.len() < 2 {
+            return;
+        }
+
+        let Some(current_index) = workspaces
+            .iter()
+            .position(|workspace| workspace == &self.active_workspace)
+        else {
+            return;
+        };
+
+        let next_index = if forward {
+            (current_index + 1) % workspaces.len()
+        } else {
+            (current_index + workspaces.len() - 1) % workspaces.len()
+        };
+
+        self.activate(workspaces[next_index].clone(), None, window, cx);
+    }
+
+    /// FR2 (Phase 6 of multi-project-window-switching): logs
+    /// `Project::resource_stats` for every project this window tracks.
+    /// Identifies each row by index only, deliberately never by project
+    /// path or file name — see phase-06's Security Considerations, this
+    /// is an `info`-level log and paths/file names don't belong there.
+    fn dump_project_resource_stats(&self, cx: &App) {
+        let workspaces: Vec<Entity<Workspace>> = self.workspaces().cloned().collect();
+        log::info!("project resource stats ({} tracked):", workspaces.len());
+        for (index, workspace) in workspaces.iter().enumerate() {
+            let stats = workspace.read(cx).project().read(cx).resource_stats(cx);
+            log::info!(
+                "  [{index}] activity={:?} language_servers={} buffers={} \
+                 worktree_entries={} terminal_scrollback_lines={} \
+                 language_server_rss_bytes={:?}",
+                stats.activity,
+                stats.running_language_servers,
+                stats.open_buffers,
+                stats.worktree_entries,
+                stats.terminal_scrollback_lines,
+                stats.language_server_rss_bytes,
+            );
+        }
     }
 
     /// Promotes the currently active workspace to persistent if it is
@@ -1450,7 +2027,17 @@ impl MultiWorkspace {
     /// Detaches a workspace: clears session state, DB binding, cached
     /// group key, and emits `WorkspaceRemoved`. The DB row is preserved
     /// so the workspace still appears in the recent-projects list.
+    ///
+    /// Also drops any pending hibernate timer for `workspace`, which
+    /// cancels it (GPUI `Task` semantics) — the single place this is
+    /// needed, since `close_workspace` and `remove` both call this for
+    /// every workspace they remove that was actually retained (the only
+    /// state a pending timer can exist in outside `activate()`'s own
+    /// synchronous body).
     fn detach_workspace(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        self.hibernate_timers.remove(&workspace.entity_id());
+        self.warm_since.remove(&workspace.entity_id());
+        self.manually_woken_at.remove(&workspace.entity_id());
         self.retained_workspaces
             .retain(|retained| retained != workspace);
         for group in &mut self.project_groups {
@@ -1694,6 +2281,59 @@ impl MultiWorkspace {
         let workspace = cx.new(|cx| Workspace::test_new(project, window, cx));
         self.activate(workspace.clone(), None, window, cx);
         workspace
+    }
+
+    /// Sets `workspace.multi_project.retain_background_projects` and
+    /// immediately retains the currently active workspace, reproducing the
+    /// retention side effect that `open_sidebar()` used to provide
+    /// unconditionally before retention was decoupled from the sidebar UI
+    /// (phase 1 of multi-project-window-switching). `activate()` never
+    /// implicitly retains the *outgoing* workspace on its own — only an
+    /// explicit `retain_workspace()`/`add()`/`retain_active_workspace()`
+    /// call does — so tests across crates that need an earlier workspace to
+    /// survive once a second one activates in the same window should call
+    /// this instead of relying on `open_sidebar()`'s old side effect.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_enable_background_retention(&mut self, cx: &mut Context<Self>) {
+        settings::SettingsStore::update_global(cx, |settings, cx| {
+            settings.update_user_settings(cx, |settings| {
+                settings.workspace.multi_project = Some(settings::MultiProjectContent {
+                    retain_background_projects: Some(true),
+                    // `None` here is a no-op merge (see `MultiProjectContent`'s
+                    // own doc comment) — it leaves `hibernate_after_ms`,
+                    // `memory_pressure_threshold_percent`, and
+                    // `background_scroll_history_lines` whatever the
+                    // default/global layers already resolved them to,
+                    // since this helper exists to toggle retention, not
+                    // hibernation, the memory fuse, or terminal scroll
+                    // history.
+                    hibernate_after_ms: None,
+                    memory_pressure_threshold_percent: None,
+                    background_scroll_history_lines: None,
+                    sidebar_side: None,
+                });
+            });
+        });
+        self.retain_active_workspace(cx);
+    }
+
+    /// Whether `workspace` currently has a pending hibernate timer, i.e.
+    /// its project is `Warm` and will hibernate on its own unless woken or
+    /// re-hibernated first. Exposed only so tests can assert that a timer
+    /// was actually cancelled (e.g. on close) rather than merely inferring
+    /// it from the absence of a later, hard-to-time-deterministically
+    /// transition.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_pending_hibernate_timer(&self, workspace: &Entity<Workspace>) -> bool {
+        self.hibernate_timers.contains_key(&workspace.entity_id())
+    }
+
+    /// Swaps in a synthetic memory-pressure reader so tests can drive the
+    /// fuse (`memory_governor_tick`) without touching the real OS. See
+    /// `MemoryPressureReader`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_memory_pressure_reader_for_test(&mut self, reader: Box<dyn MemoryPressureReader>) {
+        self.memory_pressure_reader = reader;
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1965,11 +2605,20 @@ impl Render for MultiWorkspace {
         let sidebar_side = self.sidebar_side(cx);
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
 
-        let sidebar: Option<AnyElement> = if multi_workspace_enabled && self.sidebar_open() {
+        let panel_open = self.sidebar_open();
+        let sidebar: Option<AnyElement> = if multi_workspace_enabled {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
 
-                let sidebar_width = sidebar_handle.width(cx);
+                // The rail is always drawn; the panel only when open. The
+                // sidebar view renders both, so the container has to
+                // reserve the sum.
+                let sidebar_width = sidebar_handle.rail_width(cx)
+                    + if panel_open {
+                        sidebar_handle.width(cx)
+                    } else {
+                        px(0.)
+                    };
                 let resize_handle = deferred(
                     div()
                         .id("sidebar-resize-handle")
@@ -2018,7 +2667,9 @@ impl Render for MultiWorkspace {
                     .w(sidebar_width)
                     .flex_shrink_0()
                     .child(sidebar_handle.to_any())
-                    .child(resize_handle)
+                    // Nothing to resize while only the rail is showing --
+                    // its width is fixed.
+                    .when(panel_open, |this| this.child(resize_handle))
                     .into_any_element()
             })
         } else {
@@ -2061,37 +2712,21 @@ impl Render for MultiWorkspace {
                             this.focus_sidebar(window, cx);
                         },
                     ))
-                    .on_action(cx.listener(
-                        |this: &mut Self, action: &ToggleThreadSwitcher, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.toggle_thread_switcher(action.select_last, window, cx);
-                            }
-                        },
-                    ))
+                    // Project cycling is driven by `MultiWorkspace` directly so it
+                    // works with no sidebar present (see `cycle_project`).
                     .on_action(cx.listener(|this: &mut Self, _: &NextProject, window, cx| {
-                        if let Some(sidebar) = &this.sidebar {
-                            sidebar.cycle_project(true, window, cx);
-                        }
+                        this.cycle_project(true, window, cx);
                     }))
                     .on_action(
                         cx.listener(|this: &mut Self, _: &PreviousProject, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.cycle_project(false, window, cx);
-                            }
+                            this.cycle_project(false, window, cx);
                         }),
                     )
-                    .on_action(cx.listener(|this: &mut Self, _: &NextThread, window, cx| {
-                        if let Some(sidebar) = &this.sidebar {
-                            sidebar.cycle_thread(true, window, cx);
-                        }
-                    }))
-                    .on_action(
-                        cx.listener(|this: &mut Self, _: &PreviousThread, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.cycle_thread(false, window, cx);
-                            }
-                        }),
-                    )
+                    .on_action(cx.listener(
+                        |this: &mut Self, _: &DumpProjectResourceStats, _window, cx| {
+                            this.dump_project_resource_stats(cx);
+                        },
+                    ))
                     .when(self.project_group_keys().len() >= 2, |el| {
                         el.on_action(cx.listener(
                             |this: &mut Self, _: &MoveProjectToNewWindow, window, cx| {
@@ -2112,12 +2747,15 @@ impl Render for MultiWorkspace {
                                   window,
                                   cx| {
                                 if let Some(sidebar) = &this.sidebar {
+                                    // The pointer is over the outer edge of
+                                    // rail + panel, but `width` measures the
+                                    // panel alone.
                                     let new_width = if sidebar_on_right {
                                         window.bounds().size.width - e.event.position.x
                                     } else {
                                         e.event.position.x
-                                    };
-                                    sidebar.set_width(Some(new_width), cx);
+                                    } - sidebar.rail_width(cx);
+                                    sidebar.set_width(Some(new_width.max(px(0.))), cx);
                                 }
                             },
                         ))
