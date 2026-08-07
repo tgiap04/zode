@@ -398,6 +398,11 @@ impl TitleBar {
                         window
                             .dispatch_action(Box::new(workspace::ToggleFileFinder::default()), cx);
                     })
+                    // Scoped to the search box itself, not the `flex_1` wrapper:
+                    // that wrapper spans every remaining pixel of the title bar,
+                    // and swallowing mouse-down there would also swallow the
+                    // title bar's own double-click-to-zoom and drag-to-move.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action(
                             "Search Files",
@@ -406,7 +411,6 @@ impl TitleBar {
                         )
                     }),
             )
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element()
     }
 
