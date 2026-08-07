@@ -164,6 +164,9 @@ pub enum IconName {
     Option,
     PageDown,
     PageUp,
+    PanelBottom,
+    PanelLeft,
+    PanelRight,
     Paperclip,
     Pencil,
     PencilUnavailable,
@@ -258,5 +261,27 @@ impl IconName {
     pub fn path(&self) -> Arc<str> {
         let file_stem: &'static str = self.into();
         format!("icons/{file_stem}.svg").into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use strum::IntoEnumIterator as _;
+
+    /// A variant whose asset is missing renders nothing at all — no panic, no
+    /// log — so the mismatch has to be caught here rather than on screen.
+    #[test]
+    fn every_icon_name_has_an_asset() {
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let missing = IconName::iter()
+            .filter(|icon| !assets.join(icon.path().as_ref()).is_file())
+            .map(|icon| icon.path().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "IconName variants without an SVG: {missing:#?}"
+        );
     }
 }
