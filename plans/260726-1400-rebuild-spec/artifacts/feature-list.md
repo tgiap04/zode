@@ -1,30 +1,46 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
+<!--
+Wave 5 also emits plans/<active-plan>/artifacts/_canonical-fcodes.json and pre-creates
+plans/<active-plan>/artifacts/features/{slug}/ folders — orchestrator step, not this draft.
+F### numbering below is PROVISIONAL (first-pass, sequential by discovery order); the
+orchestrator renumbers for contiguity/canonical slugs after this draft.
+-->
+
 # Feature List
 
-**Project**: Zed (zode)
-**Generated**: 2026-07-26
-**Analysis Scope**: Full monorepo — native GPUI desktop editor (`generic-source` profile, `screen_source:none`)
+**Project**: zode (Zed Editor fork)
+**Generated**: 2026-08-07
+**Analysis Scope**: Full monorepo, `generic-source` profile (native Rust/GPUI desktop editor, no
+HTTP surface, no ScreenList/RouteList upstream — `screen_source: none`)
 
-**Code Format**: All codes follow `F###_NameSlug` format (e.g., F001_ProjectFolderNavigation)
-**User Story Code Format**: All US codes follow `US###_NameSlug` format (e.g., US001_OpenProjectFolder)
-**Background Logic Code Format**: All BL codes follow `BL###_NameSlug` format (e.g., BL001_AutoUpdatePoller)
+**Code Format**: All codes follow `F###_NameSlug` format.
 
 **Feature Types**:
-- `ui` - Feature has a UI surface, no dedicated background-logic item drives it
-- `background` - Feature only has background logic (BL###), no dedicated UI surface
-- `mixed` - Feature has both a UI surface and dedicated background logic (BL###)
+- `ui` — feature has no significant standalone background subsystem (rare here; nearly every
+  UI action in this desktop app is backed by some process/store lifecycle)
+- `background` — feature has no direct user-facing action, only system lifecycle
+- `mixed` — feature has both direct user-facing actions and background logic (the dominant type
+  in this codebase)
 
-**Adaptation Note (no ScreenList upstream)**: Zed is a native desktop app; no `screen-list.md`/`SCR###`
-registry exists for this project (`screen_source:none`, per `_session-context.md` and
-`user-stories.md` Adaptation Note). Per this session's instruction, the **Related Screens** field
-below is replaced with **Related UI Surfaces** naming the descriptive GPUI `Render`-implementing
-surface (e.g. "Editor pane", "Project Panel") instead of a `SCR###` code. No SCR### codes appear
-anywhere in this document.
+## Rewrite Note (corrects a fabricated prior pass)
 
-**Related Data Models / Permissions note**: Reconciled against `data-model.md` (16 entities, no
-MODEL### codes assigned — entity names cited directly) and `permissions-matrix.md` (PERM001–PERM008,
-cited under Related Permissions on F002, F006, F007, F008, F011, F018; the remaining features
-genuinely have no associated PERM### and are marked N/A).
+The 2026-07-26 draft of this file built 6 of its 23 features (`F001_ProjectSharing`,
+`F002_JoinSharedProject`, `F003_AiAgentChat`, `F004_CollaboratorRoleManagement`,
+`F005_VoiceVideoCall`, `F006_InlineEditPrediction`, `F007_LlmProviderSwitching`) around a
+collaboration/AI-agent/LiveKit subsystem that **does not exist in this fork** — `crates/collab`,
+`crates/call`, `crates/agent*`, `crates/language_model` + provider crates, and
+`livekit_api`/`livekit_client` are all absent from the workspace (re-verified this session: `ls
+crates` has no `collab`, `call`, `agent`, or `livekit_*` directories). This pass clusters only
+from the current, corrected `user-stories.md` (67 US), `behavior-logic.md` (207 BL), `data-model.md`
+(18 MODEL), and `permissions-matrix.md` (6 PERM) — no code below cites a fabricated subsystem.
+
+## Adaptation Note (no ScreenList/RouteList upstream)
+
+`screen_source: none` — this is a native desktop app with a `Render`-dispatch UI, not a routed web
+surface. Per the template's screen-optional convention, this feature list omits the `Related
+Screens` and `Related APIs/Routes` sections entirely rather than fabricating SCR###/ROUTE### codes.
+Each feature's `Feature Area` (matching `user-stories.md`'s own column) stands in for a screen
+grouping.
 
 ## Feature Hierarchy
 
@@ -32,772 +48,475 @@ genuinely have no associated PERM### and are marked N/A).
 
 | Code | Name | Type | Language | Workspace | Priority |
 |------|------|------|----------|-----------|----------|
-| F001_ProjectFolderNavigation | Project folder navigation | mixed | Rust | zed (crates/workspace, worktree, project_panel) | P0 |
-| F002_BufferTextEditing | Buffer text editing | mixed | Rust | zed (crates/text, editor, language) | P0 |
-| F003_LspDiagnostics | LSP diagnostics feedback | mixed | Rust | zed (crates/project — LspStore) | P0 |
-| F004_LspCompletions | LSP completion suggestions | mixed | Rust | zed (crates/project — LspStore) | P0 |
-| F005_LiveSettingsEditing | Live settings.json editing | mixed | Rust | zed (crates/settings) | P0 |
-| F006_ExtensionInstallation | Third-party extension installation | mixed | Rust | zed (crates/extension_host, extension_api) | P0 |
-| F007_ProjectSharing | Project sharing for collaboration | mixed | Rust | zed (crates/collab, client, call, channel) | P0 |
-| F008_JoinSharedProject | Join a shared project | mixed | Rust | zed (crates/collab, client, call) | P0 |
-| F009_IntegratedTerminal | Integrated terminal command execution | ui | Rust | zed (crates/terminal, terminal_view) | P0 |
-| F010_GitDiffViewing | Git diff viewing | ui | Rust | zed (crates/git) | P0 |
-| F011_GitHunkStaging | Git hunk staging | ui | Rust | zed (crates/git) | P0 |
-| F012_GitCommit | Git commit of staged changes | ui | Rust | zed (crates/git) | P0 |
-| F013_AiAgentChat | AI agent chat thread | mixed | Rust | zed (crates/agent, language_model) | P0 |
-| F014_KeyboardActionDispatch | Keyboard shortcut action dispatch | background | Rust | zed (GPUI core, crates/settings keymap) | P0 |
-| F015_MultiBufferSearchResults | Multi-buffer search results view | ui | Rust | zed (crates/multi_buffer) | P1 |
-| F016_LspCodeActions | LSP code action application | mixed | Rust | zed (crates/project) | P1 |
-| F017_EditorThemeCustomization | Editor theme customization | mixed | Rust | zed (crates/theme) | P1 |
-| F018_CollaboratorRoleManagement | Collaborator role management | mixed | Rust | zed (crates/collab) | P1 |
-| F019_VoiceVideoCall | Voice/video call with collaborators | mixed | Rust | zed (crates/livekit_api, livekit_client, call) | P1 |
-| F020_InlineEditPrediction | Inline AI edit prediction acceptance | mixed | Rust | zed (crates/edit_prediction) | P1 |
-| F021_LlmProviderSwitching | LLM provider switching | mixed | Rust | zed (crates/language_model, per-vendor clients) | P1 |
-| F022_AutoUpdate | Application auto-update | background | Rust | zed (crates/auto_update, scheduler) | P1 |
-| F023_GitHostingPermalink | Git hosting permalink resolution | mixed | Rust | zed (crates/git_hosting_providers) | P2 |
+| F008_EditorCore | Editor Core | mixed | Rust | zode (crates/editor, text, multi_buffer, workspace) | P0 |
+| F009_Diagnostics | Diagnostics | mixed | Rust | zode (crates/diagnostics, project — LspStore) | P0 |
+| F010_Debugging | Debugging | mixed | Rust | zode (crates/debugger, dap, project — DapStore) | P0 |
+| F011_GitIntegration | Git Integration | mixed | Rust | zode (crates/git, git_ui, project — GitStore) | P0 |
+| F012_ExtensionSystem | Extension System | mixed | Rust | zode (crates/extension, extension_host, context_server) | P0 |
+| F013_WorkspaceAndProjectManagement | Workspace & Project Management | mixed | Rust | zode (crates/workspace, project, project_panel, sidebar, worktree) | P0 |
+| F001_Terminal | Terminal | mixed | Rust | zode (crates/terminal, terminal_view, project — Terminals) | P0 |
+| F002_LanguageIntelligence | Language Intelligence | mixed | Rust | zode (crates/project — LspStore, lsp, language, toolchain) | P0 |
+| F014_VimEmulation | Vim Emulation | mixed | Rust | zode (crates/vim) | P1 |
+| F015_SettingsAndKeymaps | Settings & Keymaps | mixed | Rust | zode (crates/settings, theme, keymap_editor, feature_flags) | P0 |
+| F016_Search | Search | ui | Rust | zode (crates/search, file_finder, project — project search) | P0 |
 
 ## Feature Details
 
-### F001_ProjectFolderNavigation: Project folder navigation
+---
+### F008_EditorCore: Editor Core
 
 **Type**: mixed
-**Description**: Developer opens a project folder as a `Worktree` and browses its file tree in the Project Panel to locate and open files for editing. Input: folder pick / directory expand. Process: `Worktree` registration + incremental filesystem watch. Output: rendered file tree, opened `Buffer` on file selection.
+**Description**: The text-editing surface itself — cursor/selection motions, multi-select, text
+deletion, split-diff comparison views, encoding/line-ending handling, inlay hints, and the
+`MultiBuffer`/`Buffer`/`Editor` stack every other panel (diagnostics, search, git diff) reuses to
+render text. This is the one subsystem every other feature in this list ultimately renders through.
 
-**Workspace**: zed (crates/workspace, crates/worktree, crates/project_panel)
+**Workspace**: zode (native GPUI desktop app)
 **Languages**: Rust
-**Components**: `Workspace`, `Worktree`, `Entry`, Project Panel view
-
-**Related UI Surfaces**:
-- Workspace: main application window (open-folder action)
-- Project Panel: file tree dock
 
 **Related User Stories**:
-- US001_OpenProjectFolder: Open a project folder
-- US002_BrowseWorktreeFiles: Browse worktree files in the project panel
-
-**Related APIs/Routes**:
-- N/A — native OS file dialog + filesystem watcher, no HTTP route
+- US001_NavigateCursorWithMotions: Navigate cursor with structural motions
+- US009_ExtendSelectionToNextMatch: Extend selection to next match
+- US010_DeleteTextToLineBoundary: Delete text to line boundary
+- US011_ToggleSplitDiffView: Toggle split-diff view
 
 **Related Data Models**:
-- Project, Worktree, Entry, ProjectPanel
+- MODEL007_TextBuffer
+- MODEL008_Buffer
+- MODEL009_MultiBuffer
+- MODEL010_Editor
+- MODEL011_Pane
+- MODEL006_EntityHandle (cross-cutting GPUI handle primitive every entity above is stored as)
 
 **Related Background Logic**:
-- BL005_WorkspaceEventEmitterSubscribe: `Workspace` emits worktree-added/entry-tree-updated events consumed by panel views
-- BL012_StandaloneCliBinaries: `zed <path>` CLI entry point (`crates/cli`) is one way a project folder is opened
+- BL002: CSV preview open action (buffer-adjacent file preview)
+- BL031: image viewer zoom controls (image preview buffer)
+- BL045: markdown preview copy action
+- BL046: markdown preview scroll-sync action
+- BL064: SVG open-following-preview action
+- BL165: generic detach-and-log-err task helper (cross-cutting executor utility)
+- BL166: image viewer path persistence
+- BL171: markdown source parsing
+- BL172: markdown preview source search
+- BL013_EditorCoreActions: bundled cursor/selection/edit action registry (US001, US009, US010)
+- BL014_ToggleSplitDiffAction: split-diff style toggle (US011)
+- BL015_EncodingSelectorToggleAction: buffer text-encoding switch
+- BL044_LineEndingSelectorToggleAction: buffer line-ending switch
+- BL126_EditorInlayHintsRefresh: inlay hints re-render on buffer/settings/LSP change
+- BL153_ComputeCompletionMenuFilterMatches: completion menu fuzzy filtering
+- BL154_SerializeEditorSelections / BL155_SerializeEditorFolds: session-restore serialization
+- BL156_ComputeRunnableRanges: gutter run/debug affordances over buffer text
+- BL176_LoadBufferContentsOffThread: async buffer load
+- BL181_WaitForImageLoad: image-preview buffer load (image_store)
+- BL200_CloneItemOnSplitOffThread: pane-split item cloning
+- BL030_ActionsMacroDefinition: the `actions!`/`#[derive(Action)]` macro/derive definition site itself (cross-cutting — every custom-command BL across every feature in this list is a consumer of this mechanism)
+- BL052_PickerConfirmActions: shared picker-confirm action pattern used by file finder, command palette, and other picker-based UI across the app (cross-cutting infra, anchored here as the generic picker/UI-shell primitive)
 
 **Related Permissions**:
-- N/A — opening a local project folder is unrestricted; no PERM### gate applies
+- PERM004_BufferCapabilityGate: `Capability::ReadWrite`/`Read`/`ReadOnly` gates every edit operation on every buffer this feature renders
 
 ---
-
-### F002_BufferTextEditing: Buffer text editing
+### F009_Diagnostics: Diagnostics
 
 **Type**: mixed
-**Description**: Developer edits an open file's text; keystrokes mutate the buffer's `Rope` when the buffer's `Capability` is `ReadWrite`, and are silently discarded when it is `Read`/`ReadOnly`. Input: keystrokes. Process: capability check → rope mutation → LSP `didChange` notify. Output: re-rendered `Editor` view, undo-stack entry.
+**Description**: Surfaces LSP diagnostics (errors/warnings) both per-buffer and project-wide, and
+exposes the last language-server error from the status bar.
 
-**Workspace**: zed (crates/text, crates/editor, crates/language)
+**Workspace**: zode
 **Languages**: Rust
-**Components**: `TextBuffer`, `Buffer`, `Editor`, `Capability` check
-
-**Related UI Surfaces**:
-- Editor pane: active buffer view (read-write and read-only states)
 
 **Related User Stories**:
-- US003_EditBufferText: Edit an open file's text
-- US021_ReadOnlyBufferRejectsEdit: Read-only buffer silently rejects an edit attempt
-
-**Related APIs/Routes**:
-- N/A
+- US012_OpenBufferDiagnostics: Open buffer diagnostics
+- US013_OpenProjectDiagnostics: Open project diagnostics
+- US014_ViewLanguageServerErrorStatus: View language server error status
 
 **Related Data Models**:
-- TextBuffer, Buffer (see PERM004_BufferCapabilityGate for the `Capability` discriminator gating this feature)
+- MODEL008_Buffer (`diagnostics: TreeMap<LanguageServerId, DiagnosticSet>`)
+- MODEL017_LanguageServer (diagnostic source)
 
 **Related Background Logic**:
-- BL006_LspRequestDispatch: debounced buffer edits forwarded to the language server as `textDocument/didChange`
-
-**Related Permissions**:
-- PERM004_BufferCapabilityGate: `Buffer`/`MultiBuffer` capability (`ReadWrite`/`Read`/`ReadOnly`) gates whether an edit is accepted
+- BL016: ETW tracing action (Windows perf/diagnostic tooling)
+- BL065: copy system specs action (for bug reports)
+- BL117: system specs GPU probe
+- BL173: miniprofiler report export
+- BL011_DeployCurrentFileDiagnosticsAction: buffer-scoped diagnostics view
+- BL012_ProjectDiagnosticsActions: project-wide diagnostics aggregation + severity filter
+- BL001_ActivityIndicatorStatusActions: status-bar last-error surface/dismiss
+- BL032_DumpInputLatencyHistogramAction: dev-tooling action dumping the input-latency histogram for perf diagnosis
 
 ---
+### F010_Debugging: Debugging
 
-### F015_MultiBufferSearchResults: Multi-buffer search results view
+**Type**: mixed
+**Description**: Full debug-session lifecycle over the Debug Adapter Protocol — start/stop/step,
+breakpoints, watch expressions, variable inspection/editing, remote-process attach, and DAP log
+viewing for troubleshooting adapters themselves.
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US015_StartDebugSession, US016_StepThroughCodeWhileDebugging, US002_StopDebugSession,
+  US003_ClearAllBreakpoints, US004_AddWatchExpression, US005_InspectVariableInDebugPanel,
+  US017_EditVariableValueWhileDebugging, US018_AttachDebuggerToRemoteProcess,
+  US067_OpenDebugAdapterLogs
+
+**Related Data Models**:
+- MODEL003_Project (`dap_store`, `breakpoint_store` fields)
+
+**Related Background Logic**:
+- BL005_DebuggerSessionControlActions: start/continue/step/stop/detach
+- BL006_NewProcessModalTabActions: launch-config picker
+- BL007_BreakpointListNavigationActions
+- BL008_ConsoleWatchExpressionAction
+- BL009_MemoryViewGoToAddressAction
+- BL010_VariableListActions: expand/collapse/copy/edit variable
+- BL004_OpenDebugAdapterLogsAction
+- BL133_DebugSessionBreakpointObserver: breakpoint-store change dispatch
+- BL150_FetchRemoteProcessListForAttach: remote-attach process listing
+- BL152_PersistStackFrameFilterPreference
+- BL177_ForwardBreakpointToggleToRemote: remote-dev breakpoint sync
+- BL178_PruneStaleJsDebugCompanionVersions / BL179_InstallLatestJsDebugCompanion: JS debug adapter companion management
+- BL201_BindSessionToWindowOnFlush: session-to-window binding on flush
+
+---
+### F011_GitIntegration: Git Integration
+
+**Type**: mixed
+**Description**: Git hunk staging/unstaging, branch switching/creation, stash, discard, commit,
+project-wide diff review, and commit-graph visualization — all wrapping a local `git` CLI
+integration, no server-side collab component.
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US019_StageGitHunk, US006_UnstageGitHunk, US007_SwitchGitBranch, US008_CreateGitBranch,
+  US020_StashUncommittedChanges, US021_DiscardFileChangesInGitPanel, US022_CommitStagedChanges,
+  US023_ViewProjectWideDiff, US024_ViewGitCommitGraph
+
+**Related Data Models**:
+- MODEL014_Repository (`GitStore`/`Repository`/`RepositorySnapshot`)
+
+**Related Background Logic**:
+- BL144: generic debounce-timer primitive underlying BL145/BL132
+- BL021_GitHunkStagingActions, BL022_GitGraphActions, BL023_BranchPickerActions,
+  BL024_CommitViewStashActions, BL025_GitPanelActions, BL026_GitPickerTabActions,
+  BL027_ProjectDiffActions, BL028_StashPickerActions
+- BL106_GitCliRepositoryIntegration: underlying `git` CLI process wrapper
+- BL145_GitDiffDebounceRecalculation
+- BL132_DebouncedDelayFire: the underlying generic debounce-timer trigger `BL145_GitDiffDebounceRecalculation` builds on
+- BL160_ReadGlobalGitCommitterIdentity, BL161_SaveGitGraphSerialization,
+  BL162_CreateGitRemote, BL163_CommitStagedChanges, BL164_SaveProjectDiffBase,
+  BL180_RestoreGitCheckpoints
+
+---
+### F012_ExtensionSystem: Extension System
+
+**Type**: mixed
+**Description**: The WASM extension platform — install/reload extensions, author and iterate on a
+local dev extension, connect to MCP context servers, and the sandbox capability allowlist
+(`ProcessExec`/`DownloadFile`/`NpmInstallPackage`) that fences what an extension can do at runtime.
+
+**Workspace**: zode
+**Languages**: Rust (host), WASM (extension guest)
+
+**Related User Stories**:
+- US025_ReloadExtensions, US026_InstallDevExtension, US027_CompileDevExtension,
+  US028_RestartContextServer, US029_ConnectToContextServerOverMcp,
+  US030_DeclareProcessExecCapability, US031_DeclareDownloadFileCapability,
+  US032_DeclareNpmInstallCapability, US033_RejectUndeclaredExtensionCapability
+
+**Related Data Models**:
+- MODEL018_ExtensionManifest
+
+**Related Background Logic**:
+- BL017_ReloadExtensionsAction, BL018_InstallDevExtensionAction, BL157_CompileDevExtension,
+  BL158_DismissLanguageExtensionSuggestion
+- BL054_ContextServerRestartAction, BL125_ContextServerNotificationObserver,
+  BL148_McpServeConnection
+
+**Related Permissions**:
+- PERM001_ExtensionProcessExecCapability (US030, US033)
+- PERM002_ExtensionDownloadFileCapability (US031, US033)
+- PERM003_ExtensionNpmInstallCapability (US032, US033)
+
+---
+### F013_WorkspaceAndProjectManagement: Workspace & Project Management
+
+**Type**: mixed
+**Description**: Opening/navigating projects and their worktrees, the project-panel file tree, the
+always-visible multi-project sidebar (this fork's rail), the fork-specific idle-hibernation
+lifecycle for background projects, dev-container bootstrap, the worktree-trust security gate, and
+window-level tab/pane navigation (folded in here rather than as its own thin feature — same
+"navigate within an open workspace" intent as project-panel/sidebar navigation, consistent with
+KISS).
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US034_OpenRecentProjectFromWelcomeScreen, US035_NavigateProjectPanelEntries,
+  US036_CreateFileInProjectPanel, US037_DeleteWorktreeFromPicker,
+  US038_ToggleMultiProjectSidebar, US039_SwitchActiveProjectInSidebar,
+  US040_HibernateIdleProject, US041_ReactivateHibernatedProject,
+  US042_InitializeDevContainerForProject, US043_BuildDevContainerImage,
+  US044_RunDevContainerLifecycleScripts, US066_SwitchBetweenOpenTabs
+
+**Related Data Models**:
+- MODEL001_MultiWorkspace, MODEL002_Workspace, MODEL003_Project, MODEL004_Worktree,
+  MODEL005_Entry, MODEL015_ProjectPanel
+
+**Related Background Logic**:
+- BL019: app feedback submission action
+- BL035: new journal entry action
+- BL049: onboarding flow actions
+- BL105: Windows Explorer context-menu shell integration
+- BL124: UserStore connection-status observer (account/auth connectivity)
+- BL129: global filesystem watcher event dispatch
+- BL130: web-window appearance/DPR media-query observer (gpui_web platform backend)
+- BL134: prompt-template override directory watcher (Handlebars templates in prompt_store)
+- BL135: remote-server projects settings observer
+- BL147: component-preview dev-tool active-page persistence
+- BL149: local db write+log helper
+- BL167: Linux CLI-install prompt action
+- BL168: journal entry file creation
+- BL174: onboarding active-page persistence
+- BL185: remote-dev buffer-update forwarding to remote server
+- BL188: remote-dev buffer-update forwarding on headless project
+- BL189: remote-dev server stdin read loop
+- BL003_InitializeDevContainerAction, BL102_DevContainerJsonParsing,
+  BL103_DevContainerManifestBuildAndRun, BL104_DockerCliIntegration
+- BL033_InstallCliBinaryAction, BL034_RegisterZedSchemeAction: app-shell CLI/URL-scheme install actions
+- BL208_ZedCliPathResolution: resolves/quotes the zed CLI binary path for shell invocation (used by the CLI install flow above)
+- BL128_FsWatchStream: filesystem watch event stream backing worktree/project-panel refresh
+- BL029_DeleteWorktreeAction, BL055_ProjectPanelActions, BL056_RecentProjectsMenuActions,
+  BL057_OpenWslPathAction, BL062_FocusSidebarFilterAction, BL097_WelcomeScreenActions,
+  BL141_WorktreeBackgroundScannerObserver, BL186_CopyWorktreeEntryOffThread,
+  BL187_DismissDevContainerSuggestion, BL200_CloneItemOnSplitOffThread,
+  BL203_UpdateWorkspaceActivationTimestamp, BL204_SaveWorkspaceWelcomePageState,
+  BL205_CreateWorktreeEntryOnDisk
+- BL094_MultiWorkspaceSidebarActions, BL095_PaneItemManagementActions,
+  BL098_WorkspacePaneNavigationActions
+- BL047_MenuNavigationActions, BL051_PanelTabNavigationActions,
+  BL053_WindowTabManagementActions, BL066_TabSwitcherActions, BL071_ApplicationMenuActivationActions,
+  BL072_TitleBarProjectMenuActions, BL099_ZedApplicationWindowActions, BL100_ZedActionsSharedRegistry
+- Fork-specific hibernation lifecycle (no dedicated BL###, cited directly per US040/US041's own
+  citation): `crates/project/src/project.rs:355,4740,4958`, `crates/project/src/lsp_store.rs:11612`,
+  `crates/project/src/prettier_store.rs:118`
+
+**Related Permissions**:
+- PERM005_WorktreeTrustGate: gates LSP/git-integration spawn on worktree trust state, surfaced via `SecurityModal`
+
+---
+### F001_Terminal: Terminal
+
+**Type**: mixed
+**Description**: The embedded terminal (Alacritty-backed) — interactive shell sessions, running
+configured `tasks.json` tasks, toggling panel visibility, and searching terminal scrollback.
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US045_RunCommandInIntegratedTerminal, US046_ToggleTerminalPanel,
+  US047_RunConfiguredTask, US048_SearchTerminalScrollback
+
+**Related Data Models**:
+- MODEL016_Terminal
+
+**Related Background Logic**:
+- BL067_TerminalCoreActions, BL068_TerminalPanelToggleActions, BL069_TerminalViewTextActions
+- BL113_ProjectTerminalShellSpawn, BL114_ProjectTaskTerminalSpawn,
+  BL194_BuildTaskContextsOffThread, BL195_SearchTerminalScrollback,
+  BL196_SerializeTerminalPanelLayout, BL197_SaveTerminalWorkingDirectoryAndTitle
+- BL118_CrossPlatformCommandWrapper, BL119_MacosPosixSpawnCommand,
+  BL120_ChildProcessGroupLifecycle, BL121_ShellCommandLineBuilder,
+  BL122_LoginShellEnvironmentCapture, BL151_ForwardSpawnedTerminalPid,
+  BL202_AwaitSpawnedTaskProcessOutput
+
+---
+### F002_LanguageIntelligence: Language Intelligence
+
+**Type**: mixed
+**Description**: Language-server process lifecycle, toolchain/language selection per buffer,
+formatter (Prettier) integration, and cross-language bridging (e.g. Vue↔TS server forwarding) —
+the LSP client layer that Diagnostics (F009) and Editor Core (F008) consume.
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US049_SwitchLanguageServerToolchain, US050_SwitchBufferLanguage,
+  US051_RestartLanguageServersForBuffer
+
+**Related Data Models**:
+- MODEL017_LanguageServer
+
+**Related Background Logic**:
+- BL039: syntax-highlights tree view dev tool
+- BL043: syntax tree view dev tool
+- BL175: outline-panel state serialization (pairs with BL050)
+- BL038_LanguageSelectorToggleAction, BL073_ToolchainSelectorActions,
+  BL041_LspToolMenuToggleAction, BL042_OpenLanguageServerLogsAction
+- BL050_OutlinePanelActions: symbol-outline panel navigation, sourced from LSP document-symbol responses
+- BL107_LanguageServerProcessLifecycle, BL108_LspStoreStartLanguageServer,
+  BL109_JsonLanguageServerSchemaContentExtension, BL110_RustAnalyzerServerStatusExtension,
+  BL111_VueLanguageServerTsServerBridge, BL183_ForwardVueTsRequestToTypescriptServer,
+  BL170_SendLspInitializeRequest, BL182_RestartLanguageServersForBuffers
+- BL112_PrettierProcessLifecycle, BL184_ClearPrettierCachesOnSettingsChange
+- BL131_LspLogViewServerLogObserver, BL136_EditorconfigExternalConfigWatcher,
+  BL142_GrammarSourceWatcher, BL191_RefreshPythonKernelspecs, BL192_InstallIpykernelPackage,
+  BL115_HeadlessProjectRemoteJupyterKernelSpawn, BL116_NativeJupyterKernelProcessLifecycle,
+  BL190_RouteJupyterMessagesToChannels, BL058_ReplSessionActions
+
+---
+### F014_VimEmulation: Vim Emulation
+
+**Type**: mixed
+**Description**: Full Vim-mode text editing — motions, mode switching, visual selection, ex
+commands, macro repeat/record, and text-object operators. Self-contained emulation layer (`crates/vim`)
+gated behind `Editor.use_modal_editing`.
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US052_NavigateTextWithVimMotions, US053_EnterVimInsertMode,
+  US054_SelectTextInVimVisualMode, US055_RunVimExCommand,
+  US056_RepeatLastVimChange, US057_SelectVimTextObject
+
+**Related Data Models**:
+- MODEL010_Editor (`use_modal_editing` gate field)
+
+**Related Background Logic**:
+- BL081_VimMotionActions, BL082_VimNormalModeInsertActions, BL093_VimVisualModeActions,
+  BL075_VimExCommandActions, BL085_VimRepeatMacroActions, BL089_VimTextObjectActions
+- BL074_VimChangeListNavigationActions, BL076_VimDigraphLiteralAction,
+  BL077_VimHelixModeActions, BL078_VimHelixPasteAction, BL079_VimIndentActions,
+  BL080_VimInsertModeActions, BL083_VimIncrementDecrementActions, BL084_VimPasteAction,
+  BL086_VimScrollActions, BL087_VimSearchActions, BL088_VimSubstituteActions,
+  BL090_VimReplaceModeActions, BL091_VimRewrapAction, BL092_VimOperatorPendingPushActions
+- BL123_VimShellExecCommand, BL140_VimMarksBufferLifecycleObserver, BL198_PipeVimFilterCommandStdin,
+  BL199_DeleteVimMarkFromDb
+- *(15 further Vim BL items — increment/decrement, rewrap, replace mode, digraphs, Helix mode,
+  change-list, register/mark deletion, shell-filter piping — are structurally identical
+  one-keybinding-to-one-action items per `user-stories.md`'s own Limits note; listed above by
+  BL### even though not individually storied)*
+
+---
+### F015_SettingsAndKeymaps: Settings & Keymaps
+
+**Type**: mixed
+**Description**: Live settings/keymap editing, base-keymap preset switching, theme
+selection/appearance, and the backup-then-migrate flow that protects a user's configuration across
+schema changes on update. Also owns the client-side staff feature-flag gate (an app-wide
+configuration concern with no better home in this partition).
+
+**Workspace**: zode
+**Languages**: Rust
+
+**Related User Stories**:
+- US058_EditSettingsJson, US059_EditKeymapBinding, US060_SwitchBaseKeymapPreset,
+  US061_BackupSettingsBeforeMigration, US062_MigrateSettingsToCurrentSchema
+
+**Related Data Models**:
+- MODEL012_SettingsStore, MODEL013_Theme
+
+**Related Background Logic**:
+- BL040: keymap key-context view action
+- BL061_SettingsEditorActions, BL036_KeymapEditorActions, BL048_ToggleBaseKeymapSelectorAction,
+  BL207_RunKeymapOrSettingsMigration
+- BL037_KeystrokeRecordingActions: keystroke-capture actions used by the keymap editor's binding-recorder UI
+- BL070_ThemeSelectorReloadAction, BL096_OpenThemePreviewAction, BL206_WatchThemeFileChanges
+- BL063_SnippetsConfigActions, BL139_SnippetDirectoryWatcher
+- BL137_ConfigFileWatch, BL138_SettingsStoreFileWatcher, BL143_KeymapAndSettingsObserver,
+  BL169_DebounceKeymapActionSearch, BL193_ComputeSettingsExactSearchMatches
+- BL101_EncryptedPasswordAtRest: secrets-at-rest for stored credentials referenced from settings-adjacent flows
+- BL127_FeatureFlagStoreObserver: reactive flag re-render on staff/flag-value change
+
+**Related Permissions**:
+- PERM006_StaffFeatureFlagGate
+
+---
+### F016_Search: Search
 
 **Type**: ui
-**Description**: Developer opens project-wide search results as a single scrollable `MultiBuffer` to review/edit matches across files without opening each individually. Input: project search query. Process: aggregate matching excerpts across `TextBuffer`s. Output: one scrollable multi-buffer view; edits write back to originating files.
+**Description**: Fuzzy file finding, whole-project text search, and in-buffer search — the three
+find surfaces of the editor.
 
-**Workspace**: zed (crates/multi_buffer)
+**Workspace**: zode
 **Languages**: Rust
-**Components**: `MultiBuffer`, `Buffer`, search-results excerpt view
-
-**Related UI Surfaces**:
-- Editor pane / Search results: multi-buffer excerpt view
 
 **Related User Stories**:
-- US004_OpenMultiBufferSearchResults: Open search results as a multi-buffer
-
-**Related APIs/Routes**:
-- N/A
+- US063_FindFileByFuzzyName, US064_SearchAcrossProject, US065_SearchWithinCurrentBuffer
 
 **Related Data Models**:
-- MultiBuffer, Buffer
+- MODEL009_MultiBuffer (project-search results rendered as a multi-buffer)
 
 **Related Background Logic**:
-- N/A — direct user-triggered aggregation, no BL### applies per user-stories.md
-
-**Related Permissions**:
-- N/A
-
----
-
-### F003_LspDiagnostics: LSP diagnostics feedback
-
-**Type**: mixed
-**Description**: Developer sees inline diagnostics from the attached language server while typing. Input: buffer change. Process: `textDocument/didChange` sent off-thread → `publishDiagnostics` received via `LspStore`. Output: inline error/warning markers in the editor.
-
-**Workspace**: zed (crates/project — LspStore)
-**Languages**: Rust
-**Components**: `LspStore`, `Buffer`, `Editor` diagnostic markers
-
-**Related UI Surfaces**:
-- Editor pane: inline diagnostic markers
-
-**Related User Stories**:
-- US005_ReceiveLspDiagnostics: Receive LSP diagnostics while typing
-
-**Related APIs/Routes**:
-- N/A — LSP over stdio/socket, not HTTP
-
-**Related Data Models**:
-- Buffer, Editor
-
-**Related Background Logic**:
-- BL006_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages
-
-**Related Permissions**:
-- N/A
-
----
-
-### F004_LspCompletions: LSP completion suggestions
-
-**Type**: mixed
-**Description**: Developer receives completion suggestions from the attached language server while typing. Input: cursor position + buffer context. Process: `textDocument/completion` request off-thread via `LspStore`. Output: completion popover at cursor.
-
-**Workspace**: zed (crates/project — LspStore)
-**Languages**: Rust
-**Components**: `LspStore`, `Buffer`, completion popover
-
-**Related UI Surfaces**:
-- Editor pane: completion popover
-
-**Related User Stories**:
-- US026_ReceiveLspCompletions: Receive LSP completion suggestions while typing
-
-**Related APIs/Routes**:
-- N/A — LSP over stdio/socket, not HTTP
-
-**Related Data Models**:
-- Buffer, Editor
-
-**Related Background Logic**:
-- BL006_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages
-
-**Related Permissions**:
-- N/A
-
----
-
-### F016_LspCodeActions: LSP code action application
-
-**Type**: mixed
-**Description**: Developer applies a language-server-suggested code action to fix an issue or refactor. Input: code-action menu trigger. Process: `textDocument/codeAction` request → selected `WorkspaceEdit` applied atomically. Output: buffer(s) updated as one undo-stack entry.
-
-**Workspace**: zed (crates/project)
-**Languages**: Rust
-**Components**: code-action lightbulb menu, `WorkspaceEdit` applier
-
-**Related UI Surfaces**:
-- Editor pane: code-action lightbulb menu
-
-**Related User Stories**:
-- US006_ApplyLspCodeAction: Apply an LSP code action
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- Buffer
-
-**Related Background Logic**:
-- BL006_LspRequestDispatch: `handle_apply_code_action` routes the accepted action back through the LSP dispatch table
-
-**Related Permissions**:
-- N/A
-
----
-
-### F017_EditorThemeCustomization: Editor theme customization
-
-**Type**: mixed
-**Description**: Developer selects a different color theme; every `Render`-implementing surface re-renders immediately with the new palette and the choice persists across restarts. Input: theme-picker selection. Process: swap active `Theme`/`ThemeFamily` → persist to settings → notify observers. Output: re-rendered UI in the new theme.
-
-**Workspace**: zed (crates/theme)
-**Languages**: Rust
-**Components**: `Theme`, `ThemeFamily`, theme picker
-
-**Related UI Surfaces**:
-- Settings / Theme picker
-
-**Related User Stories**:
-- US007_ChangeEditorTheme: Change the editor's color theme
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- Theme, ThemeFamily
-
-**Related Background Logic**:
-- BL013_SettingsStoreObserver: theme selection persisted to settings JSON, re-parsed, and observers re-render
-
-**Related Permissions**:
-- N/A
-
----
-
-### F005_LiveSettingsEditing: Live settings.json editing
-
-**Type**: mixed
-**Description**: Developer edits `settings.json` and every dependent registrant applies the new value live, without a restart. Input: settings-buffer save. Process: `SettingsStore` re-parses JSON → notifies each `impl Settings for` registrant. Output: live behavior change across the app; malformed JSON keeps last-valid settings.
-
-**Workspace**: zed (crates/settings)
-**Languages**: Rust
-**Components**: `SettingsStore`, ~40 `impl Settings for` registrants
-
-**Related UI Surfaces**:
-- Settings editor: `settings.json` buffer
-
-**Related User Stories**:
-- US008_EditSettingsJson: Edit a setting in `settings.json` and see it take effect live
-- US023_SettingsChangeNotifiesObservers: Settings-store change notifies all registered observers
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- SettingsStore
-
-**Related Background Logic**:
-- BL013_SettingsStoreObserver: `SettingsStore` re-parses on change and notifies registrant call sites
-
-**Related Permissions**:
-- N/A
-
----
-
-### F006_ExtensionInstallation: Third-party extension installation
-
-**Type**: mixed
-**Description**: Developer installs a third-party WASM extension; its manifest capabilities become its sandboxed allowlist before any code runs, and undeclared host-capability calls are rejected. Input: "Install" action. Process: download + compile `wasm32-wasip2` module → load into `extension_host` with manifest allowlist. Output: extension appears installed and usable; denied calls fail without crashing the host.
-
-**Workspace**: zed (crates/extension_host, crates/extension_api)
-**Languages**: Rust, WASM (guest extensions)
-**Components**: `ExtensionManifest`, extension_host sandbox runtime
-
-**Related UI Surfaces**:
-- Extensions panel: install/manage list
-
-**Related User Stories**:
-- US009_InstallExtension: Install a third-party extension
-- US022_ExtensionCapabilityDenied: Extension's undeclared capability request is denied
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- ExtensionManifest
-
-**Related Background Logic**:
-- BL004_ExtensionHostWasmDispatch: sandboxed WASM calls dispatched in the background, checked against the manifest allowlist, and routed back to the main thread
-
-**Related Permissions**:
-- PERM001_ExtensionProcessExecCapability: gates `ProcessExec` capability grants against the manifest's declared allowlist
-- PERM002_ExtensionDownloadFileCapability: gates `DownloadFile` capability grants
-- PERM003_ExtensionNpmInstallCapability: gates `NpmInstallPackage` capability grants
-
----
-
-### F007_ProjectSharing: Project sharing for collaboration
-
-**Type**: mixed
-**Description**: Developer (host) shares the open project so a collaborator can join and pair-program in real time, without restricting the host's own edits. Input: "Share Project" action. Process: register `Project` with `collab` server over RPC. Output: invite/room identifier produced for a collaborator to join.
-
-**Workspace**: zed (crates/collab, crates/client, crates/call, crates/channel)
-**Languages**: Rust
-**Components**: `Project`, `Workspace`, collab RPC connection
-
-**Related UI Surfaces**:
-- Workspace / Collab panel: share action + invite UI
-
-**Related User Stories**:
-- US010_ShareProjectForCollaboration: Share a project so others can collaborate
-
-**Related APIs/Routes**:
-- N/A — custom binary RPC over crates/proto, crates/rpc, not HTTP
-
-**Related Data Models**:
-- Project, Workspace
-
-**Related Background Logic**:
-- BL007_RpcProtoMessageRouting: share request/response routed as a typed proto message over the persistent RPC connection
-
-**Related Permissions**:
-- PERM005_CollabMutatingProjectRequestGuard: gates which mutating RPC requests the host's server accepts once a project is shared
-
----
-
-### F008_JoinSharedProject: Join a shared project
-
-**Type**: mixed
-**Description**: Collaborator joins a shared project, is assigned a `ChannelRole`, and receives the file tree/open buffers matching their granted `Capability`; a `Banned` participant is rejected server-side. Input: join/invite action. Process: connect to `collab` server over RPC → role assignment → state sync. Output: project state rendered with role-appropriate access, or a rejected connection.
-
-**Workspace**: zed (crates/collab, crates/client, crates/call)
-**Languages**: Rust
-**Components**: `ChannelRole`, `Capability`, RPC join handshake
-
-**Related UI Surfaces**:
-- Workspace / Collab panel: join flow
-
-**Related User Stories**:
-- US011_JoinSharedProject: Join a shared project as a collaborator
-
-**Related APIs/Routes**:
-- N/A — custom binary RPC
-
-**Related Data Models**:
-- Project, Worktree
-
-**Related Background Logic**:
-- BL007_RpcProtoMessageRouting: join request/state-sync routed over RPC
-- BL008_InAppNotificationCenter: host is notified in-app that a collaborator has joined
-
-**Related Permissions**:
-- PERM006_CollabReadOnlyProjectRequestGuard: gates which read-only RPC requests a joining collaborator (including Guest role) may issue
-- PERM007_ChannelRoleAccessControl: `ChannelRole` (Admin/Member/Talker/Guest/Banned) assigned on join determines granted `Capability`
-
----
-
-### F018_CollaboratorRoleManagement: Collaborator role management
-
-**Type**: mixed
-**Description**: Collaboration Admin changes another participant's role, immediately revoking/granting edit `Capability` server-side; a fixed set of destructive git-worktree operations remain hard-denied for any non-owning participant regardless of role. Input: role-dropdown selection. Process: Admin-only RPC role-change request enforced server-side. Output: participant's effective capability updates immediately.
-
-**Workspace**: zed (crates/collab)
-**Languages**: Rust
-**Components**: `ChannelRole`, server-side role enforcement
-
-**Related UI Surfaces**:
-- Collab panel: participant role dropdown
-
-**Related User Stories**:
-- US012_ChangeCollaboratorRole: Change a collaborator's role in a shared project
-
-**Related APIs/Routes**:
-- N/A — custom binary RPC
-
-**Related Data Models**:
-- N/A (transient RPC state)
-
-**Related Background Logic**:
-- BL007_RpcProtoMessageRouting: role-change message routed to and enforced by the collab server
-
-**Related Permissions**:
-- PERM007_ChannelRoleAccessControl: role-change is gated to the Admin role; the resulting `ChannelRole` determines the collaborator's `can_edit_projects`/`can_read_projects`/`can_use_microphone`/`can_see_channel` grants
-- PERM008_DisallowGuestRequestGuard: hard-denies a fixed set of destructive git-worktree operations to non-host roles regardless of any role change
-
----
-
-### F019_VoiceVideoCall: Voice/video call with collaborators
-
-**Type**: mixed
-**Description**: Developer starts a voice/video call with collaborators in the current room; Talker-role participants get voice + text, Guest-role participants get text only. Input: "Start Call"/"Join Call". Process: establish LiveKit WebRTC session for the room. Output: live audio/video session; degrades gracefully under poor network rather than hard-disconnecting.
-
-**Workspace**: zed (crates/livekit_api, crates/livekit_client, crates/call)
-**Languages**: Rust
-**Components**: LiveKit WebRTC session, Call panel
-
-**Related UI Surfaces**:
-- Call panel: start/join call controls
-
-**Related User Stories**:
-- US013_StartVoiceCall: Start a voice/video call with collaborators
-
-**Related APIs/Routes**:
-- N/A — WebRTC via LiveKit SDK, not a REST endpoint
-
-**Related Data Models**:
-- N/A (call state is transient, not a persisted entity)
-
-**Related Background Logic**:
-- BL010_LiveKitCallingIntegration: WebRTC session establishment via the LiveKit SDK binding
-
-**Related Permissions**:
-- PERM007_ChannelRoleAccessControl: `can_use_microphone` grant on the collaborator's `ChannelRole` gates whether they may unmute on the call
-
----
-
-### F009_IntegratedTerminal: Integrated terminal command execution
-
-**Type**: ui
-**Description**: Developer runs a shell command in an integrated terminal scoped to the project's working directory. Input: terminal command input. Process: spawn shell process, stream stdout/stderr off the UI thread. Output: live command output in the terminal pane; process terminates cleanly on panel close.
-
-**Workspace**: zed (crates/terminal, crates/terminal_view)
-**Languages**: Rust
-**Components**: `Terminal` entity, terminal panel view
-
-**Related UI Surfaces**:
-- Terminal panel: shell session view
-
-**Related User Stories**:
-- US014_RunTerminalCommand: Run a shell command in the integrated terminal
-
-**Related APIs/Routes**:
-- N/A — local process spawn, not HTTP
-
-**Related Data Models**:
-- Terminal
-
-**Related Background Logic**:
-- N/A — direct process I/O, no BL### item covers a per-command trigger per user-stories.md
-
-**Related Permissions**:
-- N/A
-
----
-
-### F010_GitDiffViewing: Git diff viewing
-
-**Type**: ui
-**Description**: Developer views a file's git diff against HEAD, updating live as the buffer is further edited. Input: open git panel/gutter for a file. Process: compute added/removed/modified line ranges against `Repository` HEAD. Output: diff markers in the gutter/git panel.
-
-**Workspace**: zed (crates/git)
-**Languages**: Rust
-**Components**: `GitStore`, `Repository`, gutter diff markers
-
-**Related UI Surfaces**:
-- Git panel / Editor gutter: diff markers
-
-**Related User Stories**:
-- US015_ViewGitDiff: View a file's git diff
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- GitStore, Repository
-
-**Related Background Logic**:
-- N/A — direct git-diff computation, no BL### item covers this specifically per user-stories.md
-
-**Related Permissions**:
-- N/A
-
----
-
-### F011_GitHunkStaging: Git hunk staging
-
-**Type**: ui
-**Description**: Developer stages a specific git hunk to commit changes incrementally, leaving the rest of the file's changes unstaged. Input: "Stage Hunk" inline action. Process: apply the hunk-level change to the git index. Output: git index reflects only the staged hunk; non-owning collaborators without write capability are denied.
-
-**Workspace**: zed (crates/git)
-**Languages**: Rust
-**Components**: `GitStore`, `Repository`, hunk-level index operation
-
-**Related UI Surfaces**:
-- Git panel / Editor gutter: stage action
-
-**Related User Stories**:
-- US027_StageGitHunk: Stage a git hunk
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- GitStore, Repository
-
-**Related Background Logic**:
-- N/A — direct git-index operation, no BL### item covers per-hunk staging per user-stories.md
-
-**Related Permissions**:
-- PERM008_DisallowGuestRequestGuard: hard-denies staging (and other destructive worktree git operations) to a non-owning collaborator regardless of assigned `ChannelRole`
-
----
-
-### F012_GitCommit: Git commit of staged changes
-
-**Type**: ui
-**Description**: Developer commits staged changes with a message, recording a checkpoint in the project's git history. Input: commit message + "Commit" click. Process: run commit against the active `Repository`'s staged index; reject empty messages before invoking git. Output: new commit created, staged list clears, HEAD updates.
-
-**Workspace**: zed (crates/git)
-**Languages**: Rust
-**Components**: `GitStore`, `Repository`, commit panel
-
-**Related UI Surfaces**:
-- Git panel: commit message input + commit button
-
-**Related User Stories**:
-- US016_CommitStagedChanges: Commit staged changes
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- GitStore, Repository
-
-**Related Background Logic**:
-- N/A — direct, user-triggered git operation per user-stories.md
-
-**Related Permissions**:
-- N/A
-
----
-
-### F023_GitHostingPermalink: Git hosting permalink resolution
-
-**Type**: mixed
-**Description**: Developer generates a stable, commit-SHA-pinned permalink to the current file/selection on the detected git hosting provider (GitHub/GitLab/Bitbucket) to share with teammates. Input: "Copy Permalink" action. Process: detect git remote → map to `GitHostingProvider` → pin to commit SHA. Output: permalink URL copied to clipboard, or action disabled if no remote/unrecognized provider.
-
-**Workspace**: zed (crates/git_hosting_providers)
-**Languages**: Rust
-**Components**: `GitHostingProvider` detection
-
-**Related UI Surfaces**:
-- Editor pane / Git panel: "Copy Permalink" action
-
-**Related User Stories**:
-- US025_ResolveGitHostingPermalink: Resolve a permalink for the current git remote
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- GitStore, Repository
-
-**Related Background Logic**:
-- BL011_GitHostingProviderDetection: provider-detection module resolving the remote to a hosting provider
-
-**Related Permissions**:
-- N/A
-
----
-
-### F013_AiAgentChat: AI agent chat thread
-
-**Type**: mixed
-**Description**: Developer chats with the AI agent in a persistent thread; the model's tool calls dispatch in order and results surface before continuing. Input: message input + send. Process: append `Message` to `Thread` → stream vendor LLM response → dispatch queued tool calls. Output: streamed response in the panel; conversation persists across restarts.
-
-**Workspace**: zed (crates/agent, crates/language_model, per-vendor client crates)
-**Languages**: Rust
-**Components**: `Thread`, `Message`, tool-call dispatch loop
-
-**Related UI Surfaces**:
-- Agent panel: message input + streamed response view
-
-**Related User Stories**:
-- US017_ChatWithAiAgent: Chat with the AI agent in a thread
-
-**Related APIs/Routes**:
-- N/A — vendor LLM API called from crates/anthropic, open_ai, etc., not a Zed-hosted route
-
-**Related Data Models**:
-- Thread, Message
-
-**Related Background Logic**:
-- BL003_AgentThreadToolCallLoop: `Thread` loop awaits streamed responses and dispatches queued tool calls
-- BL009_LlmProviderClients: the per-vendor client crate performs the actual model request
-
-**Related Permissions**:
-- N/A
-
----
-
-### F020_InlineEditPrediction: Inline AI edit prediction acceptance
-
-**Type**: mixed
-**Description**: Developer accepts an inline AI-suggested next edit while typing, applying it as a normal undoable buffer edit. Input: ghost-text prediction rendered inline + accept keystroke (e.g. Tab). Process: prediction request based on surrounding buffer context; accept applies edit, continuing to type dismisses it. Output: buffer updated (or unaffected) with no typing block on request latency.
-
-**Workspace**: zed (crates/edit_prediction, crates/edit_prediction_cli)
-**Languages**: Rust
-**Components**: ghost-text prediction renderer
-
-**Related UI Surfaces**:
-- Editor pane: inline ghost-text prediction
-
-**Related User Stories**:
-- US018_AcceptInlineEditPrediction: Accept an inline AI edit prediction
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- Buffer, Editor
-
-**Related Background Logic**:
-- BL009_LlmProviderClients: prediction requests may route through a configured provider client
-
-**Related Permissions**:
-- N/A
-
----
-
-### F021_LlmProviderSwitching: LLM provider switching
-
-**Type**: mixed
-**Description**: Developer switches which LLM provider services agent conversations; in-flight requests on the previous provider complete or cancel cleanly, and the choice persists across restarts. Input: provider-selector choice. Process: update `SettingsStore` → subsequent requests route to the newly selected vendor client crate. Output: new agent requests serviced by the selected provider.
-
-**Workspace**: zed (crates/language_model, per-vendor client crates)
-**Languages**: Rust
-**Components**: provider selector, vendor client routing
-
-**Related UI Surfaces**:
-- Agent panel / Settings: provider selector
-
-**Related User Stories**:
-- US019_SwitchLlmProvider: Switch the agent's active LLM provider
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- SettingsStore
-
-**Related Background Logic**:
-- BL013_SettingsStoreObserver: provider choice change is persisted and observed via settings
-- BL009_LlmProviderClients: subsequent requests route to the newly selected vendor client
-
-**Related Permissions**:
-- N/A
-
----
-
-### F022_AutoUpdate: Application auto-update
-
-**Type**: background
-**Description**: The application periodically checks for and applies updates in the background so the developer stays current without a manual download. Input: none (time-driven). Process: scheduled poller checks the update server, re-arming after each check regardless of success/failure. Output: on a new release, update downloads and a restart prompt appears.
-
-**Workspace**: zed (crates/auto_update, crates/scheduler)
-**Languages**: Rust
-**Components**: update poller, scheduler timer abstraction
-
-**Related UI Surfaces**:
-- N/A — background system behavior; no dedicated UI surface beyond a restart prompt
-
-**Related User Stories**:
-- US020_ReceiveAutoUpdateNotification: Receive and apply an application auto-update
-
-**Related APIs/Routes**:
-- N/A — Zed's own update server, not a documented public route
-
-**Related Data Models**:
-- N/A (ephemeral poller state, no persisted entity)
-
-**Related Background Logic**:
-- BL001_AutoUpdatePoller: the periodic update-check loop itself
-- BL002_SchedulerTrait: underlying timer abstraction the poller sleeps on between checks
-
-**Related Permissions**:
-- N/A
-
----
-
-### F014_KeyboardActionDispatch: Keyboard shortcut action dispatch
-
-**Type**: background
-**Description**: A keystroke is matched against the focused element's registered `actions!()` bindings and keymap context, then dispatched to the nearest handler up the focus/view hierarchy; unbound keystrokes pass through without triggering anything. Input: keystroke. Process: keymap-context match → action dispatch to `.on_action()` handler. Output: matched action executes (e.g. Save writes the buffer); unbound keystrokes are no-ops.
-
-**Workspace**: zed (GPUI core, crates/settings keymap config)
-**Languages**: Rust
-**Components**: `actions!()` registrations, `.on_action()` handlers, keymap context
-
-**Related UI Surfaces**:
-- N/A — global input-dispatch mechanism, not a single UI surface
-
-**Related User Stories**:
-- US024_DispatchKeyboardAction: Keyboard shortcut dispatches a registered action
-
-**Related APIs/Routes**:
-- N/A
-
-**Related Data Models**:
-- N/A (keymap/action registration is not a persisted entity)
-
-**Related Background Logic**:
-- BL005_WorkspaceEventEmitterSubscribe: related entity-event plumbing that action handlers often trigger downstream
-
-**Related Permissions**:
-- N/A
+- BL146: command palette invocation logging
+- BL020_FileFinderActions, BL159_CheckRecentHistoryPathExists
+- BL059_ProjectSearchActions
+- BL060_BufferSearchActions
 
 ---
 
 ## Summary
 
-- **Total Features**: 23
-- **Total UI Surfaces (descriptive, no SCR###)**: 18 named surfaces across 20 features (3 features are background-only: F022, F014; partial: F019 has one dedicated surface)
-- **Total User Stories**: 27 (US001–US027, all referenced)
-- **Total Routes**: 0 (native desktop app; no HTTP routes in this codebase per system-overview.md)
-- **Total Data Models**: 18 distinct entity names cited, covering all 16 top-level headings in data-model.md (Project, Worktree, Entry, TextBuffer, Buffer, MultiBuffer, Editor, Theme, ThemeFamily, SettingsStore, ExtensionManifest, Workspace, GitStore, Repository, ProjectPanel, Terminal, Thread, Message — Theme/ThemeFamily and GitStore/Repository are each one heading in data-model.md, counted here as 2 names apiece) — data-model.md does not assign MODEL### codes (entities are heading-identified only), so entity names are cited directly rather than via a code. `Capability` and `ChannelRole` are NOT top-level entities (Capability is a discriminator field on Buffer/MultiBuffer; ChannelRole is a permissions-domain type documented in permissions-matrix.md) and have been re-cited accordingly rather than listed as entities.
-- **Total Background Logic**: 13 distinct BL### codes referenced (BL001–BL013, all referenced across features)
-- **Total Permissions**: 8 formally coded (PERM001–PERM008, verified against permissions-matrix.md), cited under Related Permissions on F002, F006, F007, F008, F011, F018, F019; remaining features genuinely have no PERM### gate
-- **Languages Detected**: Rust (core), WASM (guest extensions via wasm32-wasip2)
+- **Total Features**: 11
+- **Total Screens**: N/A (`screen_source: none`, no ScreenList upstream)
+- **Total User Stories**: 67 (US001–US067, all mapped to a feature above)
+- **Total Routes**: N/A (no HTTP surface)
+- **Total Data Models**: 18 (MODEL001–MODEL018, all referenced above; MODEL006_EntityHandle is
+  cross-cutting and cited once under Editor Core rather than repeated per feature)
+- **Total Background Logic**: 208 items in `behavior-logic.md` (BL001–BL208), all 208 mapped to
+  at least one feature above. Mapping is pattern-matched by name/domain, not individually
+  re-verified per BL### — see Limits.
+- **Total Permissions**: 6 (PERM001–PERM006, all mapped)
+- **Languages Detected**: Rust (host + GPUI UI), WASM (extension guest runtime only)
 
 ## Cross-Reference Validation
 
-- [x] All F### codes are unique (F001–F023, contiguous)
-- [x] All F### codes are referenced in user-stories.md by their constituent US###
-- [x] No SCR### codes appear (screen_source:none — descriptive UI-surface names used instead, per task instruction)
-- [x] All user story references are valid (US001–US027, each appears in exactly one F###)
-- [x] All route references are N/A with reason (no HTTP routes in this codebase)
-- [x] All data model references verified against data-model.md's 16 entities (cited by name; data-model.md assigns no MODEL### codes)
-- [x] All background logic references are valid (BL001–BL013, matching user-stories.md BL citations)
-- [x] All permission references are valid PERM### codes (PERM001–PERM008, verified against permissions-matrix.md and cross-referenced from F002/F006/F007/F008/F011/F018)
-- [x] Every US has a parent feature (F###) — verified below
-- [x] Every background logic BL### cited maps to at least one feature (F###)
+- [x] All F### codes are unique
+- [x] All F### codes are referenced against `user-stories.md`'s Feature Area column (1:1, no
+  invented feature area)
+- [x] Related-screens/routes sections omitted rather than fabricated (`screen_source: none`)
+- [x] All user story references are valid (every US001–US067 appears under exactly one feature)
+- [x] All data model references are valid (every MODEL001–MODEL018 appears under exactly one
+  primary feature)
+- [x] All permission references are valid (every PERM001–PERM006 appears under exactly one feature)
+- [x] Every US has a parent feature (F###)
+- [x] Every data model maps to a feature (F###)
+- [x] Every permission maps to a feature (F###)
+- [x] No AI-agent, collaboration, or LiveKit-based feature reintroduced (verified via
+  `grep -i "agent\|collab\|livekit\|language_model"` against this file before finalizing — the one
+  hit, `agent_server_store`/`agent_location` fields on `Project` in `data-model.md`, is the external
+  ACP agent-server *registry* contributed by extensions, not an in-repo AI chat subsystem, and is
+  not cited as its own feature here; it would belong under F012_ExtensionSystem if storied in a
+  future pass)
 
-### US### → F### Coverage Matrix
+## Limits
 
-| US### | F### |
-|-------|------|
-| US001_OpenProjectFolder | F001_ProjectFolderNavigation |
-| US002_BrowseWorktreeFiles | F001_ProjectFolderNavigation |
-| US003_EditBufferText | F002_BufferTextEditing |
-| US004_OpenMultiBufferSearchResults | F015_MultiBufferSearchResults |
-| US005_ReceiveLspDiagnostics | F003_LspDiagnostics |
-| US006_ApplyLspCodeAction | F016_LspCodeActions |
-| US007_ChangeEditorTheme | F017_EditorThemeCustomization |
-| US008_EditSettingsJson | F005_LiveSettingsEditing |
-| US009_InstallExtension | F006_ExtensionInstallation |
-| US010_ShareProjectForCollaboration | F007_ProjectSharing |
-| US011_JoinSharedProject | F008_JoinSharedProject |
-| US012_ChangeCollaboratorRole | F018_CollaboratorRoleManagement |
-| US013_StartVoiceCall | F019_VoiceVideoCall |
-| US014_RunTerminalCommand | F009_IntegratedTerminal |
-| US015_ViewGitDiff | F010_GitDiffViewing |
-| US016_CommitStagedChanges | F012_GitCommit |
-| US017_ChatWithAiAgent | F013_AiAgentChat |
-| US018_AcceptInlineEditPrediction | F020_InlineEditPrediction |
-| US019_SwitchLlmProvider | F021_LlmProviderSwitching |
-| US020_ReceiveAutoUpdateNotification | F022_AutoUpdate |
-| US021_ReadOnlyBufferRejectsEdit | F002_BufferTextEditing |
-| US022_ExtensionCapabilityDenied | F006_ExtensionInstallation |
-| US023_SettingsChangeNotifiesObservers | F005_LiveSettingsEditing |
-| US024_DispatchKeyboardAction | F014_KeyboardActionDispatch |
-| US025_ResolveGitHostingPermalink | F023_GitHostingPermalink |
-| US026_ReceiveLspCompletions | F004_LspCompletions |
-| US027_StageGitHunk | F011_GitHunkStaging |
-
-## Unresolved Questions
-
-1. Data-model entities are reconciled against `data-model.md` (16 entities); that artifact assigns no `MODEL###` codes (heading-identified only), so entity names are cited directly rather than via a code — no further action needed unless a future pass introduces MODEL### numbering.
-2. Permission references are reconciled against `permissions-matrix.md`'s PERM001–PERM008 registry — resolved, no longer open.
-3. F007_ProjectSharing and F008_JoinSharedProject were kept as two separate features (host-share vs. guest-join) rather than merged into one "Real-time collaboration session" feature, since each is a distinct single user action performed by a distinct role (developer vs. collaborator) — flagging this split for confirmation if a coarser grouping is preferred downstream.
-4. F001_ProjectFolderNavigation merges US001 (open folder) and US002 (browse tree) as one feature since they form a single continuous input→process→output flow (pick folder → watch/populate tree → open file); flagging in case a stricter single-US-per-feature policy is wanted instead.
+- **Background Logic mapping is pattern-matched by name/domain, not individually re-verified
+  per BL###, but coverage IS complete.** All 208 BL items in `behavior-logic.md` (BL001–BL208,
+  including BL208 added during the Wave 7a fix cycle for `crates/util/src/util.rs`) are now
+  assigned to at least one feature above — the 36 items initially clustered as "dev-only/low-signal
+  and deliberately uncovered" (per `user-stories.md`'s narrower story-level scope) were subsequently
+  mapped in during the Wave 7a review fix cycle per the mandatory orphan-BL rule in
+  `verification-checklist-core-artifacts.md`. Several of these (dev-tooling actions, window-chrome
+  actions, remote-dev plumbing) are cross-cutting or low-signal enough that they don't warrant their
+  own US###, but every BL### still has a feature home.
+- **No independent second source cross-checked the Feature Area groupings** beyond
+  `system-overview.md`/`architecture.md`, matching the same limitation `user-stories.md` already
+  states for its own Feature Area column — this list inherits that column directly rather than
+  re-deriving it.
+- **Remote development (SSH/WSL) has no feature of its own.** Its plumbing (BL177, BL185, BL188,
+  BL189, BL135) is scattered across Debugging, Git, Workspace, and Language Intelligence above
+  rather than surfaced as `F0xx_RemoteDevelopment` — consistent with `user-stories.md`'s own Limits
+  note that remote dev was only lightly storied (US018) in this wave. A dedicated remote-dev
+  feature spec, if commissioned, should pull these BL items out into their own feature rather than
+  leaving them split as they are here.
+- **Jupyter/REPL support (BL058, BL115, BL116, BL190–BL192) is folded into Language Intelligence**
+  rather than given its own feature — no US directly stories it and it is a small, single-purpose
+  cluster; flag for a split if Jupyter functionality grows a dedicated user-story set later.

@@ -1,14 +1,14 @@
-# Wave 9 complete — 2026-07-26T07:43:23Z
+# Wave 9 complete — 2026-08-07T05:30:27Z
 # Wave 9.5 complete (core cursor advanced by orchestrator)
 # Scope: core
 # Mode: full
 # Affected artifacts: all
-6682e9ba79df32f9494865dbac9879f4ce55ca41c8a25b08a02c32941e76dd36  docs/system/architecture.md
-2953fb060d1f8ba29cf32a3b08c9ce38c2888554e1359cf4f24e9275496d8e78  docs/generated/entities.md
-43405f6b106fa202e97fe4adf6171d7a6f128f0459e07073bfc88e4114f09f67  docs/generated/behavior-logic.md
-394f8af909ce4db0339fc04e7053e178e737ec6bebc20e018213dac6a5751af9  docs/system/permissions.md
-867a8ba828d46e5c9392fa47db27d3bd27867034f80b0fca0bf9e92c37d5ef31  docs/generated/permissions-matrix.md
-1424f875889d56257730a826de4f820dac258611829fc9b367658f0c6743e5e8  docs/generated/user-stories.md
-16322aece7da604d91ad144880a88571ee269d985ce5932c190f6f21b52a3c78  docs/generated/feature-list.md
-36302c33fe569651358097373cadf6d4789d39c8f2c909ef2057c22fd50137a3  docs/system/business-rules.md
-349e4c79ea63f8ee3040953b9cc0cbb68d4e3843e29300b51b5d7b15ab3d4e99  docs/system/overview.md
+b69a47a141046e4021145166273fbe68827a1623e815335f5a2dda7c00fd87b3  docs/system/architecture.md
+2b3cb6a44002bc264779cc16c80d33c0ec2b23087d70f8de61cb18ba7171b192  docs/generated/entities.md
+42132810be216fcc5d9e06bd5f20167fc1d5d50a6ac6495df3c859f60b4698e8  docs/generated/behavior-logic.md
+63c83768172773d59a6695372ae767e131328360af51e9ab4a7a32d423e1a670  docs/system/permissions.md
+5e12609b6cf4de90c6cc772b5555a8c1465d789e8bb29f7f558583b97e0d6298  docs/generated/permissions-matrix.md
+6e09e6dcec4e6c555544e9c4d3c1e02f0e0f62f4e213d49e3f4bfb020f7e0d4f  docs/generated/user-stories.md
+b44a7bd59395617e24c94a3c39dc308b2f75570983e26e9009d450be9ef29af0  docs/generated/feature-list.md
+2953f3c10fc9455dc2bad1506ddcf5cbc0f519eab84c5bc6b7b61475ef3caac7  docs/system/business-rules.md
+fc544fbf03231c68f45d2a474e78db7016dc6b14de56f92201c79965b301ad2b  docs/system/overview.md

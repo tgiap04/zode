@@ -1,1190 +1,1878 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # User Stories
 
-**Project**: Zed (zode)
-**Generated**: 2026-07-26
-**Analysis Scope**: Full monorepo — native GPUI desktop editor (`generic-source` profile, `screen_source:none`)
+**Project**: zode (Zed fork)
+**Generated**: 2026-08-07
+**Analysis Scope**: Full monorepo — native GPUI desktop editor (`generic-source` profile, `screen_source: none`)
 
-**Code Format**: All US codes follow `US###_NameSlug` format (e.g., US001_OpenProject).
+**Code Format**: All US codes follow `US###_NameSlug` format (e.g., US001_NavigateCursorWithMotions).
 
 **US Types**:
-- `ui` - User-facing stories (developer interacting with an editor surface)
-- `system` - System stories: hook, event, observer, bg-job, trigger, etc. (mapped to BL### only)
+- `ui` - User-facing stories (developer or extension author interacting with an editor surface/API)
+- `system` - System stories: background lifecycle, sandbox enforcement, persistence (no screen mapping)
 
-## Adaptation Note (no ScreenList upstream)
+## Rewrite Note (corrects a fabricated prior pass)
 
-Zed is a native desktop app, not a routed web app — no `screen-list.md`/`screen-flow.md` artifact
-exists upstream (per `_session-context.md` and `behavior-logic.md`, `screen_source:none`). Per the
-template's own allowance ("`ui`-typed stories may map to `SCR###`... system US do not"), and because
-no SCR### codes exist to map to, the **Screens** field below names the GPUI `Render`-implementing
-UI surface descriptively (e.g. "Editor pane", "Project Panel", "Agent panel") instead of a SCR###
-code. This mirrors system-overview.md's stated analogue: "GPUI `Render`-implementing entities
-(`Editor`, `Workspace`, dock panels)" stand in for screens. No `[IPE_ZERO]` screen-map table is
-produced since there is no ScreenList to cross-validate against.
+The 2026-07-26 draft of this file invented an AI-agent/collaboration subsystem (`US002_ShareProjectForCollaboration`,
+`US003_JoinSharedProject`, `US004_ChangeCollaboratorRole`, `US005_StartVoiceCall`, `US006_ChatWithAiAgent`,
+`US007_AcceptInlineEditPrediction`, `US008_SwitchLlmProvider`) that **does not exist in this fork**. Per
+`architecture.md`'s correction note: `crates/collab`, `crates/call`, `crates/agent*`, `crates/language_model`
++ provider crates, and `livekit_api`/`livekit_client` are all absent from the workspace (verified against root
+`Cargo.toml` members). This pass is derived only from the current `behavior-logic.md` (207 BL items) and
+`permissions-matrix.md` (6 PERM items) — every US below cites a real BL### or PERM### code, or (for the two
+hibernation stories with no dedicated BL entry) a direct `file:line` citation re-verified against source in
+this session.
 
-**Roles used**: `developer` (the local editor user / project owner), `collaborator` (a remote
-participant joined to a shared project, further qualified by ChannelRole where relevant: Admin /
-Member / Talker / Guest), `extension author` (third-party code author, non-interactive role).
+## Adaptation Note (no ScreenList upstream, `screen_source: none`)
 
-## User Story Index
+zode is a native desktop app with no routed web surface — no `screen-list.md`/`screen-flow.md` exists upstream.
+Per the IPE protocol's headless-profile rule (`references/user-stories-ipe-protocol.md` Step 3), interaction
+points are sourced from `behavior-logic.md`'s `custom-command` items (the app's keybinding/command-palette/
+context-menu action surface — the functional analogue of "screen interactions" for a `Render`-dispatch desktop
+app) plus select `integration`/`observer`/`queue-worker` items that are directly user-reachable, plus
+`permissions-matrix.md`'s capability gates. The **Feature Area** column stands in for a Screen field.
 
-| Code | Title | Type | Priority | Screens |
-|------|-------|------|----------|---------|
-| US001_OpenProjectFolder | Open a project folder | ui | must | Workspace |
-| US002_BrowseWorktreeFiles | Browse worktree files in the project panel | ui | must | Project Panel |
-| US003_EditBufferText | Edit an open file's text | ui | must | Editor pane |
-| US004_OpenMultiBufferSearchResults | Open search results as a multi-buffer | ui | should | Editor pane / Search results |
-| US005_ReceiveLspDiagnostics | Receive LSP diagnostics while typing | ui | must | Editor pane |
-| US006_ApplyLspCodeAction | Apply an LSP code action | ui | should | Editor pane |
-| US007_ChangeEditorTheme | Change the editor's color theme | ui | should | Settings / Theme picker |
-| US008_EditSettingsJson | Edit a setting in `settings.json` and see it take effect live | ui | must | Settings editor |
-| US009_InstallExtension | Install a third-party extension | ui | should | Extensions panel |
-| US010_ShareProjectForCollaboration | Share a project so others can collaborate | ui | must | Workspace / Collab panel |
-| US011_JoinSharedProject | Join a shared project as a collaborator | ui | must | Workspace / Collab panel |
-| US012_ChangeCollaboratorRole | Change a collaborator's role in a shared project | ui | should | Collab panel |
-| US013_StartVoiceCall | Start a voice/video call with collaborators | ui | should | Call panel |
-| US014_RunTerminalCommand | Run a shell command in the integrated terminal | ui | must | Terminal panel |
-| US015_ViewGitDiff | View a file's git diff | ui | must | Git panel / Editor gutter |
-| US016_CommitStagedChanges | Commit staged changes | ui | must | Git panel |
-| US017_ChatWithAiAgent | Chat with the AI agent in a thread | ui | must | Agent panel |
-| US018_AcceptInlineEditPrediction | Accept an inline AI edit prediction | ui | should | Editor pane |
-| US019_SwitchLlmProvider | Switch the agent's active LLM provider | ui | should | Agent panel / Settings |
-| US020_ReceiveAutoUpdateNotification | Receive and apply an application auto-update | system | should | — |
-| US021_ReadOnlyBufferRejectsEdit | Read-only buffer silently rejects an edit attempt | system | must | Editor pane |
-| US022_ExtensionCapabilityDenied | Extension's undeclared capability request is denied | system | must | — |
-| US023_SettingsChangeNotifiesObservers | Settings-store change notifies all registered observers | system | must | — |
-| US024_DispatchKeyboardAction | Keyboard shortcut dispatches a registered action | system | must | — |
-| US025_ResolveGitHostingPermalink | Resolve a permalink for the current git remote | ui | could | Editor pane / Git panel |
-| US026_ReceiveLspCompletions | Receive LSP completion suggestions while typing | ui | must | Editor pane |
-| US027_StageGitHunk | Stage a git hunk | ui | must | Git panel / Editor gutter |
+**Roles used**: `developer` (the single local user of this desktop editor — its only application-level actor;
+no admin/manager/multi-tenant roles exist per `permissions-matrix.md`) and `extension author` (the non-interactive
+role that authors a WASM extension manifest consumed by the sandbox — used only for the three capability-
+declaration stories, where the actor is genuinely distinct from the editor's end-user).
+
+## Scope and Method
+
+`behavior-logic.md` documents 100 `custom-command` items (BL001–BL100), several of which are themselves
+umbrella action registries bundling many single-purpose keybindings under one source file (e.g. `BL013_EditorCoreActions`
+lists "dozens" of cursor/selection/edit commands; `BL005_DebuggerSessionControlActions` lists 20+ debugger
+commands). Per Step 4 of the IPE protocol (anti-CRUD, exactly one verb per US), a bundling BL is **split** across
+multiple US — one per distinct user intent — rather than merged into one "manage X" story. Conversely, closely
+related sub-verbs that form one conceptual action for this actor (e.g. Vim's `w`/`e`/`b` motions, or the
+debugger's step-over/into/out/back) are treated as **one** US under a single umbrella verb ("navigate", "step
+through"), consistent with how the source BL entry itself already groups them as one registered action set —
+this mirrors the accepted Vim-motion precedent in the IPE protocol's own merge-exception spirit (same actor,
+same handler family, no branching between them).
+
+This pass covers **67 user stories**, a curated, representative selection across every functional domain named
+in the Wave 4 task brief (core editing, extension capabilities, workspace/project management incl. multi-project
+hibernation, git, LSP/toolchain, debugging, terminal, vim) rather than an exhaustive 1:1 mapping of all 207 BL
+items — see **Limits** at the end for what was deliberately left uncovered and why.
 
 ## Interaction Inventory
 
-> No SCR###/ScreenList upstream exists for this project (native desktop app, `screen_source:none`);
-> rows below use the descriptive UI-surface names from the Index above in place of `{SCR###_Name}`,
-> per the Adaptation Note.
+> One row per interactive element mapped to a user story below. `N/A` in Endpoint = no HTTP surface (desktop app).
 
-| Screen | Element | Type | Action | Endpoint |
-|--------|---------|------|--------|---------|
-| Workspace | "Open Folder" menu item / dialog | primary-action | Opens a native file picker, adds the chosen path as a `Worktree` in the `Project` | N/A |
-| Project Panel | File/directory entry | navigation | Opens the file's buffer in the active pane, or expands/collapses a directory `Entry` | N/A |
-| Editor pane | Text buffer | primary-action | Keystrokes mutate the `TextBuffer`/`Buffer` rope; `Editor` view re-renders | N/A |
-| Editor pane | Search results multi-buffer | secondary-action | Aggregates matching excerpts from multiple buffers into one scrollable `MultiBuffer` | N/A |
-| Editor pane | Inline diagnostic/completion popover | system-action | LSP `textDocument/publishDiagnostics` / `textDocument/completion` response rendered inline | N/A |
-| Editor pane | Code action lightbulb | secondary-action | Requests `textDocument/codeAction`, applies chosen action's `WorkspaceEdit` | N/A |
-| Theme picker | Theme list item | primary-action | Swaps the active `Theme`/`ThemeFamily`, re-renders all `Render`-implementing entities | N/A |
-| Settings editor | `settings.json` text buffer | primary-action | On save, `SettingsStore` re-parses JSON and notifies `impl Settings for` registrants | N/A |
-| Extensions panel | "Install" button | primary-action | Downloads, verifies, and loads a WASM extension via `extension_host` | N/A |
-| Workspace | "Share Project" action | primary-action | Registers the current `Project` with `collab` server, generates an invite/join link | N/A |
-| Collab panel | "Join" action | primary-action | Client connects to `collab` server over RPC, requests project state as the assigned `ChannelRole` | N/A |
-| Collab panel | Role dropdown per participant | destructive-action | Admin-only; changes another participant's `ChannelRole` (Admin/Member/Talker/Guest/Banned) | N/A |
-| Call panel | "Start Call" / "Join Call" button | primary-action | Establishes a LiveKit WebRTC session for voice/video with room participants | N/A |
-| Terminal panel | Command input | primary-action | Spawns a shell process, streams stdout/stderr into the `Terminal` entity | N/A |
-| Git panel | "Stage Hunk" inline action | primary-action | Applies a hunk-level stage operation via `GitStore`/`Repository` | N/A |
-| Git panel | "Commit" button | primary-action | Runs `git commit` against staged changes in the active `Repository` | N/A |
-| Agent panel | Message input + "Send" | primary-action | Appends a `Message` to the active `Thread`, streams the model response, dispatches queued tool calls | N/A |
-| Editor pane | Inline edit-prediction ghost text | secondary-action | Tab/Accept action applies the AI-suggested edit to the buffer | N/A |
-| Agent panel | Provider selector | secondary-action | Switches which `language_model` provider crate services the active `Thread` | N/A |
-| — (system) | Auto-update background loop | system-action | Periodically polls update server; on new release, downloads and prompts a restart | N/A |
-| Editor pane | Edit keystroke on a read-only buffer | system-action | Edit is silently discarded — `Capability` check fails before the rope mutation applies | N/A |
-| — (system) | Extension host capability call | system-action | `extension_host` checks the call against the manifest allowlist; undeclared calls are rejected pre-execution | N/A |
-| — (system) | `SettingsStore` re-parse | system-action | Fires observer callbacks on every `impl Settings for` registrant after a settings-JSON change | N/A |
-| — (system) | Keybinding trigger | system-action | GPUI matches the keystroke to a registered `actions!()` action and dispatches to the focused handler | N/A |
-| Git panel | "Copy Permalink" action | secondary-action | Resolves the current git remote via `GitHostingProvider` to build a GitHub/GitLab/Bitbucket permalink URL | N/A |
+| Feature Area | Element | Type | Action | Endpoint |
+|---|---|---|---|---|
+| Editor Core | Motion keybindings (`w`/`e`/next-word etc.) | primary-action | Move cursor by structural unit | N/A |
+| Editor Core | Selection keybindings (`SelectNext`/`SelectPrevious`) | primary-action | Extend selection to next/prev match | N/A |
+| Editor Core | `DeleteToBeginningOfLine` keybinding | destructive-action | Delete text to line boundary | N/A |
+| Editor Core | `ToggleSplitDiff` toolbar/keybinding | secondary-action | Toggle split-diff view style | N/A |
+| Diagnostics | `DeployCurrentFile` command | navigation | Open buffer-scoped diagnostics | N/A |
+| Diagnostics | `Deploy` (project diagnostics) command | navigation | Open project-wide diagnostics | N/A |
+| Diagnostics | Status-bar activity indicator click | secondary-action | View last LSP error message | N/A |
+| Debugging | `Start` debugger command | primary-action | Start a debug session | N/A |
+| Debugging | `Continue`/`StepInto`/`StepOver`/`StepOut`/`StepBack` | primary-action | Step through code while debugging | N/A |
+| Debugging | `Stop`/`Detach` debugger command | destructive-action | Stop a debug session | N/A |
+| Debugging | `ClearAllBreakpoints` command | destructive-action | Clear all breakpoints | N/A |
+| Debugging | `WatchExpression` console command | primary-action | Add a watch expression | N/A |
+| Debugging | Variable-list expand/select | secondary-action | Inspect a variable in the debug panel | N/A |
+| Debugging | `EditVariable` command | primary-action | Edit a variable's value while debugging | N/A |
+| Debugging | "Attach to Process" modal (remote) | system-action | Attach debugger to a remote process | N/A |
+| Git | Hunk "Stage" gutter/context action | primary-action | Stage a git hunk | N/A |
+| Git | Hunk "Unstage" gutter/context action | primary-action | Unstage a git hunk | N/A |
+| Git | Branch picker entry select | primary-action | Switch git branch | N/A |
+| Git | Branch picker "create new branch" | primary-action | Create a git branch | N/A |
+| Git | Commit-view stash command | primary-action | Stash uncommitted changes | N/A |
+| Git | Git-panel "Discard" context action | destructive-action | Discard file changes in git panel | N/A |
+| Git | Git-panel "Commit" button | primary-action | Commit staged changes | N/A |
+| Git | Project Diff command | navigation | View project-wide diff | N/A |
+| Git | Git Graph tab command | navigation | View git commit graph | N/A |
+| Extensions | "Reload Extensions" command | secondary-action | Reload all extensions | N/A |
+| Extensions | "Install Dev Extension" button | primary-action | Install a local dev extension | N/A |
+| Extensions | Dev-extension file-change trigger | system-action | Compile a dev extension | N/A |
+| Extensions | Context-server status UI restart button | primary-action | Restart a context/MCP server | N/A |
+| Extensions | MCP client connects to local socket | system-action | Connect to a context server over MCP | N/A |
+| Extensions | Extension manifest `capabilities` entry | system-action | Declare a process-exec capability | N/A |
+| Extensions | Extension manifest `capabilities` entry | system-action | Declare a download-file capability | N/A |
+| Extensions | Extension manifest `capabilities` entry | system-action | Declare an npm-install capability | N/A |
+| Extensions | Sandbox capability check (deny path) | system-action | Reject an undeclared capability request | N/A |
+| Workspace | Welcome-screen recent-project entry click | navigation | Open a recent project from Welcome | N/A |
+| Workspace | Project-panel keybinding/context menu | navigation | Navigate project panel entries | N/A |
+| Workspace | Project-panel "New File" action | primary-action | Create a file in the project panel | N/A |
+| Workspace | Worktree picker "Delete" | destructive-action | Delete a worktree | N/A |
+| Workspace | Sidebar toggle keybinding/click | secondary-action | Toggle the multi-project sidebar | N/A |
+| Workspace | Sidebar `NextProject`/`PreviousProject` | navigation | Switch active project in sidebar | N/A |
+| Workspace | Idle timer expiry (automatic) | system-action | Hibernate an idle project | N/A |
+| Workspace | Click a hibernated project entry | primary-action | Reactivate a hibernated project | N/A |
+| Workspace | "Initialize Dev Container" command | primary-action | Initialize a dev container for a project | N/A |
+| Workspace | Dev-container open/attach trigger | system-action | Build and run a dev container | N/A |
+| Terminal | New terminal panel + keystrokes | primary-action | Run a command in the integrated terminal | N/A |
+| Terminal | Terminal panel toggle keybinding | secondary-action | Toggle the terminal panel | N/A |
+| Terminal | Task-runner "Run Task" command | primary-action | Run a configured task | N/A |
+| Terminal | Cmd-F inside terminal pane | secondary-action | Search terminal scrollback | N/A |
+| Language Intelligence | Status-bar toolchain indicator click | secondary-action | Switch language server toolchain | N/A |
+| Language Intelligence | Status-bar language indicator click | secondary-action | Switch a buffer's language | N/A |
+| Language Intelligence | "Restart Language Servers" command | system-action | Restart language servers for a buffer | N/A |
+| Vim | Motion keys (`w`/`e`/`b`/`j`/`k`) | primary-action | Navigate text with Vim motions | N/A |
+| Vim | `i`/`a`/`I`/`A`/`o`/`O` keys | primary-action | Enter Vim insert mode | N/A |
+| Vim | `v`/`V`/`Ctrl-V` keys | primary-action | Select text in Vim visual mode | N/A |
+| Vim | `:`-command line | primary-action | Run a Vim ex command | N/A |
+| Vim | `.` repeat key | primary-action | Repeat the last Vim change | N/A |
+| Vim | Operator+object combo (`diw`, `ci(`) | primary-action | Select a Vim text object | N/A |
+| Settings | Settings editor field edit | primary-action | Edit a setting in settings.json | N/A |
+| Settings | Keymap editor binding edit | primary-action | Edit a keymap binding | N/A |
+| Settings | "Base Keymap" selector | secondary-action | Switch the base keymap preset | N/A |
+| Settings | "Backup and Update" migration dialog button | system-action | Back up and migrate settings on update | N/A |
+| Search | File Finder modal | primary-action | Find a file by fuzzy name | N/A |
+| Search | Project Search panel | primary-action | Search across the whole project | N/A |
+| Search | In-buffer search bar (Cmd-F) | primary-action | Search within the current buffer | N/A |
+| App Shell | Ctrl/Cmd+Tab modal | navigation | Switch between open tabs | N/A |
+
+## User Story Index
+
+| Code | Title | Type | Priority | Feature Area |
+|---|---|---|---|---|
+| US001_NavigateCursorWithMotions | Navigate cursor with structural motions | ui | must | Editor Core |
+| US009_ExtendSelectionToNextMatch | Extend selection to next match | ui | should | Editor Core |
+| US010_DeleteTextToLineBoundary | Delete text to line boundary | ui | must | Editor Core |
+| US011_ToggleSplitDiffView | Toggle split-diff view | ui | should | Editor Core |
+| US012_OpenBufferDiagnostics | Open buffer diagnostics | ui | must | Diagnostics |
+| US013_OpenProjectDiagnostics | Open project diagnostics | ui | must | Diagnostics |
+| US014_ViewLanguageServerErrorStatus | View language server error status | ui | should | Diagnostics |
+| US015_StartDebugSession | Start a debug session | ui | must | Debugging |
+| US016_StepThroughCodeWhileDebugging | Step through code while debugging | ui | must | Debugging |
+| US002_StopDebugSession | Stop a debug session | ui | must | Debugging |
+| US003_ClearAllBreakpoints | Clear all breakpoints | ui | should | Debugging |
+| US004_AddWatchExpression | Add a watch expression | ui | should | Debugging |
+| US005_InspectVariableInDebugPanel | Inspect a variable in the debug panel | ui | should | Debugging |
+| US017_EditVariableValueWhileDebugging | Edit a variable's value while debugging | ui | should | Debugging |
+| US018_AttachDebuggerToRemoteProcess | Attach debugger to a remote process | ui | should | Debugging |
+| US019_StageGitHunk | Stage a git hunk | ui | must | Git |
+| US006_UnstageGitHunk | Unstage a git hunk | ui | must | Git |
+| US007_SwitchGitBranch | Switch git branch | ui | must | Git |
+| US008_CreateGitBranch | Create a git branch | ui | should | Git |
+| US020_StashUncommittedChanges | Stash uncommitted changes | ui | should | Git |
+| US021_DiscardFileChangesInGitPanel | Discard file changes in git panel | ui | must | Git |
+| US022_CommitStagedChanges | Commit staged changes | ui | must | Git |
+| US023_ViewProjectWideDiff | View project-wide diff | ui | should | Git |
+| US024_ViewGitCommitGraph | View git commit graph | ui | should | Git |
+| US025_ReloadExtensions | Reload all extensions | ui | should | Extensions |
+| US026_InstallDevExtension | Install a local dev extension | ui | should | Extensions |
+| US027_CompileDevExtension | Compile a dev extension | system | should | Extensions |
+| US028_RestartContextServer | Restart a context/MCP server | ui | should | Extensions |
+| US029_ConnectToContextServerOverMcp | Connect to a context server over MCP | system | should | Extensions |
+| US030_DeclareProcessExecCapability | Declare a process-exec capability | ui | must | Extensions |
+| US031_DeclareDownloadFileCapability | Declare a download-file capability | ui | should | Extensions |
+| US032_DeclareNpmInstallCapability | Declare an npm-install capability | ui | should | Extensions |
+| US033_RejectUndeclaredExtensionCapability | Reject an undeclared capability request | system | must | Extensions |
+| US034_OpenRecentProjectFromWelcomeScreen | Open a recent project from Welcome | ui | must | Workspace |
+| US035_NavigateProjectPanelEntries | Navigate project panel entries | ui | must | Workspace |
+| US036_CreateFileInProjectPanel | Create a file in the project panel | ui | must | Workspace |
+| US037_DeleteWorktreeFromPicker | Delete a worktree | ui | should | Workspace |
+| US038_ToggleMultiProjectSidebar | Toggle the multi-project sidebar | ui | must | Workspace |
+| US039_SwitchActiveProjectInSidebar | Switch active project in sidebar | ui | must | Workspace |
+| US040_HibernateIdleProject | Hibernate an idle project | system | should | Workspace |
+| US041_ReactivateHibernatedProject | Reactivate a hibernated project | ui | must | Workspace |
+| US042_InitializeDevContainerForProject | Initialize a dev container | ui | should | Workspace |
+| US043_BuildDevContainerImage | Build a dev container image | system | should | Workspace |
+| US044_RunDevContainerLifecycleScripts | Run a dev container's lifecycle scripts | system | should | Workspace |
+| US045_RunCommandInIntegratedTerminal | Run a command in the integrated terminal | ui | must | Terminal |
+| US046_ToggleTerminalPanel | Toggle the terminal panel | ui | must | Terminal |
+| US047_RunConfiguredTask | Run a configured task | ui | must | Terminal |
+| US048_SearchTerminalScrollback | Search terminal scrollback | ui | should | Terminal |
+| US049_SwitchLanguageServerToolchain | Switch language server toolchain | ui | should | Language Intelligence |
+| US050_SwitchBufferLanguage | Switch a buffer's language | ui | should | Language Intelligence |
+| US051_RestartLanguageServersForBuffer | Restart language servers for a buffer | system | should | Language Intelligence |
+| US052_NavigateTextWithVimMotions | Navigate text with Vim motions | ui | must | Vim |
+| US053_EnterVimInsertMode | Enter Vim insert mode | ui | must | Vim |
+| US054_SelectTextInVimVisualMode | Select text in Vim visual mode | ui | must | Vim |
+| US055_RunVimExCommand | Run a Vim ex command | ui | should | Vim |
+| US056_RepeatLastVimChange | Repeat the last Vim change | ui | should | Vim |
+| US057_SelectVimTextObject | Select a Vim text object | ui | should | Vim |
+| US058_EditSettingsJson | Edit a setting in settings.json | ui | must | Settings |
+| US059_EditKeymapBinding | Edit a keymap binding | ui | must | Settings |
+| US060_SwitchBaseKeymapPreset | Switch the base keymap preset | ui | should | Settings |
+| US061_BackupSettingsBeforeMigration | Back up settings before a schema migration | system | must | Settings |
+| US062_MigrateSettingsToCurrentSchema | Migrate settings to the current schema | system | must | Settings |
+| US063_FindFileByFuzzyName | Find a file by fuzzy name | ui | must | Search |
+| US064_SearchAcrossProject | Search across the whole project | ui | must | Search |
+| US065_SearchWithinCurrentBuffer | Search within the current buffer | ui | must | Search |
+| US066_SwitchBetweenOpenTabs | Switch between open tabs | ui | must | App Shell |
+| US067_OpenDebugAdapterLogs | Open Debug Adapter Protocol logs | ui | could | Debugging |
 
 ---
 
-## US001_OpenProjectFolder: Open a project folder
+## US001_NavigateCursorWithMotions: Navigate cursor with structural motions
 
 **Type**: ui
 **Interaction**: primary-action
 **Priority**: must
-**Estimate**: M
+**Feature Area**: Editor Core
 
 ### User Story
-
-As a developer, I want to open a project folder so that I can browse and edit its files.
+As a developer, I want to move my cursor by structural units (word, line, page) so that I can navigate a file without reaching for the mouse.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Selecting a folder via the native file picker adds it as a `Worktree` under the current `Project`.
-- [ ] Criterion 2: The `Worktree`'s file tree is populated in the Project Panel without a full manual re-scan (incremental filesystem watching).
-- [ ] Criterion 3: Opening a folder that is already open focuses the existing `Workspace` window instead of creating a duplicate.
-
-### Technical Notes
-
-- **Endpoint**: N/A (native OS file dialog, no HTTP route)
-- **Data Required**: `Project`, `Worktree`, `Entry` (data-model.md)
-- **Dependencies**: OS-level file-picker integration; `crates/fs` filesystem watcher
-
-### Screens
-
-- Workspace: main application window
+- [ ] Motion keybindings from `keymap.json` move the cursor without altering buffer content.
+- [ ] Page-up/page-down motions keep the cursor within the visible viewport bounds after scrolling.
 
 ### Background Logic
-
-- BL005_WorkspaceEventEmitterSubscribe: `Workspace` emits an event when a worktree is added, other panels subscribe to refresh.
+- BL013_EditorCoreActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | No project is open | Developer selects a folder via "Open Folder" | The folder appears as a root `Worktree` with its files listed in the Project Panel |
-| Error Case | Selected path was deleted/unmounted between pick and open | Developer confirms the (now-invalid) path | Workspace surfaces an error state for that worktree instead of silently showing an empty tree |
+|---|---|---|---|
+| Happy Path | Cursor is mid-line in an open buffer | Developer presses `MoveToBeginningOfLine` | Cursor moves to column 0 of the current line, buffer text unchanged |
 
 ---
 
-## US002_BrowseWorktreeFiles: Browse worktree files in the project panel
+## US009_ExtendSelectionToNextMatch: Extend selection to next match
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Editor Core
+
+### User Story
+As a developer, I want to extend my selection to the next occurrence of the selected text so that I can multi-select and edit repeated identifiers quickly.
+
+### Acceptance Criteria
+- [ ] `SelectNext` adds a new selection at the next match without losing existing selections.
+- [ ] `SelectPrevious` behaves symmetrically in the reverse direction.
+
+### Background Logic
+- BL013_EditorCoreActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A word is selected, and it recurs later in the buffer | Developer triggers `SelectNext` | A second cursor/selection is added at the next occurrence |
+
+---
+
+## US010_DeleteTextToLineBoundary: Delete text to line boundary
+
+**Type**: ui
+**Interaction**: destructive-action
+**Priority**: must
+**Feature Area**: Editor Core
+
+### User Story
+As a developer, I want to delete text from my cursor to the beginning of the line so that I can clear a partial line without selecting it manually.
+
+### Acceptance Criteria
+- [ ] `DeleteToBeginningOfLine` removes exactly the text between the line start and the cursor.
+- [ ] The deletion is a single undoable operation.
+
+### Background Logic
+- BL013_EditorCoreActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Cursor sits after 10 characters of indentation+text on a line | Developer triggers `DeleteToBeginningOfLine` | Those 10 characters are removed and `Undo` restores them in one step |
+
+---
+
+## US011_ToggleSplitDiffView: Toggle split-diff view
+
+**Type**: ui
+**Interaction**: secondary-action
+**Priority**: should
+**Feature Area**: Editor Core
+
+### User Story
+As a developer, I want to toggle the diff style of a split editor so that I can compare panes in the layout that's easiest to read for the change at hand.
+
+### Acceptance Criteria
+- [ ] `ToggleSplitDiff` switches the `SplittableEditor`'s diff rendering between its two supported styles.
+- [ ] The toggle persists for that editor instance until toggled again or the editor is closed.
+
+### Background Logic
+- BL014_ToggleSplitDiffAction
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A split editor is open comparing two buffers | Developer triggers `ToggleSplitDiff` | The diff presentation style flips to its alternate mode |
+
+---
+
+## US012_OpenBufferDiagnostics: Open buffer diagnostics
 
 **Type**: ui
 **Interaction**: navigation
 **Priority**: must
-**Estimate**: S
+**Feature Area**: Diagnostics
 
 ### User Story
-
-As a developer, I want to browse my project's file tree so that I can locate and open the file I need to edit.
+As a developer, I want to open a diagnostics view scoped to my current file so that I can review its errors/warnings without the noise of the whole project.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Expanding a directory `Entry` lazily lists its children without blocking the UI thread.
-- [ ] Criterion 2: Clicking a file `Entry` opens (or focuses, if already open) its `Buffer` in the active editor pane.
-- [ ] Criterion 3: External filesystem changes (files added/removed/renamed) are reflected in the tree without a manual refresh.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `Worktree`, `Entry` (data-model.md)
-- **Dependencies**: `crates/fs` filesystem watcher; `crates/worktree`
-
-### Screens
-
-- Project Panel: file tree dock
+- [ ] `DeployCurrentFile` opens a diagnostics editor showing only excerpts around diagnostics in the focused buffer.
+- [ ] The view updates as new diagnostics arrive for that buffer.
 
 ### Background Logic
-
-- BL005_WorkspaceEventEmitterSubscribe: entry-tree updates propagate to the panel view via entity events.
+- BL011_DeployCurrentFileDiagnosticsAction
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A worktree with nested directories is open | Developer expands a directory | Its child entries render, sorted per the panel's configured order |
-| Error Case | A watched file is deleted on disk while the panel is open | Filesystem watcher detects the deletion | The corresponding `Entry` is removed from the tree without a crash or stale reference |
+|---|---|---|---|
+| Happy Path | The focused buffer has 3 LSP diagnostics | Developer triggers `DeployCurrentFile` | A diagnostics pane opens showing exactly those 3 excerpts |
 
 ---
 
-## US003_EditBufferText: Edit an open file's text
+## US013_OpenProjectDiagnostics: Open project diagnostics
 
 **Type**: ui
-**Interaction**: primary-action
+**Interaction**: navigation
 **Priority**: must
-**Estimate**: L
+**Feature Area**: Diagnostics
 
 ### User Story
-
-As a developer, I want to edit an open file's text so that I can make changes to my code.
+As a developer, I want to open a project-wide diagnostics view so that I can see every error/warning across all open language servers at once.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Keystrokes mutate the underlying `Rope`/`TextBuffer` and the `Editor` view re-renders the change immediately.
-- [ ] Criterion 2: Edits are only accepted when the buffer's `Capability` is `ReadWrite`; otherwise see US021.
-- [ ] Criterion 3: Undo/redo restores prior buffer states using the buffer's operation history.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `TextBuffer`, `Buffer`, `Editor` (data-model.md)
-- **Dependencies**: `crates/text` (rope/sum_tree), `crates/language`, `crates/editor`
-
-### Screens
-
-- Editor pane: active buffer view
+- [ ] `Deploy` opens the project diagnostics view aggregating all worktrees' diagnostics.
+- [ ] `ToggleWarnings` hides/shows warning-severity diagnostics without affecting errors.
 
 ### Background Logic
-
-- BL006_LspRequestDispatch: buffer edits are debounced and forwarded to the language server as `textDocument/didChange`.
+- BL012_ProjectDiagnosticsActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A read-write buffer is focused | Developer types a character | The rope updates, the view re-renders, and the LSP is notified of the change |
-| Error Case | Buffer's capability is Read | Developer attempts to type | See US021_ReadOnlyBufferRejectsEdit — edit is discarded |
+|---|---|---|---|
+| Happy Path | Multiple files across the project have diagnostics | Developer triggers `Deploy` | A single list aggregates diagnostics from every affected file |
 
 ---
 
-## US004_OpenMultiBufferSearchResults: Open search results as a multi-buffer
+## US014_ViewLanguageServerErrorStatus: View language server error status
 
 **Type**: ui
 **Interaction**: secondary-action
 **Priority**: should
-**Estimate**: M
+**Feature Area**: Diagnostics
 
 ### User Story
-
-As a developer, I want to open project-wide search results as a single scrollable view so that I can review and edit matches across many files without opening each one individually.
+As a developer, I want to view the last language-server error from the status bar so that I know a language server has failed without digging through logs.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Running a project search aggregates matching excerpts from multiple `TextBuffer`s into one `MultiBuffer`.
-- [ ] Criterion 2: Editing a match inside the multi-buffer writes back to the originating file's real buffer.
-- [ ] Criterion 3: Excerpts update live if the underlying file changes while the multi-buffer is open.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `MultiBuffer`, `Buffer` (data-model.md)
-- **Dependencies**: `crates/multi_buffer`, project-wide search index
-
-### Screens
-
-- Editor pane / Search results: multi-buffer excerpt view
+- [ ] `ShowErrorMessage` surfaces the most recent LSP error text from the activity indicator.
+- [ ] `DismissMessage` clears the surfaced error without affecting the underlying language server state.
 
 ### Background Logic
-
-- N/A (direct user-triggered aggregation, no BL### applies)
+- BL001_ActivityIndicatorStatusActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A project-wide text search returns matches in 3 files | Developer opens results as a multi-buffer | All 3 files' matching excerpts render in one scrollable pane |
-| Error Case | One matched file is deleted after the search runs, before the multi-buffer is opened | Developer opens the results | The deleted file's excerpt is omitted or marked stale rather than causing a panel error |
+|---|---|---|---|
+| Happy Path | A language server crashed and logged an error | Developer clicks the status-bar activity indicator | The last error message is shown in a status-bar popover |
 
 ---
 
-## US005_ReceiveLspDiagnostics: Receive LSP diagnostics while typing
-
-**Type**: ui
-**Interaction**: system-action
-**Priority**: must
-**Estimate**: M
-
-### User Story
-
-As a developer, I want to see inline diagnostics from the language server so that I can catch errors as I type.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: On buffer change, `textDocument/didChange` is sent and subsequent `publishDiagnostics` notifications render inline squiggles/markers.
-- [ ] Criterion 2: LSP requests run off the UI thread (`cx.background_spawn`) so typing never blocks on network/process latency.
-
-### Technical Notes
-
-- **Endpoint**: N/A (LSP over stdio/socket, not HTTP)
-- **Data Required**: `Buffer`, `Editor` (data-model.md)
-- **Dependencies**: `crates/project` (`LspStore`), configured language server binary
-
-### Screens
-
-- Editor pane: inline diagnostic markers
-
-### Background Logic
-
-- BL006_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A supported language server is attached to the buffer | Developer types an incomplete expression | A syntax error underlines inline |
-| Error Case | The language server process crashes mid-session | Developer continues typing | Editing continues uninterrupted; diagnostics gracefully stop until the server restarts |
-
----
-
-## US026_ReceiveLspCompletions: Receive LSP completion suggestions while typing
-
-**Type**: ui
-**Interaction**: system-action
-**Priority**: must
-**Estimate**: M
-
-### User Story
-
-As a developer, I want completion suggestions from the language server so that I can write code faster.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Requesting completions at the cursor shows a popover populated from `textDocument/completion`.
-- [ ] Criterion 2: LSP requests run off the UI thread (`cx.background_spawn`) so typing never blocks on network/process latency.
-
-### Technical Notes
-
-- **Endpoint**: N/A (LSP over stdio/socket, not HTTP)
-- **Data Required**: `Buffer`, `Editor` (data-model.md)
-- **Dependencies**: `crates/project` (`LspStore`), configured language server binary
-
-### Screens
-
-- Editor pane: completion popover
-
-### Background Logic
-
-- BL006_LspRequestDispatch: `LspStore::handle_lsp_*` handlers dispatch and route LSP protocol messages.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A supported language server is attached to the buffer | Developer types an incomplete expression | A completion popover appears |
-| Error Case | The language server process crashes mid-session | Developer continues typing | Editing continues uninterrupted; completions gracefully stop until the server restarts |
-
----
-
-## US006_ApplyLspCodeAction: Apply an LSP code action
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: should
-**Estimate**: M
-
-### User Story
-
-As a developer, I want to apply a suggested code action so that I can fix an issue or refactor code without typing the fix by hand.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Triggering the code-action menu requests `textDocument/codeAction` and lists the server's suggestions.
-- [ ] Criterion 2: Selecting an action applies its `WorkspaceEdit` atomically across all affected buffers.
-- [ ] Criterion 3: The action is undoable as a single undo-stack entry.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `Buffer` (data-model.md)
-- **Dependencies**: `crates/project` (`handle_apply_code_action`)
-
-### Screens
-
-- Editor pane: code-action lightbulb menu
-
-### Background Logic
-
-- BL006_LspRequestDispatch: `handle_apply_code_action` routes the accepted action back through the LSP dispatch table.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Server returns a single-file rename-symbol code action | Developer selects it | All references update atomically in one undoable edit |
-| Error Case | The `WorkspaceEdit` touches a buffer that has unsaved conflicting edits | Developer applies the action | Action fails cleanly with no partial application, rather than silently corrupting the buffer |
-
----
-
-## US007_ChangeEditorTheme: Change the editor's color theme
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: should
-**Estimate**: S
-
-### User Story
-
-As a developer, I want to change the editor's color theme so that the interface matches my visual preference.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Selecting a theme from the picker swaps the active `Theme`/`ThemeFamily` immediately, no restart required.
-- [ ] Criterion 2: All open `Render`-implementing views (editor, panels, terminal) re-render with the new theme's colors.
-- [ ] Criterion 3: The choice persists across restarts via settings.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `Theme` / `ThemeFamily` (data-model.md)
-- **Dependencies**: `crates/theme`
-
-### Screens
-
-- Settings / Theme picker
-
-### Background Logic
-
-- BL013_SettingsStoreObserver: theme selection is persisted to settings JSON, re-parsed, and observers re-render.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer opens theme picker | Selects a different theme | All UI surfaces immediately reflect the new theme's palette |
-| Error Case | Selected theme references a missing/corrupt theme file | Developer selects it | Editor falls back to the previous theme rather than rendering with broken/undefined colors |
-
----
-
-## US008_EditSettingsJson: Edit a setting in settings.json and see it take effect live
+## US015_StartDebugSession: Start a debug session
 
 **Type**: ui
 **Interaction**: primary-action
 **Priority**: must
-**Estimate**: S
+**Feature Area**: Debugging
 
 ### User Story
-
-As a developer, I want to edit a setting in `settings.json` so that the editor's behavior updates without restarting the app.
+As a developer, I want to start a debug session for my project so that I can run my program under a debugger with breakpoints active.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Saving `settings.json` triggers `SettingsStore` to re-parse the file.
-- [ ] Criterion 2: Every `impl Settings for FooSettings` registrant affected by the change is notified and applies the new value live.
-- [ ] Criterion 3: A malformed JSON edit does not crash the app or silently discard the previous valid settings.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `SettingsStore` (data-model.md)
-- **Dependencies**: `crates/settings`
-
-### Screens
-
-- Settings editor: `settings.json` buffer
+- [ ] `Start` launches a `DebugSession` using the configured debug adapter for the active launch configuration.
+- [ ] A running session becomes visible in the debugger UI (console, variables, breakpoint list panes).
 
 ### Background Logic
-
-- BL013_SettingsStoreObserver: `SettingsStore` re-parses on change and notifies ~40 registrant call sites.
+- BL005_DebuggerSessionControlActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer changes `"tab_size": 2` to `4` | Saves the file | Currently open buffers immediately use 4-space tabs |
-| Error Case | Developer introduces a JSON syntax error and saves | Save completes | `SettingsStore` keeps the last valid parsed settings and surfaces a parse error, rather than crashing |
+|---|---|---|---|
+| Happy Path | A valid debug launch configuration exists for the project | Developer triggers `Start` | A `DebugSession` starts and the debugger panes populate |
+| Error Case | The debug adapter binary is missing/misconfigured | Developer triggers `Start` | Session start fails with a diagnostic message; no session panes are shown as active |
 
 ---
 
-## US009_InstallExtension: Install a third-party extension
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: should
-**Estimate**: M
-
-### User Story
-
-As a developer, I want to install a third-party extension so that I can add language, theme, or tool support not built into the editor.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Installing downloads and loads the extension's compiled `wasm32-wasip2` module into the sandboxed `extension_host` runtime.
-- [ ] Criterion 2: The extension's declared manifest (`ExtensionManifest`) capabilities are recorded as its allowlist before any code runs.
-- [ ] Criterion 3: Extension calls execute off the main thread (`cx.background_spawn`) so a slow/misbehaving extension does not freeze the UI.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `ExtensionManifest` (data-model.md)
-- **Dependencies**: `crates/extension_host`, `crates/extension_api`
-
-### Screens
-
-- Extensions panel: install/manage list
-
-### Background Logic
-
-- BL004_ExtensionHostWasmDispatch: sandboxed WASM calls dispatched in the background and routed back to the main thread.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer selects a published extension | Clicks "Install" | Extension loads, its declared capabilities become active, and it appears as installed |
-| Error Case | Extension's WASM module fails to compile/instantiate (corrupt build) | Install proceeds | Install fails with a surfaced error; host process does not crash |
-
----
-
-## US010_ShareProjectForCollaboration: Share a project so others can collaborate
+## US016_StepThroughCodeWhileDebugging: Step through code while debugging
 
 **Type**: ui
 **Interaction**: primary-action
 **Priority**: must
-**Estimate**: L
+**Feature Area**: Debugging
 
 ### User Story
-
-As a developer, I want to share my open project so that a collaborator can join and pair-program with me in real time.
+As a developer, I want to step through my program's execution one line/call/instruction at a time so that I can trace exactly where a bug occurs.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Sharing registers the current `Project` with the `collab` server over the client↔server RPC connection.
-- [ ] Criterion 2: The host retains full local control; sharing does not restrict the host's own edits.
-- [ ] Criterion 3: An invite/room identifier is produced that a collaborator can use to join.
-
-### Technical Notes
-
-- **Endpoint**: N/A (custom binary RPC over `crates/proto`/`crates/rpc`, not HTTP)
-- **Data Required**: `Project`, `Workspace` (data-model.md)
-- **Dependencies**: `crates/collab` (server), `crates/client`, `crates/call`, `crates/channel`
-
-### Screens
-
-- Workspace / Collab panel: share action + invite UI
+- [ ] `Continue`, `StepInto`, `StepOver`, `StepOut`, and `StepBack` each advance/rewind the active session by the documented unit and pause it again at the next stop point.
+- [ ] The editor's current-line indicator and the variable list refresh to reflect the new stack frame after each step.
 
 ### Background Logic
-
-- BL007_RpcProtoMessageRouting: share request/response routed as a typed proto message over the persistent RPC connection.
+- BL005_DebuggerSessionControlActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer is signed in and has a project open | Clicks "Share Project" | Project registers with `collab`, an invite becomes available, host's own editing is unaffected |
-| Error Case | Network connection to `collab` server is unavailable | Developer clicks "Share Project" | Share fails with a clear connection error rather than silently appearing shared |
+|---|---|---|---|
+| Happy Path | A debug session is paused at a breakpoint | Developer triggers `StepOver` | Execution advances past the current line and pauses again at the next statement in the same frame |
 
 ---
 
-## US011_JoinSharedProject: Join a shared project as a collaborator
+## US002_StopDebugSession: Stop a debug session
 
 **Type**: ui
-**Interaction**: primary-action
+**Interaction**: destructive-action
 **Priority**: must
-**Estimate**: L
+**Feature Area**: Debugging
 
 ### User Story
-
-As a collaborator, I want to join a shared project so that I can view and (if permitted) edit the host's files in real time.
+As a developer, I want to stop a running debug session so that I can terminate the debuggee and free the debugger UI for a new run.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Joining connects to the `collab` server over RPC and assigns the joiner a `ChannelRole` (Admin/Member/Talker/Guest/Banned).
-- [ ] Criterion 2: The joiner receives the shared project's file tree and open buffers reflecting their granted `Capability` (ReadWrite/Read/ReadOnly).
-- [ ] Criterion 3: A `Banned` participant cannot see or access the shared project at all.
-
-### Technical Notes
-
-- **Endpoint**: N/A (custom binary RPC)
-- **Data Required**: `Project`, `Worktree` (data-model.md); `ChannelRole`, `Capability` (permissions.md)
-- **Dependencies**: `crates/collab`, `crates/client`, `crates/call`
-
-### Screens
-
-- Workspace / Collab panel: join flow
+- [ ] `Stop` terminates the debuggee process (or `Detach` leaves it running if the adapter supports detach).
+- [ ] The debugger panes clear their session-scoped state (variables, call stack) once the session ends.
 
 ### Background Logic
-
-- BL007_RpcProtoMessageRouting: join request/state-sync routed over RPC.
-- BL008_InAppNotificationCenter: host is notified in-app that a collaborator has joined.
+- BL005_DebuggerSessionControlActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Collaborator has a valid invite and is assigned Member role | They join | Project files load with read-write access matching the Member role |
-| Error Case | Collaborator's role is Banned | They attempt to join | Connection is rejected server-side; no project data is sent to the client |
+|---|---|---|---|
+| Happy Path | A debug session is running | Developer triggers `Stop` | The debuggee process terminates and the session is removed from the debugger UI |
 
 ---
 
-## US012_ChangeCollaboratorRole: Change a collaborator's role in a shared project
+## US003_ClearAllBreakpoints: Clear all breakpoints
 
 **Type**: ui
 **Interaction**: destructive-action
 **Priority**: should
-**Estimate**: S
+**Feature Area**: Debugging
 
 ### User Story
-
-As a collaboration Admin, I want to change another participant's role so that I can control who can edit, chat, or is removed from the session.
+As a developer, I want to clear every breakpoint in the project so that I can start a clean debugging pass without hunting down stray breakpoints one by one.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Only participants with the Admin `ChannelRole` can change another participant's role.
-- [ ] Criterion 2: Downgrading a participant to Talker/Guest immediately revokes their edit `Capability` server-side (not just hidden in the UI).
-- [ ] Criterion 3: A small set of destructive git-worktree operations remain hard-denied for any non-owning participant regardless of the role granted (permissions.md Special Conditions).
-
-### Technical Notes
-
-- **Endpoint**: N/A (custom binary RPC)
-- **Data Required**: `ChannelRole` (permissions.md)
-- **Dependencies**: `crates/collab` (server-side role enforcement)
-
-### Screens
-
-- Collab panel: participant role dropdown
+- [ ] `ClearAllBreakpoints` removes every breakpoint tracked by the `BreakpointStore`, across all files.
+- [ ] A subsequent debug session run does not stop at any previously-set location.
 
 ### Background Logic
-
-- BL007_RpcProtoMessageRouting: role-change message routed to and enforced by the `collab` server.
+- BL005_DebuggerSessionControlActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Admin downgrades a Member to Talker | Change is applied | That participant's subsequent edit requests are rejected server-side before reaching the host |
-| Error Case | A non-Admin (e.g. Member) attempts the role-change action | Action is attempted | Server rejects the change; the requester's own role is unaffected |
+|---|---|---|---|
+| Happy Path | 5 breakpoints exist across 3 files | Developer triggers `ClearAllBreakpoints` | All 5 breakpoints are removed and the breakpoint list panel shows empty |
 
 ---
 
-## US013_StartVoiceCall: Start a voice/video call with collaborators
+## US004_AddWatchExpression: Add a watch expression
 
 **Type**: ui
 **Interaction**: primary-action
 **Priority**: should
-**Estimate**: M
+**Feature Area**: Debugging
 
 ### User Story
-
-As a developer, I want to start a voice/video call with my collaborators so that we can talk while pair-programming.
+As a developer, I want to add an expression to the debugger's watch list so that its value is continuously evaluated as I step through code.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Starting a call establishes a LiveKit WebRTC session for the current collaboration room.
-- [ ] Criterion 2: Talker-role participants can use voice + text chat; Guest-role participants get text chat only (no microphone).
-- [ ] Criterion 3: Call audio/video quality degrades gracefully (not a hard disconnect) under poor network conditions where LiveKit supports it.
-
-### Technical Notes
-
-- **Endpoint**: N/A (WebRTC via LiveKit SDK, not a REST endpoint)
-- **Data Required**: N/A (call state is transient, not a persisted entity in data-model.md)
-- **Dependencies**: `crates/livekit_api`, `crates/livekit_client`, `crates/call`
-
-### Screens
-
-- Call panel: start/join call controls
+- [ ] `WatchExpression` adds the currently selected/typed expression from the console to the watch list.
+- [ ] The watched expression re-evaluates and updates on every subsequent stop/step.
 
 ### Background Logic
-
-- BL010_LiveKitCallingIntegration: WebRTC session establishment via the LiveKit SDK binding.
+- BL008_ConsoleWatchExpressionAction
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer and a Member collaborator are in a shared room | Developer clicks "Start Call" | A LiveKit session starts and the Member can join with audio |
-| Error Case | A Guest-role participant attempts to unmute their microphone | Mic toggle is attempted | Action is blocked/hidden — Guests are restricted to text chat only |
+|---|---|---|---|
+| Happy Path | Developer types `myVar.count` in the debug console | Developer triggers `WatchExpression` | `myVar.count` appears in the watch panel and updates on the next step |
 
 ---
 
-## US014_RunTerminalCommand: Run a shell command in the integrated terminal
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: M
-
-### User Story
-
-As a developer, I want to run a shell command in the integrated terminal so that I can build, test, or script my project without leaving the editor.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Opening the terminal spawns a shell process scoped to the current project's working directory.
-- [ ] Criterion 2: Command stdout/stderr streams into the `Terminal` entity's view without blocking the UI thread.
-- [ ] Criterion 3: Closing the terminal panel terminates its shell process cleanly.
-
-### Technical Notes
-
-- **Endpoint**: N/A (local process spawn, not HTTP)
-- **Data Required**: `Terminal` (data-model.md)
-- **Dependencies**: `crates/terminal`, `crates/terminal_view`
-
-### Screens
-
-- Terminal panel: shell session view
-
-### Background Logic
-
-- N/A (direct process I/O, no BL### item covers a per-command trigger)
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Terminal panel is open in a project directory | Developer runs `cargo build` | Build output streams live into the terminal pane |
-| Error Case | The configured shell binary is missing/misconfigured | Developer opens a terminal | Panel surfaces a clear spawn error instead of an unresponsive blank pane |
-
----
-
-## US015_ViewGitDiff: View a file's git diff
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: S
-
-### User Story
-
-As a developer, I want to view a file's git diff so that I can see what changed against HEAD.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: The editor gutter/git panel shows added/removed/modified line ranges against the `Repository`'s HEAD.
-- [ ] Criterion 2: The diff view updates live as the buffer is further edited.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `GitStore` / `Repository` (data-model.md)
-- **Dependencies**: `crates/git`
-
-### Screens
-
-- Git panel / Editor gutter: diff markers
-
-### Background Logic
-
-- N/A (direct git-diff computation, no BL### item covers this specifically)
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A tracked file has an edited hunk | Developer opens the git panel/gutter for that file | Added/removed/modified line ranges render against `Repository` HEAD |
-| Error Case | The file has no git-tracked changes | Developer opens the git panel/gutter | No diff markers render; panel shows a clean-file state |
-
----
-
-## US027_StageGitHunk: Stage a git hunk
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: M
-
-### User Story
-
-As a developer, I want to stage a specific git hunk so that I can commit changes incrementally.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Staging a hunk applies only that hunk's changes to the git index, leaving the rest of the file's changes unstaged.
-- [ ] Criterion 2: A non-owning collaborator without write capability cannot stage a hunk.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `GitStore` / `Repository` (data-model.md)
-- **Dependencies**: `crates/git`
-
-### Screens
-
-- Git panel / Editor gutter: stage action
-
-### Background Logic
-
-- N/A (direct git-index operation, no BL### item covers per-hunk staging)
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A tracked file has 2 separate edited hunks | Developer stages hunk 1 only | Git index reflects hunk 1 staged, hunk 2 remains unstaged in the working tree |
-| Error Case | Developer is a non-owning collaborator attempting a destructive worktree git operation | Action is attempted | Hard-denied regardless of assigned collaboration role (permissions.md Special Conditions) |
-
----
-
-## US016_CommitStagedChanges: Commit staged changes
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: S
-
-### User Story
-
-As a developer, I want to commit my staged changes so that I can record a checkpoint in the project's git history.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Committing with a message runs against the active `Repository`'s staged index and produces a new commit.
-- [ ] Criterion 2: The commit panel clears the staged-changes list on success and reflects the new HEAD.
-- [ ] Criterion 3: An empty commit message is rejected before invoking git.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `GitStore` / `Repository` (data-model.md)
-- **Dependencies**: `crates/git`
-
-### Screens
-
-- Git panel: commit message input + commit button
-
-### Background Logic
-
-- N/A (direct, user-triggered git operation)
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer has staged changes and enters a commit message | Clicks "Commit" | A new commit is created and the staged list clears |
-| Error Case | Developer clicks "Commit" with no message | Commit is attempted | Action is blocked with a validation message; no empty-message commit is created |
-
----
-
-## US017_ChatWithAiAgent: Chat with the AI agent in a thread
-
-**Type**: ui
-**Interaction**: primary-action
-**Priority**: must
-**Estimate**: L
-
-### User Story
-
-As a developer, I want to chat with the AI agent so that I can get help writing, explaining, or refactoring code without leaving the editor.
-
-### Acceptance Criteria
-
-- [ ] Criterion 1: Sending a message appends it to the active `Thread` and streams the configured LLM provider's response back into the panel.
-- [ ] Criterion 2: If the response includes tool calls, the `Thread`'s loop dispatches them in order and surfaces each tool's result before continuing.
-- [ ] Criterion 3: The conversation (`Message` history) persists across app restarts for that `Thread`.
-
-### Technical Notes
-
-- **Endpoint**: N/A (vendor LLM API called from `crates/anthropic`/`open_ai`/etc., not a Zed-hosted route)
-- **Data Required**: `Thread`, `Message` (data-model.md)
-- **Dependencies**: `crates/agent`, `crates/language_model`, configured vendor client crate
-
-### Screens
-
-- Agent panel: message input + streamed response view
-
-### Background Logic
-
-- BL003_AgentThreadToolCallLoop: `Thread` loop awaits streamed responses and dispatches queued tool calls.
-- BL009_LlmProviderClients: the per-vendor client crate performs the actual model request.
-
-### Test Scenarios
-
-| Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A valid API key is configured for the active provider | Developer sends a message | Response streams in and any tool calls execute and report results in order |
-| Error Case | Configured provider API key is invalid/expired | Developer sends a message | Thread surfaces an auth error from the vendor client instead of hanging indefinitely |
-
----
-
-## US018_AcceptInlineEditPrediction: Accept an inline AI edit prediction
+## US005_InspectVariableInDebugPanel: Inspect a variable in the debug panel
 
 **Type**: ui
 **Interaction**: secondary-action
 **Priority**: should
-**Estimate**: S
+**Feature Area**: Debugging
 
 ### User Story
-
-As a developer, I want to accept an inline AI-suggested edit so that I can apply likely next changes without typing them manually.
+As a developer, I want to expand a variable in the debugger's variable list so that I can inspect nested fields of a struct/object while paused.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: While typing, a ghost-text prediction renders inline based on surrounding buffer context.
-- [ ] Criterion 2: Accepting (e.g. Tab) applies the prediction to the buffer as a normal, undoable edit.
-- [ ] Criterion 3: Continuing to type without accepting dismisses the prediction without side effects.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `Buffer`, `Editor` (data-model.md)
-- **Dependencies**: `crates/edit_prediction`, `crates/edit_prediction_cli` (offline eval)
-
-### Screens
-
-- Editor pane: inline ghost-text prediction
+- [ ] `ExpandSelectedEntry` reveals the child fields of the selected variable; `CollapseSelectedEntry` hides them again.
+- [ ] `CopyVariableValue` places the currently displayed value text on the clipboard.
 
 ### Background Logic
-
-- BL009_LlmProviderClients: prediction requests may route through a configured provider client.
+- BL010_VariableListActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A prediction is showing inline | Developer presses Tab | Prediction text is inserted into the buffer as a single undoable edit |
-| Error Case | Prediction service request times out | Developer continues typing | No prediction renders; typing is never blocked waiting on the request |
+|---|---|---|---|
+| Happy Path | A paused session shows a struct-typed variable | Developer triggers `ExpandSelectedEntry` | The variable's fields are listed as child rows beneath it |
 
 ---
 
-## US019_SwitchLlmProvider: Switch the agent's active LLM provider
+## US017_EditVariableValueWhileDebugging: Edit a variable's value while debugging
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Debugging
+
+### User Story
+As a developer, I want to edit a variable's value while paused in the debugger so that I can test a different runtime state without restarting the program.
+
+### Acceptance Criteria
+- [ ] `EditVariable` sends the debug adapter a set-variable request for the selected variable with the new value.
+- [ ] The variable list reflects the updated value once the adapter confirms the write.
+
+### Background Logic
+- BL010_VariableListActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A paused session shows an integer variable `count = 3` | Developer edits it to `10` via `EditVariable` | The adapter accepts the write and the panel shows `count = 10` |
+| Error Case | The debug adapter rejects the set-variable request (e.g. read-only binding) | Developer edits the value | The panel keeps the original value and surfaces the adapter's rejection |
+
+---
+
+## US018_AttachDebuggerToRemoteProcess: Attach debugger to a remote process
+
+**Type**: ui
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Debugging
+
+### User Story
+As a developer, I want to attach the debugger to a process already running on my remote (SSH) project so that I can debug a long-lived service without restarting it.
+
+### Acceptance Criteria
+- [ ] Opening the "Attach to Process" modal for a remote project fetches the live process list from the remote host.
+- [ ] Selecting a process starts a debug session attached to that PID on the remote host.
+
+### Background Logic
+- BL150_FetchRemoteProcessListForAttach
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A remote SSH project has a running target process | Developer opens Attach-to-Process and selects it | A debug session attaches to that remote PID |
+
+---
+
+## US019_StageGitHunk: Stage a git hunk
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to stage a single git hunk from the editor gutter so that I can build a commit out of only part of a file's changes.
+
+### Acceptance Criteria
+- [ ] Triggering the stage action on a hunk adds only that hunk's lines to the git index.
+- [ ] Other unstaged hunks in the same file remain unstaged.
+
+### Background Logic
+- BL021_GitHunkStagingActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A file has 2 unstaged hunks | Developer stages hunk 1 from the gutter | `git status` shows hunk 1 staged and hunk 2 still unstaged |
+
+---
+
+## US006_UnstageGitHunk: Unstage a git hunk
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to unstage a single git hunk so that I can remove it from the next commit without discarding the underlying edit.
+
+### Acceptance Criteria
+- [ ] Triggering the unstage action on a staged hunk removes only that hunk from the index.
+- [ ] The working-tree content of the hunk is left untouched.
+
+### Background Logic
+- BL021_GitHunkStagingActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A hunk is currently staged | Developer unstages it | The hunk returns to the "unstaged changes" section, file content unchanged |
+
+---
+
+## US007_SwitchGitBranch: Switch git branch
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to switch to a different local git branch from the branch picker so that I can work on another line of development.
+
+### Acceptance Criteria
+- [ ] Selecting a branch in the picker checks it out in the current repository's worktree.
+- [ ] The git panel/status-bar branch label updates to the newly checked-out branch.
+
+### Background Logic
+- BL023_BranchPickerActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Working tree is clean on branch `main`, `feature-x` exists | Developer selects `feature-x` in the branch picker | Repository checks out `feature-x`; status bar reflects it |
+| Error Case | Working tree has uncommitted changes that conflict with the target branch | Developer selects a different branch | Checkout is refused/prompts the developer rather than silently discarding changes |
+
+---
+
+## US008_CreateGitBranch: Create a git branch
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to create a new git branch from the branch picker so that I can start isolated work without leaving the editor.
+
+### Acceptance Criteria
+- [ ] Entering a new branch name and confirming creates and checks out that branch from the current HEAD.
+- [ ] The new branch is immediately selectable in the branch picker on reopen.
+
+### Background Logic
+- BL023_BranchPickerActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Developer types a novel branch name in the picker's create flow | Developer confirms | A new branch is created at current HEAD and checked out |
+
+---
+
+## US020_StashUncommittedChanges: Stash uncommitted changes
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to stash my uncommitted changes so that I can switch context to a clean working tree without losing my in-progress edits.
+
+### Acceptance Criteria
+- [ ] The stash action captures all uncommitted (staged + unstaged) changes into a new stash entry.
+- [ ] The working tree returns to matching HEAD immediately after stashing.
+
+### Background Logic
+- BL024_CommitViewStashActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | 3 files have uncommitted edits | Developer triggers stash | A stash entry is created and the working tree matches HEAD |
+
+---
+
+## US021_DiscardFileChangesInGitPanel: Discard file changes in git panel
+
+**Type**: ui
+**Interaction**: destructive-action
+**Priority**: must
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to discard a file's uncommitted changes from the git panel so that I can revert it to its last-committed state.
+
+### Acceptance Criteria
+- [ ] The discard action reverts the selected file's working-tree content to match HEAD (or the index, if staged).
+- [ ] The discarded file no longer appears in the git panel's changed-files list.
+
+### Background Logic
+- BL025_GitPanelActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A file has unstaged edits | Developer triggers "Discard" on it from the git panel | The file's content reverts to HEAD and it disappears from the changed-files list |
+
+---
+
+## US022_CommitStagedChanges: Commit staged changes
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to commit my staged changes with a message so that I can record a checkpoint in the repository's history.
+
+### Acceptance Criteria
+- [ ] Confirming a commit in the git panel with staged changes present creates a new commit on the current branch with the entered message.
+- [ ] The staged-changes list is cleared once the commit succeeds.
+
+### Background Logic
+- BL163_CommitStagedChanges
+- BL025_GitPanelActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | 2 hunks are staged and a commit message is entered | Developer confirms commit | A new commit is created containing exactly those 2 hunks |
+| Error Case | Nothing is staged | Developer attempts to commit | Commit is blocked/no-ops rather than creating an empty commit silently |
+
+---
+
+## US023_ViewProjectWideDiff: View project-wide diff
+
+**Type**: ui
+**Interaction**: navigation
+**Priority**: should
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to view a combined diff of every changed file in the project so that I can review my whole working-tree change set in one place before committing.
+
+### Acceptance Criteria
+- [ ] The Project Diff view lists every file with uncommitted changes and their hunks.
+- [ ] Selecting a hunk in the Project Diff view jumps to that hunk's location in the corresponding buffer.
+
+### Background Logic
+- BL027_ProjectDiffActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | 4 files across the project have uncommitted changes | Developer opens Project Diff | All 4 files' diffs are listed in one view |
+
+---
+
+## US024_ViewGitCommitGraph: View git commit graph
+
+**Type**: ui
+**Interaction**: navigation
+**Priority**: should
+**Feature Area**: Git
+
+### User Story
+As a developer, I want to view the repository's commit graph so that I can understand branch/merge history visually.
+
+### Acceptance Criteria
+- [ ] Opening the Git Graph tab renders commits and their parent/child edges for the current repository.
+- [ ] The graph reflects new commits after a refresh/on the panel regaining focus.
+
+### Background Logic
+- BL022_GitGraphActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Repository has 3 branches with a recent merge | Developer opens Git Graph | The merge point and both parent branches are rendered |
+
+---
+
+## US025_ReloadExtensions: Reload all extensions
 
 **Type**: ui
 **Interaction**: secondary-action
 **Priority**: should
-**Estimate**: S
+**Feature Area**: Extensions
 
 ### User Story
-
-As a developer, I want to switch which LLM provider services my agent conversations so that I can use the model/vendor of my choice.
+As a developer, I want to reload all installed extensions so that a newly installed or updated extension takes effect without restarting the editor.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: Selecting a different provider in settings changes which vendor client crate services new agent requests.
-- [ ] Criterion 2: In-flight requests on the previous provider are not corrupted by the switch (completed or cleanly cancelled).
-- [ ] Criterion 3: The chosen provider persists across restarts via `SettingsStore`.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `SettingsStore` (data-model.md)
-- **Dependencies**: `crates/language_model`, per-vendor client crate (`crates/anthropic`, `crates/open_ai`, `crates/bedrock`, etc.)
-
-### Screens
-
-- Agent panel / Settings: provider selector
+- [ ] The reload action tears down and re-initializes every loaded WASM extension instance.
+- [ ] Extensions that fail to reload report an error without crashing the host process.
 
 ### Background Logic
-
-- BL013_SettingsStoreObserver: provider choice change is persisted and observed via settings.
-- BL009_LlmProviderClients: subsequent requests route to the newly selected vendor client.
+- BL017_ReloadExtensionsAction
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Developer switches from Anthropic to a local Ollama model | Sends a new agent message | Request routes through the Ollama client crate instead of Anthropic's |
-| Error Case | Newly selected provider has no credentials configured | Developer sends a message | Agent surfaces a clear "missing credentials" error rather than silently falling back |
+|---|---|---|---|
+| Happy Path | An extension was just updated on disk | Developer triggers "Reload Extensions" | The new extension version is loaded and active |
 
 ---
 
-## US020_ReceiveAutoUpdateNotification: Receive and apply an application auto-update
+## US026_InstallDevExtension: Install a local dev extension
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Extensions
+
+### User Story
+As a developer, I want to install a locally-authored extension directory so that I can test it inside the editor before publishing.
+
+### Acceptance Criteria
+- [ ] The "Install Dev Extension" action loads the selected local directory as a dev extension.
+- [ ] The dev extension appears active on the Extensions page, distinguished from published extensions.
+
+### Background Logic
+- BL018_InstallDevExtensionAction
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A valid local extension directory with `extension.toml` exists | Developer selects it via "Install Dev Extension" | The extension loads and is marked as a dev extension |
+
+---
+
+## US027_CompileDevExtension: Compile a dev extension
 
 **Type**: system
 **Interaction**: system-action
 **Priority**: should
-**Estimate**: M
+**Feature Area**: Extensions
 
 ### User Story
-
-As a developer, I want the editor to check for and apply updates automatically so that I stay on the latest release without manually downloading it.
+As a developer, I want a locally-installed dev extension to rebuild automatically when I trigger a rebuild so that I can iterate on its Rust/WASM source without a manual build step.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: A background task polls the update server periodically from app start, re-arming itself after each check.
-- [ ] Criterion 2: When a new release is found, the update is downloaded and the developer is prompted to restart to apply it.
-- [ ] Criterion 3: A failed poll (network error) does not crash the app and the loop still re-arms for the next interval.
-
-### Technical Notes
-
-- **Endpoint**: N/A (Zed's own update server, not documented as a public route)
-- **Data Required**: N/A (no persisted entity in data-model.md; ephemeral poller state)
-- **Dependencies**: `crates/auto_update`, `crates/scheduler`
-
-### Screens
-
-- N/A (background system behavior; no dedicated UI surface beyond a restart prompt)
+- [ ] Triggering rebuild of a dev extension recompiles its source to WASM and reloads it in place.
+- [ ] A compile error is surfaced to the developer rather than silently keeping the stale build loaded.
 
 ### Background Logic
-
-- BL001_AutoUpdatePoller: the periodic update-check loop itself.
-- BL002_SchedulerTrait: underlying timer abstraction the poller sleeps on between checks.
+- BL157_CompileDevExtension
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A newer release exists on the update server | The poller's scheduled check runs | Update downloads and a restart prompt appears |
-| Error Case | Update server is unreachable | The poller's scheduled check runs | Poll fails silently to the user, logs the error, and re-arms for the next interval |
+|---|---|---|---|
+| Happy Path | Dev extension source was edited since last build | Developer triggers rebuild | The extension recompiles and the running instance reflects the new code |
 
 ---
 
-## US021_ReadOnlyBufferRejectsEdit: Read-only buffer silently rejects an edit attempt
+## US028_RestartContextServer: Restart a context/MCP server
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Extensions
+
+### User Story
+As a developer, I want to restart a context server (MCP) from its status UI so that I can recover it after a crash or configuration change without restarting the editor.
+
+### Acceptance Criteria
+- [ ] The restart action tears down the existing context-server connection and re-establishes it.
+- [ ] The context-server status UI reflects the new connection state once restarted.
+
+### Background Logic
+- BL054_ContextServerRestartAction
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A context server's connection has dropped | Developer triggers restart from the status UI | The connection re-establishes and the status UI shows it connected |
+
+---
+
+## US029_ConnectToContextServerOverMcp: Connect to a context server over MCP
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Extensions
+
+### User Story
+As a developer, I want an MCP client to be able to connect to zode's local context-server socket so that external MCP tooling can interact with my editor session.
+
+### Acceptance Criteria
+- [ ] A local Unix-socket MCP client connection is accepted by the context-server listener.
+- [ ] Incoming JSON-RPC notifications on that connection are dispatched to the appropriate subscriber.
+
+### Background Logic
+- BL148_McpServeConnection
+- BL125_ContextServerNotificationObserver
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | The context-server listener is active | An MCP client connects to its Unix socket | The connection is accepted and notifications begin dispatching |
+
+---
+
+## US030_DeclareProcessExecCapability: Declare a process-exec capability
+
+**Type**: ui
+**Interaction**: system-action
+**Priority**: must
+**Feature Area**: Extensions
+
+### User Story
+As an extension author, I want to declare a `ProcessExec` capability with a command+args match rule in my extension manifest so that my extension can spawn that specific external process at runtime.
+
+### Acceptance Criteria
+- [ ] A declared `ProcessExec` capability whose command+args rule matches a requested spawn is allowed.
+- [ ] Wildcard and double-wildcard argument matching (per `allow_exec`'s documented rules) resolve as declared.
+
+### Background Logic
+- PERM001_ExtensionProcessExecCapability
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Manifest declares `ProcessExec` for `git` with wildcard args | Extension calls `allow_exec("git", ["status"])` | The call is permitted and the process spawns |
+
+---
+
+## US031_DeclareDownloadFileCapability: Declare a download-file capability
+
+**Type**: ui
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Extensions
+
+### User Story
+As an extension author, I want to declare a `DownloadFile` capability for a specific host in my manifest so that my extension can fetch assets from that host at runtime.
+
+### Acceptance Criteria
+- [ ] A declared `DownloadFile` capability entry matching the requested host permits the sandboxed fetch.
+- [ ] A request to a host not covered by any declared entry is rejected before the fetch is attempted.
+
+### Background Logic
+- PERM002_ExtensionDownloadFileCapability
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Manifest declares `DownloadFile` for `github.com` | Extension requests a download from `github.com` | The fetch proceeds |
+
+---
+
+## US032_DeclareNpmInstallCapability: Declare an npm-install capability
+
+**Type**: ui
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Extensions
+
+### User Story
+As an extension author, I want to declare an `NpmInstallPackage` capability for a specific package in my manifest so that my extension can install that npm dependency at runtime.
+
+### Acceptance Criteria
+- [ ] A declared `NpmInstallPackage` capability entry matching the requested package permits the install.
+- [ ] A request for a package with no matching declared entry is rejected before install is attempted.
+
+### Background Logic
+- PERM003_ExtensionNpmInstallCapability
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Manifest declares `NpmInstallPackage` for `pyright` | Extension requests installing `pyright` | The install proceeds |
+
+---
+
+## US033_RejectUndeclaredExtensionCapability: Reject an undeclared capability request
 
 **Type**: system
 **Interaction**: system-action
 **Priority**: must
-**Estimate**: S
+**Feature Area**: Extensions
 
 ### User Story
-
-As a developer viewing a read-only buffer, I want my edit attempts to be silently rejected so that I never accidentally corrupt a file or view I'm not meant to modify.
+As a developer, I want an extension's undeclared capability request to be denied at runtime so that a buggy or malicious extension cannot silently exceed what it declared in its manifest.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: A buffer/multi-buffer whose `Capability` is `Read` or `ReadOnly` discards keystroke-driven edit attempts before they reach the rope.
-- [ ] Criterion 2: No error dialog interrupts the developer — the rejection is silent, per permissions.md's documented behavior.
-- [ ] Criterion 3: Non-edit interactions (cursor movement, selection, copy) remain fully functional on a read-only buffer.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `TextBuffer`, `Buffer` (data-model.md); `Capability` (permissions.md)
-- **Dependencies**: `crates/text`, `crates/editor`
-
-### Screens
-
-- Editor pane: read-only buffer
+- [ ] A `ProcessExec`/`DownloadFile`/`NpmInstallPackage` request with no matching declared capability entry errors out before the underlying operation runs.
+- [ ] The denial does not crash the host process — the extension call site receives an error result.
 
 ### Background Logic
-
-- BL013_SettingsStoreObserver: N/A directly; capability check is buffer-local, not settings-driven — listed for completeness only if a settings-driven read-only mode exists (e.g. vim mode); otherwise no BL### applies.
+- PERM001_ExtensionProcessExecCapability
+- PERM002_ExtensionDownloadFileCapability
+- PERM003_ExtensionNpmInstallCapability
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | A buffer's capability is ReadOnly (e.g. a remote collaborator's file with no write access) | Developer types a character | Nothing changes in the buffer; no error is shown |
-| Error Case | N/A — rejection itself is the correct/expected behavior, not an error path | — | — |
+|---|---|---|---|
+| Error Case | Manifest declares no `ProcessExec` capability | Extension calls `allow_exec("curl", [...])` | The call errors before any process is spawned |
 
 ---
 
-## US022_ExtensionCapabilityDenied: Extension's undeclared capability request is denied
+## US034_OpenRecentProjectFromWelcomeScreen: Open a recent project from Welcome
 
-**Type**: system
-**Interaction**: system-action
+**Type**: ui
+**Interaction**: navigation
 **Priority**: must
-**Estimate**: S
+**Feature Area**: Workspace
 
 ### User Story
-
-As an extension author, I want my extension's process-exec capability request to be sandboxed so that untrusted extensions can't run arbitrary commands beyond what they declared.
+As a developer, I want to click a recent-project entry on the welcome screen so that I can quickly reopen a project I worked on before.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: `extension_host` checks every host-capability call (process exec, network host, npm install) against the extension's declared manifest allowlist before executing it.
-- [ ] Criterion 2: A call requesting a command/host/package not present in the manifest is rejected before it runs — no partial execution.
-- [ ] Criterion 3: The denial does not crash the host editor process; only the requesting extension's call fails.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `ExtensionManifest` (data-model.md)
-- **Dependencies**: `crates/extension_host`, `crates/extension_api`
-
-### Screens
-
-- N/A (host-process-internal enforcement; no dedicated UI surface)
+- [ ] Clicking a recent-project entry opens that project's worktree(s) in a workspace.
+- [ ] The welcome screen entry reflects the project's last-known path even if the folder has since moved (surfacing an error if it no longer exists).
 
 ### Background Logic
-
-- BL004_ExtensionHostWasmDispatch: the WASM dispatch layer where the allowlist check occurs before executing a host call.
+- BL097_WelcomeScreenActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | Extension's manifest declares `curl` as an allowed command | Extension calls `curl` | Call is permitted and executes |
-| Error Case | Extension attempts to run `rm -rf` (not declared in its manifest) | Extension issues the exec call | Call is rejected before execution; host process and other extensions are unaffected |
+|---|---|---|---|
+| Happy Path | A previously-opened project appears in the recent list | Developer clicks its entry | The project opens in a new/current workspace |
 
 ---
 
-## US023_SettingsChangeNotifiesObservers: Settings-store change notifies all registered observers
+## US035_NavigateProjectPanelEntries: Navigate project panel entries
 
-**Type**: system
-**Interaction**: system-action
+**Type**: ui
+**Interaction**: navigation
 **Priority**: must
-**Estimate**: S
+**Feature Area**: Workspace
 
 ### User Story
-
-As a developer, I want every part of the editor that depends on a changed setting to update immediately so that my configuration change takes effect consistently across the whole app.
+As a developer, I want to navigate the project panel's file tree with the keyboard so that I can move between files without leaving the keyboard.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: `SettingsStore` re-parses the full settings JSON whenever it changes (file edit, or programmatic update).
-- [ ] Criterion 2: Every crate implementing `impl Settings for FooSettings` (~40 call sites) is notified and re-derives its typed settings struct.
-- [ ] Criterion 3: A registrant whose relevant settings key did not change does not unnecessarily re-render.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `SettingsStore` (data-model.md)
-- **Dependencies**: `crates/settings`
-
-### Screens
-
-- N/A (cross-cutting system behavior, not a single UI surface)
+- [ ] Keybindings move the selected entry up/down/into/out of folders in the tree.
+- [ ] Confirming a selected file entry opens it in the active pane.
 
 ### Background Logic
-
-- BL013_SettingsStoreObserver: the observer/notification mechanism itself.
+- BL055_ProjectPanelActions
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | `settings.json` is edited to change `theme` and `tab_size` | Save triggers re-parse | Theme registrant and editor-settings registrant both update; unrelated registrants are unaffected |
-| Error Case | Re-parse encounters an unknown settings key | Save triggers re-parse | Unknown key is ignored/warned on, known keys still apply — parse does not abort entirely |
+|---|---|---|---|
+| Happy Path | Project panel is focused with a folder collapsed | Developer navigates to it and expands it | The folder's children become visible and selectable |
 
 ---
 
-## US024_DispatchKeyboardAction: Keyboard shortcut dispatches a registered action
+## US036_CreateFileInProjectPanel: Create a file in the project panel
 
-**Type**: system
-**Interaction**: system-action
+**Type**: ui
+**Interaction**: primary-action
 **Priority**: must
-**Estimate**: S
+**Feature Area**: Workspace
 
 ### User Story
-
-As a developer, I want my keyboard shortcuts to reliably trigger the right editor action so that I can work efficiently using the keymap I've configured.
+As a developer, I want to create a new file directly from the project panel so that I can add files to my project without leaving the editor.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: A keystroke is matched against the currently focused element's registered `actions!()` bindings and keymap context.
-- [ ] Criterion 2: The matched action is dispatched to the nearest `.on_action()` handler up the focus/view hierarchy.
-- [ ] Criterion 3: An unbound keystroke passes through without triggering any action (no silent no-op error).
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: N/A (keymap/action registration is not a persisted data-model.md entity)
-- **Dependencies**: GPUI action dispatch (`actions!()`, `.on_action()`), `crates/settings` keymap config
-
-### Screens
-
-- N/A (global input-dispatch mechanism, not a single UI surface)
+- [ ] The "new file" action creates an empty file entry at the selected location in the worktree.
+- [ ] The new file is immediately opened for editing/renaming inline.
 
 ### Background Logic
-
-- BL005_WorkspaceEventEmitterSubscribe: related entity-event plumbing that action handlers often trigger downstream (e.g. an action emits a follow-up event).
+- BL205_CreateWorktreeEntryOnDisk
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | `cmd-s` is bound to "Save" in the active keymap context | Developer presses `cmd-s` while the editor is focused | The Save action dispatches and the buffer's file is written |
-| Error Case | Developer presses a keystroke with no binding in the current context | Keystroke is pressed | No action fires; the keystroke is otherwise ignored (or passed to default text input if applicable) |
+|---|---|---|---|
+| Happy Path | A folder is selected in the project panel | Developer triggers "New File" | A new empty file appears under that folder and is opened for naming |
 
 ---
 
-## US025_ResolveGitHostingPermalink: Resolve a permalink for the current git remote
+## US037_DeleteWorktreeFromPicker: Delete a worktree
+
+**Type**: ui
+**Interaction**: destructive-action
+**Priority**: should
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want to delete a worktree from the worktree picker so that I can remove a folder I no longer want open in this project.
+
+### Acceptance Criteria
+- [ ] Deleting a worktree removes it from the current project's set of open worktrees.
+- [ ] Deleting a worktree does not delete the underlying folder from disk.
+
+### Background Logic
+- BL029_DeleteWorktreeAction
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A project has 2 worktrees open | Developer deletes one from the picker | The project now shows only the remaining worktree; the deleted folder still exists on disk |
+
+---
+
+## US038_ToggleMultiProjectSidebar: Toggle the multi-project sidebar
 
 **Type**: ui
 **Interaction**: secondary-action
+**Priority**: must
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want to toggle the always-visible project rail so that I can reclaim screen space when I don't need to switch projects.
+
+### Acceptance Criteria
+- [ ] `ToggleWorkspaceSidebar` hides the sidebar when visible and shows it when hidden.
+- [ ] The sidebar's visibility state persists across window restarts.
+
+### Background Logic
+- BL094_MultiWorkspaceSidebarActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Sidebar is visible | Developer triggers toggle | Sidebar hides and the editor pane reclaims its space |
+
+---
+
+## US039_SwitchActiveProjectInSidebar: Switch active project in sidebar
+
+**Type**: ui
+**Interaction**: navigation
+**Priority**: must
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want to switch to the next/previous open project from the sidebar so that I can move between concurrently-open projects in the same window.
+
+### Acceptance Criteria
+- [ ] `NextProject`/`PreviousProject` cycles the window's active project among currently open projects.
+- [ ] The workspace pane content updates to reflect the newly active project.
+
+### Background Logic
+- BL094_MultiWorkspaceSidebarActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Two projects are open in the same window | Developer triggers `NextProject` | The second project becomes active and its panes render |
+
+---
+
+## US040_HibernateIdleProject: Hibernate an idle project
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want an inactive project's language servers, terminals, and other resources to be torn down automatically so that I can keep many projects open without them consuming resources indefinitely.
+
+### Acceptance Criteria
+- [ ] A project idle past its configured timer transitions `Active → Warm → Hibernated` and its resource layer (LSP, terminals, prettier, git store) is torn down or deferred.
+- [ ] The `Workspace`/`Project` entities and their on-disk session record persist through hibernation so the project can be reopened without a full re-scan.
+
+### Background Logic
+- No dedicated BL### exists for this fork-specific feature; cited directly per the headless-IPE rule: `crates/project/src/project.rs:355` (`ProjectActivity::Hibernated`), `crates/project/src/project.rs:4740` (`set_activity`), `crates/project/src/lsp_store.rs:11612` (`LspStore::hibernate`), `crates/project/src/prettier_store.rs:118` (`PrettierStore::hibernate`)
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A project has been inactive past its idle timer | The timer fires | The project's activity moves to `Hibernated` and its LSP/terminal/prettier resources are torn down or deferred behind a barrier |
+
+---
+
+## US041_ReactivateHibernatedProject: Reactivate a hibernated project
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want to click a hibernated project in the sidebar so that it wakes back up and becomes usable again without a full re-open.
+
+### Acceptance Criteria
+- [ ] Selecting a hibernated project's sidebar entry triggers `wake_resources`, restoring its torn-down resources.
+- [ ] The project's sidebar entry no longer shows the "Hibernated — will wake when opened" tooltip once reactivated.
+
+### Background Logic
+- No dedicated BL### exists for this fork-specific feature; cited directly: `crates/project/src/project.rs:4958` (`wake_resources`), `crates/sidebar/src/project_item.rs:70-79` (hibernated-entry UI)
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A project's sidebar entry shows as Hibernated | Developer clicks it | `wake_resources` runs and the project becomes fully interactive again |
+
+---
+
+## US042_InitializeDevContainerForProject: Initialize a dev container
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want to initialize a `.devcontainer` configuration for my project so that I can define a reproducible containerized dev environment.
+
+### Acceptance Criteria
+- [ ] `InitializeDevContainer` opens a modal that scaffolds a valid `devcontainer.json` for the workspace.
+- [ ] The generated config passes `validate_devcontainer_contents()` (matched `workspaceMount`/`workspaceFolder`, valid Compose `service` if applicable).
+
+### Background Logic
+- BL003_InitializeDevContainerAction
+- BL102_DevContainerJsonParsing
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Project has no existing `.devcontainer` | Developer runs `InitializeDevContainer` and completes the modal | A valid `devcontainer.json` is written to the project |
+
+---
+
+## US043_BuildDevContainerImage: Build a dev container image
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want opening a project with a valid dev-container config to build that container's image/Compose stack automatically so that I don't have to run manual Docker build commands before my environment is ready.
+
+### Acceptance Criteria
+- [ ] Opening/attaching to a dev-container-configured project builds the image/Compose stack via the Docker (or Podman) CLI.
+- [ ] Build failures surface to the developer rather than silently leaving a stale/missing image.
+
+### Background Logic
+- BL103_DevContainerManifestBuildAndRun
+- BL104_DockerCliIntegration
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Project has a valid `devcontainer.json` | Developer opens/attaches the project | The container image/Compose stack builds successfully |
+
+---
+
+## US044_RunDevContainerLifecycleScripts: Run a dev container's lifecycle scripts
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Workspace
+
+### User Story
+As a developer, I want the dev container's lifecycle scripts to run automatically once its image is built so that my editor session runs against a fully-initialized containerized environment without manual exec commands.
+
+### Acceptance Criteria
+- [ ] After a successful build, the editor runs/exec's into the container via the Docker (or Podman) CLI.
+- [ ] Lifecycle scripts (`onCreateCommand`, `postStartCommand`, etc.) execute as part of the run/exec flow.
+
+### Background Logic
+- BL103_DevContainerManifestBuildAndRun
+- BL104_DockerCliIntegration
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Dev container image built successfully, config has an `onCreateCommand` | Editor runs/execs into the container | `onCreateCommand` executes as part of the run flow |
+
+---
+
+## US045_RunCommandInIntegratedTerminal: Run a command in the integrated terminal
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Terminal
+
+### User Story
+As a developer, I want to run a shell command in an integrated terminal so that I can execute build/test commands without leaving the editor window.
+
+### Acceptance Criteria
+- [ ] Opening a terminal panel spawns a shell process in the project's working directory.
+- [ ] Command output streams into the terminal pane as it is produced.
+
+### Background Logic
+- BL067_TerminalCoreActions
+- BL113_ProjectTerminalShellSpawn
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A project is open with a valid shell configured | Developer opens a terminal and runs `ls` | The shell spawns in the project root and lists its files |
+
+---
+
+## US046_ToggleTerminalPanel: Toggle the terminal panel
+
+**Type**: ui
+**Interaction**: secondary-action
+**Priority**: must
+**Feature Area**: Terminal
+
+### User Story
+As a developer, I want to toggle the terminal panel's visibility so that I can quickly show or hide it while I work.
+
+### Acceptance Criteria
+- [ ] The toggle keybinding/command shows the terminal panel if hidden and hides it if visible.
+- [ ] A running terminal session inside the panel keeps running while the panel is hidden.
+
+### Background Logic
+- BL068_TerminalPanelToggleActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Terminal panel is hidden with a session running | Developer triggers toggle | The panel becomes visible showing the still-running session's output |
+
+---
+
+## US047_RunConfiguredTask: Run a configured task
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Terminal
+
+### User Story
+As a developer, I want to run a task defined in `tasks.json` so that I can execute a project-specific build/test/lint command with its configured arguments.
+
+### Acceptance Criteria
+- [ ] Selecting a task resolves its command/args/cwd from `tasks.json` and spawns it inside a new or reused terminal.
+- [ ] The task's exit status is surfaced once it completes.
+
+### Background Logic
+- BL114_ProjectTaskTerminalSpawn
+- BL194_BuildTaskContextsOffThread
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | `tasks.json` defines a `cargo test` task | Developer runs it | A terminal spawns running `cargo test` in the project root and reports its exit code |
+
+---
+
+## US048_SearchTerminalScrollback: Search terminal scrollback
+
+**Type**: ui
+**Interaction**: secondary-action
+**Priority**: should
+**Feature Area**: Terminal
+
+### User Story
+As a developer, I want to search the scrollback of an integrated terminal so that I can find earlier output without scrolling manually.
+
+### Acceptance Criteria
+- [ ] Cmd-F inside a terminal pane opens a search bar that highlights matches in the scrollback buffer.
+- [ ] Next/previous match navigation scrolls the terminal view to each match in order.
+
+### Background Logic
+- BL195_SearchTerminalScrollback
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Terminal scrollback contains the string "error" 3 times | Developer searches "error" | All 3 occurrences are highlighted and navigable |
+
+---
+
+## US049_SwitchLanguageServerToolchain: Switch language server toolchain
+
+**Type**: ui
+**Interaction**: secondary-action
+**Priority**: should
+**Feature Area**: Language Intelligence
+
+### User Story
+As a developer, I want to switch the active toolchain for a language from the status bar so that my language server analyzes code using the correct interpreter/SDK version.
+
+### Acceptance Criteria
+- [ ] Selecting a toolchain in the picker updates the language server's configured toolchain for that worktree.
+- [ ] The language server restarts (or reconfigures) using the newly selected toolchain.
+
+### Background Logic
+- BL073_ToolchainSelectorActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Two Python interpreters are detected for the project | Developer selects the non-default one from the toolchain picker | The Python language server reconfigures to use the selected interpreter |
+
+---
+
+## US050_SwitchBufferLanguage: Switch a buffer's language
+
+**Type**: ui
+**Interaction**: secondary-action
+**Priority**: should
+**Feature Area**: Language Intelligence
+
+### User Story
+As a developer, I want to manually set a buffer's language from the status bar so that syntax highlighting and language-server features apply correctly to a file whose extension was misdetected.
+
+### Acceptance Criteria
+- [ ] Selecting a language in the picker re-associates the buffer with that language's grammar/LSP.
+- [ ] Syntax highlighting re-renders immediately using the newly selected language's grammar.
+
+### Background Logic
+- BL038_LanguageSelectorToggleAction
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | A `.txt` file actually contains Rust code | Developer sets its language to Rust via the status-bar selector | Rust syntax highlighting and the Rust language server activate for that buffer |
+
+---
+
+## US051_RestartLanguageServersForBuffer: Restart language servers for a buffer
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: should
+**Feature Area**: Language Intelligence
+
+### User Story
+As a developer, I want to restart the language server(s) backing my open buffers so that I can recover from a hung/stale server without restarting the whole editor.
+
+### Acceptance Criteria
+- [ ] Triggering the restart action tears down and respawns the language server process(es) associated with the target buffers.
+- [ ] Buffers regain diagnostics/completions once the respawned server re-initializes.
+
+### Background Logic
+- BL182_RestartLanguageServersForBuffers
+- BL107_LanguageServerProcessLifecycle
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | The rust-analyzer process for a project has become unresponsive | Developer triggers "Restart Language Servers" | rust-analyzer respawns and diagnostics resume within the affected buffers |
+
+---
+
+## US052_NavigateTextWithVimMotions: Navigate text with Vim motions
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Vim
+
+### User Story
+As a developer, I want to move my cursor using Vim motion keys so that I can navigate text efficiently while Vim emulation is enabled.
+
+### Acceptance Criteria
+- [ ] Motion keys (`w`, `e`, `b`, `j`, `k`, etc.) move the cursor by the documented Vim unit (word/line) in normal mode.
+- [ ] A count prefix (e.g. `3w`) repeats the motion that many times.
+
+### Background Logic
+- BL081_VimMotionActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Cursor is at the start of a line with 3 words | Developer presses `w` twice | Cursor lands at the start of the third word |
+
+---
+
+## US053_EnterVimInsertMode: Enter Vim insert mode
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Vim
+
+### User Story
+As a developer, I want to enter Vim insert mode at a specific cursor position (before/after/line-start/line-end) so that I can start typing exactly where I intend.
+
+### Acceptance Criteria
+- [ ] `i`/`a`/`I`/`A`/`o`/`O` each place the cursor per their documented Vim semantics and switch the mode to Insert.
+- [ ] Text typed after entering insert mode is inserted at that cursor position, not overwriting existing text.
+
+### Background Logic
+- BL082_VimNormalModeInsertActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Cursor is mid-line in Vim normal mode | Developer presses `A` | Cursor jumps to end of line and mode switches to Insert |
+
+---
+
+## US054_SelectTextInVimVisualMode: Select text in Vim visual mode
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Vim
+
+### User Story
+As a developer, I want to select text using Vim's visual mode (character/line/block) so that I can operate on a precise text range before deleting, yanking, or changing it.
+
+### Acceptance Criteria
+- [ ] `v`, `V`, and `Ctrl-V` enter character-wise, line-wise, and block-wise visual selection respectively.
+- [ ] Motions performed while in visual mode extend the current selection instead of moving the cursor alone.
+
+### Background Logic
+- BL093_VimVisualModeActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Cursor is at the start of a 3-line block | Developer presses `V` then `jj` | All 3 lines are selected line-wise |
+
+---
+
+## US055_RunVimExCommand: Run a Vim ex command
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Vim
+
+### User Story
+As a developer, I want to type and execute a Vim `:`-command so that I can perform range-based or configuration operations (e.g. `:w`, `:%s/a/b/g`) the same way I would in real Vim.
+
+### Acceptance Criteria
+- [ ] Pressing `:` opens the ex command line, and submitting a recognized command executes it against the buffer/range.
+- [ ] An unrecognized ex command surfaces an error rather than silently doing nothing.
+
+### Background Logic
+- BL075_VimExCommandActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Buffer contains the word "foo" three times | Developer runs `:%s/foo/bar/g` | All three occurrences become "bar" |
+
+---
+
+## US056_RepeatLastVimChange: Repeat the last Vim change
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Vim
+
+### User Story
+As a developer, I want to repeat my last Vim change with `.` so that I can apply the same edit at a new cursor position without retyping it.
+
+### Acceptance Criteria
+- [ ] `.` re-executes the most recent change-producing command (insert, delete, etc.) at the current cursor position.
+- [ ] Recording (`q`) and replaying (`@@`) a macro repeats the exact recorded key sequence.
+
+### Background Logic
+- BL085_VimRepeatMacroActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Developer just deleted a word with `dw` | Cursor moves elsewhere and `.` is pressed | The word under the new cursor position is deleted the same way |
+
+---
+
+## US057_SelectVimTextObject: Select a Vim text object
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: should
+**Feature Area**: Vim
+
+### User Story
+As a developer, I want to select a Vim text object (word, quoted string, bracketed block) as the target of an operator so that I can act on a whole syntactic unit in one keystroke combo.
+
+### Acceptance Criteria
+- [ ] Operator+object combos (`diw`, `ci(`, `da"`, etc.) select exactly the documented text-object range for the operator to act on.
+- [ ] Inner (`i`) vs. around (`a`) variants include/exclude the object's delimiters as documented.
+
+### Background Logic
+- BL089_VimTextObjectActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Cursor is inside `"hello"` | Developer runs `ci"` | The contents between the quotes are deleted and insert mode starts inside them |
+
+---
+
+## US058_EditSettingsJson: Edit a setting in settings.json
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Settings
+
+### User Story
+As a developer, I want to edit a value in the Settings UI/editor so that a configuration change takes effect live without restarting the editor.
+
+### Acceptance Criteria
+- [ ] Changing a setting field updates the underlying `settings.json` and the in-memory `SettingsStore`.
+- [ ] Every registered `impl Settings` consumer observing that key re-renders/reconfigures on the change.
+
+### Background Logic
+- BL061_SettingsEditorActions
+- BL138_SettingsStoreFileWatcher
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Developer changes `buffer_font_size` in the Settings editor | The change is saved | All open editors immediately render with the new font size |
+
+---
+
+## US059_EditKeymapBinding: Edit a keymap binding
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Settings
+
+### User Story
+As a developer, I want to edit a keybinding in the keymap editor so that I can rebind an action to a key combination I prefer.
+
+### Acceptance Criteria
+- [ ] Entering a new keystroke for an action in the keymap editor writes it to the user keymap file.
+- [ ] The new binding takes effect immediately without restarting the editor.
+
+### Background Logic
+- BL036_KeymapEditorActions
+- BL143_KeymapAndSettingsObserver
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Developer rebinds `Save` from `Cmd-S` to `Cmd-Shift-S` | The binding is saved | Pressing `Cmd-Shift-S` now triggers Save, and `Cmd-S` no longer does |
+
+---
+
+## US060_SwitchBaseKeymapPreset: Switch the base keymap preset
+
+**Type**: ui
+**Interaction**: secondary-action
+**Priority**: should
+**Feature Area**: Settings
+
+### User Story
+As a developer, I want to switch the editor's base keymap preset (e.g. to a VS Code or Sublime-style layout) so that my muscle memory from another editor carries over.
+
+### Acceptance Criteria
+- [ ] Selecting a base keymap preset in the selector applies that preset's default bindings, layered under any custom user bindings.
+- [ ] The change is reflected immediately across all open windows.
+
+### Background Logic
+- BL048_ToggleBaseKeymapSelectorAction
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Default base keymap is active | Developer selects a different base keymap preset | Keybindings from that preset become active immediately |
+
+---
+
+## US061_BackupSettingsBeforeMigration: Back up settings before a schema migration
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: must
+**Feature Area**: Settings
+
+### User Story
+As a developer, I want a backup copy of my settings/keymap files written before any migration runs so that I can recover my prior configuration if the migration goes wrong.
+
+### Acceptance Criteria
+- [ ] Clicking "Backup and Update" in the migration dialog writes a backup copy of the current settings/keymap files before anything else happens.
+- [ ] The backup file is written to a recoverable location distinct from the live settings file.
+
+### Background Logic
+- BL207_RunKeymapOrSettingsMigration
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Settings file uses a deprecated schema field | Developer clicks "Backup and Update" | A backup file is written before migration begins |
+
+---
+
+## US062_MigrateSettingsToCurrentSchema: Migrate settings to the current schema
+
+**Type**: system
+**Interaction**: system-action
+**Priority**: must
+**Feature Area**: Settings
+
+### User Story
+As a developer, I want my settings/keymap files migrated to the current schema after they're backed up so that an editor update doesn't silently break or lose my configuration.
+
+### Acceptance Criteria
+- [ ] After the backup completes, the migration applies to the live settings/keymap files.
+- [ ] The migrated file parses successfully under the current schema after the operation completes.
+
+### Background Logic
+- BL207_RunKeymapOrSettingsMigration
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Settings file backed up, uses a deprecated schema field | Migration applies to the live file | The live settings file parses successfully under the current schema |
+
+---
+
+## US063_FindFileByFuzzyName: Find a file by fuzzy name
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Search
+
+### User Story
+As a developer, I want to fuzzy-search for a file by (partial) name so that I can open it without navigating the project tree manually.
+
+### Acceptance Criteria
+- [ ] The file finder modal ranks and lists project files matching the typed fuzzy query.
+- [ ] Confirming the highlighted result opens that file in the active pane.
+
+### Background Logic
+- BL020_FileFinderActions
+- BL159_CheckRecentHistoryPathExists
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Project contains `src/main.rs` | Developer types "mnrs" in the file finder | `src/main.rs` appears as a top ranked match and opens on confirm |
+
+---
+
+## US064_SearchAcrossProject: Search across the whole project
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Search
+
+### User Story
+As a developer, I want to search for a text pattern across the entire project so that I can find every usage of a symbol or string regardless of which file it's in.
+
+### Acceptance Criteria
+- [ ] Submitting a project search query returns matches grouped by file, with per-match context lines.
+- [ ] Search results can be opened as a multi-buffer for reviewing/editing matches in place.
+
+### Background Logic
+- BL059_ProjectSearchActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | The string "TODO" appears in 5 files | Developer searches "TODO" project-wide | All 5 files' matches are listed with surrounding context |
+
+---
+
+## US065_SearchWithinCurrentBuffer: Search within the current buffer
+
+**Type**: ui
+**Interaction**: primary-action
+**Priority**: must
+**Feature Area**: Search
+
+### User Story
+As a developer, I want to search for text within my currently open buffer so that I can jump between occurrences of a term in the file I'm editing.
+
+### Acceptance Criteria
+- [ ] Opening the in-buffer search bar and submitting a query highlights all matches in the active buffer.
+- [ ] Next/previous navigation moves the cursor/scroll position between matches in order.
+
+### Background Logic
+- BL060_BufferSearchActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | Active buffer contains "foo" 4 times | Developer searches "foo" | All 4 occurrences highlight and are navigable via next/previous |
+
+---
+
+## US066_SwitchBetweenOpenTabs: Switch between open tabs
+
+**Type**: ui
+**Interaction**: navigation
+**Priority**: must
+**Feature Area**: App Shell
+
+### User Story
+As a developer, I want to switch between recently-used open tabs via a quick-switcher modal so that I can jump back to a file I was just editing without hunting through the tab bar.
+
+### Acceptance Criteria
+- [ ] Holding the tab-switcher modifier and pressing the trigger key cycles through open tabs in most-recently-used order.
+- [ ] Releasing the modifier confirms the highlighted tab and focuses it.
+
+### Background Logic
+- BL066_TabSwitcherActions
+
+### Test Scenarios
+| Scenario | Given | When | Then |
+|---|---|---|---|
+| Happy Path | 3 tabs are open, tab C was focused most recently before tab A | Developer holds the switcher modifier and taps the trigger key once | Tab C becomes the highlighted/confirmed selection |
+
+---
+
+## US067_OpenDebugAdapterLogs: Open Debug Adapter Protocol logs
+
+**Type**: ui
+**Interaction**: navigation
 **Priority**: could
-**Estimate**: S
+**Feature Area**: Debugging
 
 ### User Story
-
-As a developer, I want to generate a permalink to my current file/selection on GitHub/GitLab/Bitbucket so that I can share a precise reference with teammates.
+As a developer, I want to open the Debug Adapter Protocol log viewer so that I can diagnose why a debug adapter isn't behaving as expected.
 
 ### Acceptance Criteria
-
-- [ ] Criterion 1: The action detects the current file's git remote and maps it to the correct `GitHostingProvider` implementation (GitHub/GitLab/Bitbucket).
-- [ ] Criterion 2: The generated permalink pins to the current commit SHA (not a branch name) so the link remains stable.
-- [ ] Criterion 3: If no remote is configured or the provider is unrecognized, the action is unavailable rather than producing a broken link.
-
-### Technical Notes
-
-- **Endpoint**: N/A
-- **Data Required**: `GitStore` / `Repository` (data-model.md)
-- **Dependencies**: `crates/git_hosting_providers`
-
-### Screens
-
-- Editor pane / Git panel: "Copy Permalink" action
+- [ ] `OpenDebugAdapterLogs` opens a log viewer backed by a `LogStore` observing all active debug sessions.
+- [ ] Logs for a given session remain viewable after that session ends, until the viewer is closed.
 
 ### Background Logic
-
-- BL011_GitHostingProviderDetection: the provider-detection module resolving the remote to a hosting provider.
+- BL004_OpenDebugAdapterLogsAction
 
 ### Test Scenarios
-
 | Scenario | Given | When | Then |
-|----------|-------|------|------|
-| Happy Path | File's repo has a GitHub remote and is committed | Developer selects "Copy Permalink" | A commit-SHA-pinned GitHub URL is copied to the clipboard |
-| Error Case | Repo has no remote configured | Developer selects "Copy Permalink" | Action is disabled/hidden rather than generating an invalid link |
+|---|---|---|---|
+| Happy Path | A debug session is active | Developer triggers `OpenDebugAdapterLogs` | A log pane opens showing that session's DAP protocol traffic |
 
 ---
+
+## Feature Area → US Map
+
+| Feature Area | US Codes |
+|---|---|
+| Editor Core | US001, US009, US010, US011 |
+| Diagnostics | US012, US013, US014 |
+| Debugging | US015, US016, US002, US003, US004, US005, US017, US018, US067 |
+| Git | US019, US006, US007, US008, US020, US021, US022, US023, US024 |
+| Extensions | US025, US026, US027, US028, US029, US030, US031, US032, US033 |
+| Workspace | US034, US035, US036, US037, US038, US039, US040, US041, US042, US043, US044 |
+| Terminal | US045, US046, US047, US048 |
+| Language Intelligence | US049, US050, US051 |
+| Vim | US052, US053, US054, US055, US056, US057 |
+| Settings | US058, US059, US060, US061, US062 |
+| Search | US063, US064, US065 |
+| App Shell | US066 |
 
 ## Cross-Reference Validation
 
 - [x] All US### codes are unique
 - [x] All acceptance criteria are testable
-- [x] All technical notes are complete (or explicitly `N/A` with reason, e.g. no HTTP endpoint / no persisted entity)
-- [ ] All US### codes are referenced in FeatureList.md — N/A this pass; no upstream FeatureList generated in this session
-- [x] All `ui` US### mapped to a descriptive UI-surface screen name (no SCR###/ScreenList exists upstream for this `screen_source:none` project — see Adaptation Note)
-- [x] All `system` US### have at least one BL### mapped (US020, US021, US022, US023, US024 — US021 notes a partial/indirect BL relation; US024 maps to the closest related BL### since keybinding dispatch itself has no dedicated BL### item)
+- [x] All technical notes/citations are complete (BL###, PERM###, or direct `file:line` for the two hibernation stories with no dedicated BL entry, re-verified this session with `grep`)
+- [x] Feature mapping deferred to `feature-list.md` (this doc contains US without direct feature codes, per template convention)
+- [x] All `ui`-typed US map to a Feature Area (no SCR### exists in this profile; system US excluded from mapping requirement)
+- [x] All `system`-typed US have at least one BL### (or PERM###/direct-citation) mapped
+- [x] No AI-agent, collaboration, or LiveKit references reintroduced (verified via `grep -i "agent\|collab\|livekit\|language_model"` against this file before finalizing)
 
-## Unresolved Questions
+## Limits
 
-1. No upstream `feature-list.md` exists in this session — US↔F### cross-references above are deferred until a FeatureList artifact is produced.
-2. US021 (read-only buffer rejection) and US024 (keybinding dispatch) have no dedicated BL### item describing the exact mechanism; the closest related BL### items are cited, but a future BL pass could add dedicated items for "capability-gated edit rejection" and "action-dispatch resolution" if greater precision is needed.
-3. Screens are named descriptively (Workspace, Project Panel, Editor pane, etc.) rather than as SCR### codes, since no `screen-list.md` exists for this native desktop app (`screen_source:none`). If a future pass introduces a screen inventory for GPUI `Render` entities, these US### should be re-mapped to formal SCR### codes.
+- **Not exhaustive over all 207 BL items.** This pass authored 67 US covering every functional domain named in
+  the Wave 4 brief, prioritizing `must`/`should`-worthy, genuinely distinct user intents. Left uncovered by
+  deliberate choice: the ~15 remaining Vim BL items (increment/decrement, rewrap, replace mode, digraphs, Helix
+  mode, change-list navigation, register/mark deletion, shell-filter piping) — all structurally identical in
+  shape to the 6 Vim US already written (one keybinding-driven single-verb action); a dedicated Vim-emulation
+  pass should add them if full parity is required. Also uncovered: internal dev-only diagnostic tooling
+  (BL016 ETW tracing, BL032 input-latency histogram, BL039 highlights-tree view, BL040 key-context view, BL043
+  syntax-tree view, BL096 theme-preview, BL147 component-preview) — genuinely `could`-priority editor-authoring
+  tools rather than end-user features, and the onboarding/window-chrome/CLI-install/journal/feedback/image-
+  viewer/CSV-preview/SVG-preview/markdown-preview items (BL002, BL019, BL031, BL033, BL034, BL035, BL045, BL046,
+  BL049, BL053, BL064, BL065, BL071, BL072, BL099, BL172) — real but lower-signal single-purpose actions that
+  would follow the same one-BL-to-one-US pattern already demonstrated above without adding new judgment calls.
+- **Remote development (SSH) is only lightly covered** (US018 attach-to-remote-process). The `remote`/
+  `remote_connection`/`remote_server` subsystem's own user-facing surface (opening an SSH project, forwarding
+  buffer edits/breakpoints to a headless remote host — BL177, BL185, BL188, BL189) was not separately storied;
+  it is mostly system-action plumbing behind the "open project"/"toggle breakpoint" stories already written,
+  and a dedicated remote-dev feature spec would benefit from its own pass.
+- **No corroborating cross-check against a second independent source was performed for the Feature Area
+  groupings** beyond `system-overview.md`/`architecture.md`; those two documents and `behavior-logic.md`/
+  `permissions-matrix.md` were treated as the authoritative in-repo sources for this wave, consistent with the
+  rebuild-spec pipeline's design (BL/PERM artifacts are themselves the researched ground truth for this pass,
+  not a claim requiring external validation).

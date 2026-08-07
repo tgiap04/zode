@@ -1,0 +1,83 @@
+{
+  "generated_at": "2026-08-07T04:31:57Z",
+  "overall_status": "PASS",
+  "plan": "260726-1400-rebuild-spec",
+  "schema_version": 1,
+  "totals": {
+    "critical": 0,
+    "failed_specs": 0,
+    "passed_specs": 0,
+    "warning": 0
+  },
+  "validators": {
+    "behavior_logic": {
+      "issues": [
+        {
+          "location": {
+            "file": "plans/260726-1400-rebuild-spec/artifacts/behavior-logic.md",
+            "line": 278
+          },
+          "message": "BL section 'BL002' (type: custom-command) matches file-exchange vocabulary but has no populated '**File Schema**' table",
+          "rule_id": "BehaviorLogic.file_schema_missing",
+          "severity": "warning",
+          "validator": "behavior_logic"
+        },
+        {
+          "location": {
+            "file": "plans/260726-1400-rebuild-spec/artifacts/behavior-logic.md",
+            "line": 503
+          },
+          "message": "BL section 'BL013' (type: custom-command) matches file-exchange vocabulary but has no populated '**File Schema**' table",
+          "rule_id": "BehaviorLogic.file_schema_missing",
+          "severity": "warning",
+          "validator": "behavior_logic"
+        },
+        {
+          "location": {
+            "file": "plans/260726-1400-rebuild-spec/artifacts/behavior-logic.md",
+            "line": 1839
+          },
+          "message": "BL section 'BL081' (type: custom-command) matches file-exchange vocabulary but has no populated '**File Schema**' table",
+          "rule_id": "BehaviorLogic.file_schema_missing",
+          "severity": "warning",
+          "validator": "behavior_logic"
+        },
+        {
+          "location": {
+            "file": "plans/260726-1400-rebuild-spec/artifacts/behavior-logic.md",
+            "line": 2395
+          },
+          "message": "BL section 'BL107' (type: integration) matches file-exchange vocabulary but has no populated '**File Schema**' table",
+          "rule_id": "BehaviorLogic.file_schema_missing",
+          "severity": "warning",
+          "validator": "behavior_logic"
+        },
+        {
+          "location": {
+            "file": "plans/260726-1400-rebuild-spec/artifacts/behavior-logic.md",
+            "line": 4197
+          },
+          "message": "BL section 'BL173' (type: queue-worker) matches file-exchange vocabulary but has no populated '**File Schema**' table",
+          "rule_id": "BehaviorLogic.file_schema_missing",
+          "severity": "warning",
+          "validator": "behavior_logic"
+        },
+        {
+          "location": {
+            "file": "plans/260726-1400-rebuild-spec/artifacts/behavior-logic.md",
+            "line": 0
+          },
+          "message": "BL count mismatch: scout inventory has 266 entries but document has 208 BL sections",
+          "rule_id": "BehaviorLogic.cardinality",
+          "severity": "warning",
+          "validator": "behavior_logic"
+        }
+      ],
+      "status": "WARN",
+      "summary": {
+        "critical": 0,
+        "warning": 6
+      }
+    }
+  }
+}
