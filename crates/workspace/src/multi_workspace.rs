@@ -155,6 +155,17 @@ impl Render for DraggedSidebar {
     }
 }
 
+/// Every method here borrows the sidebar entity (`read`/`update`), so any
+/// `MultiWorkspace` method that reaches this trait — `sidebar_side`,
+/// `open_sidebar`, `close_sidebar`, `toggle_sidebar`, `focus_sidebar`,
+/// `sidebar_has_notifications` — inherits that borrow.
+///
+/// UI that lives *inside* the sidebar therefore must not call those directly:
+/// a `cx.listener` body runs within `Sidebar::update`, so re-entering panics
+/// with "cannot read Sidebar while it is already being updated". Dispatch the
+/// matching action instead (`ToggleWorkspaceSidebar`, `FocusWorkspaceSidebar`,
+/// `CloseWorkspaceSidebar`) — `Window::dispatch_action` defers, so the borrow
+/// is released before the handler runs.
 impl<T: Sidebar> SidebarHandle for Entity<T> {
     fn width(&self, cx: &App) -> Pixels {
         self.read(cx).width(cx)

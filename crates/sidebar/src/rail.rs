@@ -212,13 +212,15 @@ impl Sidebar {
                             cx,
                         )
                     })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(multi_workspace) = this.multi_workspace.upgrade() {
-                            multi_workspace.update(cx, |multi_workspace, cx| {
-                                multi_workspace.toggle_sidebar(window, cx);
-                            });
-                        }
-                    })),
+                    // Dispatch rather than calling `MultiWorkspace::toggle_sidebar`
+                    // directly: a `cx.listener` body runs inside `Sidebar::update`,
+                    // and `toggle_sidebar` reaches back through `SidebarHandle`
+                    // (`prepare_for_focus`/`focus`), which borrows this very entity
+                    // again. `Window::dispatch_action` defers, so the borrow is
+                    // released before the action runs.
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(workspace::ToggleWorkspaceSidebar), cx);
+                    }),
             )
             .child(
                 IconButton::new("project-rail-open-project", IconName::Plus)
