@@ -8,8 +8,8 @@
   // - "dark": Use the theme indicated by the "dark" field
   "theme": {
     "mode": "system",
-    "light": "One Light",
-    "dark": "One Dark",
+    "light": "Light 2026",
+    "dark": "Dark 2026",
   },
   "icon_theme": "Zed (Default)",
   // The name of a base set of key bindings to use.

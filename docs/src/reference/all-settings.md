@@ -4509,7 +4509,7 @@ Example command to set the title: `echo -e "\e]2;New Title\007";`
 
 - Description: The theme setting can be specified in two forms - either as the name of a theme or as an object containing the `mode`, `dark`, and `light` themes for the Zed UI.
 - Setting: `theme`
-- Default: `One Dark`
+- Default: `Dark 2026`
 
 ### Theme Object
 
@@ -4521,8 +4521,8 @@ Example command to set the title: `echo -e "\e]2;New Title\007";`
 {
   "theme": {
     "mode": "system",
-    "dark": "One Dark",
-    "light": "One Light"
+    "dark": "Dark 2026",
+    "light": "Light 2026"
   }
 }
 ```
