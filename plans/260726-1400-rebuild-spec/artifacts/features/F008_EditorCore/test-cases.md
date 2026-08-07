@@ -1,0 +1,60 @@
+<!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
+# Test Cases — F008_EditorCore
+
+**SIDECAR (v26.1.0):** this is a 5th, optional file alongside the 4 mandatory feature-spec files.
+Its absence never blocks feature-spec promotion.
+
+**Code Format**: `TC###` — 3-digit zero-padded, **resets per feature** (this file's own scope is
+the reset boundary; unlike `JOB###`, which is file-global).
+
+**Citation-source split**: `UT`/`IT` rows cite a `BR-###`/`SM-###`/`DEC-###`/`DISC-###` code, a
+`` `file:line` ``, or an `edge-cases.md` row. `UAT` rows cite a `screens.md`/`business-context.md`
+section — NEVER a bare code (UAT is less code-traceable by design; see
+`references/test-cases-researcher-contract.md`).
+
+**CSV export**: out of scope v1 — Markdown is the sole output. See plan Decision.
+
+---
+
+## Test Cases
+
+| Test-ID | Type (UT\|IT\|UAT) | Given | When | Then | Traces-to |
+|---------|---------------------|-------|------|------|-----------|
+| TC001 | IT | `Buffer.capability` is `ReadWrite` | an edit-mutating method (e.g. insert) is dispatched on the `Editor` | the edit proceeds and is recorded in `TextBuffer.history` | `DISC-007` |
+| TC002 | IT | `Buffer.capability` is `Read` | an edit-mutating method is dispatched on the `Editor` | `editable()` returns false, the method short-circuits, and the buffer is unchanged with no dialog | `DISC-007` |
+| TC003 | IT | `Buffer.capability` is `ReadOnly` | an edit-mutating method is dispatched on the `Editor` | edits are structurally rejected the same way as `Read`, silently, with no UI dialog (PERM004) | `DISC-007` |
+| TC004 | IT | `Editor.read_only` flag is set to true while the underlying buffer's capability is still `ReadWrite` | an edit-mutating method is dispatched | `Editor::read_only(cx)` returns true via the flag alone and the edit is a no-op | `BR-001` |
+| TC005 | IT | `Editor.read_only` flag is false but the buffer's capability is not `ReadWrite` | an edit-mutating method is dispatched | `Editor::read_only(cx)` returns true via the capability leg of the OR and the edit is a no-op | `BR-001` |
+| TC006 | IT | `Buffer.parse_status` is `Idle` | a syntax-highlighting/tree-sitter-dependent feature (e.g. folding) queries the tree | the current committed tree is used with no additional validation | `DISC-008` |
+| TC007 | IT | `Buffer.parse_status` is `Parsing` (a re-parse is in flight) | a syntax-highlighting/tree-sitter-dependent feature queries the tree | the last-committed (stale) tree is used as a fallback until the parse completes | `DISC-008` |
+| TC008 | IT | `SM-001_ParseStatus` is in state `Idle` | the buffer text is edited | the state transitions to `Parsing` and a background tree-sitter re-parse task is spawned | `SM-001` |
+| TC009 | IT | `SM-001_ParseStatus` is in state `Parsing` | the background parse task resolves | the state transitions back to `Idle` and syntax-dependent consumers (folding, structural motions, inlay hints) are notified to use the fresh tree | `SM-001` |
+| TC010 | UT | `Editor.mode` is `SingleLine` | the editor renders | no gutter/breadcrumbs/minimap is shown and `mode.is_single_line()` gates soft-wrap-stop motion behavior | `DISC-009` |
+| TC011 | UT | `Editor.mode` is `AutoHeight { min_lines, max_lines }` | content is added or removed | the editor's height grows/shrinks between the two bounds with no full chrome | `DISC-009` |
+| TC012 | UT | `Editor.mode` is `Full { ... }` | the editor renders | full chrome (gutter, breadcrumbs, minimap, active-line background per flag) is shown and multi-line editing is permitted | `DISC-009` |
+| TC013 | UT | `Editor.mode` is `Minimap { parent }` | the editor renders | it displays as a zoomed-out overview bound to the parent `Editor` and is not independently editable content | `DISC-009` |
+| TC014 | IT | `SplittableEditor.diff_view_style` is `Unified` and the pane width is at or above the narrow threshold | `ToggleSplitDiff` is triggered | `diff_view_style` becomes `Split` and `self.split(...)` runs, creating two side-by-side panes | `BR-002` |
+| TC015 | IT | `SplittableEditor.diff_view_style` is `Unified` and the pane width is below `too_narrow_for_split` | `ToggleSplitDiff` is triggered | `diff_view_style` still becomes `Split`, but `self.split(...)` is skipped so the UI stays single-pane | `BR-002` |
+| TC016 | IT | a singleton-buffer editor is dirty and `BufferSerialization::All` is the active policy, item is closing | `Editor::serialize` runs | the dirty buffer's content, cursor, and fold state are serialized regardless of the closing state | `BR-003` |
+| TC017 | IT | a singleton-buffer editor's policy is `BufferSerialization::NonDirtyBuffers` and the item is closing | `Editor::serialize` runs | serialization is skipped entirely (returns `None`) rather than partially writing state | `BR-003` |
+| TC018 | UT | the cursor sits after 10 characters of indentation+text on a line | `DeleteToBeginningOfLine` is triggered | the reverse-selection, extend-to-boundary, and backspace steps run inside one `self.transact(...)` block and a single `Undo` restores all 10 characters | `BR-004` |
+| TC019 | UT | a buffer is marked `Read`/`ReadOnly` | a developer attempts to edit it | the edit is silently dropped, buffer content is unchanged, and nothing is recorded in the undo history | `edge-cases.md § Developer tries to edit a file that is marked view-only` |
+| TC020 | IT | a split-diff editor pane is narrower than the split threshold | the developer toggles split-diff view | the internal preference flips to "split" but the pane visually stays single until widened | `edge-cases.md § Developer toggles split-diff view while the editor pane is too narrow` |
+| TC021 | UT | an active selection has no further occurrences of its text elsewhere in the file | `SelectNext` is triggered | the existing selection(s) stay exactly as they were; nothing new is added | `edge-cases.md § no further occurrences exist in the file` |
+| TC022 | UT | text has just been deleted via `DeleteToBeginningOfLine` | the developer immediately presses Undo | the entire deletion (reverse-selection, extend, remove) reverts in one single Undo step | `edge-cases.md § immediately presses Undo` |
+| TC023 | IT | a file or workspace has unsaved changes | the developer closes the file or the whole workspace | the dirty buffer's content, cursor position, and collapsed sections are saved locally with no prompt shown | `edge-cases.md § closes a file or the whole workspace while it has unsaved changes` |
+| TC024 | UAT | developer opens a file | they land on the Editor tab | the buffer's text is shown with the cursor at the last-saved (or first) position | `screens.md § User Journey step 1` |
+| TC025 | UAT | an Editor tab is open and focused | the developer triggers structural motions (word/line/page) | the cursor moves to the target area without altering buffer content | `screens.md § User Journey step 2` |
+| TC026 | UAT | a repeated identifier is selected in an open Editor tab | the developer extends the selection to further occurrences, or deletes a stretch of text back to the line start | the multi-point selection grows, or the deleted text is removed as a single undoable action | `screens.md § User Journey step 3` |
+| TC027 | UAT | the developer is comparing two versions of a file | they open a split-diff editor tab and toggle between unified and side-by-side presentation | the view switches between one pane with inline diff markers and two side-by-side panes | `screens.md § User Journey step 4` |
+| TC028 | UAT | the developer closes the tab or the whole workspace | the session ends | the cursor, selection, and fold state are quietly preserved for the next time the file is opened | `screens.md § User Journey step 5` |
+| TC029 | UAT | the file being edited is marked view-only | the developer attempts a change | the change is simply ignored — no error dialog interrupts the developer, and the file stays as it was | `business-context.md § What They Do item 5` |
+
+---
+
+## Coverage Notes
+
+- `FR-001`, `FR-002`, `FR-003`, `FR-004` — [NO_TEST_CASE] Requirements codes are fulfilled through the linked BR/US rows above (BR-001/BR-002/BR-003/BR-004 and US001/US009/US010/US011); the contract scopes direct expansion to BR-###/SM-###/DEC-###/DISC-### only, not FR-###.
+- `ALG-001_InlayHintRefreshDecision` — [NO_TEST_CASE] Algorithm blocks are out of the contract's expansion scope (BR/SM/DEC/DISC only); its debounce/invalidate branches are also flagged `unverified` in technical-spec.md's edge cases (exact cancel-vs-coalesce semantics not traced to source line level).
+- `ALG-002_CompletionMenuFuzzyFilter` — [NO_TEST_CASE] Algorithm blocks are out of the contract's expansion scope (BR/SM/DEC/DISC only).
+- `SplittableEditor.diff_view_style` (unnumbered local DISC, not a `data-model.md` DISC-### code per technical-spec.md's Assumptions) — [NO_TEST_CASE] Its two values are already exercised via `BR-002` (TC014/TC015); no separate DISC-### code exists to cite per the citation-source rule.

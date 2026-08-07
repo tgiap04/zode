@@ -1,0 +1,55 @@
+# Test Cases — F015_SettingsAndKeymaps
+
+**SIDECAR (v26.1.0):** this is a 5th, optional file alongside the 4 mandatory feature-spec files.
+Its absence never blocks feature-spec promotion.
+
+**Code Format**: `TC###` — 3-digit zero-padded, resets per feature (this file's own scope is the
+reset boundary).
+
+**Citation-source split**: `UT`/`IT` rows cite a `BR-###`/`SM-###`/`DEC-###`/`DISC-###` code, a
+`file:line`, or an `edge-cases.md` row. `UAT` rows cite a `screens.md`/`business-context.md`
+section — never a bare code.
+
+**CSV export**: out of scope v1 — Markdown is the sole output.
+
+---
+
+## Test Cases
+
+| Test-ID | Type (UT\|IT\|UAT) | Given | When | Then | Traces-to |
+|---------|---------------------|-------|------|------|-----------|
+| TC001 | UT | The merged-settings view includes the `Default` layer with no user override present for a key | The `SettingsStore` resolves that key | The value comes from shipped defaults, is rendered as the lowest-precedence layer in the Settings UI, and no write path exists for it | `DISC-010` (`Default` row) |
+| TC002 | IT | An org/device-wide override for a key exists at the `Global` layer | `set_global_settings` parses and applies a new value for that key | The value is written to `global_settings.json`, any parse error is recorded per-file in `file_errors` rather than aborting, and the value participates in the merge at `Global` precedence | `DISC-010` (`Global` row) |
+| TC003 | IT | The Settings UI is targeting `SettingsUiFile::User` (the default target) | The developer edits a field | `update_settings_file`/`update_settings_file_with_completion` writes the new value to `settings.json` via `SettingsStore::set_user_settings` | `DISC-010` (`User` row) |
+| TC004 | UT | A key's current resolved value originates from the `Server` layer (remote-dev push) | The developer attempts to edit that value from the local Settings UI | The client treats the value as not user-editable — no local write path is invoked for the `Server` layer | `DISC-010` (`Server` row) |
+| TC005 | IT | `SettingsUiFile::Project` is selected for a given worktree | The developer edits a field in that context | The edit is queued through `ProjectSettingsUpdateQueue` and written to that worktree's `.zed/settings.json` | `DISC-010` (`Project((WorktreeId, RelPath))` row) |
+| TC006 | UT | The OS reports a light system appearance and the active theme setting tracks appearance | The theme selector resolves the current appearance | `Appearance::Light` is selected, applying light-mode contrast defaults, with no extra validation beyond the enum parse and no dedicated DB write (name string persisted in `settings.json`) | `DISC-011` (`Light` row) |
+| TC007 | UT | The OS reports a dark system appearance and the active theme setting tracks appearance | The theme selector resolves the current appearance | `Appearance::Dark` is selected, applying dark-mode contrast defaults, with the same "no dedicated write" behavior as `Light` | `DISC-011` (`Dark` row) |
+| TC008 | IT | A key has distinct values set at `Default`, `Global`, `User`, and a `Project` layer for the current worktree simultaneously | `SettingsStore::get<T>` resolves that key | The resolved value is the `Project` layer's value, not `User`/`Global`/`Default` — precedence holds `Project > Server > User ≈ Global > Default` per the `SettingsFile` `Ord` implementation | `BR-001` |
+| TC009 | IT | The developer is editing a keybinding whose current source is the base-keymap preset (not the user's own keymap file), and the keystrokes are changing | The developer confirms the rebind in `KeybindingEditorModal` | `KeymapFile::update_keybinding` writes a new user-level `Add` entry for the new keystroke plus an explicit unbind (`suppression_unbind`) entry for the original keystroke, and the base-keymap source file itself is never rewritten | `BR-002` |
+| TC010 | IT | `settings.json` on disk uses a deprecated schema field and the live file exists | The developer clicks "Backup and Update" | `write_settings_migration` writes the unmigrated old text to `settings_backup.json` via `fs.atomic_write` and only after that write succeeds does it overwrite the live `settings.json` with the migrated text | `BR-003` |
+| TC011 | IT | A `FeatureFlag` type has `enabled_for_all() == false`, no per-flag user override is set, and the account is staff on a debug build with `ZED_DISABLE_STAFF` unset and `enabled_for_staff() == true` | `FeatureFlagStore::try_flag_value` resolves the flag | The staff branch resolves the flag "on" — but if a per-flag override is present in `FeatureFlagsSettings`, that override value is returned instead and the staff check is never reached | `BR-004` |
+| TC012 | IT | Two UI-triggered settings edits for the same file are issued in quick succession | Both mutations are enqueued on `setting_file_updates_tx` | The updates are processed one at a time (never racing on the same file); each processed update loads current text, applies its mutation, canonicalizes an existing path, calls `fs.atomic_write`, then calls `set_user_settings` before its caller's oneshot completes | `ALG-001` (`crates/settings/src/settings_store.rs:552-607`) |
+| TC013 | IT | `keymap.json` is being watched by `Fs::watch` and Zed is running | An external editor writes a new binding to `keymap.json` | The watch loop's next batch loads the new content, `parse_and_apply` succeeds, and `notify_observers()` triggers `handle_keymap_file_changes` to reload bindings without a parse error being recorded | `INT-001` (`crates/settings/src/settings_file.rs:165`) |
+| TC014 | IT | The developer hand-edits `settings.json` and introduces invalid JSON or a wrong-typed value | The file-watch loop picks up the save | The parse failure is recorded in `SettingsStore::file_errors` keyed by `SettingsFile`; the app keeps running on the last valid merged settings and the watch loop keeps listening for a subsequent valid save | edge-cases.md § "Developer hand-edits `settings.json` with invalid JSON or a value of the wrong type" |
+| TC015 | IT | Writing to the backup path (e.g. `settings_backup.json`) will fail (disk full / permissions) | The developer clicks "Backup and Update" | `fs.atomic_write` to the backup path errors, `.with_context(...)` wraps it, and the function returns early via `?` — the live `settings.json`/`keymap.json` write in the same call never executes | edge-cases.md § "The backup-file write fails ... while migrating settings or keymap" |
+| TC016 | IT | No `settings.json` (or `keymap.json`) file exists yet on disk (first run) and it uses/would use a deprecated-schema-affected default | The developer clicks "Backup and Update" (or migration runs on first write) | `fs.is_file` reports false, so no backup write is attempted and the migrated text is written directly to the new live path | edge-cases.md § "Developer clicks \"Backup and Update\" but no live settings/keymap file exists yet (first run)" |
+| TC017 | UT | The current session is a staff account and `ZED_DISABLE_STAFF` is set in the environment | A `FeatureFlag` with `enabled_for_staff() == true` and no override is resolved | The flag resolves to off for that session, matching the non-staff experience, letting the developer verify it locally | edge-cases.md § "A Zed staff account has the local testing override set to force non-staff behavior" |
+| TC018 | UT | The developer is typing into the KeymapEditor's or Settings UI's search box | Keystrokes continue arriving faster than the debounce window | No search executes on every keystroke; a single debounced search runs once typing settles, and results update only for that completed run | edge-cases.md § "Developer types a search query in the keymap editor or Settings search box" |
+| TC019 | UAT | Developer has the SettingsWindow open | Developer searches for "font size" and changes `buffer_font_size` to a new value | `settings.json` is rewritten and an already-open editor immediately reflects the new font size without restarting Zed | screens.md § User Journey step 1 |
+| TC020 | UAT | Developer has the KeymapEditor open and searches for an action | Developer opens `KeybindingEditorModal`, records a new keystroke, and confirms | The new binding is active immediately; the modal closes and the KeymapEditor's table reflects the updated keystroke for that action | screens.md § User Journey step 2 |
+| TC021 | UAT | Developer opens the `BaseKeymapSelector` | Developer picks a preset from another editor (e.g. VS Code) | That preset's bindings (e.g. `Ctrl-Shift-P`) activate immediately across all open windows, layered under any custom user bindings | screens.md § User Journey step 3 |
+| TC022 | UAT | Developer opens the `ThemeSelector` | Developer moves the selection to preview themes, then confirms one | The previewed theme applies live while moving the selection, and the confirmed theme is applied immediately app-wide | screens.md § User Journey step 4 |
+| TC023 | UAT | Developer opens a settings or keymap file that uses a deprecated schema field, and the `MigrationBanner` is showing above the editor | Developer clicks "Backup and Update" | A backup file is written first, the live file is rewritten in the current schema, and the `MigrationBanner` disappears | screens.md § User Journey step 5 |
+
+---
+
+## Coverage Notes
+
+_(None — every `BR-###`/`DISC-###` code in `technical-spec.md` traces to at least one test case
+above. This feature has no `SM-###`/`DEC-###` codes: Decision Logic is explicitly N/A and State
+Machines are explicitly None per `technical-spec.md`, so neither family requires a
+`[NO_TEST_CASE]` entry. `FR-###` and `ALG-###`/`INT-###` codes are outside the mandatory
+BR/SM/DEC/DISC expansion set per the contract; `ALG-001` and `INT-001` are nonetheless covered
+above via `file:line` citation for completeness, and every `FR-###` is exercised indirectly through
+its linked `BR-###`/`ALG-###`/`INT-###` test case.)_

@@ -1,0 +1,115 @@
+{
+  "generated_at": "2026-08-07T09:54:17Z",
+  "overall_status": "PASS",
+  "plan": "260726-1400-rebuild-spec",
+  "schema_version": 1,
+  "totals": {
+    "critical": 0,
+    "failed_specs": 0,
+    "passed_specs": 11,
+    "warning": 0
+  },
+  "validators": {
+    "specs": {
+      "F001_Terminal": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F001_Terminal/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F002_LanguageIntelligence": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F002_LanguageIntelligence/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F008_EditorCore": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F008_EditorCore/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F009_Diagnostics": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F009_Diagnostics/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F010_Debugging": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F010_Debugging/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F011_GitIntegration": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F011_GitIntegration/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F012_ExtensionSystem": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F012_ExtensionSystem/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F013_WorkspaceAndProjectManagement": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F013_WorkspaceAndProjectManagement/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F014_VimEmulation": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F014_VimEmulation/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F015_SettingsAndKeymaps": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F015_SettingsAndKeymaps/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      },
+      "F016_Search": {
+        "issues": [],
+        "spec_path": "plans/260726-1400-rebuild-spec/artifacts/features/F016_Search/test-cases.md",
+        "status": "PASS",
+        "summary": {
+          "critical": 0,
+          "warning": 0
+        }
+      }
+    }
+  }
+}

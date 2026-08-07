@@ -1,6 +1,6 @@
 ---
 failed: 0
-warnings: 5
+warnings: 2
 missing: 0
 result: PASS
 ---
@@ -11,11 +11,11 @@ result: PASS
 `result`: PASS iff `failed === 0 && missing === 0`.
 -->
 
-# Review Report — Rebuild-Spec Artifacts (Wave 7a, Core) — FINAL RE-CHECK #2
+# Review Report — Rebuild-Spec Artifacts (Wave 7a Core, Re-Review #2)
 
 **Reviewer**: Staff Engineer (automated)
-**Date**: 2026-07-26
-**Scope**: 8 core artifacts (system-overview.md, architecture.md, data-model.md, behavior-logic.md, permissions.md, permissions-matrix.md, user-stories.md, feature-list.md). RouteList/ScreenList/ScreenFlow/ApiContracts/FeatureSpec/ProcessFlow SKIPPED per task scope (generic-source, screen_source:none, no --flows/--api-contracts/--feature-specs pass run). Full independent pass over all 8 artifacts, not just the 3 previously-patched spots.
+**Date**: 2026-08-07
+**Scope**: 8 core artifacts (system-overview.md, architecture.md, data-model.md, behavior-logic.md, permissions.md, permissions-matrix.md, user-stories.md, feature-list.md). Stack: Rust, `generic-source` profile — RouteList/ScreenList/ScreenFlow/ApiMap correctly absent and not flagged.
 
 ---
 
@@ -25,16 +25,22 @@ result: PASS
 |--------|-------|
 | Artifacts reviewed | 8 core |
 | Critical issues | 0 |
-| Warnings | 5 |
+| Warnings | 2 |
+| Missing (`.pending` markers) | 0 |
 | Result | **PASS** |
 
-**All 3 previously-tracked critical issues are confirmed FIXED, verified independently:**
+All 3 criticals + 4 warnings from the prior review round are confirmed fixed (verified independently below, not taken on faith). No new criticals surfaced. Two low-impact warnings remain, both stale-documentation-text issues that do not affect any cross-reference integrity.
 
-- **C1 (BL012 orphan)** — `feature-list.md:86` now cites `BL012_StandaloneCliBinaries` under F001_ProjectFolderNavigation's Related Background Logic (`zed <path>` CLI entry point). Grep of all 13 BL### codes across feature-list.md confirms every code (BL001–BL013) now has ≥1 citation. `feature-list.md:749` ("all referenced across features") and `:761` are now truthful.
-- **C2 (ProjectPanel orphan)** — `feature-list.md:82` now lists `ProjectPanel` under F001's Related Data Models (also present at `feature-list.md:748` Total Data Models summary). Cross-checked all 16 data-model.md top-level entity headings (`data-model.md`: Workspace, Project, Worktree, Entry, TextBuffer, Buffer, MultiBuffer, Editor, Thread, Message, SettingsStore, Theme/ThemeFamily, GitStore/Repository, ProjectPanel, Terminal, ExtensionManifest = 16) against feature-list.md citations — all 16 headings (18 entity names, Theme/ThemeFamily and GitStore/Repository each counted as 2) have ≥1 non-summary-line citation.
-- **C3 (BehaviorLogic Index table misalignment)** — `behavior-logic.md:39-53` Index table now correctly populates all 4 columns (Code | Name | Type | Trigger) for all 13 BL### rows, matching the per-BL### detail sections below.
+---
 
-**This independent re-pass found zero new critical issues.** One candidate false-positive was investigated and ruled out: system-overview.md appears to be missing the checklist's literal "## System Architecture / ### High-Level Architecture (Mermaid) / ### Technology Stack / ## Data Flow" sections — but cross-checking against the actual `system-overview-template.md` (not the possibly-stale checklist prose) confirms this project's template explicitly delegates diagrams/tech-stack to architecture.md ("For architecture diagrams and tech stack details, see architecture.md") and requires only Executive Summary → Key Design Decisions → Security Overview → Scalability, which system-overview.md has in full. architecture.md independently carries all 3 required Mermaid diagrams (graph TB, graph LR, sequenceDiagram) and a Layer|Technology|Version tech-stack table. Not a defect.
+## Verification of Prior Fixes (independent re-check)
+
+1. **36 orphan BL codes** — re-ran the full BL↔F### cross-check programmatically: `behavior-logic.md` defines exactly 208 BL codes (BL001–BL208), `feature-list.md` references exactly the same 208 codes. Zero orphans in either direction. **FIXED, confirmed.**
+2. **BL208_ZedCliPathResolution** — present at `behavior-logic.md:5142`, `Source File: crates/util/src/util.rs`, `Source Symbol: get_zed_cli_path`, mapped into `feature-list.md`'s F013 (`crates/util/src/util.rs` gap referenced explicitly). **FIXED, confirmed.**
+3. **BL146–BL207 bare headings** — grep for `^## BL[0-9]{3}_[A-Za-z0-9]+$` (no trailing `: Title`) across the whole file returns zero matches; all 208 headings follow `## BL###_Slug: Title`. **FIXED, confirmed.**
+4. **architecture.md missing `## Data Flow`** — present at `architecture.md:193`, wraps the SSH sequence diagram as `### Remote Development (SSH), not Collaboration`. **FIXED, confirmed.**
+5. **Crate-count mismatch (179 vs 180)** — verified directly against `Cargo.toml`'s workspace `members` array: 180 `crates/*` paths. `system-overview.md` and `architecture.md` both now say "180 crate paths (179 top-level + 1 nested `refineable/derive_refineable`)". **FIXED, confirmed against ground truth, not just cross-doc agreement.**
+6. **feature-list.md stale Limits paragraph** — now reads "coverage IS complete... all 208 BL items... are now assigned to at least one feature above", consistent with the BL cross-check above. **FIXED, confirmed.**
 
 ---
 
@@ -46,72 +52,81 @@ _(none)_
 
 ## Warnings
 
-All 5 previously-known warnings were re-checked in this pass and reconfirmed as still open — stale cross-reference-validation checkbox prose only, no impact on underlying data correctness.
-
-### W1: behavior-logic.md Cross-Reference Validation contains stale claims — OPEN (unchanged)
+### W1: permissions-matrix.md Cross-Reference Validation section is stale re: FeatureList — OPEN
 - **Severity**: warning
-- **Location**: `behavior-logic.md:354-355`
-- **Description**: Still states "N/A this pass, no upstream US artifact generated" / "N/A this pass, no upstream FeatureList generated." Both user-stories.md and feature-list.md exist; feature-list.md now cites all 13/13 BL### codes (C1 fixed).
-- **Fix**: Update both checkboxes to `[x]` now that C1 is resolved (all 13 BL### cited in feature-list.md).
+- **Location**: `permissions-matrix.md:247`
+- **Description**: The Cross-Reference Validation checklist states `[ ] All PERM### codes are referenced in FeatureList.md — N/A this pass, no upstream FeatureList regenerated in this wave`. This is no longer true: `feature-list.md` exists in this same artifact set and its own Cross-Reference Validation confirms `All permission references are valid (every PERM001–PERM006 appears under exactly one feature)` (verified independently: PERM001–PERM006 all appear in `feature-list.md`, matching `permissions-matrix.md`'s own PERM001–PERM006). The checkbox is left unchecked with an outdated "N/A" rationale from an earlier wave ordering.
+- **Fix**: Update the checkbox to `[x]` and replace the note with something like "confirmed via feature-list.md's own Cross-Reference Validation — all 6 PERM codes referenced." Pure documentation-freshness issue; no actual cross-reference is broken.
 
-### W2: user-stories.md Cross-Reference Validation / Unresolved Question #1 claims no upstream FeatureList exists — OPEN (unchanged)
+### W2: behavior-logic.md Cross-Reference Validation section undercounts BL total — OPEN
 - **Severity**: warning
-- **Location**: `user-stories.md:1182`, `user-stories.md:1188`
-- **Description**: Still states "N/A this pass; no upstream FeatureList generated in this session." feature-list.md's US###→F### Coverage Matrix (`feature-list.md:767-795`) correctly maps all 27 US### codes, each exactly once.
-- **Fix**: Update checkbox to checked; resolve/remove Unresolved Question #1.
+- **Location**: `behavior-logic.md:5185-5186`
+- **Description**: The Cross-Reference Validation section states `All BL### codes are unique (BL001–BL207, verified no duplicates)` and `All BL### codes are contiguous (no gaps 001–207)`, but the document actually contains BL001–BL208 (208 items, confirmed unique and contiguous by direct grep) since BL208 was added in the prior fix cycle. The Summary section two lines above correctly says "Total Behavior Logic Items: 208", so this is an internal inconsistency between two sections of the same file — the Cross-Reference Validation checklist text wasn't updated when BL208 was appended.
+- **Fix**: Update both bullets to read "BL001–BL208". Does not affect the correctness of the uniqueness/contiguity claim itself (re-verified true for 208 items), only the stated range.
 
-### W3: permissions-matrix.md Cross-Reference Validation cites a stale reason for its unchecked PERM→FeatureList box — OPEN (unchanged)
-- **Severity**: warning
-- **Location**: `permissions-matrix.md:225`
-- **Description**: Still unchecked with reason "N/A this pass, no upstream FeatureList generated." feature-list.md exists and correctly cites all 8 PERM### codes (verified — no PERM orphans).
-- **Fix**: Check the box; update the stated reason to reflect full PERM### coverage confirmed in feature-list.md.
+---
 
-### W4: feature-list.md — residual stale-prose risk around the now-fixed C1/C2/C3 area — OPEN (informational, confirmed non-critical)
-- **Severity**: warning
-- **Location**: `feature-list.md:24-27`, `feature-list.md:748-750`, `feature-list.md:799-800`
-- **Description**: The previously-critical C1/C2/C3 are confirmed fixed in substance, and re-reading these specific lines in this pass found no remaining false statement. Flagged only for continued extra scrutiny in future edit passes since this is exactly the aggregate-claim text that produced the prior defects.
-- **Fix**: No action required beyond normal proofreading; not blocking.
+## BehaviorLogic Cardinality
 
-### W5: Workspace crate-count "~241" vs. root Cargo.toml member count — OPEN (unchanged, confirmed non-critical)
-- **Severity**: warning
-- **Location**: `system-overview.md:7`, `architecture.md:4,11,145,196`
-- **Description**: system-overview.md/architecture.md cite "~241"/"241 workspace members" and separately "~230 in-workspace library crates" (subset statically linked into the `zed` binary) and "232 under crates/" (a different subset). All figures are hedged ("~") and each is individually well-scoped, so this is phrasing-precision noise, not a raw contradiction.
-- **Fix**: Optional — recount and cite one single, precisely-labeled aggregate figure if exactness is desired; not blocking.
+Per `verification-checklist-core-artifacts.md`'s Cardinality Cross-Check, loading `_scout-bl-inventory.md`:
+
+- **Inventory total**: 207 real entries (see Investigation below — not 266, and not literally "208")
+- **Artifact BL count**: 208
+- **Gap**: |207 − 208| / max(207, 208) × 100 = **0.48%** → **PASS** (well under the 5% threshold; also passes the small-project absolute-floor check: abs gap = 1, ≤ 2 → PASS)
+- **Missing categories**: none. Every inventory category with ≥1 real entry (custom-command, integration, observer, scheduled-job, queue-worker) has ≥1 matching BL type in the artifact (100/24, 20, 2, 62 respectively — see Type distribution below). The five zero-entry inventory categories (event-listener, mail, middleware, notification, webhook) are correctly documented as empty in both the scout inventory and `behavior-logic.md`'s own Scope Notes, and are exempt from Category-drop enforcement.
+- **Orphan files**: none. Every scout inventory `Source File` entry (e.g. `crates/util/src/util.rs`, now BL208) has a matching BL item; no inventory entry lacks a corresponding BL Source File.
+
+### Investigation: is the validator's "266 vs 208" WARN a real gap or a false positive?
+
+**False positive — confirmed by direct count, not assumption.**
+
+I independently counted `_scout-bl-inventory.md` three ways:
+
+1. `grep -cE "^- (category): "` for all 10 canonical categories → **212** raw matches.
+2. Of those 212, exactly **5** are `_(none found...)_` placeholder lines (event-listener, mail, middleware, notification, webhook) — these are prose notes explaining an empty category, not real entries, and should not count toward inventory total.
+3. **212 − 5 = 207 real inventory entries.** This is the correct denominator for the cardinality gap calculation, and it is what I used above.
+
+Separately, I counted all dash-prefixed lines regardless of indentation (`grep -cE "^[[:space:]]*- "`) → **248** — this includes the 207 real top-level entries + 5 placeholder lines + **36** indented sub-bullet continuation lines (the `- Intent matched:`, `- No-row reason:`, `- Observed pattern:` explanatory lines the task description flagged as the likely miscounting culprit). Neither 212 nor 248 nor any combination I tried reaches 266, so I cannot fully reconstruct the validator's naive-counter arithmetic, but the mechanism is clearly consistent with the task's hypothesis: **a naive line-counter that doesn't distinguish top-level category entries from indented explanatory sub-bullets (and/or doesn't exclude the 5 "none found" placeholders) will overcount.** The task description's own framing ("208 = 207 original...") is itself slightly garbled, but my from-scratch count lands cleanly on **207 real entries**, giving a 0.48% gap against the artifact's 208 BL items — solidly PASS, not the critical the raw "266 vs 208" delta would suggest if taken at face value.
+
+**Verdict: WARN is a validator-side counting artifact, not a real coverage gap.** No action needed on the artifacts; if anything, `validate_behavior_logic.py`'s inventory-counting regex should be tightened to match only lines starting with a category name followed by `: ` at zero indentation, excluding `_(none found...)_` placeholder lines — but that is a tooling fix outside the scope of this artifact review.
 
 ---
 
 ## Passed Checks
 
-✓ SystemOverview.required_sections @ system-overview.md (verified against system-overview-template.md, not checklist prose)
-✓ SystemOverview.key_design_decisions_min2 @ system-overview.md
-✓ Architecture.mermaid_diagrams_valid @ architecture.md (3 diagrams: graph TB, graph LR, sequenceDiagram)
-✓ Architecture.tech_stack_matches_manifests @ architecture.md
-✓ DataModel.erd_present @ data-model.md
-✓ DataModel.required_sections_order @ data-model.md
-✓ DataModel.discriminator_sequential_no_gaps (DISC-001..DISC-017) @ data-model.md
-✓ DataModel.disc_scope_min2_values_no_boolean_only @ data-model.md
-✓ DataModel.no_duplicate_discriminators @ data-model.md
-✓ BehaviorLogic.bl_codes_unique_and_format_valid (BL001..BL013) @ behavior-logic.md
-✓ BehaviorLogic.index_table_4col_format_correct (FIXED, re-verified) @ behavior-logic.md
-✓ BehaviorLogic.per_item_required_fields_present @ behavior-logic.md
-✓ BehaviorLogic.cardinality_total_gap (13 inventory vs 13 BL = 0% = PASS) @ behavior-logic.md
-✓ BehaviorLogic.bl_orphan_check (FIXED: 0 orphans, all 13 referenced in feature-list.md) @ behavior-logic.md
-✓ Permissions.required_sections_order @ permissions.md
-✓ Permissions.valid_auth_system_type (hybrid) @ permissions.md
+✓ Universal.no_placeholder_text @ system-overview.md,architecture.md,data-model.md,behavior-logic.md,permissions.md,permissions-matrix.md,user-stories.md,feature-list.md (8/8)
+✓ Universal.required_sections_in_order @ system-overview.md,architecture.md,data-model.md,behavior-logic.md,permissions.md,permissions-matrix.md,user-stories.md,feature-list.md (8/8)
+✓ Universal.no_orphaned_codes @ BL001-BL208 (208/208, 0 orphans)
+✓ Universal.no_orphaned_codes @ PERM001-PERM006 (6/6, 0 orphans)
+✓ Universal.no_orphaned_codes @ US001-US067 (67/67, 0 orphans)
+✓ Universal.no_orphaned_codes @ MODEL001-MODEL018 (18/18, 0 orphans)
+✓ SystemOverview.mermaid_diagrams_present @ system-overview.md
+✓ SystemOverview.tech_stack_table_format @ system-overview.md
+✓ SystemOverview.crate_count_matches_cargo_toml @ system-overview.md (180 verified against Cargo.toml)
+✓ Architecture.mermaid_diagram_present_and_valid @ architecture.md
+✓ Architecture.data_flow_section_present @ architecture.md
+✓ Architecture.crate_count_matches_cargo_toml @ architecture.md (180 verified against Cargo.toml)
+✓ DataModel.model_code_uniqueness @ data-model.md (MODEL001-MODEL018, 0 duplicates)
+✓ DataModel.disc_code_uniqueness @ data-model.md (DISC-001-DISC-013, 0 duplicates)
+✓ DataModel.entity_completeness @ MODEL001_MultiWorkspace..MODEL018_ExtensionManifest (18/18)
+✓ BehaviorLogic.bl_code_uniqueness @ behavior-logic.md (BL001-BL208, 0 duplicates)
+✓ BehaviorLogic.bl_heading_format @ BL001..BL208 (208/208, `BL###_Slug: Title` format)
+✓ BehaviorLogic.source_file_and_symbol_present @ BL001..BL208 (208/208)
+✓ BehaviorLogic.no_multi_symbol_delimiter @ BL001..BL208 (208/208)
+✓ BehaviorLogic.valid_type_value @ BL001..BL208 (208/208, all in canonical 10)
+✓ BehaviorLogic.orphan_bl_zero @ BL001..BL208 (208/208 mapped to feature-list.md)
+✓ Permissions.valid_auth_system_type @ permissions.md (`other`)
 ✓ Permissions.no_perm_codes_in_curated_view @ permissions.md
-✓ PermissionsMatrix.perm_codes_unique_and_format_valid (PERM001..PERM008) @ permissions-matrix.md
-✓ PermissionsMatrix.index_table_4col_format_correct @ permissions-matrix.md
-✓ PermissionsMatrix.perm_orphan_check (0 orphans, all 8 referenced in feature-list.md) @ permissions-matrix.md
-✓ UserStories.us_codes_unique_and_format_valid (US001..US027) @ user-stories.md
-✓ UserStories.single_intent @ user-stories.md
-✓ UserStories.human_actor @ user-stories.md
-✓ UserStories.system_us_has_bl_mapped (US020-024) @ user-stories.md
-✓ FeatureList.f_codes_unique_and_format_valid (F001..F023) @ feature-list.md
-✓ FeatureList.us_to_f_mapping_complete (US001-027, all mapped exactly once) @ feature-list.md
-✓ FeatureList.perm_codes_all_mapped (PERM001-008, re-verified, 0 orphans) @ feature-list.md
-✓ FeatureList.data_model_orphan_check (FIXED: 0 orphans, all 16 entity headings / 18 names referenced) @ feature-list.md
-✓ FeatureList.no_duplicate_feature_names @ feature-list.md
-✓ FeatureList.c1_c2_c3_fix_verified (BL012 cited, ProjectPanel cited, Index table 4-col rebuilt) @ feature-list.md + behavior-logic.md
+✓ PermissionsMatrix.perm_code_uniqueness @ permissions-matrix.md (PERM001-PERM006, 0 duplicates)
+✓ PermissionsMatrix.required_fields_present @ PERM001..PERM006 (6/6)
+✓ UserStories.us_code_uniqueness @ user-stories.md (US001-US067, 0 duplicates)
+✓ UserStories.ui_type_has_feature_area @ US001..US067 (67/67, screen-list absent, Feature Area substitutes per profile)
+✓ UserStories.system_type_has_bl_or_citation @ US027,US029,US033,US040,US043,US044,US051,US061,US062 (9/9)
+✓ FeatureList.f_code_uniqueness @ feature-list.md (F001,F002,F008-F016, 0 duplicates)
+✓ FeatureList.every_bl_mapped @ feature-list.md (208/208)
+✓ FeatureList.every_perm_mapped @ feature-list.md (6/6)
+✓ FeatureList.every_model_mapped @ feature-list.md (18/18)
+✓ FeatureList.no_fabricated_subsystem @ feature-list.md,user-stories.md,data-model.md,permissions-matrix.md (grep-verified: no agent/collab/livekit/language_model reintroduction)
 
 ---
 
@@ -119,19 +134,18 @@ All 5 previously-known warnings were re-checked in this pass and reconfirmed as 
 
 | Metric | Value |
 |--------|-------|
-| Feature Specs | 0 (not in scope this pass) |
-| User Stories | 27 (US001–US027) |
-| Screens | N/A (screen_source:none, not produced) |
-| Background Logic Items | 13 (BL001–BL013; 0 orphaned) |
-| Permissions | 8 (PERM001–PERM008; 0 orphaned) |
-| Backend Route Rows | 0 (no HTTP routes; not produced) |
-| Frontend Pages | N/A (not produced) |
-| Data Model Entities | 16 headings / 18 names (0 orphaned) |
+| Feature Specs | 11 (F001,F002,F008–F016; provisional numbering per template note) |
+| User Stories | 67 |
+| Screens | N/A (`screen_source: none`) |
+| Background Logic Items | 208 |
+| Permissions | 6 |
+| Backend Route Rows | N/A (no HTTP surface) |
+| Frontend Pages | N/A |
+| Data Model Entities | 18 |
 
 ---
 
-## Unresolved Questions
+## Still Unresolved
 
-1. W1-W3 (stale "N/A this pass, no upstream X generated" checkbox prose in behavior-logic.md, user-stories.md, permissions-matrix.md) are now factually stale given feature-list.md exists and fully cross-references all of them — batchable into one proofreading sweep, not blocking Wave 9 promotion.
-2. W5 (crate-count phrasing precision) is optional polish, not blocking.
-3. No blocking issues remain. Clean PASS — ready for Wave 9 promotion as far as this core-artifact scope is concerned.
+- W1 and W2 above (both stale cross-reference-validation prose, zero functional impact — safe to fix in a follow-up pass, not blocking).
+- Pre-existing, out-of-scope-for-this-cycle observation (not a new finding, not actionable this round): `behavior-logic.md`'s "Related Data Models" sections cite entities by informal name (e.g. `Project`, `Editor`, `Workspace`) rather than by `MODEL###` code, unlike `feature-list.md`'s own Related Data Models sections which correctly use `MODEL###`. This has been true across all prior review rounds and causes no orphan/dangling reference (no MODEL### token is ever malformed or missing), so it is a style/traceability nit rather than a defect — flagging only for awareness, not counted as a warning.

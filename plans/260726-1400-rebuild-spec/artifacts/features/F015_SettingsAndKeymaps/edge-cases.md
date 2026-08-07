@@ -1,0 +1,10 @@
+# Edge Cases — F015_SettingsAndKeymaps
+
+| Scenario | What Happens | User-Facing Message |
+|----------|--------------|---------------------|
+| Developer hand-edits `settings.json` with invalid JSON or a value of the wrong type | The parse error is recorded against that file internally; the editor keeps running on the last valid merged settings rather than crashing, and the watch loop keeps listening for the next (hopefully valid) save | "None — silent recovery; the previous valid settings stay in effect until the file is fixed" |
+| Developer edits a keybinding that came from the base keymap preset or an extension, not their own keymap file | A new entry is added to the user's own keymap file instead of editing the original source; if the keystroke also changed, an extra entry is added to explicitly cancel the old binding | "None — the change simply takes effect as if it were a normal rebind" |
+| The backup-file write fails (for example, disk full or permissions issue) while migrating settings or keymap | The operation stops immediately — the live settings/keymap file is never touched, so nothing is lost or half-updated | "Backup and Update" fails with an error; the developer's existing configuration is left exactly as it was |
+| Developer clicks "Backup and Update" but no live settings/keymap file exists yet (first run) | There is nothing to back up, so the migrated content is written straight to a new file | "None — a fresh, up-to-date file is created" |
+| A Zed staff account has the local testing override set to force non-staff behavior | In-development features that are normally visible to staff are hidden, exactly as they'd appear for a non-staff account | "None — the feature simply doesn't appear, same as for any other user" |
+| Developer types a search query in the keymap editor or Settings search box | The search runs in the background with a short delay so typing stays responsive, then results (or a completed-search record) update once ready | "None — results simply appear as typing settles" |
