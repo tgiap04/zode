@@ -63,10 +63,14 @@ pub struct SidebarRenderState {
     pub open: bool,
     /// Whether the always-visible project rail is present. Independent of
     /// `open`: the rail occupies the window's `side` edge even with the
-    /// panel closed, which is what decides whether the title bar still has
-    /// to leave room for the platform's window controls.
+    /// panel closed.
     pub rail: bool,
     pub side: SidebarSide,
+    /// How much of the `side` edge the sidebar actually covers. The title bar
+    /// needs the width, not just `occupies`: the rail alone is narrower than
+    /// the strip macOS draws its window controls over, so the title bar still
+    /// has to reserve the remainder or the controls land on its content.
+    pub edge_width: Pixels,
 }
 
 impl SidebarRenderState {
@@ -403,10 +407,20 @@ impl MultiWorkspace {
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
         let enabled = self.multi_workspace_enabled(cx);
+        let open = self.sidebar_open() && enabled;
+        let rail = self.sidebar.is_some() && enabled;
         SidebarRenderState {
-            open: self.sidebar_open() && enabled,
-            rail: self.sidebar.is_some() && enabled,
+            open,
+            rail,
             side: self.sidebar_side(cx),
+            // Mirrors the container width in `render`: the rail is always drawn,
+            // the panel only when open.
+            edge_width: match (&self.sidebar, rail) {
+                (Some(sidebar), true) => {
+                    sidebar.rail_width(cx) + if open { sidebar.width(cx) } else { px(0.) }
+                }
+                _ => px(0.),
+            },
         }
     }
 

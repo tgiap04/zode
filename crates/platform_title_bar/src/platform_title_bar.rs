@@ -238,18 +238,26 @@ impl Render for PlatformTitleBar {
                     })
             })
             .map(|this| {
-                // The rail sits on the window edge even with the panel
-                // closed, so macOS's window controls (drawn by the OS over
-                // that same corner) land on the sidebar, not here -- but the
-                // in-title-bar controls Linux draws start to the right of the
-                // sidebar and stay visible.
-                let left_edge_free = !sidebar.occupies(SidebarSide::Left);
+                // The sidebar sits on the window edge even with the panel
+                // closed, so macOS's window controls (drawn by the OS over that
+                // same corner) land partly on it -- but the rail alone is
+                // narrower than the strip they occupy, so reserve however much
+                // of it the sidebar does not already cover. The in-title-bar
+                // controls Linux draws start to the right of the sidebar and
+                // stay visible regardless.
+                let left_edge_covered = if sidebar.side == SidebarSide::Left {
+                    sidebar.edge_width
+                } else {
+                    px(0.)
+                };
+                let traffic_light_inset = px(TRAFFIC_LIGHT_PADDING) - left_edge_covered;
                 let show_left_controls = !(sidebar.open && sidebar.side == SidebarSide::Left);
 
                 if window.is_fullscreen() {
                     this.pl_2()
-                } else if self.platform_style == PlatformStyle::Mac && left_edge_free {
-                    this.pl(px(TRAFFIC_LIGHT_PADDING))
+                } else if self.platform_style == PlatformStyle::Mac && traffic_light_inset > px(0.)
+                {
+                    this.pl(traffic_light_inset)
                 } else if let Some(controls) = show_left_controls
                     .then(|| {
                         render_left_window_controls(
