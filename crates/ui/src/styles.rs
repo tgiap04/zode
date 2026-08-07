@@ -7,6 +7,7 @@ mod severity;
 mod spacing;
 mod typography;
 mod units;
+mod workspace_surface;
 
 pub use appearance::*;
 pub use color::*;
@@ -16,3 +17,4 @@ pub use severity::*;
 pub use spacing::*;
 pub use typography::*;
 pub use units::*;
+pub use workspace_surface::*;

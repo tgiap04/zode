@@ -2685,12 +2685,16 @@ impl Render for MultiWorkspace {
                         .occlude(),
                 );
 
+                // The sidebar is a sibling of the whole `Workspace`, not one of
+                // its docks, so it never passes through `render_dock` — it has
+                // to claim the surface treatment for itself.
                 div()
                     .id("sidebar-container")
                     .relative()
                     .h_full()
                     .w(sidebar_width)
                     .flex_shrink_0()
+                    .workspace_surface(cx)
                     .child(sidebar_handle.to_any())
                     // Nothing to resize while only the rail is showing --
                     // its width is fixed.
