@@ -1,0 +1,64 @@
+<!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths — all references here are output targets or internal definitions -->
+# Test Cases — F010_Debugging
+
+**SIDECAR (v26.1.0):** this is a 5th, optional file alongside the 4 mandatory feature-spec files.
+Its absence never blocks feature-spec promotion.
+
+**Code Format**: `TC###` — 3-digit zero-padded, resets per feature (this file's own scope is the
+reset boundary).
+
+**Citation-source split**: `UT`/`IT` rows cite a `BR-###`/`SM-###`/`DEC-###`/`DISC-###` code, a
+`file:line`, or an `edge-cases.md` row. `UAT` rows cite a `screens.md`/`business-context.md`
+section — never a bare code.
+
+**CSV export**: out of scope v1 — Markdown is the sole output.
+
+---
+
+## Test Cases
+
+| Test-ID | Type (UT\|IT\|UAT) | Given | When | Then | Traces-to |
+|---------|---------------------|-------|------|------|-----------|
+| TC001 | UT | 5 breakpoints tracked across 3 files in `BreakpointStore` | `ClearAllBreakpoints` is triggered | The entire `breakpoints` map is emptied in one call and `BreakpointStoreEvent::BreakpointsCleared` is emitted carrying all 3 affected paths — no partial per-file clear occurs | `BR-001` |
+| TC002 | IT | An active session's adapter reports `capabilities.supports_set_variable = true`; a variable's edit UI is open | Developer submits a new value via `EditVariable` | `SetVariableValueCommand` is sent to the adapter; on success the `VariablesCommand`/`ReadMemory` caches are invalidated, watchers refresh for that stack frame, and `SessionEvent::Variables` is emitted | `BR-002` |
+| TC003 | IT | An active session's adapter reports `capabilities.supports_set_variable = false` (or the adapter rejects the write, e.g. a read-only binding) | Developer submits a new value via `EditVariable` | No `SetVariableValueCommand` reaches the adapter (or the adapter's rejection is returned); the variable list keeps showing the original value and surfaces the adapter's rejection message | `BR-002`; `edge-cases.md § Debug adapter rejects a variable edit` |
+| TC004 | UT | `running_state.session().is_attached() == true` for the active session | Debugger UI wiring for the active session is evaluated | The `Detach` action is registered (`on_action`) and dispatches to `session.detach_client()` | `BR-003` |
+| TC005 | UT | `running_state.session().is_attached() == false` for the active session | Debugger UI wiring for the active session is evaluated | `Detach` is not wired up for that session; `Stop` remains available regardless | `BR-003` |
+| TC006 | UT | The `js-debug-companion` directory contains 3 valid-semver version folders | A local `DapStore` is constructed (`DapStore::new`) | Folders are sorted by parsed semver and all but the single newest are deleted, leaving exactly one version installed | `BR-004` |
+| TC007 | IT | A developer has joined someone else's collab session as a guest (non-hosting) and their `Project.client_state` is `Collab { remote_id, .. }` | The guest clicks the gutter to set a breakpoint | Zode doesn't apply the edit itself — it hands the request off to the host by sending `proto::ToggleBreakpoint` over `upstream_client` and moves on without waiting for a reply | `BR-005`; `DISC-002` (value: `Collab`); `INT-004_CollabBreakpointForward` |
+| TC008 | UT | A developer is working solo, no collab session active (`Project.client_state == Local`) | They click the gutter to set a breakpoint | The breakpoint appears in their own editor immediately — it's a purely local `BreakpointStore` write, nothing goes over the network | `DISC-002` (value: `Local`) |
+| TC009 | IT | A developer is hosting a collab session (`Project.client_state == Shared { remote_id }`) and sets a breakpoint | Their guests are watching the same file | The breakpoint takes effect on the host's own copy right away, and every connected guest sees it too, pushed out over `rpc` via `downstream_client` | `DISC-002` (value: `Shared`) |
+| TC010 | IT | `Session.global_state == Running` | A breakpoint is hit, or developer triggers `Pause`, or the adapter sends a `StoppedEvent` | `ThreadStatus` transitions `Running -> Stopped`; the variable list and stack frame list refresh | `SM-001` (transition: `Running -> Stopped`) |
+| TC011 | IT | `Session.global_state == Stopped` at a breakpoint | Developer triggers `Continue` (or `StepInto`/`StepOver`/`StepOut`, gated per `BR-003` for `StepBack`) | `ThreadStatus` transitions `Stopped -> Running` (via `Stepping` for step actions) and the editor current-line indicator clears until the next stop | `SM-001` (transition: `Stopped -> Running`) |
+| TC012 | IT | A `Session` is `Running` or `Stopped` | The debuggee process exits, or the adapter shuts down the session | `ThreadStatus` transitions to `Exited` then `Ended`; session-scoped panes (variables, call stack) clear | `SM-001` (transition: `* -> Exited/Ended`) |
+| TC013 | IT | A developer is actively debugging a project that is in the foreground (`Project.activity == Active`) | The idle timer or memory-pressure fuse runs its periodic hibernation check | Nothing happens to the debug session — an `Active` project is never a hibernation candidate in the first place | `DISC-003` (value: `Active`) |
+| TC014 | IT | A developer has defocused the project (`Project.activity == Warm`) but a debug session is still running, or a buffer is mid-autosave | The idle timer or memory-pressure fuse tries to hibernate the project | The developer's session isn't torn down — the hibernation is deferred, and a `hibernate_retry` task keeps retrying on a fixed interval until the debug session ends or the autosave race clears | `DISC-003` (value: `Warm`) |
+| TC015 | IT | A debug session is active on a project that would otherwise be hibernated for being idle | Hibernation is attempted for that project | Hibernation is deferred and retried later instead of tearing the project down mid-session; the running session is not interrupted | `DISC-003` (value: `Hibernated`); `edge-cases.md § A debug session is active while its project would otherwise be hibernated` |
+| TC016 | UT | The locally installed `js-debug-companion` version is older than the latest version published on the npm registry | `get_or_install_companion` runs the version comparison | A background install of the newer version starts (`install_latest_version`) while the current session keeps using the already-installed binary uninterrupted | `crates/project/src/debugger/session.rs:3144-3170` |
+| TC017 | IT | Developer opens "Attach to Process" on a remote (SSH) project and the `proto::GetProcesses` request to `remote.proto_client` fails | The response resolves as an error | The picker falls back to an empty candidate list rather than blocking or crashing the modal | `INT-003_RemoteProcessListForAttach`; `edge-cases.md § Remote process list request fails while opening Attach to Process` |
+| TC018 | IT | Developer toggles the "only user frames" stack-frame filter for a given adapter name and workspace database id, then restarts the app | `StackFrameList::toggle_frame_filter` runs, then the workspace reopens | The `kv_store` is upserted with key `stack_frame_filter_key(adapter_name, workspace_id)` and the serialized filter value; the same filter state is restored after restart | `crates/debugger_ui/src/session/running/stack_frame_list.rs:838-857` |
+| TC019 | UT | The debug adapter binary for the selected launch configuration is missing or misconfigured | Developer triggers `Start` | Session start fails before any `DebugSession` is created; no debugger panes become active; a diagnostic message is surfaced | `edge-cases.md § Debug adapter binary is missing or misconfigured when starting a session` |
+| TC020 | UT | The active session's adapter does not report `capabilities.supports_step_back` | Debugger UI wiring for the active session is evaluated | The `StepBack` control is not wired up/available for that session | `BR-003`; `edge-cases.md § Stepping (StepBack) is requested but the adapter doesn't support reverse execution` |
+| TC021 | UAT | Developer arrives at the New Process Modal | Developer sees the Debug tab preselected with available launch configurations and selects one | The modal closes and the Debugger Panel opens with Console, Breakpoint List, and Variable List visible but empty until the program hits a breakpoint | `screens.md § User Journey step 1-2` |
+| TC022 | UAT | Developer has the New Process Modal open | Developer switches between the Task/Debug/Attach/Launch tabs | The visible pane updates to match the selected tab, letting the developer pick a launch configuration or task and start a session | `screens.md § Screen List — New Process Modal` |
+| TC023 | UAT | Developer has just launched a debug session | The program reaches a breakpoint and pauses | Developer is taken to the paused-state view where Variable List and Console populate with the current stack frame's data, and steps through code from there | `screens.md § User Journey step 3` |
+| TC024 | UAT | Developer is at a paused session and wants to inspect raw memory around a variable's address | Developer opens the Memory View and types an address in its query bar | The Memory View jumps to and displays the hex/byte content around that address | `screens.md § User Journey step 4` |
+| TC025 | UAT | Developer is on a remote (SSH) project with a long-lived service already running | Developer opens "Attach to Process," picks the running process from the live list | A debug session attaches to that process in place, without restarting it | `business-context.md § What They Do item 7` |
+| TC026 | UAT | Debugger behavior looks wrong during or after a session | Developer opens the Debug Adapter Log Viewer | A log pane opens showing that session's raw DAP protocol traffic, and stays viewable even after the session has ended, until the viewer is closed | `screens.md § User Journey step 5` |
+| TC027 | UAT | Developer is at a paused session viewing a struct-typed variable | Developer types an expression into the debug console and adds it to the watch list, then expands the struct variable | The expression appears in the watch panel and updates on the next step; the struct's nested fields render as child rows | `business-context.md § What They Do item 3` |
+| TC028 | UAT | Breakpoints are scattered across several files from earlier debugging passes | Developer clears every breakpoint at once instead of removing them one by one | All breakpoints are gone in a single action, giving the developer a clean pass to start setting new ones | `business-context.md § What They Do item 5` |
+| TC029 | UAT | Developer is finished with a running debug session | Developer stops the session, or detaches if the adapter supports it | The debuggee process terminates (Stop) or keeps running independently of the debugger (Detach), and the session is removed from the debugger UI | `business-context.md § What They Do item 6` |
+
+---
+
+## Coverage Notes
+
+- `FR-014` — [NO_TEST_CASE] The Cross-Cutting Logic Requirements table lists this row's Source as
+  "see per-row Source citations under Business Rules/Algorithms/Integrations below," but no
+  BR/SM/DEC/DISC block below actually cites the `Session::new` `BreakpointStoreEvent` subscription
+  with a precise `file:line` — nothing traceable to expand into a Given/When/Then without going
+  past the 4 authorized source files.
+- `FR-018` — [NO_TEST_CASE] The only citation for the session-id/window-id binding on
+  serialization flush is the `DB Impact per Event` row in `technical-spec.md`, which is itself
+  marked `[INFERRED]` with "exact line range not re-verified in this pass" — too uncertain a basis
+  to expand into an asserted test case.
