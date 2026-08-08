@@ -78,7 +78,7 @@ fn render_font_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement 
     let theme_settings = ThemeSettings::get_global(cx);
     let ui_font = theme_settings.ui_font.family.clone();
     let buffer_font = theme_settings.buffer_font.family.clone();
-    let current_size = f32::from(theme_settings.buffer_font_size(cx)).round() as i32;
+    let current_size = f32::from(theme_settings.buffer_font_size(cx));
     // `None` here is not "unset" to the user -- the terminal renders the buffer
     // font in that case, so showing the buffer font is what is actually on screen.
     let terminal_font = TerminalSettings::get_global(cx)
@@ -130,7 +130,7 @@ fn render_font_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement 
         .child(
             h_flex()
                 .justify_between()
-                .child(Label::new("Size").color(Color::Muted))
+                .child(Label::new("Editor size").color(Color::Muted))
                 .child(render_font_size_toggle(current_size, tab_index)),
         )
 }
@@ -138,23 +138,28 @@ fn render_font_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement 
 /// A few presets rather than a free number field: the page's other controls are
 /// toggle groups, and a stepper here would be the only thing on the screen
 /// needing its own state.
-const FONT_SIZE_PRESETS: [i32; 4] = [12, 13, 14, 16];
+///
+/// The shipped default has to appear among them, or the control opens with
+/// nothing selected and the first click silently resizes text the user never
+/// asked to change.
+const FONT_SIZE_PRESETS: [f32; 4] = [10.5, 12.0, 13.0, 14.0];
 
 /// Split out so a test can reach it: the closure it is called from lives inside
 /// a toggle button and cannot be invoked without a window.
 ///
-/// Writes both sizes deliberately -- the user picks one number, and setting only
-/// the editor leaves the chrome at its default with nothing on screen to say so.
-fn write_font_size(size: i32, settings: &mut settings::SettingsContent) {
-    let size = Some(settings::FontSize(size as f32));
-    settings.theme.buffer_font_size = size;
-    settings.theme.ui_font_size = size;
+/// Editor only. Code and chrome are read at different distances and the shipped
+/// defaults already disagree (10.5 against 13), so one number cannot serve both
+/// without quietly overriding whichever the user did not have in mind.
+fn write_font_size(size: f32, settings: &mut settings::SettingsContent) {
+    settings.theme.buffer_font_size = Some(settings::FontSize(size));
 }
 
-fn render_font_size_toggle(current_size: i32, tab_index: &mut isize) -> impl IntoElement {
+fn render_font_size_toggle(current_size: f32, tab_index: &mut isize) -> impl IntoElement {
+    // Compared with a tolerance because these are settings values round-tripped
+    // through f32, not integers that can be matched exactly.
     let selected = FONT_SIZE_PRESETS
         .iter()
-        .position(|size| *size == current_size);
+        .position(|size| (size - current_size).abs() < 0.01);
 
     ToggleButtonGroup::single_row(
         "onboarding-font-size",
@@ -485,20 +490,44 @@ mod tests {
         });
     }
 
-    /// A font size is one number to the user but two settings underneath, and
-    /// writing only the editor one leaves the chrome at its default with nothing
-    /// on screen to say so.
+    /// The control is labelled for the editor, so it must not quietly resize the
+    /// interface too -- the shipped defaults deliberately differ.
     #[gpui::test]
-    fn a_font_size_writes_both_the_editor_and_the_interface(cx: &mut TestAppContext) {
+    fn a_font_size_writes_the_editor_and_leaves_the_interface_alone(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
 
             let mut content = settings::SettingsContent::default();
-            super::write_font_size(13, &mut content);
+            super::write_font_size(10.5, &mut content);
 
-            assert_eq!(content.theme.buffer_font_size, Some(settings::FontSize(13.0)));
-            assert_eq!(content.theme.ui_font_size, Some(settings::FontSize(13.0)));
+            assert_eq!(
+                content.theme.buffer_font_size,
+                Some(settings::FontSize(10.5))
+            );
+            assert_eq!(content.theme.ui_font_size, None);
         });
+    }
+
+    /// A preset the shipped default cannot match leaves the control blank, so
+    /// the first click moves text the user came to this screen already happy with.
+    #[test]
+    fn the_default_editor_size_is_one_of_the_presets_offered() {
+        let defaults: settings::SettingsContent =
+            settings::parse_json_with_comments(settings::default_settings().as_ref())
+                .expect("default settings must parse as jsonc");
+        let default_size = defaults
+            .theme
+            .buffer_font_size
+            .expect("default.json must set buffer_font_size")
+            .0;
+
+        assert!(
+            super::FONT_SIZE_PRESETS
+                .iter()
+                .any(|size| (size - default_size).abs() < 0.01),
+            "default buffer_font_size {default_size} is not in {:?}",
+            super::FONT_SIZE_PRESETS
+        );
     }
 }
