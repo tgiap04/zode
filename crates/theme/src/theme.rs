@@ -44,20 +44,6 @@ pub use crate::ui_density::*;
 /// The name of the default dark theme.
 pub const DEFAULT_DARK_THEME: &str = "One Dark";
 
-/// Margin applied to each workspace panel surface — the docks, the center pane
-/// group and the project sidebar. Two neighbouring surfaces
-/// therefore sit `2 ×` this apart, so the window background shows through as a
-/// seam that separates them.
-///
-/// For reference, VS Code's floating-panel layout puts its panels `5px` apart
-/// (`agents.layout.floatingPanelGap`) — but it also draws a 1px border around
-/// each one, which is what actually makes the boundary readable. Without that
-/// border the seam only reads as far as the background contrasts with the
-/// panels, so this runs slightly wider than VS Code's gap.
-pub const WORKSPACE_SURFACE_MARGIN: Pixels = px(3.0);
-/// Corner radius for those same surfaces. VS Code's own scale for comparison:
-/// `cornerRadius-small` 4px, `-medium` 6px, `-large` 8px (its panels use large).
-pub const WORKSPACE_SURFACE_ROUNDING: Pixels = px(5.0);
 
 /// Defines window border radius for platforms that use client side decorations.
 pub const CLIENT_SIDE_DECORATION_ROUNDING: Pixels = px(10.0);

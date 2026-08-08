@@ -7601,13 +7601,13 @@ impl Workspace {
             leader_border_for_pane(follower_states, &pane, window, cx)
         });
 
-        // Every dock — left, right and bottom, across all `BottomDockLayout`
-        // variants — funnels through here, so the surface treatment lands once
-        // rather than per layout arm.
+        // No surface treatment: with the centre flush, a margin here would be the
+        // only seam left and would read as a stray grey channel beside one dock.
         let mut container = div()
             .flex()
             .flex_none()
-            .workspace_surface(cx)
+            .self_stretch()
+            .overflow_hidden()
             .child(dock.clone())
             .children(leader_border);
 
