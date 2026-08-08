@@ -9014,13 +9014,13 @@ dependencies = [
  "fuzzy",
  "gpui",
  "menu",
- "notifications",
  "picker",
  "project",
- "schemars",
  "serde",
  "settings",
+ "settings_ui",
  "telemetry",
+ "terminal",
  "theme",
  "theme_settings",
  "ui",
@@ -9028,7 +9028,6 @@ dependencies = [
  "vim_mode_setting",
  "workspace",
  "zed_actions",
- "zlog",
 ]
 
 [[package]]
@@ -12580,7 +12579,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "serde_json_lenient",
  "settings_content",
  "settings_json",
  "settings_macros",

@@ -7,14 +7,14 @@ use chrono::{DateTime, Utc};
 use git::Clone as GitClone;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, Window, actions,
+    ParentElement, Render, img, Styled, Task, Window, actions,
 };
 use gpui::WeakEntity;
 use menu::{SelectNext, SelectPrevious};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
 use util::ResultExt;
 use zed_actions::{Extensions, OpenKeymap, OpenOnboarding, OpenSettings, command_palette};
 
@@ -423,7 +423,11 @@ impl Render for WelcomePage {
                             .justify_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
+                            .child(
+                                img("images/zode_logo.png")
+                                    .size(rems_from_px(45.))
+                                    .flex_none(),
+                            )
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
                                     Label::new("The editor for what's next")
