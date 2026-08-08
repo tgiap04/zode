@@ -15172,10 +15172,12 @@ mod tests {
         let parsed: serde_json::Value = settings::parse_json_with_comments(&settings_text).unwrap();
         assert_eq!(
             parsed["theme"],
+            // The migration fills both slots from the configured defaults, so
+            // read them from the constants rather than pinning theme names here.
             serde_json::json!({
                 "mode": "system",
-                "light": "One Light",
-                "dark": "One Dark"
+                "light": settings::DEFAULT_LIGHT_THEME,
+                "dark": settings::DEFAULT_DARK_THEME
             })
         );
 
