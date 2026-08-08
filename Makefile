@@ -15,6 +15,9 @@ PROFILE_DIR := $(if $(filter dev,$(PROFILE)),debug,$(PROFILE))
 BIN := target/$(PROFILE_DIR)/$(PACKAGE)
 
 # Directory zode opens. Override: make dev PROJECT=~/some/repo
+# Set it EMPTY (make dev PROJECT=) to launch with no folder at all. That is the
+# only way to reach the first-run screen: passing any path opens it directly and
+# the onboarding branch never runs, so a fresh reset looks like it did nothing.
 PROJECT ?= .
 
 # Trims several GB of debug info while keeping backtraces readable.
@@ -61,7 +64,7 @@ help: ## Show this help
 build: ## Compile the zode binary (PROFILE=dev by default, incremental)
 	$(CARGO) build -p $(PACKAGE) --bin $(PACKAGE) --profile $(PROFILE)
 
-dev: ## Launch the already-built binary — never recompiles
+dev: ## Launch the already-built binary — never recompiles (PROJECT= opens nothing)
 	@test -x $(BIN) || { \
 		echo "No binary at $(BIN) — run 'make build$(if $(filter dev,$(PROFILE)),, PROFILE=$(PROFILE))' first."; \
 		exit 1; \
@@ -138,7 +141,11 @@ define confirm_and_delete
 	for dir in $(1); do \
 		if [ -e "$$dir" ]; then rm -rf "$$dir"; echo "  removed $$dir"; fi; \
 	done; \
-	echo "Done. The next launch starts from defaults."
+	echo "Done. The next launch starts from defaults."; \
+	echo; \
+	echo "To actually see that, launch with no folder:  make dev PROJECT="; \
+	echo "Plain 'make dev' passes this repo as an argument, which opens it"; \
+	echo "straight away and skips the first-run screen entirely."
 endef
 
 paths: ## Print where zode stores things (mirrors crates/paths/src/paths.rs)
