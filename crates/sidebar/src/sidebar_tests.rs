@@ -152,3 +152,70 @@ async fn test_rebuild_contents_reflects_open_projects(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// A stand-in for the real title bar: `Workspace` renders whatever view is
+/// mounted in that slot, and the sidebar column only reserves a row when one is.
+struct TestTitleBar;
+
+impl gpui::Render for TestTitleBar {
+    fn render(
+        &mut self,
+        window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::Styled as _;
+        gpui::div().h(ui::utils::platform_title_bar_height(window))
+    }
+}
+
+/// The sidebar is a sibling of the whole `Workspace`, so left to itself it runs
+/// the full window height and ends up alongside the title bar instead of
+/// starting where the centre does. The column reserves that row up front — this
+/// pins that the sidebar box actually begins below it.
+#[gpui::test]
+async fn test_sidebar_box_starts_below_the_title_bar(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar, cx);
+    });
+    cx.run_until_parked();
+
+    // No title bar mounted yet: nothing to clear, so the box starts at the top
+    // bar the surface margin. Without this half the assertion below would pass
+    // on a sidebar that simply never moved.
+    let title_bar_height = cx.update(|window, _| ui::utils::platform_title_bar_height(window));
+    let before = cx
+        .debug_bounds("sidebar-container")
+        .expect("the sidebar container should be drawn");
+    assert!(
+        before.origin.y < title_bar_height,
+        "with no title bar mounted the sidebar should start at the top, was {:?}",
+        before.origin.y
+    );
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let title_bar = cx.new(|_| TestTitleBar);
+        mw.workspace().update(cx, |workspace, cx| {
+            workspace.set_titlebar_item(title_bar.into(), window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    let after = cx
+        .debug_bounds("sidebar-container")
+        .expect("the sidebar container should still be drawn");
+    assert!(
+        after.origin.y >= title_bar_height,
+        "the sidebar box must clear the {:?} title bar row, started at {:?}",
+        title_bar_height,
+        after.origin.y
+    );
+}

@@ -2,7 +2,6 @@ use crate::Sidebar;
 use crate::project_list::ListEntry;
 use gpui::{AnyElement, App, Context, SharedString, Window, px};
 use ui::{Tooltip, prelude::*};
-use workspace::{Sidebar as WorkspaceSidebar, SidebarSide};
 
 /// Width of the always-visible project rail. Sized so a 32px project
 /// square sits centred with room for the active-project indicator on the
@@ -55,25 +54,17 @@ impl Sidebar {
             .is_some_and(|multi_workspace| multi_workspace.read(cx).sidebar_open())
     }
 
-    /// macOS draws its window controls over the window's own top-left
-    /// corner, which the rail occupies now that it is always visible.
-    /// Reserve that strip so the topmost project square stays clickable.
-    pub(crate) fn top_inset(&self, window: &Window, cx: &App) -> Pixels {
-        if cfg!(target_os = "macos")
-            && !window.is_fullscreen()
-            && self.side(cx) == SidebarSide::Left
-        {
-            ui::utils::platform_title_bar_height(window)
-        } else {
-            px(0.0)
-        }
-    }
-
     /// The always-visible project switcher. Unlike the panel, this is not
     /// gated on `MultiWorkspace::sidebar_open` -- it is the primary way to
     /// switch projects, and the panel (with its filter input and project
     /// names) is the secondary, on-demand view over the same data.
-    pub(crate) fn render_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_rail(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let panels = self.render_rail_panels(window, cx);
+        let has_panels = panels.is_some();
         let colors = cx.theme().colors();
         let entries = self.contents.rail_entries.clone();
 
@@ -98,7 +89,8 @@ impl Sidebar {
                             .map(|(ix, entry)| self.render_rail_item(ix, entry, cx)),
                     ),
             )
-            .child(self.render_rail_footer(cx))
+            .children(panels)
+            .child(self.render_rail_footer(has_panels, cx))
             .into_any_element()
     }
 
@@ -189,16 +181,26 @@ impl Sidebar {
     /// Toggle for the wide panel plus an "add project" button -- the rail
     /// alone shows no project names, so the panel needs a discoverable way
     /// in that isn't only the `cmd-alt-j` keybinding.
-    fn render_rail_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+    ///
+    /// `follows_panels` draws the seam against the panel switcher above. Absent
+    /// that block the footer sits straight under the project squares, where a
+    /// rule would divide nothing.
+    fn render_rail_footer(&self, follows_panels: bool, cx: &mut Context<Self>) -> AnyElement {
         let panel_open = self.panel_open(cx);
+        let border = cx.theme().colors().border;
 
         v_flex()
             .flex_shrink_0()
             .py_1()
             .gap_1()
             .items_center()
+            .when(follows_panels, |el| el.border_t_1().border_color(border))
             .child(
-                IconButton::new("project-rail-toggle-panel", IconName::ListTree)
+                // Not a tree glyph: the panel switcher directly above already
+                // carries `FileTree` and `ListTree` from the project and
+                // outline panels, and a third tree in the same column reads as
+                // a duplicate.
+                IconButton::new("project-rail-toggle-panel", IconName::Menu)
                     .icon_size(IconSize::Small)
                     .toggle_state(panel_open)
                     .tooltip(move |_window, cx| {
