@@ -1002,7 +1002,8 @@ impl MultiWorkspace {
     }
 
     fn derived_project_groups(&self, cx: &App) -> Vec<ProjectGroup> {
-        self.project_groups
+        let mut groups: Vec<ProjectGroup> = self
+            .project_groups
             .iter()
             .map(|group| ProjectGroup {
                 key: group.key.clone(),
@@ -1014,7 +1015,32 @@ impl MultiWorkspace {
                     .collect(),
                 expanded: group.expanded,
             })
-            .collect()
+            .collect();
+
+        // Nothing registers a group for the window's own first workspace. Both
+        // paths into `ensure_project_group_state` are about ADDING a project, and
+        // `restore_project_groups` only replays what an earlier session wrote --
+        // which is nothing, the first time. So a window opened straight onto one
+        // folder had no group at all and the rail drew an empty column.
+        //
+        // Synthesised on read rather than inserted on open: the paths arrive
+        // asynchronously, so any write would have to pick a moment, and picking
+        // the wrong one is how this went missing in the first place.
+        let active_key = self.active_workspace.read(cx).project_group_key(cx);
+        if !active_key.path_list().paths().is_empty()
+            && !groups.iter().any(|group| group.key == active_key)
+        {
+            groups.insert(
+                0,
+                ProjectGroup {
+                    key: active_key,
+                    workspaces: vec![self.active_workspace.clone()],
+                    expanded: true,
+                },
+            );
+        }
+
+        groups
     }
 
     pub fn project_groups(&self, cx: &App) -> Vec<ProjectGroup> {
@@ -2692,9 +2718,12 @@ impl Render for MultiWorkspace {
                         .occlude(),
                 );
 
-                // The sidebar is a sibling of the whole `Workspace`, not one of
-                // its docks, so it never passes through `render_dock` — it has
-                // to claim the surface treatment for itself.
+                // No surface treatment here, unlike the docks. Its margin and
+                // border would have to come out of the column's own 48px, which
+                // is exactly the rail's width -- the rail was being clipped by
+                // the difference, and the margin read as a grey channel between
+                // the rail and the editor. The rail draws its own right border
+                // as the single separator instead.
                 //
                 // The `Workspace` beside it stacks title bar over centre over
                 // status bar, so a full-height sidebar would run alongside the
@@ -2723,7 +2752,7 @@ impl Render for MultiWorkspace {
                             .relative()
                             .flex_1()
                             .min_h_0()
-                            .workspace_surface(cx)
+                            .overflow_hidden()
                             .child(sidebar_handle.to_any())
                             // Nothing to resize while only the rail is showing --
                             // its width is fixed.
