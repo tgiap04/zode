@@ -101,3 +101,22 @@ Phase 01–04 đã xong. Ba điều chệch khỏi bản vẽ, đều có lý do
 - **141/141** style key, **45/45** syntax key, **8/8** players, **24/24** terminal ANSI đều có giá trị — không key nào rơi về fallback
 - `border.transparent = "#00000000"`; `border`, `border.variant`, `border.selected` là **ba giá trị khác nhau**
 - Đối chiếu ảnh chụp zode vs VSCode trên: editor, sidebar, tab bar, status bar, terminal, command palette, popover/menu
+
+## Sửa lỗi syntax (2026-08-08)
+
+Người dùng báo màu chữ code chưa giống. Đối chiếu lại bằng bộ giải scope TextMate đúng chuẩn
+(**đặc hiệu nhất thắng**, không phải "luật cuối thắng") cho thấy **29 giá trị syntax sai** — phần
+lớn do phase 02/03 lấy nhầm scope khi suy 11 khoá không có nguồn trực tiếp.
+
+Nặng nhất là `punctuation` / `.bracket` / `.delimiter`: dark để `#808080`, light để **`#800000`**
+(đỏ thẫm — vốn là màu `punctuation.definition.tag` của light_vs). Dấu câu có mặt ở mọi dòng code
+nên sai chỗ này lộ ngay. `property` của light cũng nhận nhầm `#e50000` (màu attribute).
+
+**Bài học phương pháp:** bộ giải scope đầu tiên tôi viết dùng "luật cuối thắng" và báo 8 khoá sai
+mà thực ra đang đúng — `entity.name.type` = `#4EC9B0` là **do VSCode**, vì luật Dark+ kế thừa
+(3 đoạn) đặc hiệu hơn luật `entity.name` của 2026 (2 đoạn). Sửa theo bộ giải sai thì đã làm hỏng
+thêm. Mọi đối chiếu scope về sau phải chấm điểm theo số đoạn khớp.
+
+Sau khi sửa: **0/30 lệch** trên các khoá đối chiếu được, **0/8 lệch** trên khoá nền, cả hai theme.
+`hint`, `predictive`, `primary` giữ nguyên — VSCode 2026 không định nghĩa màu inlay-hint/ghost-text,
+và `primary` là màu mặc định của riêng Zed.
