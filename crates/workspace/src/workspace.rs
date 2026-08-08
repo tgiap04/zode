@@ -8304,9 +8304,10 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
-                            .border_t_1()
-                            .border_b_1()
-                            .border_color(colors.border)
+                            // No top or bottom rule: the title bar and status bar
+                            // share the editor's background, so a line here would
+                            // be the only thing dividing one continuous surface.
+                            // The docks and centre group carry their own outlines.
                             .child({
                                 let this = cx.entity();
                                 canvas(
