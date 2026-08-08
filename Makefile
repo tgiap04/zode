@@ -55,7 +55,7 @@ THEMES_DIR := $(ZODE_CONFIG)/themes
 
 .DEFAULT_GOAL := help
 .PHONY: help build dev fast run lint test clean trim theme-push theme-pull \
-	paths reset-config reset-all onboarding
+	paths reset-config reset-all onboarding bundle
 
 help: ## Show this help
 	@grep -hE '^[a-z][a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) \
@@ -77,6 +77,12 @@ fast: ## Build optimised and launch — use this when scrolling feels sluggish
 
 run: ## Compile if needed, then launch
 	$(CARGO) run -p $(PACKAGE) --bin $(PACKAGE) -- $(PROJECT)
+
+# macOS reads the app icon from the bundle's Info.plist, so `build` and `dev`
+# can never show it -- they produce a bare executable and the Dock falls back to
+# its generic "exec" tile. Only a bundle has an icon at all.
+bundle: ## Build a macOS .app so the Dock icon exists, then open it
+	script/bundle-mac -d -o
 
 lint: ## Run the project's clippy gate (never plain `cargo clippy`)
 	./script/clippy
