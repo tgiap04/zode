@@ -1705,6 +1705,10 @@ impl Workspace {
         let status_bar = cx.new(|cx| {
             let mut status_bar =
                 StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
+            // Every dock keeps its buttons here; `PanelButtons` itself draws
+            // nothing for the dock the project rail already stands beside, so
+            // the pair never doubles up and a dock the rail does not cover stays
+            // reachable from the status bar.
             status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);

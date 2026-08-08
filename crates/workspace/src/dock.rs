@@ -1188,6 +1188,57 @@ impl PanelButtons {
     }
 }
 
+use crate::SidebarSide;
+
+impl PanelButtons {
+    /// Whether the project rail already carries this dock's buttons.
+    ///
+    /// Deliberately reads settings only. The obvious check -- ask the workspace
+    /// whether a sidebar is registered -- would borrow an entity that is mid-render
+    /// around this call, which is the re-entrancy that aborts the process. The rail
+    /// is registered unconditionally at window creation, so the settings alone say
+    /// where it is and whether it is drawn.
+    fn rail_draws(&self, panel_name: &str, cx: &App) -> bool {
+        rail_draws_panel(
+            panel_name,
+            self.dock.read(cx).position,
+            WorkspaceSettings::get_global(cx).multi_project.sidebar_side,
+            !project::DisableAiSettings::get_global(cx).disable_ai,
+        )
+    }
+}
+
+/// The project panel is the one panel the rail never adopts. Re-docking it should
+/// slide its button along the status bar, not lift it into the rail -- the rail is
+/// already the project-switching column, and a second project affordance in it
+/// reads as a duplicate of what is right below.
+const PANEL_ALWAYS_IN_STATUS_BAR: &str = "Project Panel";
+
+/// Whether the project rail draws this panel's button -- and therefore whether the
+/// status bar must not.
+///
+/// Per PANEL, not per dock: the earlier per-dock form swept every panel sharing the
+/// rail's edge into it, so re-docking the project panel onto that edge teleported
+/// its button out of the status bar.
+///
+/// Split out from the settings lookup so it can be tested without a window: the
+/// rule is a name and three booleans, while reaching it needs a whole workspace.
+pub fn rail_draws_panel(
+    panel_name: &str,
+    position: DockPosition,
+    rail_side: SidebarSide,
+    rail_drawn: bool,
+) -> bool {
+    rail_drawn
+        && panel_name != PANEL_ALWAYS_IN_STATUS_BAR
+        && match position {
+            DockPosition::Left => rail_side == SidebarSide::Left,
+            DockPosition::Right => rail_side == SidebarSide::Right,
+            // The rail stands beside one edge; nothing represents the bottom.
+            DockPosition::Bottom => false,
+        }
+}
+
 impl Render for PanelButtons {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dock = self.dock.read(cx);
@@ -1207,6 +1258,12 @@ impl Render for PanelButtons {
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
+                // Skip only what the rail is already drawing: clearing the whole
+                // dock would take the project panel's button with it, and that one
+                // belongs here whichever edge it is docked to.
+                if self.rail_draws(entry.panel.persistent_name(), cx) {
+                    return None;
+                }
                 let icon = entry.panel.icon(window, cx)?;
                 let icon_tooltip = entry
                     .panel
@@ -1522,6 +1579,55 @@ pub mod test {
     impl Focusable for TestPanel {
         fn focus_handle(&self, _cx: &App) -> FocusHandle {
             self.focus_handle.clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod rail_coverage_tests {
+    use super::{DockPosition, PANEL_ALWAYS_IN_STATUS_BAR, SidebarSide, rail_draws_panel};
+
+    const ORDINARY: &str = "Outline Panel";
+
+    /// Get this backwards and the status bar either doubles every rail button or
+    /// hides the one dock the rail cannot reach -- both silent, neither caught by
+    /// anything that only checks the app still draws.
+    #[test]
+    fn the_rail_draws_the_panels_on_its_own_edge_and_nothing_else() {
+        for (side, adopted) in [
+            (SidebarSide::Left, DockPosition::Left),
+            (SidebarSide::Right, DockPosition::Right),
+        ] {
+            for position in [DockPosition::Left, DockPosition::Right, DockPosition::Bottom] {
+                assert_eq!(
+                    rail_draws_panel(ORDINARY, position, side, true),
+                    position == adopted,
+                    "a {side:?} rail against a {position:?} dock"
+                );
+            }
+        }
+
+        // With no rail drawn, every panel keeps its status-bar button.
+        for position in [DockPosition::Left, DockPosition::Right, DockPosition::Bottom] {
+            assert!(!rail_draws_panel(ORDINARY, position, SidebarSide::Left, false));
+            assert!(!rail_draws_panel(ORDINARY, position, SidebarSide::Right, false));
+        }
+    }
+
+    /// The reported defect: the project panel began in the status bar, and
+    /// right-click -> Dock Right (onto the rail's own edge) did not slide its
+    /// button to the other end of the status bar -- it lifted the button into the
+    /// rail, because the rule was per dock rather than per panel.
+    #[test]
+    fn re_docking_the_project_panel_never_lifts_it_into_the_rail() {
+        for side in [SidebarSide::Left, SidebarSide::Right] {
+            for position in [DockPosition::Left, DockPosition::Right, DockPosition::Bottom] {
+                assert!(
+                    !rail_draws_panel(PANEL_ALWAYS_IN_STATUS_BAR, position, side, true),
+                    "a {side:?} rail must leave the project panel in the status bar \
+                     even when it is docked {position:?}"
+                );
+            }
         }
     }
 }
