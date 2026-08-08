@@ -301,6 +301,11 @@ impl Render for PlatformTitleBar {
                     .justify_between()
                     .overflow_x_hidden()
                     .w_full()
+                    // The last child is the layout-control cluster, which would
+                    // otherwise sit flush against the window edge. Absolute px,
+                    // like the traffic-light inset above: the gap to a window edge
+                    // should not shrink with the UI font.
+                    .pr(px(8.))
                     .children(children),
             )
             .when(!window.is_fullscreen(), |title_bar| {

@@ -213,7 +213,7 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
-        children.push(self.render_search_bar(cx));
+        children.push(self.render_search_bar(window, cx));
         children.push(self.render_layout_controls());
 
         if title_bar_settings.show_onboarding_banner {
@@ -245,6 +245,9 @@ impl Render for TitleBar {
                         .bg(title_bar_color)
                         .h(height)
                         .pl_2()
+                        // The layout controls end this row, and their own px_1 is
+                        // not enough to keep them off the window edge.
+                        .pr_2()
                         .justify_between()
                         .w_full()
                         .children(children),
@@ -351,7 +354,7 @@ impl TitleBar {
     /// title bar that opens the file finder. Wrapped in a flexible spacer so
     /// it stays centred as the project/branch group on its left changes
     /// width.
-    fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_search_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         // VS Code's command centre shows the folder name rather than a search
         // prompt, and opens quick-open on click -- which is what this does.
@@ -389,7 +392,15 @@ impl TitleBar {
             .child(
                 h_flex()
                     .id("title-bar-search")
-                    .h(rems_from_px(22.))
+                    // Measured off the bar itself, not `rems_from_px`. That helper
+                    // divides by a fixed 16px base while the window's rem size is
+                    // the UI font size, so a rem height shrinks with the font while
+                    // `platform_title_bar_height` holds its 34px floor -- the box
+                    // ends up far shorter than the number in the source suggests.
+                    //
+                    // 10 rather than 6: at 3px a side the box reads as touching the
+                    // bar's edges even though it measures dead centre.
+                    .h(platform_title_bar_height(window) - px(10.))
                     .w(rems_from_px(360.))
                     .max_w_full()
                     .px_2()
