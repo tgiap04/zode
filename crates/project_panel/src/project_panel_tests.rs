@@ -10339,3 +10339,41 @@ impl Render for TestProjectItemView {
         Empty
     }
 }
+
+/// Re-docking this panel has to move the project rail to the opposite edge in the
+/// same write. They are two independent settings keys, so nothing but this makes
+/// them agree -- and when they land on the same edge the rail adopts the panel's
+/// button, which is precisely what keeping the panel opposite the rail prevents.
+#[test]
+fn re_docking_the_panel_parks_the_rail_on_the_far_side() {
+    for (position, expected_dock, expected_rail) in [
+        (
+            DockPosition::Left,
+            settings::DockSide::Left,
+            settings::SidebarSide::Right,
+        ),
+        (
+            DockPosition::Right,
+            settings::DockSide::Right,
+            settings::SidebarSide::Left,
+        ),
+    ] {
+        let mut content = settings::SettingsContent::default();
+        super::write_dock_and_opposite_rail(position, &mut content);
+
+        assert_eq!(
+            content.project_panel.as_ref().and_then(|panel| panel.dock),
+            Some(expected_dock),
+            "docking {position:?} must write the panel's own side"
+        );
+        assert_eq!(
+            content
+                .workspace
+                .multi_project
+                .as_ref()
+                .and_then(|multi| multi.sidebar_side),
+            Some(expected_rail),
+            "docking {position:?} must park the rail opposite"
+        );
+    }
+}
