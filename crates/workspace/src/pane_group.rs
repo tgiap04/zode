@@ -231,8 +231,26 @@ impl PaneGroup {
         render_cx: &dyn PaneLeaderDecorator,
         window: &mut Window,
         cx: &mut App,
-    ) -> impl IntoElement {
-        self.root.render(0, zoomed, render_cx, window, cx).element
+    ) -> AnyElement {
+        let element = self.root.render(0, zoomed, render_cx, window, cx).element;
+
+        // Only the center group is a top-level workspace surface. Groups nested
+        // inside a dock (the terminal panel keeps its own) already sit within a
+        // surface that `Workspace::render_dock` has spaced and rounded.
+        if !self.is_center {
+            return element;
+        }
+
+        // `flex_1`, not `size_full`: a 100% width/height box plus a margin adds
+        // up to more than the parent, and the parent clips the overflow — which
+        // silently eats the very seam the margin is there to create. Growing
+        // into the remaining space (and stretching on the cross axis) leaves
+        // room for the margin on all four sides.
+        div()
+            .flex_1()
+            .workspace_surface(cx)
+            .child(element)
+            .into_any_element()
     }
 
     pub fn panes(&self) -> Vec<&Entity<Pane>> {

@@ -251,6 +251,22 @@ pub fn replace_value_in_json_text<T: AsRef<str>>(
                 (first_key_start..first_key_start, content)
             }
         } else {
+            // Nothing matched anywhere, so `existing_value_range` still spans the
+            // whole file and replacing it would swallow the header comments along
+            // with the object. Pull the start up to the object; the end stays put
+            // so the trailing newline is still consumed rather than duplicated.
+            // Comments are named nodes here, so the root value is the first named
+            // child that is not one.
+            if existing_value_range.start == 0
+                && existing_value_range.end == text.len()
+                && let Some(root_value) = syntax_tree
+                    .root_node()
+                    .named_children(&mut syntax_tree.walk())
+                    .find(|node| node.kind() != "comment")
+            {
+                existing_value_range.start = root_value.byte_range().start;
+            }
+
             // We don't have the key, construct the nested objects
             let new_value = construct_json_value(&key_path[depth..], new_value);
             let indent_prefix_len = tab_size * depth;
@@ -258,26 +274,20 @@ pub fn replace_value_in_json_text<T: AsRef<str>>(
             if depth == 0 {
                 new_val.push('\n');
             }
-            // best effort to keep comments with best effort indentation
-            let mut replace_text = &text[existing_value_range.clone()];
-            while let Some(comment_start) = replace_text.rfind("//") {
-                if let Some(comment_end) = replace_text[comment_start..].find('\n') {
-                    let mut comment_with_indent_start = replace_text[..comment_start]
-                        .rfind('\n')
-                        .unwrap_or(comment_start);
-                    if !replace_text[comment_with_indent_start..comment_start]
-                        .trim()
-                        .is_empty()
-                    {
-                        comment_with_indent_start = comment_start;
-                    }
-                    new_val.insert_str(
-                        1,
-                        &replace_text[comment_with_indent_start..comment_start + comment_end],
-                    );
-                }
-                replace_text = &replace_text[..comment_start];
-            }
+
+            // Best effort to keep comments that sit inside the replaced object.
+            // Searching backwards for "//" cannot tell a comment apart from the
+            // "//" inside a URL — it truncates `// https://host/path` down to
+            // `//host/path` — so walk whole lines and keep them in file order.
+            let kept_comments = text[existing_value_range.clone()]
+                .lines()
+                .filter(|line| line.trim_start().starts_with("//"))
+                .fold(String::new(), |mut kept, line| {
+                    kept.push('\n');
+                    kept.push_str(line.trim_end());
+                    kept
+                });
+            new_val.insert_str(1, &kept_comments);
 
             (existing_value_range, new_val)
         }
@@ -2631,5 +2641,41 @@ mod tests {
   "d": "value2"
 }"#;
         assert_eq!(infer_json_indent_size(json_mixed), 2);
+    }
+
+    // Writing the first key into an empty object is the path every settings file
+    // takes on its very first edit, and it used to rebuild the whole file: the
+    // header was hoisted inside the braces, collapsed onto one line, and any URL
+    // truncated at its "//" — all while still parsing, so nothing else caught it.
+    #[test]
+    fn first_key_into_an_empty_object_keeps_the_comments_intact() {
+        #[track_caller]
+        fn check_first_key(input: &str, expected: &str) {
+            let mut text = input.to_string();
+            let old: Value = parse_json_with_comments(input).unwrap();
+            update_value_in_json_text(
+                &mut text,
+                &mut Vec::new(),
+                2,
+                &old,
+                &json!({ "vim_mode": true }),
+                &mut Vec::new(),
+            );
+            pretty_assertions::assert_eq!(expected, text);
+        }
+
+        check_first_key(
+            "// header\n// see https://zed.dev/docs\n{}\n",
+            "// header\n// see https://zed.dev/docs\n{\n  \"vim_mode\": true\n}\n",
+        );
+        check_first_key(
+            "// header\n// see https://zed.dev/docs\n{\n}\n",
+            "// header\n// see https://zed.dev/docs\n{\n  \"vim_mode\": true\n}\n",
+        );
+        check_first_key(
+            "{\n  // inside\n  // see https://zed.dev/docs\n}\n",
+            "{\n  // inside\n  // see https://zed.dev/docs\n  \"vim_mode\": true\n}\n",
+        );
+        check_first_key("{}\n", "{\n  \"vim_mode\": true\n}\n");
     }
 }

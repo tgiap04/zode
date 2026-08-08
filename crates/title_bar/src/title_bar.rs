@@ -19,8 +19,8 @@ use crate::application_menu::{
 use client::UserStore;
 
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, Styled, Subscription, WeakEntity, Window, actions, div,
+    Action, AnyElement, App, Context, Entity, Focusable, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window, actions, div,
 };
 use onboarding_banner::OnboardingBanner;
 use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
@@ -214,6 +214,7 @@ impl Render for TitleBar {
         );
 
         children.push(self.render_search_bar(cx));
+        children.push(self.render_layout_controls());
 
         if title_bar_settings.show_onboarding_banner {
             if let Some(banner) = &self.banner {
@@ -352,14 +353,16 @@ impl TitleBar {
     /// width.
     fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let placeholder = self
+        // VS Code's command centre shows the folder name rather than a search
+        // prompt, and opens quick-open on click -- which is what this does.
+        let label = self
             .effective_active_worktree(cx)
             .and_then(|worktree| {
                 worktree
                     .read(cx)
                     .root_name()
                     .file_name()
-                    .map(|name| format!("Search {name}"))
+                    .map(|name| name.to_string())
             })
             .unwrap_or_else(|| "Search".to_string());
 
@@ -367,8 +370,22 @@ impl TitleBar {
             .flex_1()
             .min_w_0()
             .flex()
+            .items_center()
             .justify_center()
+            .gap_1()
             .px_2()
+            .child(Self::render_action_button(
+                "title-bar-go-back",
+                IconName::ArrowLeft,
+                "Go Back",
+                workspace::GoBack,
+            ))
+            .child(Self::render_action_button(
+                "title-bar-go-forward",
+                IconName::ArrowRight,
+                "Go Forward",
+                workspace::GoForward,
+            ))
             .child(
                 h_flex()
                     .id("title-bar-search")
@@ -389,7 +406,7 @@ impl TitleBar {
                             .color(Color::Muted),
                     )
                     .child(
-                        Label::new(placeholder)
+                        Label::new(label)
                             .size(LabelSize::Small)
                             .color(Color::Muted)
                             .truncate(),
@@ -398,6 +415,11 @@ impl TitleBar {
                         window
                             .dispatch_action(Box::new(workspace::ToggleFileFinder::default()), cx);
                     })
+                    // Scoped to the search box itself, not the `flex_1` wrapper:
+                    // that wrapper spans every remaining pixel of the title bar,
+                    // and swallowing mouse-down there would also swallow the
+                    // title bar's own double-click-to-zoom and drag-to-move.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action(
                             "Search Files",
@@ -406,6 +428,53 @@ impl TitleBar {
                         )
                     }),
             )
+            .into_any_element()
+    }
+
+    /// An icon button that dispatches its action rather than reaching into an
+    /// entity — the title bar sits inside `Sidebar`-adjacent render paths, and
+    /// dispatching defers past whatever borrow is live when the click lands.
+    fn render_action_button<A: Action + Clone>(
+        id: &'static str,
+        icon: IconName,
+        tooltip: &'static str,
+        action: A,
+    ) -> impl IntoElement {
+        IconButton::new(id, icon)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .tooltip({
+                let action = action.clone();
+                move |_window, cx| Tooltip::for_action(tooltip, &action, cx)
+            })
+            .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+    }
+
+    /// VS Code parks its layout toggles at the far right of the title bar.
+    /// Its fourth button opens a "customize layout" menu that has no equivalent
+    /// here, so only the three dock toggles are carried over.
+    fn render_layout_controls(&self) -> AnyElement {
+        h_flex()
+            .gap_0p5()
+            .px_1()
+            .child(Self::render_action_button(
+                "title-bar-toggle-left-dock",
+                IconName::PanelLeft,
+                "Toggle Left Dock",
+                workspace::ToggleLeftDock,
+            ))
+            .child(Self::render_action_button(
+                "title-bar-toggle-bottom-dock",
+                IconName::PanelBottom,
+                "Toggle Bottom Dock",
+                workspace::ToggleBottomDock,
+            ))
+            .child(Self::render_action_button(
+                "title-bar-toggle-right-dock",
+                IconName::PanelRight,
+                "Toggle Right Dock",
+                workspace::ToggleRightDock,
+            ))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element()
     }

@@ -48,8 +48,13 @@ use zed_actions::{OpenProjectSettings, OpenSettings, OpenSettingsAt};
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, font_picker, icon_theme_picker, theme_picker,
+    SettingsSectionHeader, icon_theme_picker, theme_picker,
 };
+
+// Re-exported for the onboarding page's font section. Deliberately narrow: the
+// module also holds dropdown, number-field and section-item helpers that nothing
+// outside this crate should be reaching for.
+pub use crate::components::font_picker;
 
 const NAVBAR_CONTAINER_TAB_INDEX: isize = 0;
 const NAVBAR_GROUP_TAB_INDEX: isize = 1;

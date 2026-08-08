@@ -63,10 +63,14 @@ pub struct SidebarRenderState {
     pub open: bool,
     /// Whether the always-visible project rail is present. Independent of
     /// `open`: the rail occupies the window's `side` edge even with the
-    /// panel closed, which is what decides whether the title bar still has
-    /// to leave room for the platform's window controls.
+    /// panel closed.
     pub rail: bool,
     pub side: SidebarSide,
+    /// How much of the `side` edge the sidebar actually covers. The title bar
+    /// needs the width, not just `occupies`: the rail alone is narrower than
+    /// the strip macOS draws its window controls over, so the title bar still
+    /// has to reserve the remainder or the controls land on its content.
+    pub edge_width: Pixels,
 }
 
 impl SidebarRenderState {
@@ -155,6 +159,17 @@ impl Render for DraggedSidebar {
     }
 }
 
+/// Every method here borrows the sidebar entity (`read`/`update`), so any
+/// `MultiWorkspace` method that reaches this trait — `sidebar_side`,
+/// `open_sidebar`, `close_sidebar`, `toggle_sidebar`, `focus_sidebar`,
+/// `sidebar_has_notifications` — inherits that borrow.
+///
+/// UI that lives *inside* the sidebar therefore must not call those directly:
+/// a `cx.listener` body runs within `Sidebar::update`, so re-entering panics
+/// with "cannot read Sidebar while it is already being updated". Dispatch the
+/// matching action instead (`ToggleWorkspaceSidebar`, `FocusWorkspaceSidebar`,
+/// `CloseWorkspaceSidebar`) — `Window::dispatch_action` defers, so the borrow
+/// is released before the handler runs.
 impl<T: Sidebar> SidebarHandle for Entity<T> {
     fn width(&self, cx: &App) -> Pixels {
         self.read(cx).width(cx)
@@ -392,10 +407,20 @@ impl MultiWorkspace {
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
         let enabled = self.multi_workspace_enabled(cx);
+        let open = self.sidebar_open() && enabled;
+        let rail = self.sidebar.is_some() && enabled;
         SidebarRenderState {
-            open: self.sidebar_open() && enabled,
-            rail: self.sidebar.is_some() && enabled,
+            open,
+            rail,
             side: self.sidebar_side(cx),
+            // Mirrors the container width in `render`: the rail is always drawn,
+            // the panel only when open.
+            edge_width: match (&self.sidebar, rail) {
+                (Some(sidebar), true) => {
+                    sidebar.rail_width(cx) + if open { sidebar.width(cx) } else { px(0.) }
+                }
+                _ => px(0.),
+            },
         }
     }
 
@@ -2606,6 +2631,13 @@ impl Render for MultiWorkspace {
         let sidebar_on_right = sidebar_side == SidebarSide::Right;
 
         let panel_open = self.sidebar_open();
+        // `None` when nothing is mounted in the title bar slot -- reserving a
+        // row for a header that is not drawn would leave a bare strip.
+        let title_bar_row_height = self
+            .workspace()
+            .read(cx)
+            .titlebar_item()
+            .map(|_| ui::utils::platform_title_bar_height(window));
         let sidebar: Option<AnyElement> = if multi_workspace_enabled {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
@@ -2660,16 +2692,43 @@ impl Render for MultiWorkspace {
                         .occlude(),
                 );
 
-                div()
-                    .id("sidebar-container")
-                    .relative()
+                // The sidebar is a sibling of the whole `Workspace`, not one of
+                // its docks, so it never passes through `render_dock` — it has
+                // to claim the surface treatment for itself.
+                //
+                // The `Workspace` beside it stacks title bar over centre over
+                // status bar, so a full-height sidebar would run alongside the
+                // title bar rather than starting where the centre does. The
+                // spacer above reserves that row and paints it as title bar, so
+                // the header reads as spanning the whole window the way VS Code's
+                // does -- and on macOS the window controls land on it rather
+                // than on the sidebar.
+                // No `h_full` on the container — an explicit 100% height beats
+                // `self_stretch` and, together with the surface margin, overflows
+                // the column.
+                v_flex()
                     .h_full()
                     .w(sidebar_width)
                     .flex_shrink_0()
-                    .child(sidebar_handle.to_any())
-                    // Nothing to resize while only the rail is showing --
-                    // its width is fixed.
-                    .when(panel_open, |this| this.child(resize_handle))
+                    .children(title_bar_row_height.map(|height| {
+                        div()
+                            .h(height)
+                            .flex_none()
+                            .bg(cx.theme().colors().title_bar_background)
+                    }))
+                    .child(
+                        div()
+                            .id("sidebar-container")
+                            .debug_selector(|| "sidebar-container".into())
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .workspace_surface(cx)
+                            .child(sidebar_handle.to_any())
+                            // Nothing to resize while only the rail is showing --
+                            // its width is fixed.
+                            .when(panel_open, |this| this.child(resize_handle)),
+                    )
                     .into_any_element()
             })
         } else {

@@ -34,7 +34,7 @@ use crate::editorconfig_store::EditorconfigStore;
 use crate::{
     ActiveSettingsProfileName, FontFamilyName, IconThemeName, LanguageSettingsContent,
     LanguageToSettingsMap, LspSettings, LspSettingsMap, SemanticTokenRules, ThemeName,
-    UserSettingsContentExt, VsCodeSettings, WorktreeId,
+    UserSettingsContentExt, WorktreeId,
     settings_content::{
         ExtensionsSettingsContent, ProfileBase, ProjectSettingsContent, RootUserSettings,
         SettingsContent, UserSettingsContent, merge_from::MergeFrom,
@@ -626,18 +626,6 @@ impl SettingsStore {
         })
     }
 
-    pub fn import_vscode_settings(
-        &self,
-        fs: Arc<dyn Fs>,
-        vscode_settings: VsCodeSettings,
-    ) -> oneshot::Receiver<Result<()>> {
-        self.update_settings_file_inner(fs, move |old_text: String, cx: AsyncApp| {
-            cx.read_global(|store: &SettingsStore, _cx| {
-                store.get_vscode_edits(old_text, &vscode_settings)
-            })
-        })
-    }
-
     pub fn get_all_files(&self) -> Vec<SettingsFile> {
         let mut files = Vec::from_iter(
             self.local_settings
@@ -832,12 +820,6 @@ impl SettingsStore {
             new_text.replace_range(range, &replacement);
         }
         Ok(new_text)
-    }
-
-    pub fn get_vscode_edits(&self, old_text: String, vscode: &VsCodeSettings) -> Result<String> {
-        self.new_text_for_update(old_text, |content| {
-            content.merge_from(&vscode.settings_content())
-        })
     }
 
     /// Updates the value of a setting in a JSON file, returning a list
@@ -1622,7 +1604,7 @@ mod tests {
     use std::{cell::RefCell, num::NonZeroU32};
 
     use crate::{
-        ClosePosition, ItemSettingsContent, VsCodeSettingsSource, default_settings,
+        ClosePosition, ItemSettingsContent, default_settings,
         settings_content::LanguageSettingsContent, test_settings,
     };
 
@@ -1672,22 +1654,6 @@ mod tests {
             DefaultLanguageSettings {
                 tab_size: content.tab_size.unwrap(),
                 preferred_line_length: content.preferred_line_length.unwrap(),
-            }
-        }
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct ThemeSettings {
-        buffer_font_family: FontFamilyName,
-        buffer_font_fallbacks: Vec<FontFamilyName>,
-    }
-
-    impl Settings for ThemeSettings {
-        fn from_settings(content: &SettingsContent) -> Self {
-            let content = content.theme.clone();
-            ThemeSettings {
-                buffer_font_family: content.buffer_font_family.unwrap(),
-                buffer_font_fallbacks: content.buffer_font_fallbacks.unwrap(),
             }
         }
     }
@@ -2126,180 +2092,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_vscode_import(cx: &mut App) {
-        let mut store = SettingsStore::new(cx, &test_settings());
-        store.register_setting::<DefaultLanguageSettings>();
-        store.register_setting::<ItemSettings>();
-        store.register_setting::<GlobalOnlySetting>();
-        store.register_setting::<ThemeSettings>();
-
-        // create settings that werent present
-        check_vscode_import(
-            &mut store,
-            r#"{
-            }
-            "#
-            .unindent(),
-            r#" { "editor.tabSize": 37 } "#.to_owned(),
-            r#"{
-              "base_keymap": "VSCode",
-              "tab_size": 37
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-
-        // persist settings that were present
-        check_vscode_import(
-            &mut store,
-            r#"{
-                "preferred_line_length": 99,
-            }
-            "#
-            .unindent(),
-            r#"{ "editor.tabSize": 42 }"#.to_owned(),
-            r#"{
-                "base_keymap": "VSCode",
-                "tab_size": 42,
-                "preferred_line_length": 99,
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-
-        // don't clobber settings that aren't present in vscode
-        check_vscode_import(
-            &mut store,
-            r#"{
-                "preferred_line_length": 99,
-                "tab_size": 42
-            }
-            "#
-            .unindent(),
-            r#"{}"#.to_owned(),
-            r#"{
-                "base_keymap": "VSCode",
-                "preferred_line_length": 99,
-                "tab_size": 42
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-
-        // custom enum
-        check_vscode_import(
-            &mut store,
-            r#"{
-            }
-            "#
-            .unindent(),
-            r#"{ "git.decorations.enabled": true }"#.to_owned(),
-            r#"{
-              "project_panel": {
-                "git_status": true
-              },
-              "outline_panel": {
-                "git_status": true
-              },
-              "base_keymap": "VSCode",
-              "tabs": {
-                "git_status": true
-              }
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-
-        // explorer sort settings
-        check_vscode_import(
-            &mut store,
-            r#"{
-            }
-            "#
-            .unindent(),
-            r#"{
-              "explorer.sortOrder": "mixed",
-              "explorer.sortOrderLexicographicOptions": "lower"
-            }"#
-            .unindent(),
-            r#"{
-              "project_panel": {
-                "sort_mode": "mixed",
-                "sort_order": "lower"
-              },
-              "base_keymap": "VSCode"
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-
-        // font-family
-        check_vscode_import(
-            &mut store,
-            r#"{
-            }
-            "#
-            .unindent(),
-            r#"{ "editor.fontFamily": "Cascadia Code, 'Consolas', Courier New" }"#.to_owned(),
-            r#"{
-              "base_keymap": "VSCode",
-              "buffer_font_fallbacks": [
-                "Consolas",
-                "Courier New"
-              ],
-              "buffer_font_family": "Cascadia Code"
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-
-        // hover sticky settings
-        check_vscode_import(
-            &mut store,
-            r#"{
-            }
-            "#
-            .unindent(),
-            r#"{
-              "editor.hover.sticky": false,
-              "editor.hover.hidingDelay": 500
-            }"#
-            .to_owned(),
-            r#"{
-              "base_keymap": "VSCode",
-              "hover_popover_hiding_delay": 500,
-              "hover_popover_sticky": false
-            }
-            "#
-            .unindent(),
-            cx,
-        );
-    }
-
     #[track_caller]
-    fn check_vscode_import(
-        store: &mut SettingsStore,
-        old: String,
-        vscode: String,
-        expected: String,
-        cx: &mut App,
-    ) {
-        store.set_user_settings(&old, cx).ok();
-        let new = store
-            .get_vscode_edits(
-                old,
-                &VsCodeSettings::from_str(&vscode, VsCodeSettingsSource::VsCode).unwrap(),
-            )
-            .unwrap();
-        pretty_assertions::assert_eq!(new, expected);
-    }
-
     #[gpui::test]
     fn test_update_git_settings(cx: &mut App) {
         let store = SettingsStore::new(cx, &test_settings());

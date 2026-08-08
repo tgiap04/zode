@@ -172,6 +172,11 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
 static STARTUP_TIME: OnceLock<Instant> = OnceLock::new();
 
 fn main() {
+    // Must stay first. Anything that reads the environment before this runs --
+    // `RELEASE_CHANNEL_NAME` above all -- will never see the `ZODE_*` spelling,
+    // and it fails silently when it does. `startup_order_tests` guards this.
+    zed_env_vars::bridge_zode_env_vars();
+
     STARTUP_TIME.get_or_init(|| Instant::now());
 
     #[cfg(unix)]
@@ -1346,9 +1351,9 @@ struct Args {
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     ///
     /// This overrides the default platform-specific data directory location.
-    /// On macOS, the default is `~/Library/Application Support/Zed`.
-    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/zed`.
-    /// On Windows, the default is `%LOCALAPPDATA%\Zed`.
+    /// On macOS, the default is `~/Library/Application Support/Zode`.
+    /// On Linux/FreeBSD, the default is `$XDG_DATA_HOME/zode`.
+    /// On Windows, the default is `%LOCALAPPDATA%\Zode`.
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
     user_data_dir: Option<String>,
 
@@ -1656,5 +1661,35 @@ fn check_for_conpty_dll() {
         }
     } else {
         log::warn!("Failed to load conpty.dll. Terminal will work with reduced functionality.");
+    }
+}
+
+#[cfg(test)]
+mod startup_order_tests {
+    /// `bridge_zode_env_vars` only works if nothing has read the environment
+    /// yet, and when it is too late it fails silently -- the `ZODE_*` spelling
+    /// just stops having any effect, with nothing logged.
+    ///
+    /// This reads the source rather than the behaviour because there is no
+    /// runtime seam to observe: by the time a test could look, `main` has long
+    /// returned. Coarse, but it catches the regression that actually happens,
+    /// which is someone inserting a line above the call.
+    #[test]
+    fn env_bridge_runs_before_anything_else_in_main() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split_once("\nfn main() {")
+            .expect("main.rs should declare `fn main`")
+            .1;
+        let first_statement = body
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("//"))
+            .expect("`fn main` should have a body");
+
+        assert_eq!(
+            first_statement, "zed_env_vars::bridge_zode_env_vars();",
+            "the environment bridge must stay the first statement in `main`"
+        );
     }
 }

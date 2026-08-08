@@ -4,7 +4,7 @@ use gpui::{AppContext as _, TestAppContext};
 use project::Project;
 use serde_json::json;
 use settings::Settings as _;
-use workspace::MultiWorkspace;
+use workspace::{MultiWorkspace, ToggleWorkspaceSidebar};
 
 pub(crate) fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -55,6 +55,57 @@ async fn test_registered_sidebar_opens(cx: &mut TestAppContext) {
     });
 }
 
+/// The rail's panel-toggle button lives inside the sidebar, so its click
+/// handler runs within `Sidebar::update`. `MultiWorkspace::toggle_sidebar`
+/// reaches back through `SidebarHandle` (`sidebar_side`, then
+/// `prepare_for_focus`/`focus`), which borrows that same entity — calling it
+/// directly from there aborts with "cannot read Sidebar while it is already
+/// being updated". Dispatching the action defers past the borrow; this locks
+/// that the toggle still lands when driven from the sidebar's own context.
+#[gpui::test]
+async fn test_toggle_action_dispatched_from_sidebar_context(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar.clone(), cx);
+        sidebar
+    });
+
+    multi_workspace.update(cx, |mw, cx| mw.open_sidebar(cx));
+    cx.run_until_parked();
+    assert!(
+        multi_workspace.read_with(cx, |mw, _cx| mw.sidebar_open()),
+        "precondition: the sidebar starts open"
+    );
+
+    sidebar.update_in(cx, |_sidebar, window, cx| {
+        window.dispatch_action(Box::new(ToggleWorkspaceSidebar), cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        !multi_workspace.read_with(cx, |mw, _cx| mw.sidebar_open()),
+        "toggling from inside a Sidebar update must close the sidebar, not re-enter it"
+    );
+
+    sidebar.update_in(cx, |_sidebar, window, cx| {
+        window.dispatch_action(Box::new(ToggleWorkspaceSidebar), cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        multi_workspace.read_with(cx, |mw, _cx| mw.sidebar_open()),
+        "and toggling again must reopen it"
+    );
+}
+
 /// FR2: the sidebar's entry list must come straight from
 /// `MultiWorkspace::project_groups`, and the active project group must be
 /// flagged as active.
@@ -100,4 +151,71 @@ async fn test_rebuild_contents_reflects_open_projects(cx: &mut TestAppContext) {
             "exactly one entry should be flagged active"
         );
     });
+}
+
+/// A stand-in for the real title bar: `Workspace` renders whatever view is
+/// mounted in that slot, and the sidebar column only reserves a row when one is.
+struct TestTitleBar;
+
+impl gpui::Render for TestTitleBar {
+    fn render(
+        &mut self,
+        window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::Styled as _;
+        gpui::div().h(ui::utils::platform_title_bar_height(window))
+    }
+}
+
+/// The sidebar is a sibling of the whole `Workspace`, so left to itself it runs
+/// the full window height and ends up alongside the title bar instead of
+/// starting where the centre does. The column reserves that row up front — this
+/// pins that the sidebar box actually begins below it.
+#[gpui::test]
+async fn test_sidebar_box_starts_below_the_title_bar(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar, cx);
+    });
+    cx.run_until_parked();
+
+    // No title bar mounted yet: nothing to clear, so the box starts at the top
+    // bar the surface margin. Without this half the assertion below would pass
+    // on a sidebar that simply never moved.
+    let title_bar_height = cx.update(|window, _| ui::utils::platform_title_bar_height(window));
+    let before = cx
+        .debug_bounds("sidebar-container")
+        .expect("the sidebar container should be drawn");
+    assert!(
+        before.origin.y < title_bar_height,
+        "with no title bar mounted the sidebar should start at the top, was {:?}",
+        before.origin.y
+    );
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let title_bar = cx.new(|_| TestTitleBar);
+        mw.workspace().update(cx, |workspace, cx| {
+            workspace.set_titlebar_item(title_bar.into(), window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    let after = cx
+        .debug_bounds("sidebar-container")
+        .expect("the sidebar container should still be drawn");
+    assert!(
+        after.origin.y >= title_bar_height,
+        "the sidebar box must clear the {:?} title bar row, started at {:?}",
+        title_bar_height,
+        after.origin.y
+    );
 }

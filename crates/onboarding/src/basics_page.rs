@@ -1,41 +1,21 @@
-use std::sync::Arc;
-
 use client::TelemetrySettings;
 use fs::Fs;
-use gpui::{Action, App, IntoElement};
+use gpui::{App, IntoElement};
 use project::project_settings::ProjectSettings;
 use settings::{BaseKeymap, Settings, update_settings_file};
-use theme::{Appearance, SystemAppearance, ThemeRegistry};
-use theme_settings::{ThemeAppearanceMode, ThemeName, ThemeSelection, ThemeSettings};
+use terminal::terminal_settings::TerminalSettings;
+use theme::Appearance;
+use theme_settings::{ThemeAppearanceMode, ThemeSettings};
 use ui::{
-    Divider, StatefulInteractiveElement, SwitchField, TintColor,
+    Divider, PopoverMenu, SwitchField,
     ToggleButtonGroup, ToggleButtonGroupSize, ToggleButtonSimple, ToggleButtonWithIcon, Tooltip,
     prelude::*,
 };
 use vim_mode_setting::VimModeSetting;
 
-use crate::{
-    ImportCursorSettings, ImportVsCodeSettings, SettingsImportState,
-    theme_preview::{ThemePreviewStyle, ThemePreviewTile},
-};
-
-const LIGHT_THEMES: [&str; 3] = ["One Light", "Ayu Light", "Gruvbox Light"];
-const DARK_THEMES: [&str; 3] = ["One Dark", "Ayu Dark", "Gruvbox Dark"];
-const FAMILY_NAMES: [SharedString; 3] = [
-    SharedString::new_static("One"),
-    SharedString::new_static("Ayu"),
-    SharedString::new_static("Gruvbox"),
-];
-
-fn get_theme_family_themes(theme_name: &str) -> Option<(&'static str, &'static str)> {
-    for i in 0..LIGHT_THEMES.len() {
-        if LIGHT_THEMES[i] == theme_name || DARK_THEMES[i] == theme_name {
-            return Some((LIGHT_THEMES[i], DARK_THEMES[i]));
-        }
-    }
-    None
-}
-
+/// Only the 2026 family ships, so there is nothing to choose between -- the
+/// mode toggle stays because Light/Dark/System is still a real choice, and
+/// System is the one that follows the OS.
 fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement {
     let theme_selection = ThemeSettings::get_global(cx).theme.clone();
     let system_appearance = theme::SystemAppearance::global(cx);
@@ -47,151 +27,37 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
             Appearance::Dark => ThemeAppearanceMode::Dark,
         });
 
-    return v_flex()
-        .gap_2()
-        .child(
-            h_flex().justify_between().child(Label::new("Theme")).child(
-                ToggleButtonGroup::single_row(
-                    "theme-selector-onboarding-dark-light",
-                    [
-                        ThemeAppearanceMode::Light,
-                        ThemeAppearanceMode::Dark,
-                        ThemeAppearanceMode::System,
-                    ]
-                    .map(|mode| {
-                        const MODE_NAMES: [SharedString; 3] = [
-                            SharedString::new_static("Light"),
-                            SharedString::new_static("Dark"),
-                            SharedString::new_static("System"),
-                        ];
-                        ToggleButtonSimple::new(
-                            MODE_NAMES[mode as usize].clone(),
-                            move |_, _, cx| {
-                                write_mode_change(mode, cx);
+    return h_flex().justify_between().child(Label::new("Theme")).child(
+        ToggleButtonGroup::single_row(
+            "theme-selector-onboarding-dark-light",
+            [
+                ThemeAppearanceMode::Light,
+                ThemeAppearanceMode::Dark,
+                ThemeAppearanceMode::System,
+            ]
+            .map(|mode| {
+                const MODE_NAMES: [SharedString; 3] = [
+                    SharedString::new_static("Light"),
+                    SharedString::new_static("Dark"),
+                    SharedString::new_static("System"),
+                ];
+                ToggleButtonSimple::new(MODE_NAMES[mode as usize].clone(), move |_, _, cx| {
+                    write_mode_change(mode, cx);
 
-                                telemetry::event!(
-                                    "Welcome Theme mode Changed",
-                                    from = theme_mode,
-                                    to = mode
-                                );
-                            },
-                        )
-                    }),
-                )
-                .size(ToggleButtonGroupSize::Medium)
-                .tab_index(tab_index)
-                .selected_index(theme_mode as usize)
-                .style(ui::ToggleButtonGroupStyle::Outlined)
-                .width(rems_from_px(3. * 64.)),
-            ),
+                    telemetry::event!(
+                        "Welcome Theme mode Changed",
+                        from = theme_mode,
+                        to = mode
+                    );
+                })
+            }),
         )
-        .child(
-            h_flex()
-                .gap_2()
-                .justify_between()
-                .children(render_theme_previews(tab_index, &theme_selection, cx)),
-        );
-
-    fn render_theme_previews(
-        tab_index: &mut isize,
-        theme_selection: &ThemeSelection,
-        cx: &mut App,
-    ) -> [impl IntoElement; 3] {
-        let system_appearance = SystemAppearance::global(cx);
-        let theme_registry = ThemeRegistry::global(cx);
-
-        let theme_seed = 0xBEEF as f32;
-        let theme_mode = theme_selection
-            .mode()
-            .unwrap_or_else(|| match *system_appearance {
-                Appearance::Light => ThemeAppearanceMode::Light,
-                Appearance::Dark => ThemeAppearanceMode::Dark,
-            });
-        let appearance = match theme_mode {
-            ThemeAppearanceMode::Light => Appearance::Light,
-            ThemeAppearanceMode::Dark => Appearance::Dark,
-            ThemeAppearanceMode::System => *system_appearance,
-        };
-        let current_theme_name: SharedString = theme_selection.name(appearance).0.into();
-
-        let theme_names = match appearance {
-            Appearance::Light => LIGHT_THEMES,
-            Appearance::Dark => DARK_THEMES,
-        };
-
-        let themes = theme_names.map(|theme| theme_registry.get(theme).unwrap());
-
-        [0, 1, 2].map(|index| {
-            let theme = &themes[index];
-            let is_selected = theme.name == current_theme_name;
-            let name = theme.name.clone();
-            let colors = cx.theme().colors();
-
-            v_flex()
-                .w_full()
-                .items_center()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .id(name)
-                        .relative()
-                        .w_full()
-                        .border_2()
-                        .border_color(colors.border_transparent)
-                        .rounded(ThemePreviewTile::ROOT_RADIUS)
-                        .map(|this| {
-                            if is_selected {
-                                this.border_color(colors.border_selected)
-                            } else {
-                                this.opacity(0.8).hover(|s| s.border_color(colors.border))
-                            }
-                        })
-                        .tab_index({
-                            *tab_index += 1;
-                            *tab_index - 1
-                        })
-                        .focus(|mut style| {
-                            style.border_color = Some(colors.border_focused);
-                            style
-                        })
-                        .on_click({
-                            let theme_name = theme.name.clone();
-                            let current_theme_name = current_theme_name.clone();
-
-                            move |_, _, cx| {
-                                write_theme_change(theme_name.clone(), theme_mode, cx);
-                                telemetry::event!(
-                                    "Welcome Theme Changed",
-                                    from = current_theme_name,
-                                    to = theme_name
-                                );
-                            }
-                        })
-                        .map(|this| {
-                            if theme_mode == ThemeAppearanceMode::System {
-                                let (light, dark) = (
-                                    theme_registry.get(LIGHT_THEMES[index]).unwrap(),
-                                    theme_registry.get(DARK_THEMES[index]).unwrap(),
-                                );
-                                this.child(
-                                    ThemePreviewTile::new(light, theme_seed)
-                                        .style(ThemePreviewStyle::SideBySide(dark)),
-                                )
-                            } else {
-                                this.child(
-                                    ThemePreviewTile::new(theme.clone(), theme_seed)
-                                        .style(ThemePreviewStyle::Bordered),
-                                )
-                            }
-                        }),
-                )
-                .child(
-                    Label::new(FAMILY_NAMES[index].clone())
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-        })
-    }
+        .size(ToggleButtonGroupSize::Medium)
+        .tab_index(tab_index)
+        .selected_index(theme_mode as usize)
+        .style(ui::ToggleButtonGroupStyle::Outlined)
+        .width(rems_from_px(3. * 64.)),
+    );
 
     fn write_mode_change(mode: ThemeAppearanceMode, cx: &mut App) {
         let fs = <dyn Fs>::global(cx);
@@ -199,39 +65,159 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
             theme_settings::set_mode(settings, mode);
         });
     }
+}
 
-    fn write_theme_change(
-        theme: impl Into<Arc<str>>,
-        theme_mode: ThemeAppearanceMode,
-        cx: &mut App,
-    ) {
-        let fs = <dyn Fs>::global(cx);
-        let theme = theme.into();
-        update_settings_file(fs, cx, move |settings, cx| match theme_mode {
-            ThemeAppearanceMode::System => {
-                let (light_theme, dark_theme) =
-                    get_theme_family_themes(&theme).unwrap_or((theme.as_ref(), theme.as_ref()));
+/// Font family and size, the two settings almost everyone changes on day one.
+///
+/// The pickers are built inside `PopoverMenu::menu`, which only runs when the
+/// menu is opened. That matters: this page re-renders on every settings change
+/// (`Onboarding` observes `SettingsStore`), and enumerating system fonts on each
+/// of those would be paid for nothing. `FontPickerDelegate` reads the list from
+/// `FontFamilyCache`, which `Onboarding::new` has already prefetched.
+fn render_font_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement {
+    let theme_settings = ThemeSettings::get_global(cx);
+    let ui_font = theme_settings.ui_font.family.clone();
+    let buffer_font = theme_settings.buffer_font.family.clone();
+    let current_size = f32::from(theme_settings.buffer_font_size(cx));
+    // `None` here is not "unset" to the user -- the terminal renders the buffer
+    // font in that case, so showing the buffer font is what is actually on screen.
+    let terminal_font = TerminalSettings::get_global(cx)
+        .font_family
+        .as_ref()
+        .map_or_else(
+            || buffer_font.clone(),
+            |family| SharedString::from(family.0.clone()),
+        );
 
-                settings.theme.theme = Some(settings::ThemeSelection::Dynamic {
-                    mode: ThemeAppearanceMode::System,
-                    light: ThemeName(light_theme.into()),
-                    dark: ThemeName(dark_theme.into()),
+    v_flex()
+        .gap_2()
+        .child(Label::new("Fonts"))
+        .child(
+            h_flex()
+                .justify_between()
+                .child(Label::new("Interface").color(Color::Muted))
+                .child(render_font_menu(
+                    "onboarding-ui-font",
+                    ui_font,
+                    tab_index,
+                    |name, settings| settings.theme.ui_font_family = Some(name),
+                )),
+        )
+        .child(
+            h_flex()
+                .justify_between()
+                .child(Label::new("Editor").color(Color::Muted))
+                .child(render_font_menu(
+                    "onboarding-buffer-font",
+                    buffer_font,
+                    tab_index,
+                    |name, settings| settings.theme.buffer_font_family = Some(name),
+                )),
+        )
+        .child(
+            h_flex()
+                .justify_between()
+                .child(Label::new("Terminal").color(Color::Muted))
+                .child(render_font_menu(
+                    "onboarding-terminal-font",
+                    terminal_font,
+                    tab_index,
+                    |name, settings| {
+                        settings.terminal.get_or_insert_default().font_family = Some(name)
+                    },
+                )),
+        )
+        .child(
+            h_flex()
+                .justify_between()
+                .child(Label::new("Editor size").color(Color::Muted))
+                .child(render_font_size_toggle(current_size, tab_index)),
+        )
+}
+
+/// A few presets rather than a free number field: the page's other controls are
+/// toggle groups, and a stepper here would be the only thing on the screen
+/// needing its own state.
+///
+/// The shipped default has to appear among them, or the control opens with
+/// nothing selected and the first click silently resizes text the user never
+/// asked to change.
+const FONT_SIZE_PRESETS: [f32; 4] = [10.5, 12.0, 13.0, 14.0];
+
+/// Split out so a test can reach it: the closure it is called from lives inside
+/// a toggle button and cannot be invoked without a window.
+///
+/// Editor only. Code and chrome are read at different distances and the shipped
+/// defaults already disagree (10.5 against 13), so one number cannot serve both
+/// without quietly overriding whichever the user did not have in mind.
+fn write_font_size(size: f32, settings: &mut settings::SettingsContent) {
+    settings.theme.buffer_font_size = Some(settings::FontSize(size));
+}
+
+fn render_font_size_toggle(current_size: f32, tab_index: &mut isize) -> impl IntoElement {
+    // Compared with a tolerance because these are settings values round-tripped
+    // through f32, not integers that can be matched exactly.
+    let selected = FONT_SIZE_PRESETS
+        .iter()
+        .position(|size| (size - current_size).abs() < 0.01);
+
+    ToggleButtonGroup::single_row(
+        "onboarding-font-size",
+        FONT_SIZE_PRESETS.map(|size| {
+            ToggleButtonSimple::new(SharedString::from(size.to_string()), move |_, _, cx| {
+                let fs = <dyn Fs>::global(cx);
+                update_settings_file(fs, cx, move |settings, _cx| {
+                    write_font_size(size, settings);
                 });
-            }
-            ThemeAppearanceMode::Light => theme_settings::set_theme(
-                settings,
-                theme,
-                Appearance::Light,
-                *SystemAppearance::global(cx),
-            ),
-            ThemeAppearanceMode::Dark => theme_settings::set_theme(
-                settings,
-                theme,
-                Appearance::Dark,
-                *SystemAppearance::global(cx),
-            ),
-        });
-    }
+            })
+        }),
+    )
+    .size(ToggleButtonGroupSize::Medium)
+    .tab_index(tab_index)
+    .when_some(selected, |group, index| group.selected_index(index))
+    .style(ui::ToggleButtonGroupStyle::Outlined)
+    .width(rems_from_px(4. * 48.))
+}
+
+fn render_font_menu(
+    id: &'static str,
+    current: SharedString,
+    tab_index: &mut isize,
+    write: fn(settings::FontFamilyName, &mut settings::SettingsContent),
+) -> impl IntoElement {
+    *tab_index += 1;
+    let trigger_index = *tab_index;
+
+    PopoverMenu::new(id)
+        .trigger(
+            Button::new(SharedString::from(id), current.clone())
+                .tab_index(trigger_index)
+                .style(ButtonStyle::Outlined)
+                .size(ButtonSize::Medium)
+                .end_icon(
+                    Icon::new(IconName::ChevronUpDown)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                ),
+        )
+        .menu(move |window, cx: &mut App| {
+            let current = current.clone();
+            Some(cx.new(move |cx| {
+                settings_ui::font_picker(
+                    current,
+                    move |font_name, _window, cx| {
+                        let fs = <dyn Fs>::global(cx);
+                        update_settings_file(fs, cx, move |settings, _cx| {
+                            write(font_name.to_string().into(), settings);
+                        });
+                    },
+                    window,
+                    cx,
+                )
+            }))
+        })
+        .anchor(gpui::Anchor::TopRight)
+        .into_any_element()
 }
 
 fn render_telemetry_section(tab_index: &mut isize, cx: &App) -> impl IntoElement {
@@ -243,7 +229,7 @@ fn render_telemetry_section(tab_index: &mut isize, cx: &App) -> impl IntoElement
             SwitchField::new(
                 "onboarding-telemetry-metrics",
                 None::<&str>,
-                Some("Help improve Zed by sending anonymous usage data".into()),
+                Some("Help improve Zode by sending anonymous usage data".into()),
                 if TelemetrySettings::get_global(cx).metrics {
                     ui::ToggleState::Selected
                 } else {
@@ -283,7 +269,7 @@ fn render_telemetry_section(tab_index: &mut isize, cx: &App) -> impl IntoElement
                 "onboarding-telemetry-crash-reports",
                 None::<&str>,
                 Some(
-                    "Help fix Zed by sending crash reports so we can fix critical issues fast"
+                    "Help fix Zode by sending crash reports so we can fix critical issues fast"
                         .into(),
                 ),
                 if TelemetrySettings::get_global(cx).diagnostics {
@@ -424,12 +410,12 @@ fn render_worktree_auto_trust_switch(tab_index: &mut isize, cx: &mut App) -> imp
         ui::ToggleState::Unselected
     };
 
-    let tooltip_description = "Zed can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.";
+    let tooltip_description = "Zode can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.";
 
     SwitchField::new(
         "onboarding-auto-trust-worktrees",
         Some("Trust All Projects By Default"),
-        Some("Automatically mark all new projects as trusted to unlock all Zed's features".into()),
+        Some("Automatically mark all new projects as trusted to unlock all Zode's features".into()),
         toggle_state,
         {
             let fs = <dyn Fs>::global(cx);
@@ -459,68 +445,6 @@ fn render_worktree_auto_trust_switch(tab_index: &mut isize, cx: &mut App) -> imp
     .tooltip(Tooltip::text(tooltip_description))
 }
 
-fn render_setting_import_button(
-    tab_index: isize,
-    label: SharedString,
-    action: &dyn Action,
-    imported: bool,
-) -> impl IntoElement + 'static {
-    let action = action.boxed_clone();
-
-    Button::new(label.clone(), label.clone())
-        .style(ButtonStyle::OutlinedGhost)
-        .size(ButtonSize::Medium)
-        .label_size(LabelSize::Small)
-        .selected_style(ButtonStyle::Tinted(TintColor::Accent))
-        .toggle_state(imported)
-        .tab_index(tab_index)
-        .when(imported, |this| {
-            this.end_icon(Icon::new(IconName::Check).size(IconSize::Small))
-                .color(Color::Success)
-        })
-        .on_click(move |_, window, cx| {
-            telemetry::event!("Welcome Import Settings", import_source = label,);
-            window.dispatch_action(action.boxed_clone(), cx);
-        })
-}
-
-fn render_import_settings_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement {
-    let import_state = SettingsImportState::global(cx);
-    let imports: [(SharedString, &dyn Action, bool); 2] = [
-        (
-            "VS Code".into(),
-            &ImportVsCodeSettings { skip_prompt: false },
-            import_state.vscode,
-        ),
-        (
-            "Cursor".into(),
-            &ImportCursorSettings { skip_prompt: false },
-            import_state.cursor,
-        ),
-    ];
-
-    let [vscode, cursor] = imports.map(|(label, action, imported)| {
-        *tab_index += 1;
-        render_setting_import_button(*tab_index - 1, label, action, imported)
-    });
-
-    h_flex()
-        .gap_2()
-        .flex_wrap()
-        .justify_between()
-        .child(
-            v_flex()
-                .gap_0p5()
-                .max_w_5_6()
-                .child(Label::new("Import Settings"))
-                .child(
-                    Label::new("Automatically pull your settings from other editors")
-                        .color(Color::Muted),
-                ),
-        )
-        .child(h_flex().gap_1().child(vscode).child(cursor))
-}
-
 pub(crate) fn render_basics_page(cx: &mut App) -> impl IntoElement {
     let mut tab_index = 0;
 
@@ -528,10 +452,82 @@ pub(crate) fn render_basics_page(cx: &mut App) -> impl IntoElement {
         .id("basics-page")
         .gap_6()
         .child(render_theme_section(&mut tab_index, cx))
+        .child(render_font_section(&mut tab_index, cx))
         .child(render_base_keymap_section(&mut tab_index, cx))
-        .child(render_import_settings_section(&mut tab_index, cx))
         .child(render_vim_mode_switch(&mut tab_index, cx))
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
         .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
         .child(render_telemetry_section(&mut tab_index, cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+    use settings::Settings as _;
+
+    /// The first screen a user ever sees must not be able to abort the process.
+    ///
+    /// It used to: the theme section looked its themes up by name and
+    /// `unwrap()`ed the result, so a registry without them took the app down on
+    /// launch. `LoadThemes::JustBase` reproduces exactly that -- it loads the
+    /// base theme only, so "Dark 2026" and "Light 2026" are genuinely absent.
+    #[gpui::test]
+    fn the_page_renders_without_the_themes_it_expects(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            project::DisableAiSettings::register(cx);
+            client::TelemetrySettings::register(cx);
+            project::project_settings::ProjectSettings::register(cx);
+            settings::BaseKeymap::register(cx);
+            vim_mode_setting::VimModeSetting::register(cx);
+            <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
+
+            // Building the element tree is the whole assertion: anything that
+            // panics on missing data does it here.
+            let _ = super::render_basics_page(cx);
+        });
+    }
+
+    /// The control is labelled for the editor, so it must not quietly resize the
+    /// interface too -- the shipped defaults deliberately differ.
+    #[gpui::test]
+    fn a_font_size_writes_the_editor_and_leaves_the_interface_alone(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+
+            let mut content = settings::SettingsContent::default();
+            super::write_font_size(10.5, &mut content);
+
+            assert_eq!(
+                content.theme.buffer_font_size,
+                Some(settings::FontSize(10.5))
+            );
+            assert_eq!(content.theme.ui_font_size, None);
+        });
+    }
+
+    /// A preset the shipped default cannot match leaves the control blank, so
+    /// the first click moves text the user came to this screen already happy with.
+    #[test]
+    fn the_default_editor_size_is_one_of_the_presets_offered() {
+        let defaults: settings::SettingsContent =
+            settings::parse_json_with_comments(settings::default_settings().as_ref())
+                .expect("default settings must parse as jsonc");
+        let default_size = defaults
+            .theme
+            .buffer_font_size
+            .expect("default.json must set buffer_font_size")
+            .0;
+
+        assert!(
+            super::FONT_SIZE_PRESETS
+                .iter()
+                .any(|size| (size - default_size).abs() < 0.01),
+            "default buffer_font_size {default_size} is not in {:?}",
+            super::FONT_SIZE_PRESETS
+        );
+    }
 }

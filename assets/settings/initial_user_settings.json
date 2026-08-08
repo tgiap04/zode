@@ -1,17 +1,14 @@
-// Zed settings
+// zode settings
 //
-// For information on how to configure Zed, see the Zed
-// documentation: https://zed.dev/docs/configuring-zed
+// This file starts empty on purpose: every key written here OVERRIDES the
+// shipped defaults in `assets/settings/default.json`. Seeding values would
+// silently pin new installs to whatever was current the day the seed was
+// written, which is how the bundled theme and font size stopped taking effect.
 //
-// To see all of Zed's default settings without changing your
-// custom settings, run `zed: open default settings` from the
-// command palette (cmd-shift-p / ctrl-shift-p)
-{
-  "ui_font_size": 16,
-  "buffer_font_size": 15,
-  "theme": {
-    "mode": "system",
-    "light": "One Light",
-    "dark": "One Dark",
-  },
-}
+// zode is a fork of Zed, so Zed's configuration documentation applies:
+// https://zed.dev/docs/configuring-zed
+//
+// To read every default without touching this file, run
+// `zed: open default settings` from the command palette (cmd-shift-p).
+// The action namespace is still `zed:` — it is inherited from upstream.
+{}

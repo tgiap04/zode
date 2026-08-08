@@ -24,13 +24,13 @@ fs.workspace = true
 fuzzy.workspace = true
 gpui.workspace = true
 menu.workspace = true
-notifications.workspace = true
 picker.workspace = true
 project.workspace = true
-schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
+settings_ui.workspace = true
 telemetry.workspace = true
+terminal.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
@@ -38,7 +38,9 @@ util.workspace = true
 vim_mode_setting.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
-zlog.workspace = true
 
 [dev-dependencies]
 db = {workspace = true, features = ["test-support"]}
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

@@ -787,6 +787,13 @@ impl Dock {
         self.panel_entries.len()
     }
 
+    /// The panels docked here, in the order they are shown. `panel_entries` is
+    /// private to this module, so anything outside it that wants to draw its own
+    /// list of panels — the project rail's panel switcher — goes through here.
+    pub fn panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.panel_entries.iter().map(|entry| &entry.panel)
+    }
+
     pub fn has_agent_panel(&self, cx: &App) -> bool {
         self.panel_entries
             .iter()
@@ -1393,6 +1400,9 @@ pub mod test {
         pub default_size: Pixels,
         pub flexible: bool,
         pub activation_priority: u32,
+        /// Defaults to `None`, matching a panel that contributes no dock button.
+        /// Set it when a test needs the panel to appear in an icon list.
+        pub icon: Option<ui::IconName>,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -1408,6 +1418,7 @@ pub mod test {
                 default_size: px(300.),
                 flexible: false,
                 activation_priority,
+                icon: None,
             }
         }
 
@@ -1480,11 +1491,11 @@ pub mod test {
         }
 
         fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
-            None
+            self.icon
         }
 
         fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-            None
+            self.icon.map(|_| "Test Panel")
         }
 
         fn toggle_action(&self) -> Box<dyn Action> {

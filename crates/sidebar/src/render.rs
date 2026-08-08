@@ -5,13 +5,12 @@ use ui::prelude::*;
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel_open = self.panel_open(cx);
-        let rail = self.render_rail(cx);
+        let rail = self.render_rail(window, cx);
 
         h_flex()
             .key_context(self.dispatch_context(window, cx))
             .track_focus(&self.focus_handle)
             .size_full()
-            .pt(self.top_inset(window, cx))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))

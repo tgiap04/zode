@@ -7597,10 +7597,13 @@ impl Workspace {
             leader_border_for_pane(follower_states, &pane, window, cx)
         });
 
+        // Every dock — left, right and bottom, across all `BottomDockLayout`
+        // variants — funnels through here, so the surface treatment lands once
+        // rather than per layout arm.
         let mut container = div()
             .flex()
-            .overflow_hidden()
             .flex_none()
+            .workspace_surface(cx)
             .child(dock.clone())
             .children(leader_border);
 
@@ -15169,10 +15172,12 @@ mod tests {
         let parsed: serde_json::Value = settings::parse_json_with_comments(&settings_text).unwrap();
         assert_eq!(
             parsed["theme"],
+            // The migration fills both slots from the configured defaults, so
+            // read them from the constants rather than pinning theme names here.
             serde_json::json!({
                 "mode": "system",
-                "light": "One Light",
-                "dark": "One Dark"
+                "light": settings::DEFAULT_LIGHT_THEME,
+                "dark": settings::DEFAULT_DARK_THEME
             })
         );
 

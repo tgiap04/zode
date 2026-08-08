@@ -1,19 +1,15 @@
 use crate::multibuffer_hint::MultibufferHint;
 use client::UserStore;
 use db::kvp::KeyValueStore;
-use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Global, IntoElement, KeyContext, Render, ScrollHandle, SharedString,
-    Subscription, Task, WeakEntity, Window, actions,
+    Action, AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, KeyContext, Render, ScrollHandle, SharedString, Subscription, Task, WeakEntity,
+    Window, actions, img,
 };
-use notifications::status_toast::StatusToast;
-use schemars::JsonSchema;
-use serde::Deserialize;
-use settings::{SettingsStore, VsCodeSettingsSource};
+use settings::SettingsStore;
 use std::sync::Arc;
 use ui::{
-    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
+    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement,
     WithScrollbar as _, prelude::*, rems_from_px,
 };
 
@@ -30,25 +26,6 @@ use zed_actions::OpenOnboarding;
 mod base_keymap_picker;
 mod basics_page;
 pub mod multibuffer_hint;
-mod theme_preview;
-
-/// Imports settings from Visual Studio Code.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
-#[serde(deny_unknown_fields)]
-pub struct ImportVsCodeSettings {
-    #[serde(default)]
-    pub skip_prompt: bool,
-}
-
-/// Imports settings from Cursor editor.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
-#[serde(deny_unknown_fields)]
-pub struct ImportCursorSettings {
-    #[serde(default)]
-    pub skip_prompt: bool,
-}
 
 pub const FIRST_OPEN: &str = "first_open";
 pub const DOCS_URL: &str = "https://zed.dev/docs/";
@@ -126,49 +103,6 @@ pub fn init(cx: &mut App) {
                 .detach();
         });
     });
-
-    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
-        workspace.register_action(|_workspace, action: &ImportVsCodeSettings, window, cx| {
-            let fs = <dyn Fs>::global(cx);
-            let action = *action;
-
-            let workspace = cx.weak_entity();
-
-            window
-                .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-                    handle_import_vscode_settings(
-                        workspace,
-                        VsCodeSettingsSource::VsCode,
-                        action.skip_prompt,
-                        fs,
-                        cx,
-                    )
-                    .await
-                })
-                .detach();
-        });
-
-        workspace.register_action(|_workspace, action: &ImportCursorSettings, window, cx| {
-            let fs = <dyn Fs>::global(cx);
-            let action = *action;
-
-            let workspace = cx.weak_entity();
-
-            window
-                .spawn(cx, async move |cx: &mut AsyncWindowContext| {
-                    handle_import_vscode_settings(
-                        workspace,
-                        VsCodeSettingsSource::Cursor,
-                        action.skip_prompt,
-                        fs,
-                        cx,
-                    )
-                    .await
-                })
-                .detach();
-        });
-    })
-    .detach();
 
     base_keymap_picker::init(cx);
 
@@ -287,15 +221,23 @@ impl Render for Onboarding {
                                     .child(
                                         h_flex()
                                             .gap_4()
-                                            .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
+                                            .child(
+                                                // A raster mark, not a `Vector`: `Vector`
+                                                // renders an SVG tinted with one
+                                                // theme colour, which would flatten
+                                                // this logo to a silhouette.
+                                                img("images/zode_logo.png")
+                                                    .size(rems(2.5))
+                                                    .flex_none(),
+                                            )
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        Headline::new("Welcome to Zode")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("Built on Zed")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),
@@ -406,125 +348,6 @@ fn go_to_welcome_page(cx: &mut App) {
             pane.remove_item(onboarding_id, false, false, window, cx);
         });
     });
-}
-
-pub async fn handle_import_vscode_settings(
-    workspace: WeakEntity<Workspace>,
-    source: VsCodeSettingsSource,
-    skip_prompt: bool,
-    fs: Arc<dyn Fs>,
-    cx: &mut AsyncWindowContext,
-) {
-    use util::truncate_and_remove_front;
-
-    let vscode_settings =
-        match settings::VsCodeSettings::load_user_settings(source, fs.clone()).await {
-            Ok(vscode_settings) => vscode_settings,
-            Err(err) => {
-                zlog::error!("{err:?}");
-                let _ = cx.prompt(
-                    gpui::PromptLevel::Info,
-                    &format!("Could not find or load a {source} settings file"),
-                    None,
-                    &["Ok"],
-                );
-                return;
-            }
-        };
-
-    if !skip_prompt {
-        let prompt = cx.prompt(
-            gpui::PromptLevel::Warning,
-            &format!(
-                "Importing {} settings may overwrite your existing settings. \
-                Will import settings from {}",
-                vscode_settings.source,
-                truncate_and_remove_front(&vscode_settings.path.to_string_lossy(), 128),
-            ),
-            None,
-            &["Ok", "Cancel"],
-        );
-        let result = cx.spawn(async move |_| prompt.await.ok()).await;
-        if result != Some(0) {
-            return;
-        }
-    };
-
-    let Ok(result_channel) = cx.update(|_, cx| {
-        let source = vscode_settings.source;
-        let path = vscode_settings.path.clone();
-        let result_channel = cx
-            .global::<SettingsStore>()
-            .import_vscode_settings(fs, vscode_settings);
-        zlog::info!("Imported {source} settings from {}", path.display());
-        result_channel
-    }) else {
-        return;
-    };
-
-    let result = result_channel.await;
-    workspace
-        .update_in(cx, |workspace, _, cx| match result {
-            Ok(_) => {
-                let confirmation_toast = StatusToast::new(
-                    format!("Your {} settings were successfully imported.", source),
-                    cx,
-                    |this, _| {
-                        this.icon(
-                            Icon::new(IconName::Check)
-                                .size(IconSize::Small)
-                                .color(Color::Success),
-                        )
-                        .dismiss_button(true)
-                    },
-                );
-                SettingsImportState::update(cx, |state, _| match source {
-                    VsCodeSettingsSource::VsCode => {
-                        state.vscode = true;
-                    }
-                    VsCodeSettingsSource::Cursor => {
-                        state.cursor = true;
-                    }
-                });
-                workspace.toggle_status_toast(confirmation_toast, cx);
-            }
-            Err(_) => {
-                let error_toast = StatusToast::new(
-                    "Failed to import settings. See log for details",
-                    cx,
-                    |this, _| {
-                        this.icon(
-                            Icon::new(IconName::Close)
-                                .size(IconSize::Small)
-                                .color(Color::Error),
-                        )
-                        .action("Open Log", |window, cx| {
-                            window.dispatch_action(workspace::OpenLog.boxed_clone(), cx)
-                        })
-                        .dismiss_button(true)
-                    },
-                );
-                workspace.toggle_status_toast(error_toast, cx);
-            }
-        })
-        .ok();
-}
-
-#[derive(Default, Copy, Clone)]
-pub struct SettingsImportState {
-    pub cursor: bool,
-    pub vscode: bool,
-}
-
-impl Global for SettingsImportState {}
-
-impl SettingsImportState {
-    pub fn global(cx: &App) -> Self {
-        cx.try_global().cloned().unwrap_or_default()
-    }
-    pub fn update<R>(cx: &mut App, f: impl FnOnce(&mut Self, &mut App) -> R) -> R {
-        cx.update_default_global(f)
-    }
 }
 
 impl workspace::SerializableItem for Onboarding {
@@ -650,6 +473,45 @@ mod persistence {
                 SELECT item_id
                 FROM onboarding_pages
                 WHERE item_id = ? AND workspace_id = ?
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    /// The one place the crate may still say "Zed": crediting where the fork
+    /// came from. Anything else that names Zed is the app claiming to be an
+    /// editor it is not.
+    const ATTRIBUTION: &str = r#"Label::new("Built on Zed")"#;
+
+    /// Reads the source rather than behaviour, because "calls itself by the
+    /// right name" has no runtime seam -- and it is exactly the kind of thing
+    /// that drifts back in one label at a time.
+    #[test]
+    fn the_crate_never_claims_to_be_zed() {
+        for (path, source) in [
+            ("onboarding.rs", include_str!("onboarding.rs")),
+            ("basics_page.rs", include_str!("basics_page.rs")),
+            ("base_keymap_picker.rs", include_str!("base_keymap_picker.rs")),
+            ("multibuffer_hint.rs", include_str!("multibuffer_hint.rs")),
+        ] {
+            // Only the shipping half of each file. Test code is not user-facing
+            // text, and this very module quotes the name it is banning.
+            let shipping = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+            for (number, line) in shipping.lines().enumerate() {
+                if line.trim_start().starts_with("//") || line.contains(ATTRIBUTION) {
+                    continue;
+                }
+                // `zed.dev` links point at documentation that is real and still
+                // applies; the fork has none of its own to point at instead.
+                let without_urls = line.replace("zed.dev", "").replace("zed://", "");
+                assert!(
+                    !without_urls.contains("Zed"),
+                    "{path}:{} still names Zed: {line}",
+                    number + 1
+                );
             }
         }
     }

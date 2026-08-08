@@ -5,7 +5,6 @@ mod editorconfig_store;
 mod keymap_file;
 mod settings_file;
 mod settings_store;
-mod vscode_import;
 
 pub use settings_macros::RegisterSetting;
 
@@ -49,7 +48,6 @@ pub use settings_store::{
     SettingsJsonSchemaParams, SettingsKey, SettingsLocation, SettingsParseResult, SettingsStore,
 };
 
-pub use vscode_import::{VsCodeSettings, VsCodeSettingsSource};
 
 pub use keymap_file::ActionSequence;
 
@@ -181,4 +179,95 @@ pub fn initial_debug_tasks_content() -> Cow<'static, str> {
 
 pub fn initial_local_debug_tasks_content() -> Cow<'static, str> {
     asset_str::<SettingsAssets>("settings/initial_local_debug_tasks.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every key seeded into a fresh `settings.json` OVERRIDES `default.json`,
+    // which makes a values-carrying seed invisible in review yet decisive at
+    // runtime: it pins new installs to whatever was current the day the seed
+    // was written, and the shipped theme and font size never take effect.
+    #[test]
+    fn the_seeded_user_settings_override_nothing() {
+        let seed = initial_user_settings_content();
+        let parsed: serde_json::Value = crate::parse_json_with_comments(seed.as_ref())
+            .expect("seeded user settings must parse as jsonc");
+        let object = parsed
+            .as_object()
+            .expect("seeded user settings must be a JSON object");
+
+        assert!(
+            object.is_empty(),
+            "seed overrides shipped defaults for: {:?}",
+            object.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // Defaulting to a font that is not shipped fails silently: it renders
+    // perfectly on the machine of whoever chose it, and falls back to something
+    // else on every machine that never installed it. So assert the files are
+    // actually here, not merely that the names read the way we meant.
+    #[test]
+    fn the_default_fonts_are_bundled_with_the_app() {
+        let defaults: serde_json::Value =
+            crate::parse_json_with_comments(crate::default_settings().as_ref())
+                .expect("default settings must parse as jsonc");
+
+        assert_eq!(defaults["buffer_font_family"], "JetBrains Mono");
+        assert_eq!(defaults["terminal"]["font_family"], "JetBrains Mono NL");
+
+        // Every weight, not just Regular: a missing Bold is synthesised by the
+        // platform into a smeared fake that nobody notices until it is shipped.
+        let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/fonts/jetbrains-mono");
+        for family in ["JetBrainsMono", "JetBrainsMonoNL"] {
+            for style in ["Regular", "Italic", "Bold", "BoldItalic"] {
+                let file = fonts.join(format!("{family}-{style}.ttf"));
+                assert!(file.is_file(), "default font not bundled: {}", file.display());
+            }
+        }
+        assert!(
+            fonts.join("OFL.txt").is_file(),
+            "the SIL Open Font License must ship with the fonts it covers"
+        );
+
+        // Merged with the platform defaults, so this covers glyphs JetBrains
+        // Mono has no design for at all -- CJK being the obvious one.
+        for fallbacks in [
+            &defaults["buffer_font_fallbacks"],
+            &defaults["terminal"]["font_fallbacks"],
+        ] {
+            assert_eq!(fallbacks, &serde_json::json!([".ZedMono"]));
+        }
+    }
+
+    // The seed is not just read, it is EDITED: the first setting a user changes
+    // is written into this exact text. An empty object with a comment header is
+    // the shape the jsonc editor handles worst, and a mangled header is invisible
+    // to every other test because the file still parses afterwards.
+    #[test]
+    fn the_seeded_header_survives_the_first_settings_write() {
+        let mut text = initial_user_settings_content().to_string();
+        let old: serde_json::Value = crate::parse_json_with_comments(&text)
+            .expect("seeded user settings must parse as jsonc");
+        let new = serde_json::json!({ "vim_mode": true });
+
+        crate::update_value_in_json_text(&mut text, &mut Vec::new(), 2, &old, &new, &mut Vec::new());
+
+        let written: serde_json::Value = crate::parse_json_with_comments(&text)
+            .unwrap_or_else(|error| panic!("first write produced invalid jsonc: {error}\n{text}"));
+        assert_eq!(written["vim_mode"], serde_json::json!(true));
+
+        for line in initial_user_settings_content().lines() {
+            let line = line.trim();
+            if line.starts_with("//") {
+                assert!(
+                    text.contains(line),
+                    "the first write mangled a header line.\nlost: {line}\nresult:\n{text}"
+                );
+            }
+        }
+    }
 }

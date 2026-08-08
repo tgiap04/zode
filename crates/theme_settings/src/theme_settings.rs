@@ -408,3 +408,130 @@ pub fn increase_buffer_font_size(cx: &mut App) {
 pub fn decrease_buffer_font_size(cx: &mut App) {
     adjust_buffer_font_size(cx, |size| size - px(1.0));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn bundled_theme_files() -> Vec<PathBuf> {
+        let themes_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
+        let mut files = Vec::new();
+        let mut dirs = vec![themes_dir];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("failed to read themes dir") {
+                let path = entry.expect("failed to read theme dir entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "json") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(!files.is_empty(), "no bundled themes found");
+        files.sort();
+        files
+    }
+
+    fn parse_family(path: &PathBuf) -> ThemeFamilyContent {
+        let bytes = std::fs::read(path).expect("failed to read theme");
+        // Mirrors the call in `load_bundled_themes`, which swallows parse failures
+        // via `log_err()` — a broken theme is silently absent at runtime, so it has
+        // to be caught here instead.
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|err| panic!("failed to parse theme at {}: {err}", path.display()))
+    }
+
+    #[test]
+    fn bundled_themes_parse() {
+        for path in bundled_theme_files() {
+            let family = parse_family(&path);
+            for theme in &family.themes {
+                assert_eq!(
+                    theme.style.players.len(),
+                    8,
+                    "{} in {} must define 8 player colors: index 0 drives the local editor \
+                     and terminal cursor, index 7 drives the agent/absent color, and \
+                     `merge_player_colors` silently keeps the built-in palette when the list \
+                     is short",
+                    theme.name,
+                    path.display()
+                );
+                assert!(
+                    !theme.style.syntax.is_empty(),
+                    "{} in {} has no syntax styles",
+                    theme.name,
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_theme_colors_parse() {
+        fn check(value: &serde_json::Value, path: &PathBuf) {
+            match value {
+                serde_json::Value::String(string) if string.starts_with('#') => {
+                    assert!(
+                        try_parse_color(string).is_ok(),
+                        "unparseable color {string:?} in {}",
+                        path.display()
+                    );
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|item| check(item, path)),
+                serde_json::Value::Object(entries) => {
+                    entries.values().for_each(|entry| check(entry, path))
+                }
+                _ => {}
+            }
+        }
+
+        for path in bundled_theme_files() {
+            let bytes = std::fs::read(&path).expect("failed to read theme");
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("failed to parse theme as JSON");
+            check(&value, &path);
+        }
+    }
+
+    #[test]
+    fn default_themes_are_bundled() {
+        let bundled = bundled_theme_files()
+            .iter()
+            .flat_map(|path| parse_family(path).themes)
+            .map(|theme| theme.name)
+            .collect::<Vec<_>>();
+
+        // The first two are the configured defaults; the third is the last-resort
+        // fallback that `configured_theme` reaches for, and it names a different
+        // theme on purpose.
+        for default in [
+            ::settings::DEFAULT_LIGHT_THEME,
+            ::settings::DEFAULT_DARK_THEME,
+            theme::DEFAULT_DARK_THEME,
+        ] {
+            assert!(
+                bundled.iter().any(|name| name == default),
+                "default theme {default:?} is not among the bundled themes {bundled:?}"
+            );
+        }
+
+        // `assets/settings/default.json` is what actually drives a fresh install;
+        // the constants above only mirror it. A name that matches neither a bundled
+        // theme nor the constants means the app silently falls back at startup.
+        let defaults =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/settings/default.json");
+        let bytes = std::fs::read(&defaults).expect("failed to read default settings");
+        let settings: serde_json_lenient::Value =
+            serde_json_lenient::from_slice(&bytes).expect("failed to parse default settings");
+        for mode in ["light", "dark"] {
+            let name = settings["theme"][mode]
+                .as_str()
+                .unwrap_or_else(|| panic!("default.json has no theme.{mode}"));
+            assert!(
+                bundled.iter().any(|bundled_name| bundled_name == name),
+                "default.json theme.{mode} = {name:?} is not among the bundled themes {bundled:?}"
+            );
+        }
+    }
+}
