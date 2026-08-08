@@ -180,3 +180,56 @@ pub fn initial_debug_tasks_content() -> Cow<'static, str> {
 pub fn initial_local_debug_tasks_content() -> Cow<'static, str> {
     asset_str::<SettingsAssets>("settings/initial_local_debug_tasks.json")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every key seeded into a fresh `settings.json` OVERRIDES `default.json`,
+    // which makes a values-carrying seed invisible in review yet decisive at
+    // runtime: it pins new installs to whatever was current the day the seed
+    // was written, and the shipped theme and font size never take effect.
+    #[test]
+    fn the_seeded_user_settings_override_nothing() {
+        let seed = initial_user_settings_content();
+        let parsed: serde_json::Value = crate::parse_json_with_comments(seed.as_ref())
+            .expect("seeded user settings must parse as jsonc");
+        let object = parsed
+            .as_object()
+            .expect("seeded user settings must be a JSON object");
+
+        assert!(
+            object.is_empty(),
+            "seed overrides shipped defaults for: {:?}",
+            object.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // The seed is not just read, it is EDITED: the first setting a user changes
+    // is written into this exact text. An empty object with a comment header is
+    // the shape the jsonc editor handles worst, and a mangled header is invisible
+    // to every other test because the file still parses afterwards.
+    #[test]
+    fn the_seeded_header_survives_the_first_settings_write() {
+        let mut text = initial_user_settings_content().to_string();
+        let old: serde_json::Value = crate::parse_json_with_comments(&text)
+            .expect("seeded user settings must parse as jsonc");
+        let new = serde_json::json!({ "vim_mode": true });
+
+        crate::update_value_in_json_text(&mut text, &mut Vec::new(), 2, &old, &new, &mut Vec::new());
+
+        let written: serde_json::Value = crate::parse_json_with_comments(&text)
+            .unwrap_or_else(|error| panic!("first write produced invalid jsonc: {error}\n{text}"));
+        assert_eq!(written["vim_mode"], serde_json::json!(true));
+
+        for line in initial_user_settings_content().lines() {
+            let line = line.trim();
+            if line.starts_with("//") {
+                assert!(
+                    text.contains(line),
+                    "the first write mangled a header line.\nlost: {line}\nresult:\n{text}"
+                );
+            }
+        }
+    }
+}
