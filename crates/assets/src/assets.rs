@@ -53,11 +53,43 @@ impl Assets {
         cx.text_system().add_fonts(embedded_fonts)
     }
 
+    #[cfg(test)]
+    fn embedded_font_paths() -> Vec<String> {
+        Self::iter()
+            .filter(|path| path.ends_with(".ttf"))
+            .map(|path| path.to_string())
+            .collect()
+    }
+
     pub fn load_test_fonts(&self, cx: &App) {
         cx.text_system()
             .add_fonts(vec![
                 self.load("fonts/lilex/Lilex-Regular.ttf").unwrap().unwrap(),
             ])
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A font the settings default to is only real once it reaches the binary.
+    // The include globs above take whole directories, so a new family arrives by
+    // side effect -- or silently fails to, and the app quietly renders something
+    // else on every machine except the one that installed the font by hand.
+    #[test]
+    fn the_default_font_families_are_embedded() {
+        let embedded = Assets::embedded_font_paths();
+
+        for family in ["JetBrainsMono", "JetBrainsMonoNL"] {
+            for style in ["Regular", "Italic", "Bold", "BoldItalic"] {
+                let path = format!("fonts/jetbrains-mono/{family}-{style}.ttf");
+                assert!(
+                    embedded.contains(&path),
+                    "not embedded: {path}\nembedded fonts: {embedded:#?}"
+                );
+            }
+        }
     }
 }

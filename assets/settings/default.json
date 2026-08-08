@@ -23,20 +23,21 @@
   // 5. "SublimeText"
   // 6. "TextMate"
   "base_keymap": "VSCode",
-  // The name of a font to use for rendering text in the editor
-  // ".ZedMono" currently aliases to Lilex
-  // but this may change in the future.
-  "buffer_font_family": ".ZedMono",
+  // The name of a font to use for rendering text in the editor.
+  // Bundled in assets/fonts/jetbrains-mono, so this renders the same everywhere
+  // rather than depending on what the machine happens to have installed.
+  "buffer_font_family": "JetBrains Mono",
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
-  "buffer_font_fallbacks": null,
+  // ".ZedMono" aliases the bundled Lilex and covers glyphs JetBrains Mono lacks.
+  "buffer_font_fallbacks": [".ZedMono"],
   // The OpenType features to enable for text in the editor.
   "buffer_font_features": {
     // Disable ligatures:
     // "calt": false
   },
   // The default font size for text in the editor
-  "buffer_font_size": 15,
+  "buffer_font_size": 13,
   // The weight of the editor font in standard CSS units from 100 to 900.
   "buffer_font_weight": 400,
   // Set the buffer's line height.
@@ -66,7 +67,7 @@
   // The weight of the UI font in standard CSS units from 100 to 900.
   "ui_font_weight": 400,
   // The default font size for text in the UI
-  "ui_font_size": 16,
+  "ui_font_size": 13,
   // How much to fade out unused code.
   "unnecessary_code_fade": 0.3,
   // Active pane styling settings.
@@ -1640,13 +1641,15 @@
     // Set the terminal's font size. If this option is not included,
     // the terminal will default to matching the buffer's font size.
     // "font_size": 15,
-    // Set the terminal's font family. If this option is not included,
-    // the terminal will default to matching the buffer's font family.
-    // "font_family": ".ZedMono",
+    // Set the terminal's font family. Omitting this makes the terminal match
+    // the buffer's font; zode sets it explicitly to the no-ligature cut, since
+    // ligatures in shell output turn "->" and "!=" into glyphs you cannot count
+    // columns by. Bundled alongside the ligature cut in assets/fonts.
+    "font_family": "JetBrains Mono NL",
     // Set the terminal's font fallbacks. If this option is not included,
     // the terminal will default to matching the buffer's font fallbacks.
     // This will be merged with the platform's default font fallbacks
-    // "font_fallbacks": ["FiraCode Nerd Fonts"],
+    "font_fallbacks": [".ZedMono"],
     // The weight of the editor font in standard CSS units from 100 to 900.
     "font_weight": 400,
     // Sets the maximum number of lines in the terminal's scrollback buffer.
