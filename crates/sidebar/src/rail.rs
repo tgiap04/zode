@@ -9,6 +9,19 @@ use ui::{Tooltip, prelude::*};
 pub const RAIL_WIDTH: Pixels = px(48.0);
 
 const RAIL_ITEM_SIZE: Pixels = px(48.0);
+
+/// One knob for every glyph in the column, so they cannot drift apart.
+///
+/// Worth knowing if you tune it: `IconSize` is rems against the UI font size, not
+/// pixels -- `Small` is `rems_from_px(14.)`, which on the shipped 13px font draws
+/// about 11px, while the column's own 48px width does not move.
+pub(crate) const RAIL_ICON_SIZE: IconSize = IconSize::Small;
+
+/// Absolute, not `gap_1`: spacing helpers are rems against the UI font, so on the
+/// shipped 13px font `gap_1` yields 3px, and 3px between 19.5px glyphs in a fixed
+/// 48px column reads as one run-on strip. The column's width does not shrink with
+/// the font, so neither should the air between its buttons.
+pub(crate) const RAIL_ICON_GAP: Pixels = px(10.0);
 const RAIL_SQUARE_SIZE: Pixels = px(32.0);
 
 /// One or two letters standing in for the project, Discord-style. Word
@@ -191,8 +204,8 @@ impl Sidebar {
 
         v_flex()
             .flex_shrink_0()
-            .py_1()
-            .gap_1()
+            .py(RAIL_ICON_GAP)
+            .gap(RAIL_ICON_GAP)
             .items_center()
             .when(follows_panels, |el| el.border_t_1().border_color(border))
             .child(
@@ -201,7 +214,7 @@ impl Sidebar {
                 // outline panels, and a third tree in the same column reads as
                 // a duplicate.
                 IconButton::new("project-rail-toggle-panel", IconName::Menu)
-                    .icon_size(IconSize::Small)
+                    .icon_size(RAIL_ICON_SIZE)
                     .toggle_state(panel_open)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action(
@@ -226,7 +239,7 @@ impl Sidebar {
             )
             .child(
                 IconButton::new("project-rail-open-project", IconName::Plus)
-                    .icon_size(IconSize::Small)
+                    .icon_size(RAIL_ICON_SIZE)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action("Open Project", &workspace::Open::DEFAULT, cx)
                     })
