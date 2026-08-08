@@ -55,7 +55,7 @@ THEMES_DIR := $(ZODE_CONFIG)/themes
 
 .DEFAULT_GOAL := help
 .PHONY: help build dev fast run lint test clean trim theme-push theme-pull \
-	paths reset-config reset-all
+	paths reset-config reset-all onboarding
 
 help: ## Show this help
 	@grep -hE '^[a-z][a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) \
@@ -145,7 +145,8 @@ define confirm_and_delete
 	echo; \
 	echo "To actually see that, launch with no folder:  make dev PROJECT="; \
 	echo "Plain 'make dev' passes this repo as an argument, which opens it"; \
-	echo "straight away and skips the first-run screen entirely."
+	echo "straight away and skips the first-run screen entirely."; \
+	echo "'make onboarding' does both steps in one go."
 endef
 
 paths: ## Print where zode stores things (mirrors crates/paths/src/paths.rs)
@@ -160,3 +161,10 @@ reset-config: ## Delete settings, keymap and themes — keeps extensions and lan
 
 reset-all: ## Delete everything zode stores, as if it had never run
 	@$(call confirm_and_delete,"$(ZODE_CONFIG)" "$(ZODE_DATA)" "$(ZODE_STATE)" "$(ZODE_CACHE)" $(if $(ZODE_LOGS),"$(ZODE_LOGS)"))
+
+# Wiping state is only half of it: the first-run screen sits behind an `else if`
+# in main.rs, so passing ANY path on the command line skips it. `make dev` passes
+# this repo by default, which is why a reset alone looks like it did nothing.
+onboarding: ## Reset everything, then launch straight into the first-run screen
+	@$(MAKE) --no-print-directory reset-all
+	@$(MAKE) --no-print-directory dev PROJECT=
