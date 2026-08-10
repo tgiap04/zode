@@ -25,11 +25,9 @@ use gpui::{
 };
 use project::ProjectGroupKey;
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
-use settings::Settings as _;
 use ui::{ContextMenu, PopoverMenuHandle, prelude::*};
 use workspace::{
     MultiWorkspace, MultiWorkspaceEvent, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide,
-    WorkspaceSettings,
 };
 
 const DEFAULT_WIDTH: Pixels = px(300.0);
@@ -165,7 +163,7 @@ impl WorkspaceSidebar for Sidebar {
     }
 
     fn side(&self, cx: &App) -> SidebarSide {
-        WorkspaceSettings::get_global(cx).multi_project.sidebar_side
+        crate::rail::rail_side(cx)
     }
 
     fn prepare_for_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {

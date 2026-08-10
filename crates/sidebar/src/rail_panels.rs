@@ -1,11 +1,10 @@
 use crate::Sidebar;
-use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE};
+use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE, rail_side};
 use gpui::{AnyElement, App, Context, Entity, Window};
 use std::sync::Arc;
 use ui::{Tooltip, prelude::*};
-use settings::Settings as _;
+use workspace::SidebarSide;
 use workspace::dock::{Dock, PanelHandle};
-use workspace::{SidebarSide, WorkspaceSettings};
 
 impl Sidebar {
     /// The dock the rail's panel buttons stand for: the one on the rail's own
@@ -17,7 +16,7 @@ impl Sidebar {
         let multi_workspace = self.multi_workspace.upgrade()?;
         let workspace = multi_workspace.read(cx).workspace().clone();
         let workspace = workspace.read(cx);
-        Some(match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
+        Some(match rail_side(cx) {
             SidebarSide::Left => workspace.left_dock().clone(),
             SidebarSide::Right => workspace.right_dock().clone(),
         })
@@ -31,10 +30,12 @@ impl Sidebar {
             return Vec::new();
         };
         let position = dock.read(cx).position();
-        let side = WorkspaceSettings::get_global(cx).multi_project.sidebar_side;
+        let side = rail_side(cx);
 
         // Same predicate the status bar consults, so the two can never both claim
-        // a panel or both drop one.
+        // a panel or both drop one. `rail_drawn: true` is a statement of fact
+        // rather than a lookup: this runs only from the rail's own render, so the
+        // rail demonstrably exists.
         dock.read(cx)
             .panels()
             .filter(|panel| {

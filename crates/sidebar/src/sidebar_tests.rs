@@ -1,10 +1,10 @@
 use crate::Sidebar;
 use fs::FakeFs;
-use gpui::{AppContext as _, TestAppContext};
+use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
 use project::Project;
 use serde_json::json;
 use settings::Settings as _;
-use workspace::{MultiWorkspace, ToggleWorkspaceSidebar};
+use workspace::{MultiWorkspace, SidebarSide, ToggleWorkspaceSidebar};
 
 pub(crate) fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -218,4 +218,67 @@ async fn test_sidebar_box_starts_below_the_title_bar(cx: &mut TestAppContext) {
         title_bar_height,
         after.origin.y
     );
+}
+
+/// The rail is the outermost column on whichever edge the sidebar stands against,
+/// the way VS Code's activity bar sits beyond its sidebar rather than between the
+/// sidebar and the editor. A fixed rail-then-panel order reads correctly on the
+/// left and mirrors wrongly on the right — which is the shipped default, so the
+/// wrong half is the one users see.
+///
+/// Measured rather than reasoned: the ordering lives in an element tree, and
+/// nothing else in this crate would notice it flipping.
+#[gpui::test]
+async fn the_rail_stays_outside_the_panel_on_either_edge(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar, cx);
+        mw.open_sidebar(cx);
+    });
+    cx.run_until_parked();
+
+    for side in [SidebarSide::Left, SidebarSide::Right] {
+        cx.update(|_, cx| {
+            settings::SettingsStore::update_global(cx, |settings, cx| {
+                settings.update_user_settings(cx, |settings| {
+                    settings
+                        .workspace
+                        .multi_project
+                        .get_or_insert_default()
+                        .sidebar_side = Some(side);
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        let rail = cx
+            .debug_bounds("project-rail")
+            .expect("the rail is always drawn while the sidebar is registered");
+        let panel = cx
+            .debug_bounds("project-list-panel")
+            .expect("the project list is drawn while the sidebar is open");
+
+        match side {
+            SidebarSide::Left => assert!(
+                rail.right() <= panel.origin.x,
+                "a left sidebar must read rail-then-panel, got rail {:?} panel {:?}",
+                rail,
+                panel
+            ),
+            SidebarSide::Right => assert!(
+                panel.right() <= rail.origin.x,
+                "a right sidebar must read panel-then-rail, got panel {:?} rail {:?}",
+                panel,
+                rail
+            ),
+        }
+    }
 }
