@@ -1705,6 +1705,10 @@ impl Workspace {
         let status_bar = cx.new(|cx| {
             let mut status_bar =
                 StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
+            // Every dock keeps its buttons here; `PanelButtons` itself draws
+            // nothing for the dock the project rail already stands beside, so
+            // the pair never doubles up and a dock the rail does not cover stays
+            // reachable from the status bar.
             status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);
@@ -7597,13 +7601,13 @@ impl Workspace {
             leader_border_for_pane(follower_states, &pane, window, cx)
         });
 
-        // Every dock — left, right and bottom, across all `BottomDockLayout`
-        // variants — funnels through here, so the surface treatment lands once
-        // rather than per layout arm.
+        // No surface treatment: with the centre flush, a margin here would be the
+        // only seam left and would read as a stray grey channel beside one dock.
         let mut container = div()
             .flex()
             .flex_none()
-            .workspace_surface(cx)
+            .self_stretch()
+            .overflow_hidden()
             .child(dock.clone())
             .children(leader_border);
 
@@ -8304,9 +8308,10 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .overflow_hidden()
-                            .border_t_1()
-                            .border_b_1()
-                            .border_color(colors.border)
+                            // No top or bottom rule: the title bar and status bar
+                            // share the editor's background, so a line here would
+                            // be the only thing dividing one continuous surface.
+                            // The docks and centre group carry their own outlines.
                             .child({
                                 let this = cx.entity();
                                 canvas(

@@ -8289,11 +8289,13 @@ mod tests {
         let scroll_bounds = tab_bar_scroll_handle.bounds();
         let scroll_offset = tab_bar_scroll_handle.offset();
         assert!(tab_bounds.right() <= scroll_bounds.right());
-        // Magic number for this setup: it tracks the tab bar's usable width, so
-        // it moves whenever the centre pane's own width does — the workspace
-        // surface margin and border shifted it from -39.5 to -63.5. The
-        // assertions either side are the behaviour this test actually guards.
-        assert_eq!(scroll_offset.x, px(-63.5));
+        // Magic number for this setup: it tracks the tab bar's usable width, so it
+        // moves whenever the centre pane's own width does. Flush it is -39.5; the
+        // centre's own margin and border take 3+1 off each side, which is the 8px
+        // to -47.5. It read -63.5 while the sidebar and docks carried surfaces of
+        // their own too. The assertions either side are the behaviour this test
+        // actually guards.
+        assert_eq!(scroll_offset.x, px(-47.5));
         assert!(
             !tab_bounds.intersects(&new_tab_button_bounds),
             "Tab should not overlap with the new tab button, if this is failing check if there's been a redesign!"

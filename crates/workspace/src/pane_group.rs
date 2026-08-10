@@ -6,6 +6,13 @@ use crate::{
     workspace_settings::{PaneSplitDirectionHorizontal, PaneSplitDirectionVertical},
 };
 use anyhow::Result;
+
+/// The gap and outline that set the editor area apart from the rail, the docks
+/// and the status bar. Lives here rather than in a shared style helper: the
+/// centre is the only surface that carries it, and when both sides of a seam
+/// carried one the doubled channel read as a grey bar.
+const CENTRE_SURFACE_MARGIN: Pixels = px(3.0);
+const CENTRE_SURFACE_ROUNDING: Pixels = px(5.0);
 use collections::HashMap;
 use gpui::{
     Along, AnyView, AnyWeakView, Axis, Bounds, Entity, Hsla, IntoElement, MouseButton, Pixels,
@@ -241,14 +248,23 @@ impl PaneGroup {
             return element;
         }
 
-        // `flex_1`, not `size_full`: a 100% width/height box plus a margin adds
-        // up to more than the parent, and the parent clips the overflow — which
-        // silently eats the very seam the margin is there to create. Growing
-        // into the remaining space (and stretching on the cross axis) leaves
-        // room for the margin on all four sides.
+        // The centre alone carries the seam. Everything it touches -- the project
+        // rail, the docks -- is drawn flush, so this margin is the entire gap
+        // between them rather than one half of a doubled channel, which is what
+        // read as a grey bar when the sidebar had a surface of its own.
+        //
+        // `flex_1`, not `size_full`: a 100% box plus a margin exceeds the parent,
+        // and the parent clips the overflow -- silently eating the very seam the
+        // margin exists to create. Growing into the remaining space, and
+        // stretching on the cross axis, leaves room on all four sides.
         div()
             .flex_1()
-            .workspace_surface(cx)
+            .self_stretch()
+            .m(CENTRE_SURFACE_MARGIN)
+            .rounded(CENTRE_SURFACE_ROUNDING)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .overflow_hidden()
             .child(element)
             .into_any_element()
     }

@@ -7309,6 +7309,62 @@ impl EventEmitter<Event> for ProjectPanel {}
 
 impl EventEmitter<PanelEvent> for ProjectPanel {}
 
+/// Split out so a test can reach it: `set_position` runs inside a settings-file
+/// update closure that needs an `fs` and a live app.
+///
+/// Re-docking this panel rearranges the whole edge layout, so all of it is written
+/// at once. The project rail parks on the OPPOSITE edge -- that is what leaves this
+/// panel's button in the status bar rather than letting the rail adopt it -- and the
+/// panels that ride the rail follow the rail, or their buttons fall out of it and
+/// land in the status bar too.
+///
+/// A panel the user has explicitly parked along the BOTTOM is not riding the rail
+/// and is left where it is. It keeps its status-bar button either way, so dragging
+/// it to an edge it was deliberately moved off would cost a preference and buy
+/// nothing.
+///
+/// Naming the rail-riding panels here is the ugly part: this module has no business
+/// knowing about outline or git. The alternative is deriving the rail's side from
+/// this panel's dock at read time, which `workspace` cannot do -- `ProjectPanelSettings`
+/// lives in this crate, and this crate already depends on `workspace`.
+fn write_dock_and_opposite_rail(position: DockPosition, settings: &mut settings::SettingsContent) {
+    let dock = match position {
+        DockPosition::Left | DockPosition::Bottom => DockSide::Left,
+        DockPosition::Right => DockSide::Right,
+    };
+    // Same edge, three different enums: this panel and `outline_panel` use the
+    // two-way `DockSide`, `git_panel` uses the three-way `DockPosition`.
+    let (rail_side, rail_dock_side, rail_dock_position) = match dock {
+        DockSide::Left => (
+            settings::SidebarSide::Right,
+            DockSide::Right,
+            settings::DockPosition::Right,
+        ),
+        DockSide::Right => (
+            settings::SidebarSide::Left,
+            DockSide::Left,
+            settings::DockPosition::Left,
+        ),
+    };
+
+    settings.project_panel.get_or_insert_default().dock = Some(dock);
+    settings
+        .workspace
+        .multi_project
+        .get_or_insert_default()
+        .sidebar_side = Some(rail_side);
+    settings.outline_panel.get_or_insert_default().dock = Some(rail_dock_side);
+
+    let git_panel_is_along_the_bottom = settings
+        .git_panel
+        .as_ref()
+        .and_then(|panel| panel.dock)
+        .is_some_and(|dock| dock == settings::DockPosition::Bottom);
+    if !git_panel_is_along_the_bottom {
+        settings.git_panel.get_or_insert_default().dock = Some(rail_dock_position);
+    }
+}
+
 impl Panel for ProjectPanel {
     fn position(&self, _: &Window, cx: &App) -> DockPosition {
         match ProjectPanelSettings::get_global(cx).dock {
@@ -7323,11 +7379,7 @@ impl Panel for ProjectPanel {
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
         settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
-            let dock = match position {
-                DockPosition::Left | DockPosition::Bottom => DockSide::Left,
-                DockPosition::Right => DockSide::Right,
-            };
-            settings.project_panel.get_or_insert_default().dock = Some(dock);
+            write_dock_and_opposite_rail(position, settings);
         });
     }
 

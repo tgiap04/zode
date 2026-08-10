@@ -1002,7 +1002,8 @@ impl MultiWorkspace {
     }
 
     fn derived_project_groups(&self, cx: &App) -> Vec<ProjectGroup> {
-        self.project_groups
+        let mut groups: Vec<ProjectGroup> = self
+            .project_groups
             .iter()
             .map(|group| ProjectGroup {
                 key: group.key.clone(),
@@ -1014,7 +1015,45 @@ impl MultiWorkspace {
                     .collect(),
                 expanded: group.expanded,
             })
-            .collect()
+            .collect();
+
+        // The window's own workspace has to appear in its own group, and two
+        // separate things can leave it out:
+        //
+        // - No group at all. Both paths into `ensure_project_group_state` are
+        //   about ADDING a project, and `restore_project_groups` only replays
+        //   what an earlier session wrote -- nothing, the first time. A window
+        //   opened straight onto one folder drew an empty rail.
+        // - A group with the right key but no workspaces. Group state is
+        //   restored from disk while `retained_workspaces` starts empty, and the
+        //   active workspace is only retained when the sidebar opens. Reopening
+        //   a project with the sidebar closed left the rail listing it while
+        //   nothing marked it active -- the entry is matched by workspace, not
+        //   by key (see `sidebar::project_list`).
+        //
+        // So this attaches the workspace rather than merely ensuring a key, and
+        // does it on read rather than on open: the paths arrive asynchronously,
+        // so a write would have to pick a moment, and picking the wrong one is
+        // how this went missing in the first place.
+        let active_key = self.active_workspace.read(cx).project_group_key(cx);
+        if !active_key.path_list().paths().is_empty() {
+            match groups.iter_mut().find(|group| group.key == active_key) {
+                Some(group) if !group.workspaces.contains(&self.active_workspace) => {
+                    group.workspaces.insert(0, self.active_workspace.clone());
+                }
+                Some(_) => {}
+                None => groups.insert(
+                    0,
+                    ProjectGroup {
+                        key: active_key,
+                        workspaces: vec![self.active_workspace.clone()],
+                        expanded: true,
+                    },
+                ),
+            }
+        }
+
+        groups
     }
 
     pub fn project_groups(&self, cx: &App) -> Vec<ProjectGroup> {
@@ -2692,9 +2731,12 @@ impl Render for MultiWorkspace {
                         .occlude(),
                 );
 
-                // The sidebar is a sibling of the whole `Workspace`, not one of
-                // its docks, so it never passes through `render_dock` — it has
-                // to claim the surface treatment for itself.
+                // No surface treatment here, unlike the docks. Its margin and
+                // border would have to come out of the column's own 48px, which
+                // is exactly the rail's width -- the rail was being clipped by
+                // the difference, and the margin read as a grey channel between
+                // the rail and the editor. The rail draws its own right border
+                // as the single separator instead.
                 //
                 // The `Workspace` beside it stacks title bar over centre over
                 // status bar, so a full-height sidebar would run alongside the
@@ -2723,7 +2765,7 @@ impl Render for MultiWorkspace {
                             .relative()
                             .flex_1()
                             .min_h_0()
-                            .workspace_surface(cx)
+                            .overflow_hidden()
                             .child(sidebar_handle.to_any())
                             // Nothing to resize while only the rail is showing --
                             // its width is fixed.

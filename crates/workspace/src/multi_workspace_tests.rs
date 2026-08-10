@@ -452,10 +452,10 @@ async fn test_find_or_create_local_workspace_reuses_active_workspace_when_sideba
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
 
-    let active_workspace = multi_workspace.read_with(cx, |mw, cx| {
+    let active_workspace = multi_workspace.read_with(cx, |mw, _cx| {
         assert!(
-            mw.project_groups(cx).is_empty(),
-            "sidebar-closed setup should start with no retained project groups"
+            mw.retained_workspaces().is_empty(),
+            "sidebar-closed setup should start with nothing retained"
         );
         mw.workspace().clone()
     });
@@ -736,10 +736,10 @@ async fn test_switching_projects_with_sidebar_closed_detaches_old_active_workspa
         disable_background_project_retention(cx);
     });
 
-    let workspace_a = multi_workspace.read_with(cx, |mw, cx| {
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| {
         assert!(
-            mw.project_groups(cx).is_empty(),
-            "sidebar-closed setup should start with no retained project groups"
+            mw.retained_workspaces().is_empty(),
+            "sidebar-closed setup should start with nothing retained"
         );
         mw.workspace().clone()
     });
@@ -1535,9 +1535,7 @@ async fn test_hibernate_after_ms_zero_disables_hibernation(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-async fn test_disabling_hibernation_live_cancels_an_already_pending_timer(
-    cx: &mut TestAppContext,
-) {
+async fn test_disabling_hibernation_live_cancels_an_already_pending_timer(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
@@ -1637,7 +1635,10 @@ async fn test_closing_workspace_with_pending_hibernate_timer_does_not_leak(
         })
         .await
         .expect("closing a background workspace with no unsaved changes should succeed");
-    assert!(closed, "close_workspace should report the workspace removed");
+    assert!(
+        closed,
+        "close_workspace should report the workspace removed"
+    );
     cx.run_until_parked();
 
     multi_workspace.read_with(cx, |mw, _cx| {
@@ -2107,4 +2108,88 @@ async fn test_memory_fuse_hysteresis_delays_the_second_victim(cx: &mut TestAppCo
         2,
         "once hysteresis clears, the fuse must pick up the remaining eligible victim"
     );
+}
+
+/// A window opened straight onto one folder has to appear in the project rail.
+///
+/// Nothing registers a group for that first workspace -- both writers are about
+/// ADDING a project, and restore only replays an earlier session -- so the very
+/// first run of a project drew an empty rail, which is not a state any test that
+/// adds projects first would ever reach.
+#[gpui::test]
+async fn the_only_open_project_still_forms_a_group(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/root_a").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace.read_with(cx, |multi_workspace, cx| {
+        let groups = multi_workspace.project_groups(cx);
+        assert_eq!(
+            groups.len(),
+            1,
+            "the window's own project must form a group without anything registering it"
+        );
+        assert!(
+            !groups[0].key.path_list().paths().is_empty(),
+            "the group must carry the project's path, or the rail has nothing to label"
+        );
+    });
+}
+
+/// The second run of the same project, with the sidebar left closed.
+///
+/// Group state comes back from disk while `retained_workspaces` starts empty --
+/// the active workspace is only retained when the sidebar opens -- so the group
+/// existed with nothing in it. The rail matches its active entry by workspace,
+/// not by key (`sidebar::project_list`), so it listed the project the window was
+/// built around and marked none of them current. Ensuring the KEY exists is not
+/// enough; the workspace has to be attached to it.
+#[gpui::test]
+async fn a_restored_group_still_carries_the_windows_own_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/root_a").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    let active = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    let key =
+        multi_workspace.read_with(cx, |mw, cx| mw.project_group_key_for_workspace(&active, cx));
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.restore_project_groups(
+            vec![SerializedProjectGroupState {
+                key: key.clone(),
+                expanded: true,
+            }],
+            cx,
+        );
+        assert!(
+            mw.retained_workspaces().is_empty(),
+            "a restore with the sidebar closed retains nothing -- without that this \
+             test would pass on the ordinary path instead of the restored one"
+        );
+    });
+
+    multi_workspace.read_with(cx, |mw, cx| {
+        let groups = mw.project_groups(cx);
+        assert_eq!(
+            groups.len(),
+            1,
+            "the restored group and the window's own project are the same group"
+        );
+        assert!(
+            groups[0].workspaces.contains(&active),
+            "the restored group must carry the active workspace, or the rail shows \
+             the project without marking it current"
+        );
+    });
 }

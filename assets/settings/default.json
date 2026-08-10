@@ -192,7 +192,7 @@
     "background_scroll_history_lines": null,
     // Which side of the window the project switcher sidebar docks to.
     // "left" or "right".
-    "sidebar_side": "left"
+    "sidebar_side": "right"
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
@@ -771,7 +771,7 @@
     // Default width of the project panel.
     "default_width": 240,
     // Where to dock the project panel. Can be 'left' or 'right'.
-    "dock": "right",
+    "dock": "left",
     // Spacing between worktree entries in the project panel. Can be 'comfortable' or 'standard'.
     "entry_spacing": "comfortable",
     // Whether to show file icons in the project panel.

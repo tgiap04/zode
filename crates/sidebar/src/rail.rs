@@ -1,7 +1,17 @@
 use crate::Sidebar;
 use crate::project_list::ListEntry;
 use gpui::{AnyElement, App, Context, SharedString, Window, px};
+use settings::Settings as _;
 use ui::{Tooltip, prelude::*};
+use workspace::{SidebarSide, WorkspaceSettings};
+
+/// The edge the whole sidebar column stands against. Every part of the column
+/// that has a side -- the order of rail and panel, the rail's own separator, the
+/// active-project pill -- reads this one value, so they cannot end up mirrored
+/// against each other.
+pub(crate) fn rail_side(cx: &App) -> SidebarSide {
+    WorkspaceSettings::get_global(cx).multi_project.sidebar_side
+}
 
 /// Width of the always-visible project rail. Sized so a 32px project
 /// square sits centred with room for the active-project indicator on the
@@ -9,6 +19,19 @@ use ui::{Tooltip, prelude::*};
 pub const RAIL_WIDTH: Pixels = px(48.0);
 
 const RAIL_ITEM_SIZE: Pixels = px(48.0);
+
+/// One knob for every glyph in the column, so they cannot drift apart.
+///
+/// Worth knowing if you tune it: `IconSize` is rems against the UI font size, not
+/// pixels -- `Small` is `rems_from_px(14.)`, which on the shipped 13px font draws
+/// about 11px, while the column's own 48px width does not move.
+pub(crate) const RAIL_ICON_SIZE: IconSize = IconSize::Small;
+
+/// Absolute, not `gap_1`: spacing helpers are rems against the UI font, so on the
+/// shipped 13px font `gap_1` yields 3px, and 3px between 19.5px glyphs in a fixed
+/// 48px column reads as one run-on strip. The column's width does not shrink with
+/// the font, so neither should the air between its buttons.
+pub(crate) const RAIL_ICON_GAP: Pixels = px(10.0);
 const RAIL_SQUARE_SIZE: Pixels = px(32.0);
 
 /// One or two letters standing in for the project, Discord-style. Word
@@ -67,14 +90,23 @@ impl Sidebar {
         let has_panels = panels.is_some();
         let colors = cx.theme().colors();
         let entries = self.contents.rail_entries.clone();
+        let side = rail_side(cx);
 
         v_flex()
             .id("project-rail")
+            .debug_selector(|| "project-rail".into())
             .h_full()
             .w(RAIL_WIDTH)
             .flex_shrink_0()
             .bg(colors.title_bar_background)
-            .border_r_1()
+            // The separator belongs on the edge facing the rest of the window,
+            // which flips with the column. Drawn on the fixed right it would sit
+            // against the window frame on a right-docked rail and leave the seam
+            // that matters -- rail against panel -- with nothing on it.
+            .map(|el| match side {
+                SidebarSide::Left => el.border_r_1(),
+                SidebarSide::Right => el.border_l_1(),
+            })
             .border_color(colors.border)
             .child(
                 v_flex()
@@ -86,7 +118,7 @@ impl Sidebar {
                         entries
                             .iter()
                             .enumerate()
-                            .map(|(ix, entry)| self.render_rail_item(ix, entry, cx)),
+                            .map(|(ix, entry)| self.render_rail_item(ix, entry, side, cx)),
                     ),
             )
             .children(panels)
@@ -94,7 +126,13 @@ impl Sidebar {
             .into_any_element()
     }
 
-    fn render_rail_item(&self, ix: usize, entry: &ListEntry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_rail_item(
+        &self,
+        ix: usize,
+        entry: &ListEntry,
+        side: SidebarSide,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = cx.theme().colors();
         let warning = cx.theme().status().warning;
         let is_active = entry.is_active;
@@ -117,12 +155,17 @@ impl Sidebar {
             .justify_center()
             .cursor_pointer()
             // Leading indicator pill marking the active project, in the
-            // Discord-style rail this is modelled on.
+            // Discord-style rail this is modelled on. It rides the rail's outer
+            // edge, so it flips with the column rather than crossing to the side
+            // the separator is already on.
             .when(is_active, |el| {
                 el.child(
                     div()
                         .absolute()
-                        .left_0()
+                        .map(|pill| match side {
+                            SidebarSide::Left => pill.left_0(),
+                            SidebarSide::Right => pill.right_0(),
+                        })
                         .h(px(24.0))
                         .w(px(3.0))
                         .rounded_sm()
@@ -191,8 +234,8 @@ impl Sidebar {
 
         v_flex()
             .flex_shrink_0()
-            .py_1()
-            .gap_1()
+            .py(RAIL_ICON_GAP)
+            .gap(RAIL_ICON_GAP)
             .items_center()
             .when(follows_panels, |el| el.border_t_1().border_color(border))
             .child(
@@ -201,7 +244,7 @@ impl Sidebar {
                 // outline panels, and a third tree in the same column reads as
                 // a duplicate.
                 IconButton::new("project-rail-toggle-panel", IconName::Menu)
-                    .icon_size(IconSize::Small)
+                    .icon_size(RAIL_ICON_SIZE)
                     .toggle_state(panel_open)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action(
@@ -226,7 +269,7 @@ impl Sidebar {
             )
             .child(
                 IconButton::new("project-rail-open-project", IconName::Plus)
-                    .icon_size(IconSize::Small)
+                    .icon_size(RAIL_ICON_SIZE)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action("Open Project", &workspace::Open::DEFAULT, cx)
                     })

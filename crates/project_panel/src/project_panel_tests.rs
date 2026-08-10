@@ -10339,3 +10339,76 @@ impl Render for TestProjectItemView {
         Empty
     }
 }
+
+/// Re-docking this panel has to move the project rail to the opposite edge in the
+/// same write. They are two independent settings keys, so nothing but this makes
+/// them agree -- and when they land on the same edge the rail adopts the panel's
+/// button, which is precisely what keeping the panel opposite the rail prevents.
+#[test]
+fn re_docking_the_panel_parks_the_rail_on_the_far_side() {
+    for (position, expected_dock, expected_rail) in [
+        (
+            DockPosition::Left,
+            settings::DockSide::Left,
+            settings::SidebarSide::Right,
+        ),
+        (
+            DockPosition::Right,
+            settings::DockSide::Right,
+            settings::SidebarSide::Left,
+        ),
+    ] {
+        let mut content = settings::SettingsContent::default();
+        super::write_dock_and_opposite_rail(position, &mut content);
+
+        assert_eq!(
+            content.project_panel.as_ref().and_then(|panel| panel.dock),
+            Some(expected_dock),
+            "docking {position:?} must write the panel's own side"
+        );
+        assert_eq!(
+            content
+                .workspace
+                .multi_project
+                .as_ref()
+                .and_then(|multi| multi.sidebar_side),
+            Some(expected_rail),
+            "docking {position:?} must park the rail opposite"
+        );
+        assert_eq!(
+            content.outline_panel.as_ref().and_then(|panel| panel.dock),
+            Some(match expected_rail {
+                settings::SidebarSide::Left => settings::DockSide::Left,
+                settings::SidebarSide::Right => settings::DockSide::Right,
+            }),
+            "the outline panel rides the rail, so it must follow it to {expected_rail:?}"
+        );
+        assert_eq!(
+            content.git_panel.as_ref().and_then(|panel| panel.dock),
+            Some(match expected_rail {
+                settings::SidebarSide::Left => settings::DockPosition::Left,
+                settings::SidebarSide::Right => settings::DockPosition::Right,
+            }),
+            "the git panel rides the rail, so it must follow it to {expected_rail:?}"
+        );
+    }
+}
+
+/// A panel parked along the bottom is not riding the rail, and its button sits in
+/// the status bar wherever the rail goes. Sweeping it to an edge with the rest
+/// would spend a preference the user set deliberately and buy nothing back.
+#[test]
+fn re_docking_the_panel_leaves_a_bottom_docked_git_panel_alone() {
+    for position in [DockPosition::Left, DockPosition::Right] {
+        let mut content = settings::SettingsContent::default();
+        content.git_panel.get_or_insert_default().dock = Some(settings::DockPosition::Bottom);
+
+        super::write_dock_and_opposite_rail(position, &mut content);
+
+        assert_eq!(
+            content.git_panel.as_ref().and_then(|panel| panel.dock),
+            Some(settings::DockPosition::Bottom),
+            "docking the project panel {position:?} must not lift the git panel off the bottom"
+        );
+    }
+}

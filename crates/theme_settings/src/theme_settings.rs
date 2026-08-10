@@ -30,9 +30,8 @@ use crate::settings::adjust_buffer_font_size;
 pub use crate::settings::{
     BufferLineHeight, FontFamilyName, IconThemeName, IconThemeSelection, ThemeAppearanceMode,
     ThemeName, ThemeSelection, ThemeSettings, adjust_ui_font_size, adjusted_font_size,
-    appearance_to_mode,
-    clamp_font_size, default_theme, observe_buffer_font_size_adjustment, reset_buffer_font_size,
-    reset_ui_font_size, set_icon_theme, set_mode, set_theme, setup_ui_font,
+    appearance_to_mode, clamp_font_size, default_theme, observe_buffer_font_size_adjustment,
+    reset_buffer_font_size, reset_ui_font_size, set_icon_theme, set_mode, set_theme, setup_ui_font,
 };
 pub use theme::UiDensity;
 
@@ -532,6 +531,44 @@ mod tests {
                 bundled.iter().any(|bundled_name| bundled_name == name),
                 "default.json theme.{mode} = {name:?} is not among the bundled themes {bundled:?}"
             );
+        }
+    }
+
+    /// The title bar and status bar are meant to read as one surface with the
+    /// editor, with no rule between them. Upstream VS Code does not do this --
+    /// its 2026 themes give the chrome its own near-identical shade -- so the
+    /// importer, or anyone re-deriving these files from source, will put that
+    /// shade back. It is a 3% difference that looks like nothing in a diff and
+    /// like a seam on screen.
+    #[test]
+    fn the_2026_chrome_shares_the_editor_background() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/themes/vscode-2026/vscode-2026.json");
+        let family = parse_family(&path);
+        assert!(!family.themes.is_empty(), "vscode-2026 defines no themes");
+
+        for theme in &family.themes {
+            let colors = &theme.style.colors;
+            let editor = colors
+                .editor_background
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no editor.background", theme.name));
+
+            for (field, value) in [
+                ("title_bar.background", &colors.title_bar_background),
+                (
+                    "title_bar.inactive_background",
+                    &colors.title_bar_inactive_background,
+                ),
+                ("status_bar.background", &colors.status_bar_background),
+            ] {
+                assert_eq!(
+                    value.as_ref(),
+                    Some(editor),
+                    "{} sets {field} away from editor.background ({editor})",
+                    theme.name
+                );
+            }
         }
     }
 }

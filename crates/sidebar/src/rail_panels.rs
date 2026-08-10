@@ -1,17 +1,25 @@
 use crate::Sidebar;
+use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE, rail_side};
 use gpui::{AnyElement, App, Context, Entity, Window};
 use std::sync::Arc;
 use ui::{Tooltip, prelude::*};
+use workspace::SidebarSide;
 use workspace::dock::{Dock, PanelHandle};
 
 impl Sidebar {
-    /// The dock the rail's panel buttons stand for. VS Code hangs its activity
-    /// bar off the primary sidebar alone, so the right and bottom docks keep
-    /// their own buttons in the status bar and stay out of the rail.
+    /// The dock the rail's panel buttons stand for: the one on the rail's own
+    /// side. A button parked at the right edge that opens a panel at the left
+    /// edge is the whole screen apart from what it did. The bottom dock keeps
+    /// its own buttons in the status bar -- the rail stands for the primary
+    /// sidebar, not for every dock.
     fn rail_dock(&self, cx: &App) -> Option<Entity<Dock>> {
         let multi_workspace = self.multi_workspace.upgrade()?;
         let workspace = multi_workspace.read(cx).workspace().clone();
-        Some(workspace.read(cx).left_dock().clone())
+        let workspace = workspace.read(cx);
+        Some(match rail_side(cx) {
+            SidebarSide::Left => workspace.left_dock().clone(),
+            SidebarSide::Right => workspace.right_dock().clone(),
+        })
     }
 
     /// The panels the rail draws buttons for. Kept apart from the rendering so a
@@ -21,7 +29,20 @@ impl Sidebar {
         let Some(dock) = self.rail_dock(cx) else {
             return Vec::new();
         };
-        dock.read(cx).panels().cloned().collect()
+        let position = dock.read(cx).position();
+        let side = rail_side(cx);
+
+        // Same predicate the status bar consults, so the two can never both claim
+        // a panel or both drop one. `rail_drawn: true` is a statement of fact
+        // rather than a lookup: this runs only from the rail's own render, so the
+        // rail demonstrably exists.
+        dock.read(cx)
+            .panels()
+            .filter(|panel| {
+                workspace::dock::rail_draws_panel(panel.persistent_name(), position, side, true)
+            })
+            .cloned()
+            .collect()
     }
 
     /// VS Code's activity bar, folded into the project rail rather than given a
@@ -72,7 +93,7 @@ impl Sidebar {
 
             buttons.push(
                 IconButton::new(panel.persistent_name(), icon)
-                    .icon_size(IconSize::Small)
+                    .icon_size(RAIL_ICON_SIZE)
                     .toggle_state(is_active)
                     .tooltip({
                         let action = action.boxed_clone();
@@ -94,8 +115,8 @@ impl Sidebar {
         Some(
             v_flex()
                 .flex_shrink_0()
-                .py_1()
-                .gap_1()
+                .py(RAIL_ICON_GAP)
+                .gap(RAIL_ICON_GAP)
                 .items_center()
                 .border_t_1()
                 .border_color(cx.theme().colors().border)
@@ -110,16 +131,19 @@ mod tests {
     use crate::Sidebar;
     use crate::sidebar_tests::init_test;
     use fs::FakeFs;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
     use project::Project;
     use workspace::MultiWorkspace;
+    use workspace::SidebarSide;
     use workspace::dock::DockPosition;
     use workspace::dock::test::TestPanel;
 
-    /// The rail hangs off the left dock alone. Without that, panels docked right
-    /// or along the bottom would double up as rail buttons.
+    /// The rail toggles the dock it stands beside, so the same set of panels has
+    /// to yield different buttons depending on which edge it is parked at. A
+    /// button on one edge opening a panel on the other is the width of the screen
+    /// between cause and effect. The bottom dock stays out of it either way.
     #[gpui::test]
-    async fn rail_lists_left_dock_panels_only(cx: &mut TestAppContext) {
+    async fn the_rail_lists_the_dock_on_its_own_side(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -141,7 +165,7 @@ mod tests {
                     let panel = cx.new(|cx| {
                         let mut panel = TestPanel::new(*position, 100 + index as u32, cx);
                         // A panel with no icon contributes no button at all, so
-                        // without this the assertion below would pass on an
+                        // without this the assertions below would pass on an
                         // empty rail regardless of which dock was read.
                         panel.icon = Some(ui::IconName::FileTree);
                         panel
@@ -156,13 +180,27 @@ mod tests {
             sidebar
         });
 
-        sidebar.read_with(cx, |sidebar, cx| {
-            assert_eq!(
-                sidebar.rail_panels(cx).len(),
-                2,
-                "only the two left-docked panels belong in the rail"
-            );
-        });
+        for (side, expected) in [(SidebarSide::Left, 2), (SidebarSide::Right, 1)] {
+            cx.update(|_, cx| {
+                settings::SettingsStore::update_global(cx, |settings, cx| {
+                    settings.update_user_settings(cx, |settings| {
+                        settings
+                            .workspace
+                            .multi_project
+                            .get_or_insert_default()
+                            .sidebar_side = Some(side);
+                    });
+                });
+            });
+
+            sidebar.read_with(cx, |sidebar, cx| {
+                assert_eq!(
+                    sidebar.rail_panels(cx).len(),
+                    expected,
+                    "a {side:?} rail must list the panels docked {side:?}"
+                );
+            });
+        }
     }
 
     /// Reading the workspace and its dock from inside `Sidebar::render` is the

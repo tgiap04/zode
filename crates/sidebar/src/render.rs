@@ -1,11 +1,21 @@
 use crate::Sidebar;
+use crate::rail::rail_side;
 use gpui::{Context, IntoElement, Render, Window};
 use ui::prelude::*;
+use workspace::SidebarSide;
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel_open = self.panel_open(cx);
+        let side = rail_side(cx);
         let rail = self.render_rail(window, cx);
+        // The rail is the outermost column on whichever edge the sidebar stands
+        // against -- VS Code's activity bar sits beyond its sidebar, not between
+        // the sidebar and the editor. Fixed rail-then-panel order gets that right
+        // on the left and mirrors it wrongly on the right, which is the shipped
+        // default, so the panel would open on the far side of the rail from the
+        // editor it belongs to.
+        let panel = panel_open.then(|| self.render_panel(cx).into_any_element());
 
         h_flex()
             .key_context(self.dispatch_context(window, cx))
@@ -18,8 +28,10 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::on_focus_sidebar_filter))
-            .child(rail)
-            .when(panel_open, |this| this.child(self.render_panel(cx)))
+            .map(|this| match side {
+                SidebarSide::Left => this.child(rail).children(panel),
+                SidebarSide::Right => this.children(panel).child(rail),
+            })
     }
 }
 
@@ -33,6 +45,7 @@ impl Sidebar {
         let has_query = self.has_filter_query(cx);
 
         v_flex()
+            .debug_selector(|| "project-list-panel".into())
             .flex_1()
             .min_w_0()
             .h_full()

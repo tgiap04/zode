@@ -48,7 +48,6 @@ pub use settings_store::{
     SettingsJsonSchemaParams, SettingsKey, SettingsLocation, SettingsParseResult, SettingsStore,
 };
 
-
 pub use keymap_file::ActionSequence;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,7 +224,11 @@ mod tests {
         for family in ["JetBrainsMono", "JetBrainsMonoNL"] {
             for style in ["Regular", "Italic", "Bold", "BoldItalic"] {
                 let file = fonts.join(format!("{family}-{style}.ttf"));
-                assert!(file.is_file(), "default font not bundled: {}", file.display());
+                assert!(
+                    file.is_file(),
+                    "default font not bundled: {}",
+                    file.display()
+                );
             }
         }
         assert!(
@@ -243,6 +246,38 @@ mod tests {
         }
     }
 
+    // The project rail draws buttons for the LEFT dock only, so a panel docked
+    // right is absent from it entirely -- no error, no empty state, just a rail
+    // that quietly has nothing on it. That is what the shipped defaults did
+    // before: every panel defaulted to the right dock.
+    #[test]
+    fn the_panel_docks_line_up_with_the_rails_side() {
+        let defaults: serde_json::Value =
+            crate::parse_json_with_comments(crate::default_settings().as_ref())
+                .expect("default settings must parse as jsonc");
+
+        let rail_side = defaults["multi_project"]["sidebar_side"]
+            .as_str()
+            .expect("multi_project.sidebar_side must be set");
+
+        // These ride the rail, so they have to dock on its side or their buttons
+        // are simply absent from it.
+        for panel in ["outline_panel", "git_panel"] {
+            assert_eq!(
+                defaults[panel]["dock"], rail_side,
+                "{panel} must dock on the rail's side ({rail_side}) to appear in it"
+            );
+        }
+
+        // This one deliberately does NOT: docked opposite the rail, its button
+        // falls to the status bar instead, which is where it is wanted.
+        assert_ne!(
+            defaults["project_panel"]["dock"], rail_side,
+            "project_panel is meant to sit opposite the rail so its button lands \
+             in the status bar rather than in the rail"
+        );
+    }
+
     // The seed is not just read, it is EDITED: the first setting a user changes
     // is written into this exact text. An empty object with a comment header is
     // the shape the jsonc editor handles worst, and a mangled header is invisible
@@ -254,7 +289,14 @@ mod tests {
             .expect("seeded user settings must parse as jsonc");
         let new = serde_json::json!({ "vim_mode": true });
 
-        crate::update_value_in_json_text(&mut text, &mut Vec::new(), 2, &old, &new, &mut Vec::new());
+        crate::update_value_in_json_text(
+            &mut text,
+            &mut Vec::new(),
+            2,
+            &old,
+            &new,
+            &mut Vec::new(),
+        );
 
         let written: serde_json::Value = crate::parse_json_with_comments(&text)
             .unwrap_or_else(|error| panic!("first write produced invalid jsonc: {error}\n{text}"));
