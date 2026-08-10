@@ -7309,7 +7309,6 @@ impl EventEmitter<Event> for ProjectPanel {}
 
 impl EventEmitter<PanelEvent> for ProjectPanel {}
 
-
 /// Split out so a test can reach it: `set_position` runs inside a settings-file
 /// update closure that needs an `fs` and a live app.
 ///
@@ -7318,6 +7317,11 @@ impl EventEmitter<PanelEvent> for ProjectPanel {}
 /// panel's button in the status bar rather than letting the rail adopt it -- and the
 /// panels that ride the rail follow the rail, or their buttons fall out of it and
 /// land in the status bar too.
+///
+/// A panel the user has explicitly parked along the BOTTOM is not riding the rail
+/// and is left where it is. It keeps its status-bar button either way, so dragging
+/// it to an edge it was deliberately moved off would cost a preference and buy
+/// nothing.
 ///
 /// Naming the rail-riding panels here is the ugly part: this module has no business
 /// knowing about outline or git. The alternative is deriving the rail's side from
@@ -7350,7 +7354,15 @@ fn write_dock_and_opposite_rail(position: DockPosition, settings: &mut settings:
         .get_or_insert_default()
         .sidebar_side = Some(rail_side);
     settings.outline_panel.get_or_insert_default().dock = Some(rail_dock_side);
-    settings.git_panel.get_or_insert_default().dock = Some(rail_dock_position);
+
+    let git_panel_is_along_the_bottom = settings
+        .git_panel
+        .as_ref()
+        .and_then(|panel| panel.dock)
+        .is_some_and(|dock| dock == settings::DockPosition::Bottom);
+    if !git_panel_is_along_the_bottom {
+        settings.git_panel.get_or_insert_default().dock = Some(rail_dock_position);
+    }
 }
 
 impl Panel for ProjectPanel {
