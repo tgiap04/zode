@@ -1,6 +1,8 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::persistence::model::DockData;
-use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
+use crate::{
+    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, SidebarSide, WorkspaceSettings,
+};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
@@ -1186,18 +1188,21 @@ impl PanelButtons {
             _settings_subscription: settings_subscription,
         }
     }
-}
 
-use crate::SidebarSide;
-
-impl PanelButtons {
     /// Whether the project rail already carries this dock's buttons.
     ///
     /// Deliberately reads settings only. The obvious check -- ask the workspace
     /// whether a sidebar is registered -- would borrow an entity that is mid-render
-    /// around this call, which is the re-entrancy that aborts the process. The rail
-    /// is registered unconditionally at window creation, so the settings alone say
-    /// where it is and whether it is drawn.
+    /// around this call, which is the re-entrancy that aborts the process.
+    ///
+    /// That makes `disable_ai` a proxy for `MultiWorkspace::sidebar_render_state`'s
+    /// `sidebar.is_some() && !disable_ai`, and the two part company while the
+    /// sidebar is unregistered: `zed::init` registers it from a `cx.defer` during
+    /// window construction, and skips it entirely for a windowless `MultiWorkspace`.
+    /// Both are before or without a first paint, so no frame is drawn from the
+    /// disagreement -- but a caller that starts registering the sidebar later, or
+    /// conditionally, would silently strip these buttons with no rail to receive
+    /// them. Keep registration unconditional and eager.
     fn rail_draws(&self, panel_name: &str, cx: &App) -> bool {
         rail_draws_panel(
             panel_name,
@@ -1598,7 +1603,11 @@ mod rail_coverage_tests {
             (SidebarSide::Left, DockPosition::Left),
             (SidebarSide::Right, DockPosition::Right),
         ] {
-            for position in [DockPosition::Left, DockPosition::Right, DockPosition::Bottom] {
+            for position in [
+                DockPosition::Left,
+                DockPosition::Right,
+                DockPosition::Bottom,
+            ] {
                 assert_eq!(
                     rail_draws_panel(ORDINARY, position, side, true),
                     position == adopted,
@@ -1608,9 +1617,23 @@ mod rail_coverage_tests {
         }
 
         // With no rail drawn, every panel keeps its status-bar button.
-        for position in [DockPosition::Left, DockPosition::Right, DockPosition::Bottom] {
-            assert!(!rail_draws_panel(ORDINARY, position, SidebarSide::Left, false));
-            assert!(!rail_draws_panel(ORDINARY, position, SidebarSide::Right, false));
+        for position in [
+            DockPosition::Left,
+            DockPosition::Right,
+            DockPosition::Bottom,
+        ] {
+            assert!(!rail_draws_panel(
+                ORDINARY,
+                position,
+                SidebarSide::Left,
+                false
+            ));
+            assert!(!rail_draws_panel(
+                ORDINARY,
+                position,
+                SidebarSide::Right,
+                false
+            ));
         }
     }
 
@@ -1621,7 +1644,11 @@ mod rail_coverage_tests {
     #[test]
     fn re_docking_the_project_panel_never_lifts_it_into_the_rail() {
         for side in [SidebarSide::Left, SidebarSide::Right] {
-            for position in [DockPosition::Left, DockPosition::Right, DockPosition::Bottom] {
+            for position in [
+                DockPosition::Left,
+                DockPosition::Right,
+                DockPosition::Bottom,
+            ] {
                 assert!(
                     !rail_draws_panel(PANEL_ALWAYS_IN_STATUS_BAR, position, side, true),
                     "a {side:?} rail must leave the project panel in the status bar \
