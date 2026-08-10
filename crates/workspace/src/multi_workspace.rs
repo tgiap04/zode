@@ -1017,27 +1017,40 @@ impl MultiWorkspace {
             })
             .collect();
 
-        // Nothing registers a group for the window's own first workspace. Both
-        // paths into `ensure_project_group_state` are about ADDING a project, and
-        // `restore_project_groups` only replays what an earlier session wrote --
-        // which is nothing, the first time. So a window opened straight onto one
-        // folder had no group at all and the rail drew an empty column.
+        // The window's own workspace has to appear in its own group, and two
+        // separate things can leave it out:
         //
-        // Synthesised on read rather than inserted on open: the paths arrive
-        // asynchronously, so any write would have to pick a moment, and picking
-        // the wrong one is how this went missing in the first place.
+        // - No group at all. Both paths into `ensure_project_group_state` are
+        //   about ADDING a project, and `restore_project_groups` only replays
+        //   what an earlier session wrote -- nothing, the first time. A window
+        //   opened straight onto one folder drew an empty rail.
+        // - A group with the right key but no workspaces. Group state is
+        //   restored from disk while `retained_workspaces` starts empty, and the
+        //   active workspace is only retained when the sidebar opens. Reopening
+        //   a project with the sidebar closed left the rail listing it while
+        //   nothing marked it active -- the entry is matched by workspace, not
+        //   by key (see `sidebar::project_list`).
+        //
+        // So this attaches the workspace rather than merely ensuring a key, and
+        // does it on read rather than on open: the paths arrive asynchronously,
+        // so a write would have to pick a moment, and picking the wrong one is
+        // how this went missing in the first place.
         let active_key = self.active_workspace.read(cx).project_group_key(cx);
-        if !active_key.path_list().paths().is_empty()
-            && !groups.iter().any(|group| group.key == active_key)
-        {
-            groups.insert(
-                0,
-                ProjectGroup {
-                    key: active_key,
-                    workspaces: vec![self.active_workspace.clone()],
-                    expanded: true,
-                },
-            );
+        if !active_key.path_list().paths().is_empty() {
+            match groups.iter_mut().find(|group| group.key == active_key) {
+                Some(group) if !group.workspaces.contains(&self.active_workspace) => {
+                    group.workspaces.insert(0, self.active_workspace.clone());
+                }
+                Some(_) => {}
+                None => groups.insert(
+                    0,
+                    ProjectGroup {
+                        key: active_key,
+                        workspaces: vec![self.active_workspace.clone()],
+                        expanded: true,
+                    },
+                ),
+            }
         }
 
         groups
