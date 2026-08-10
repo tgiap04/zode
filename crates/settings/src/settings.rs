@@ -48,7 +48,6 @@ pub use settings_store::{
     SettingsJsonSchemaParams, SettingsKey, SettingsLocation, SettingsParseResult, SettingsStore,
 };
 
-
 pub use keymap_file::ActionSequence;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,7 +224,11 @@ mod tests {
         for family in ["JetBrainsMono", "JetBrainsMonoNL"] {
             for style in ["Regular", "Italic", "Bold", "BoldItalic"] {
                 let file = fonts.join(format!("{family}-{style}.ttf"));
-                assert!(file.is_file(), "default font not bundled: {}", file.display());
+                assert!(
+                    file.is_file(),
+                    "default font not bundled: {}",
+                    file.display()
+                );
             }
         }
         assert!(
@@ -286,7 +289,14 @@ mod tests {
             .expect("seeded user settings must parse as jsonc");
         let new = serde_json::json!({ "vim_mode": true });
 
-        crate::update_value_in_json_text(&mut text, &mut Vec::new(), 2, &old, &new, &mut Vec::new());
+        crate::update_value_in_json_text(
+            &mut text,
+            &mut Vec::new(),
+            2,
+            &old,
+            &new,
+            &mut Vec::new(),
+        );
 
         let written: serde_json::Value = crate::parse_json_with_comments(&text)
             .unwrap_or_else(|error| panic!("first write produced invalid jsonc: {error}\n{text}"));
