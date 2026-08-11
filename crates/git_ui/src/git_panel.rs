@@ -22,8 +22,8 @@ use editor::{EditorStyle, RewrapOptions};
 use file_icons::FileIcons;
 use git::commit::ParsedCommitMessage;
 use git::repository::{
-    Branch, CommitDetails, CommitOptions, CommitSummary, FetchOptions, GitCommitTemplate,
-    PushOptions, Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking,
+    Branch, CommitDetails, CommitOptions, CommitSummary, FetchOptions, GitCommitTemplate, LogOrder,
+    LogSource, PushOptions, Remote, RemoteCommandOutput, ResetMode, Upstream, UpstreamTracking,
     UpstreamTrackingStatus,
 };
 use git::stash::GitStash;
@@ -74,6 +74,7 @@ use workspace::{
     notifications::{DetachAndPromptErr, NotifyResultExt},
 };
 
+mod commits_section;
 mod panel_section;
 mod render_commit_box;
 mod render_entries;
@@ -276,6 +277,9 @@ struct SerializedGitPanel {
     /// `None` in blobs written before collapsible sections existed.
     #[serde(default)]
     section_collapse: Option<SectionCollapseState>,
+    /// Height of the `Commits` section in pixels, `None` before it was ever resized.
+    #[serde(default)]
+    commits_section_height: Option<f32>,
 }
 
 // The enum mirrors `SectionCollapseState`, which persists all four sections so that a fold
@@ -305,9 +309,13 @@ impl Default for SectionCollapseState {
         Self {
             repositories: false,
             changes: false,
-            // Collapsed by default so opening the panel never pays for a graph load.
+            // Both collapsed by default so opening the panel never pays for a log fetch. The graph
+            // and the commit list share one cache, and `Repository`'s fetch for it runs `git log`
+            // with no `--max-count` — it streams the branch's whole history. Until that can be
+            // limited, having either section open by default would make every panel open pay for
+            // the entire history of the branch.
             graph: true,
-            commits: false,
+            commits: true,
         }
     }
 }
@@ -724,6 +732,10 @@ pub struct GitPanel {
     /// Repositories section on every render. This is rebuilt off the render path, on the events
     /// that change the repository set.
     sorted_repo_ids: Vec<RepositoryId>,
+    commits_section: Option<CommitsSectionState>,
+    commits_section_height: Pixels,
+    /// Pointer position at the last resize step, so the drag can move by delta.
+    commits_resize_drag_start: Option<Pixels>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -736,6 +748,37 @@ const MAX_PANEL_EDITOR_LINES: usize = 6;
 
 /// Five rows of `RepositoryRow`, which is `px(36.)` tall.
 const MAX_REPOSITORY_ROWS_HEIGHT: Pixels = px(180.);
+
+const COMMITS_SECTION_DEFAULT_HEIGHT: Pixels = px(200.);
+const COMMITS_SECTION_MIN_HEIGHT: Pixels = px(80.);
+const COMMITS_SECTION_MAX_HEIGHT: Pixels = px(600.);
+const COMMITS_ROW_HEIGHT: Pixels = px(28.);
+/// The window of the log asked for when the section opens.
+///
+/// This does NOT bound the fetch. `Repository::graph_data` uses the range only to slice what it
+/// returns; the fetch it starts streams the branch's entire history into the repository's cache
+/// (`git log` there carries no `--max-count`). Capping it for real means changing that fetch, which
+/// lives outside this crate — recorded as follow-up work in the plan. Meanwhile the section defaults
+/// to collapsed so nothing pays for it unasked.
+const COMMITS_SECTION_PAGE_SIZE: usize = 50;
+
+/// Marks the drag that resizes the `Commits` section.
+#[derive(Clone)]
+struct DraggedCommitsSectionHandle;
+
+/// Lives only while the `Commits` section has been expanded at least once — that absence is the
+/// laziness the panel relies on, since asking a repository for graph data is what starts the fetch
+/// (`Repository::graph_data`).
+///
+/// The commits themselves are deliberately *not* stored here. Topology lives in the repository's
+/// own `initial_graph_data` cache and per-commit subjects in its `commit_data` cache, both shared
+/// with the git graph tab. Keeping a second copy here would double the memory and let the two
+/// drift; instead every render reads a window of the repository's cache.
+struct CommitsSectionState {
+    scroll_handle: UniformListScrollHandle,
+    /// The branch the current data was fetched for, so a checkout can invalidate it.
+    loaded_for_branch: Option<SharedString>,
+}
 
 pub(crate) fn commit_message_editor(
     commit_message_buffer: Entity<Buffer>,
@@ -854,16 +897,34 @@ impl GitPanel {
                 &git_store,
                 window,
                 move |this, _git_store, event, window, cx| match event {
+                    // These are the events on which `Repository` throws away its graph cache, and
+                    // switching repositories changes whose log we want — either way the commits
+                    // section needs reloading, not merely repainting.
                     GitStoreEvent::RepositoryUpdated(
                         _,
-                        RepositoryEvent::StatusesChanged | RepositoryEvent::HeadChanged,
+                        RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged,
                         true,
                     )
-                    | GitStoreEvent::RepositoryAdded
-                    | GitStoreEvent::RepositoryRemoved(_)
                     | GitStoreEvent::ActiveRepositoryChanged(_) => {
                         this.update_sorted_repo_ids(cx);
+                        this.invalidate_commits(cx);
                         this.schedule_update(window, cx);
+                    }
+                    GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::StatusesChanged, true)
+                    | GitStoreEvent::RepositoryAdded
+                    | GitStoreEvent::RepositoryRemoved(_) => {
+                        this.update_sorted_repo_ids(cx);
+                        this.schedule_update(window, cx);
+                    }
+                    // The graph fetch streams in and reports progress this way. Without a notify
+                    // the rows that have landed would sit unpainted until something unrelated
+                    // happened to redraw the panel.
+                    GitStoreEvent::RepositoryUpdated(
+                        _,
+                        RepositoryEvent::GraphEvent(_, _),
+                        true,
+                    ) => {
+                        cx.notify();
                     }
                     // A repository's work directory can move under it, which changes the name the
                     // row sorts by. That arrives as an ordinary update — of any kind, on any
@@ -922,6 +983,9 @@ impl GitPanel {
                 section_collapse: SectionCollapseState::default(),
                 zoomed: false,
                 sorted_repo_ids: Vec::new(),
+                commits_section: None,
+                commits_section_height: COMMITS_SECTION_DEFAULT_HEIGHT,
+                commits_resize_drag_start: None,
             };
 
             this.update_sorted_repo_ids(cx);
@@ -1009,6 +1073,7 @@ impl GitPanel {
             amend_pending: self.amend_pending,
             signoff_enabled: self.signoff_enabled,
             section_collapse: Some(self.section_collapse),
+            commits_section_height: Some(f32::from(self.commits_section_height)),
         }
     }
 
@@ -1016,6 +1081,12 @@ impl GitPanel {
         self.amend_pending = serialized.amend_pending;
         self.signoff_enabled = serialized.signoff_enabled;
         self.section_collapse = serialized.section_collapse.unwrap_or_default();
+        self.commits_section_height = serialized
+            .commits_section_height
+            .map(px)
+            // A stored height from a build with different bounds must still land inside them.
+            .map(|height| height.clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT))
+            .unwrap_or(COMMITS_SECTION_DEFAULT_HEIGHT);
         cx.notify();
     }
 
@@ -1082,8 +1153,81 @@ impl GitPanel {
 
     fn toggle_section(&mut self, kind: PanelSectionKind, cx: &mut Context<Self>) {
         self.section_collapse.toggle(kind);
+        // Expanding is the only thing that may start a fetch — never `render`, or opening the
+        // panel would pay for a commit log nobody asked to see.
+        if kind == PanelSectionKind::Commits && self.section_expanded(kind) {
+            self.ensure_commits_loaded(cx);
+        }
         cx.notify();
         self.serialize(cx);
+    }
+
+    fn current_branch_ref(&self, cx: &App) -> Option<SharedString> {
+        self.active_repository
+            .as_ref()?
+            .read(cx)
+            .branch
+            .as_ref()
+            .map(|branch| branch.ref_name.clone())
+    }
+
+    /// Asking a repository for graph data is what *starts* the fetch, so this is only ever called
+    /// from the expand path and from the branch-change invalidation — never from `render`.
+    fn ensure_commits_loaded(&mut self, cx: &mut Context<Self>) {
+        let Some(repository) = self.active_repository.clone() else {
+            return;
+        };
+        let Some(branch) = self.current_branch_ref(cx) else {
+            return;
+        };
+
+        let already_loaded = self
+            .commits_section
+            .as_ref()
+            .is_some_and(|state| state.loaded_for_branch.as_ref() == Some(&branch));
+        if already_loaded {
+            return;
+        }
+
+        let state = self
+            .commits_section
+            .get_or_insert_with(|| CommitsSectionState {
+                scroll_handle: UniformListScrollHandle::new(),
+                loaded_for_branch: None,
+            });
+        state.loaded_for_branch = Some(branch.clone());
+
+        // The response is a window onto the repository's own cache; the call is made for its
+        // effect of kicking off the fetch, which streams in and notifies as it lands.
+        repository.update(cx, |repository, cx| {
+            repository.graph_data(
+                LogSource::Branch(branch),
+                LogOrder::default(),
+                0..COMMITS_SECTION_PAGE_SIZE,
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    /// `Repository` drops its entire graph cache on `HeadChanged` and `BranchListChanged`
+    /// (`git_store.rs`, `subscribe_self`) whether or not the branch *name* changed — committing on
+    /// the current branch does exactly that. So this must not compare branch names to decide:
+    /// whatever was loaded is already gone, and a marker claiming otherwise would make
+    /// `ensure_commits_loaded` short-circuit forever, leaving the section stuck on "Loading…".
+    fn invalidate_commits(&mut self, cx: &mut Context<Self>) {
+        if self.commits_section.is_none() {
+            return;
+        }
+
+        if self.section_expanded(PanelSectionKind::Commits) {
+            if let Some(state) = self.commits_section.as_mut() {
+                state.loaded_for_branch = None;
+            }
+            self.ensure_commits_loaded(cx);
+        } else {
+            self.commits_section = None;
+        }
     }
 
     fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -3546,6 +3690,12 @@ impl GitPanel {
 
         self.select_first_entry_if_none(window, cx);
 
+        // Off the render path, so an expanded section gets its data even when the panel opens
+        // already expanded — while a collapsed one still never asks. Idempotent per branch.
+        if self.section_expanded(PanelSectionKind::Commits) {
+            self.ensure_commits_loaded(cx);
+        }
+
         let suggested_commit_message = self.suggest_commit_message(cx);
         let placeholder_text = suggested_commit_message
             .unwrap_or_else(|| self.commit_placeholder_text(window, cx).to_string());
@@ -4195,6 +4345,10 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::toggle_sort_by_path))
             .on_action(cx.listener(Self::toggle_tree_view))
             .on_action(cx.listener(Self::toggle_zoom))
+            .on_drag_move::<DraggedCommitsSectionHandle>(cx.listener(Self::resize_commits_section))
+            .on_drop::<DraggedCommitsSectionHandle>(cx.listener(|this, _, _, cx| {
+                this.end_commits_section_resize(cx);
+            }))
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
@@ -4246,6 +4400,7 @@ impl Render for GitPanel {
                                 )
                             }),
                     )
+                    .child(self.render_commits_section(cx))
                     .into_any_element(),
             )
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {

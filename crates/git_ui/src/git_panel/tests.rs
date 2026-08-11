@@ -1535,10 +1535,13 @@ fn test_section_collapse_state_defaults() {
 
     assert!(state.is_expanded(PanelSectionKind::Repositories));
     assert!(state.is_expanded(PanelSectionKind::Changes));
-    assert!(state.is_expanded(PanelSectionKind::Commits));
     assert!(
         !state.is_expanded(PanelSectionKind::Graph),
-        "graph must start collapsed so opening the panel never pays for a graph load"
+        "graph must start collapsed so opening the panel never pays for a log fetch"
+    );
+    assert!(
+        !state.is_expanded(PanelSectionKind::Commits),
+        "commits shares that fetch, so it starts collapsed for the same reason"
     );
 }
 
@@ -1560,8 +1563,8 @@ fn test_deserialize_section_collapse_state_with_missing_fields() {
 
     assert!(!state.is_expanded(PanelSectionKind::Changes));
     assert!(!state.is_expanded(PanelSectionKind::Graph));
+    assert!(!state.is_expanded(PanelSectionKind::Commits));
     assert!(state.is_expanded(PanelSectionKind::Repositories));
-    assert!(state.is_expanded(PanelSectionKind::Commits));
 }
 
 #[gpui::test]
@@ -1618,7 +1621,7 @@ async fn test_section_collapse_state_survives_serialization(cx: &mut TestAppCont
             !restored.section_expanded(PanelSectionKind::Graph),
             "graph must stay collapsed across a round trip"
         );
-        assert!(restored.section_expanded(PanelSectionKind::Commits));
+        assert!(!restored.section_expanded(PanelSectionKind::Commits));
     });
 }
 
@@ -2162,4 +2165,286 @@ async fn test_panel_draws_with_no_repository(cx: &mut TestAppContext) {
         gpui::size(px(360.), px(800.)),
         |_, _| panel_to_draw.into_any_element(),
     );
+}
+
+fn upstream(tracking: UpstreamTracking) -> Upstream {
+    Upstream {
+        ref_name: "refs/remotes/origin/main".into(),
+        tracking,
+    }
+}
+
+#[test]
+fn test_tracking_status_label_covers_every_case() {
+    use crate::git_panel::commits_section::tracking_status_label;
+
+    assert_eq!(tracking_status_label(None), "No upstream");
+    assert_eq!(
+        tracking_status_label(Some(&upstream(UpstreamTracking::Gone))),
+        "Upstream gone"
+    );
+    assert_eq!(
+        tracking_status_label(Some(&upstream(
+            UpstreamTrackingStatus {
+                ahead: 0,
+                behind: 0
+            }
+            .into()
+        ))),
+        "Up to date with origin"
+    );
+    assert_eq!(
+        tracking_status_label(Some(&upstream(
+            UpstreamTrackingStatus {
+                ahead: 2,
+                behind: 0
+            }
+            .into()
+        ))),
+        "↑2 ahead of origin"
+    );
+    assert_eq!(
+        tracking_status_label(Some(&upstream(
+            UpstreamTrackingStatus {
+                ahead: 0,
+                behind: 3
+            }
+            .into()
+        ))),
+        "↓3 behind origin"
+    );
+    assert_eq!(
+        tracking_status_label(Some(&upstream(
+            UpstreamTrackingStatus {
+                ahead: 2,
+                behind: 3
+            }
+            .into()
+        ))),
+        "↑2 ↓3 — origin"
+    );
+}
+
+async fn init_commits_panel(
+    cx: &mut TestAppContext,
+) -> (Entity<GitPanel>, Entity<Repository>, VisualTestContext) {
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({ ".git": {}, "tracked": "tracked\n" }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        path!("/project/.git").as_ref(),
+        &[("tracked", "old tracked\n".into())],
+    );
+    fs.set_branch_name(path!("/project/.git").as_ref(), Some("main"));
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let mut visual_cx = VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(&mut visual_cx, GitPanel::new);
+    visual_cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    visual_cx.run_until_parked();
+
+    let repository = panel.update_in(&mut visual_cx, |panel, _, _| {
+        panel
+            .active_repository
+            .clone()
+            .expect("the fixture has a repository")
+    });
+
+    (panel, repository, visual_cx)
+}
+
+/// Whether the branch's log has been asked for at all. `get_graph_data` reads the cache without
+/// creating an entry, so `None` means nothing ever called `graph_data`.
+fn branch_log_was_requested(
+    panel: &Entity<GitPanel>,
+    repository: &Entity<Repository>,
+    cx: &mut VisualTestContext,
+) -> bool {
+    panel.update_in(cx, |panel, _, cx| {
+        let Some(branch) = panel.current_branch_ref(cx) else {
+            return false;
+        };
+        repository
+            .read(cx)
+            .get_graph_data(LogSource::Branch(branch), LogOrder::default())
+            .is_some()
+    })
+}
+
+/// The precondition phase 05 rests on: a folded section costs nothing.
+#[gpui::test]
+async fn test_collapsed_commits_section_never_requests_the_log(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, _| {
+        assert!(
+            !panel.section_expanded(PanelSectionKind::Commits),
+            "the commits section must default to folded, since the fetch it starts is uncapped"
+        );
+        assert!(
+            panel.commits_section.is_none(),
+            "a folded section must not even allocate its state"
+        );
+    });
+
+    // Draw it folded — the render path must not be a back door to the fetch.
+    let panel_to_draw = panel.clone();
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(360.), px(800.)),
+        |_, _| panel_to_draw.into_any_element(),
+    );
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    assert!(
+        !branch_log_was_requested(&panel, &repository, cx),
+        "nothing may ask the repository for the branch log while the section is folded"
+    );
+    panel.update_in(cx, |panel, _, _| {
+        assert!(panel.commits_section.is_none());
+    });
+}
+
+#[gpui::test]
+async fn test_expanding_commits_section_requests_the_log_once(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Commits, cx);
+        assert!(panel.section_expanded(PanelSectionKind::Commits));
+    });
+    cx.run_until_parked();
+
+    assert!(
+        branch_log_was_requested(&panel, &repository, cx),
+        "expanding must be what asks for the log"
+    );
+
+    let loaded_for = panel.update_in(cx, |panel, _, _| {
+        panel
+            .commits_section
+            .as_ref()
+            .and_then(|state| state.loaded_for_branch.clone())
+    });
+    assert_eq!(
+        loaded_for
+            .clone()
+            .map(|branch| branch.to_string())
+            .as_deref(),
+        Some("refs/heads/main")
+    );
+
+    // Asking again is a no-op — the branch has not changed and nothing dropped the cache.
+    panel.update_in(cx, |panel, _, cx| panel.ensure_commits_loaded(cx));
+    cx.run_until_parked();
+    let loaded_again = panel.update_in(cx, |panel, _, _| {
+        panel
+            .commits_section
+            .as_ref()
+            .and_then(|state| state.loaded_for_branch.clone())
+    });
+    assert_eq!(loaded_again, loaded_for);
+}
+
+/// `Repository` drops its graph cache on any HEAD change, including a commit on the branch that is
+/// already checked out. Invalidation must therefore not skip when the branch *name* is unchanged —
+/// doing so left the section stuck on "Loading…" forever.
+#[gpui::test]
+async fn test_invalidation_does_not_skip_when_the_branch_name_is_unchanged(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Commits, cx);
+    });
+    cx.run_until_parked();
+
+    let branch_before = panel.update_in(cx, |panel, _, _| {
+        panel
+            .commits_section
+            .as_ref()
+            .and_then(|state| state.loaded_for_branch.clone())
+    });
+    assert_eq!(
+        branch_before.map(|branch| branch.to_string()).as_deref(),
+        Some("refs/heads/main")
+    );
+
+    // Expanded: the marker must be re-established, meaning the log was asked for again.
+    panel.update_in(cx, |panel, _, cx| {
+        panel.invalidate_commits(cx);
+        assert_eq!(
+            panel
+                .commits_section
+                .as_ref()
+                .and_then(|state| state.loaded_for_branch.clone())
+                .map(|branch| branch.to_string())
+                .as_deref(),
+            Some("refs/heads/main"),
+            "invalidating an expanded section must reload it, not leave it empty"
+        );
+    });
+    cx.run_until_parked();
+
+    // Folded: the state is dropped outright, even though the branch name never changed.
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Commits, cx);
+        assert!(
+            panel.commits_section.is_some(),
+            "folding alone must not discard what was already loaded"
+        );
+        panel.invalidate_commits(cx);
+        assert!(
+            panel.commits_section.is_none(),
+            "an unchanged branch name must not stop invalidation"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_commits_section_height_survives_serialization(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        assert_eq!(panel.commits_section_height, COMMITS_SECTION_DEFAULT_HEIGHT);
+        panel.commits_section_height = px(320.);
+        let serialized = panel.serialized_state();
+        let round_tripped = serde_json::from_str::<SerializedGitPanel>(
+            &serde_json::to_string(&serialized).expect("serializes"),
+        )
+        .expect("deserializes");
+        panel.commits_section_height = px(0.);
+        panel.apply_serialized_state(round_tripped, cx);
+        assert_eq!(panel.commits_section_height, px(320.));
+    });
+
+    // A stored height from a build with different bounds is clamped back inside them.
+    panel.update_in(cx, |panel, _, cx| {
+        let out_of_range = SerializedGitPanel {
+            amend_pending: false,
+            signoff_enabled: false,
+            section_collapse: None,
+            commits_section_height: Some(5_000.),
+        };
+        panel.apply_serialized_state(out_of_range, cx);
+        assert_eq!(panel.commits_section_height, COMMITS_SECTION_MAX_HEIGHT);
+    });
 }
