@@ -34,7 +34,7 @@ Panel git mở từ rail có cấu trúc + hành vi của VSCode Source Control:
 | # | Phase | Miếng | Effort | Status | Blocked by |
 |---|---|---|---|---|---|
 | 00 | [Tách git_panel.rs thành module](phase-00-extract-git-panel-modules.md) | — | 2-3d | **completed** | — |
-| 01 | [PanelSection + title row + zoom](phase-01-panel-section-and-title-row.md) | B | 2-3d | pending | 00 |
+| 01 | [PanelSection + title row + zoom](phase-01-panel-section-and-title-row.md) | B | 2-3d | **completed** | 00 |
 | 02 | [Commit box lên top, giải tán footer](phase-02-commit-box-to-top.md) | A | 3-4d | pending | 01 |
 | 03 | [Section Repositories](phase-03-repositories-section.md) | C | 2-3d | pending | 01 |
 | 04 | [Section Commits](phase-04-commits-section.md) | E | 3-4d | pending | 01 |
@@ -68,7 +68,7 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 |---|---|---|---|
 | R1 | Hai vùng scroll lồng nhau (section Graph + Commits, trong panel cũng scroll) | 04, 05 | Section có chiều cao **cố định + resize handle**, không tự co giãn theo nội dung. Chứng minh ở 04 trước khi làm 05. |
 | R2 | Commit box đổi chỗ phá giả định của `Focusable for GitPanel` + `focus_changes_list` / `focus_editor` / `expand_commit_editor` | 02 | Rà cả 3 action + `Focusable` trong cùng phase; test focus order. |
-| R3 | Collapse state không persist → mở panel thấy 4 section bung ra, tệ hơn hiện tại | 01 | `SerializedGitPanel` (`git_panel.rs:254`) + `serialize()` đã có — thêm field, không dựng hạ tầng mới. |
+| R3 | Collapse state không persist → mở panel thấy 4 section bung ra, tệ hơn hiện tại | 01 | ✅ Đã xử: `Option<SectionCollapseState>` trên `SerializedGitPanel`, `#[serde(default)]` ở **cả hai** tầng nên blob cũ và blob thiếu field lẻ đều đọc được. Test đi qua kvp thật. |
 | R4 | Nhúng graph → `get_graph_data` chạy mỗi lần mở panel | 05 | Lazy: chỉ khởi tạo `Entity<GitGraph>` khi section Graph expand lần đầu. |
 | R5 | **Hai tầng header**: section `Changes` + group header `Tracked`/`Untracked` (`render_list_header`, đang là list entry có checkbox staging) | 01, 02 | Không xoá group header (nó mang checkbox staging). Giảm nhấn thị giác: group header nhỏ hơn, không có disclosure riêng. |
 | R6 | Phase 00 là diff lớn dạng no-op → khó review | 00 | ✅ Đã xử: 5 commit riêng, clippy + 60/60 test xanh giữa mỗi commit. |
@@ -77,6 +77,14 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 ## Gate mỗi phase
 
 `./script/clippy` sạch · test `git_ui` (+ `git_graph` ở phase 05) xanh · panel dùng được thật sau mỗi phase.
+
+## Điều phase 01 sửa lại cho các phase sau
+
+- **Nút `⛶` không cần chạm crate `workspace`.** Cơ chế zoom đã đủ: emit `PanelEvent::ZoomIn/ZoomOut`, `Dock` (`dock.rs:637-668`) gọi lại `set_zoomed`. Rủi ro "cần thêm ở `workspace`" trong phase 01 không thành hiện thực.
+- **`ui::CountBadge` không dùng inline được** — nó `absolute()`, thiết kế để phủ lên icon. Section badge phải tự dựng pill. Ảnh hưởng phase 03, 04.
+- **Nội dung section phải gate `expanded` ở call site**, không chỉ trong `PanelSection`. Nếu không, element bị dựng rồi bỏ mỗi lần re-render lúc gập. Ảnh hưởng phase 03, 04, 05 — đặc biệt 05, nơi nội dung đắt nhất (R4).
+- **Ba variant `PanelSectionKind` còn `#[allow(dead_code)]`.** Phase 03/04/05 phải **xoá dần** attribute đó khi variant của mình được dựng, không để nguyên.
+- **`div().flex_1()` tạm khi `Changes` gập** (giữ commit box ở đáy) — phase 02 xoá nó.
 
 ## Bước tiếp theo
 
