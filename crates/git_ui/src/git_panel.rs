@@ -160,6 +160,11 @@ struct GitMenuState {
     sort_by_path: bool,
     has_stash_items: bool,
     tree_view: bool,
+    /// The commit row that used to carry Uncommit, Branch Diff and Open Git Graph is gone;
+    /// these re-home the affordances it held.
+    can_uncommit: bool,
+    show_branch_diff: bool,
+    has_repository: bool,
 }
 
 fn git_panel_context_menu(
@@ -191,6 +196,13 @@ fn git_panel_context_menu(
             .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
             .separator()
             .action("Open Diff", project_diff::Diff.boxed_clone())
+            .when(state.show_branch_diff, |this| {
+                this.action("View Branch Diff", BranchDiff.boxed_clone())
+            })
+            // `git_graph` only registers a handler for `Open` when a repository is active, so
+            // without this the entry would be a silent no-op rather than a disabled one.
+            .action_disabled_when(!state.has_repository, "Open Git Graph", Open.boxed_clone())
+            .action_disabled_when(!state.can_uncommit, "Uncommit", git::Uncommit.boxed_clone())
             .separator()
             .action_disabled_when(
                 !state.has_tracked_changes,
@@ -729,9 +741,12 @@ pub(crate) fn commit_message_editor(
 ) -> Editor {
     let buffer = cx.new(|cx| MultiBuffer::singleton(commit_message_buffer, cx));
     let max_lines = if in_panel { MAX_PANEL_EDITOR_LINES } else { 18 };
+    // In the panel the editor now sits above the file list, so it starts at one line and grows
+    // downward to `max_lines` before scrolling internally. The modal keeps its fixed height.
+    let min_lines = if in_panel { 1 } else { max_lines };
     let mut commit_editor = Editor::new(
         EditorMode::AutoHeight {
-            min_lines: max_lines,
+            min_lines,
             max_lines: Some(max_lines),
         },
         buffer,
@@ -771,6 +786,9 @@ impl GitPanel {
             let mut was_file_icons = GitPanelSettings::get_global(cx).file_icons;
             let mut was_folder_icons = GitPanelSettings::get_global(cx).folder_icons;
             let mut was_diff_stats = GitPanelSettings::get_global(cx).diff_stats;
+            let mut was_fallback_branch_name = GitPanelSettings::get_global(cx)
+                .fallback_branch_name
+                .clone();
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
                 let settings = GitPanelSettings::get_global(cx);
                 let sort_by_path = settings.sort_by_path;
@@ -778,6 +796,7 @@ impl GitPanel {
                 let file_icons = settings.file_icons;
                 let folder_icons = settings.folder_icons;
                 let diff_stats = settings.diff_stats;
+                let fallback_branch_name = settings.fallback_branch_name.clone();
                 if tree_view != was_tree_view {
                     this.view_mode = GitPanelViewMode::from_settings(cx);
                 }
@@ -787,7 +806,12 @@ impl GitPanel {
                     this.bulk_staging.take();
                     update_entries = true;
                 }
-                if (diff_stats != was_diff_stats) || update_entries {
+                // The commit placeholder names the fallback branch, and the placeholder is only
+                // rewritten from `update_visible_entries`.
+                if (diff_stats != was_diff_stats)
+                    || fallback_branch_name != was_fallback_branch_name
+                    || update_entries
+                {
                     this.update_visible_entries(window, cx);
                 }
                 if file_icons != was_file_icons || folder_icons != was_folder_icons {
@@ -798,6 +822,7 @@ impl GitPanel {
                 was_file_icons = file_icons;
                 was_folder_icons = folder_icons;
                 was_diff_stats = diff_stats;
+                was_fallback_branch_name = fallback_branch_name;
             })
             .detach();
 
@@ -3484,7 +3509,8 @@ impl GitPanel {
         self.select_first_entry_if_none(window, cx);
 
         let suggested_commit_message = self.suggest_commit_message(cx);
-        let placeholder_text = suggested_commit_message.unwrap_or("Enter commit message".into());
+        let placeholder_text = suggested_commit_message
+            .unwrap_or_else(|| self.commit_placeholder_text(window, cx).to_string());
 
         self.commit_editor.update(cx, |editor, cx| {
             editor.set_placeholder_text(&placeholder_text, window, cx)
@@ -3726,6 +3752,43 @@ impl GitPanel {
         matches!(branch_name, "main" | "master")
     }
 
+    /// `git reset HEAD^` needs a parent to reset onto — a repository whose only commit is the
+    /// root cannot be uncommitted.
+    fn can_uncommit(&self, cx: &Context<Self>) -> bool {
+        self.active_repository
+            .as_ref()
+            .and_then(|repo| repo.read(cx).branch.as_ref())
+            .and_then(|branch| branch.most_recent_commit.as_ref())
+            .is_some_and(|commit| commit.has_parent)
+    }
+
+    fn show_branch_diff(&self, cx: &Context<Self>) -> bool {
+        self.active_repository.is_some() && !self.is_on_main_branch(cx)
+    }
+
+    /// Names the branch the commit will land on, so the commit box says where it is aiming.
+    /// With no branch resolved yet (an unborn HEAD in a fresh repository) this falls back to the
+    /// settings value. That is exact for repositories Zode itself initialized, and a guess for
+    /// one initialized elsewhere with a different `init.defaultBranch` — cosmetic either way,
+    /// since it never decides where the commit actually goes.
+    fn commit_placeholder_text(&self, window: &Window, cx: &Context<Self>) -> SharedString {
+        let branch = self
+            .active_repository
+            .as_ref()
+            .and_then(|repo| repo.read(cx).branch.as_ref())
+            .map(|branch| branch.name().to_owned())
+            .unwrap_or_else(|| {
+                GitPanelSettings::get_global(cx)
+                    .fallback_branch_name
+                    .clone()
+            });
+
+        match ui::text_for_action(&git::Commit, window, cx) {
+            Some(keystroke) => format!("Message ({keystroke} to commit on \"{branch}\")").into(),
+            None => format!("Message (commit on \"{branch}\")").into(),
+        }
+    }
+
     fn render_buffer_header_controls(
         &self,
         entity: &Entity<Self>,
@@ -3852,6 +3915,9 @@ impl GitPanel {
                 sort_by_path: GitPanelSettings::get_global(cx).sort_by_path,
                 has_stash_items: self.stash_entries.entries.len() > 0,
                 tree_view: GitPanelSettings::get_global(cx).tree_view,
+                can_uncommit: self.can_uncommit(cx),
+                show_branch_diff: self.show_branch_diff(cx),
+                has_repository: self.active_repository.is_some(),
             },
             window,
             cx,
@@ -4098,41 +4164,55 @@ impl Render for GitPanel {
                 v_flex()
                     .size_full()
                     .child(self.render_title_row(window, cx))
-                    // TODO(phase-02): dissolved once the commit box moves to the top and the
-                    // affordances here are relocated.
-                    .children(self.render_panel_header(window, cx))
                     .child(
                         PanelSection::new("git-panel-changes-section", "Changes", changes_expanded)
                             .badge(self.changes_count)
+                            .on_badge_click(
+                                {
+                                    let focus_handle = self.focus_handle.clone();
+                                    move |_, cx| {
+                                        Tooltip::for_action_in(
+                                            "Open Diff",
+                                            &Diff,
+                                            &focus_handle,
+                                            cx,
+                                        )
+                                    }
+                                },
+                                |_, _, cx| {
+                                    cx.defer(|cx| cx.dispatch_action(&Diff));
+                                },
+                            )
                             .on_toggle(cx.listener(|this, _, _, cx| {
                                 this.toggle_section(PanelSectionKind::Changes, cx);
                             }))
                             .actions(self.render_changes_section_actions(cx))
-                            // Building the list while the section is folded would only feed an
-                            // element the section then throws away.
+                            // Building this while the section is folded would only feed the
+                            // section elements it then throws away.
                             .when(changes_expanded, |section| {
-                                if let Some(repo) = self.active_repository.clone()
-                                    && has_entries
-                                {
-                                    section.child(
-                                        self.render_entries(has_write_access, repo, window, cx)
-                                            .into_any_element(),
-                                    )
-                                } else {
-                                    section.child(self.render_empty_state(cx).into_any_element())
-                                }
+                                section.children(self.render_commit_box(window, cx)).map(
+                                    |section| {
+                                        if let Some(repo) = self.active_repository.clone()
+                                            && has_entries
+                                        {
+                                            section.child(
+                                                self.render_entries(
+                                                    has_write_access,
+                                                    repo,
+                                                    window,
+                                                    cx,
+                                                )
+                                                .into_any_element(),
+                                            )
+                                        } else {
+                                            section.child(
+                                                self.render_empty_state(cx).into_any_element(),
+                                            )
+                                        }
+                                    },
+                                )
                             }),
                     )
-                    // Keeps the commit box at the bottom of the panel while every section is
-                    // folded away. Goes when the commit box moves to the top in phase 02.
-                    .when(!changes_expanded, |this| this.child(div().flex_1()))
-                    .children(self.render_footer(window, cx))
-                    .when(self.amend_pending, |this| {
-                        this.child(self.render_pending_amend(cx))
-                    })
-                    .when(!self.amend_pending, |this| {
-                        this.children(self.render_previous_commit(window, cx))
-                    })
                     .into_any_element(),
             )
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
@@ -4148,12 +4228,18 @@ impl Render for GitPanel {
 }
 
 impl Focusable for GitPanel {
-    fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        if self.entries.is_empty() {
-            self.commit_editor.focus_handle(cx)
-        } else {
-            self.focus_handle.clone()
-        }
+    fn focus_handle(&self, _cx: &App) -> gpui::FocusHandle {
+        // This used to hand the commit editor the focus whenever the entry list was empty, which
+        // made sense while the empty state filled the panel and the commit box sat at the very
+        // bottom. The commit box is now always on screen at the top, so an empty list says
+        // nothing about where the user wants to be.
+        //
+        // Always taking the panel's own handle keeps the `GitPanel` key context active, so every
+        // panel action — commit, stage, navigate — is reachable by keybinding the moment the
+        // panel opens, and `FocusEditor` is one keystroke away. Returning the editor's handle
+        // would narrow the context to `CommitEditor` and disable the list actions until the user
+        // focused back out.
+        self.focus_handle.clone()
     }
 }
 
@@ -4254,8 +4340,10 @@ impl Panel for GitPanel {
 impl PanelHeader for GitPanel {}
 
 pub fn panel_editor_container(_window: &mut Window, cx: &mut App) -> Div {
+    // Width-only: the commit editor sits above the file list and grows with its content, so
+    // forcing a full height here would make it swallow the list.
     v_flex()
-        .size_full()
+        .w_full()
         .gap(px(8.))
         .p_2()
         .bg(cx.theme().colors().editor_background)

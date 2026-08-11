@@ -1746,3 +1746,192 @@ async fn test_title_row_zoom_and_close(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+async fn test_commit_placeholder_names_the_target_branch(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".git": {},
+            "tracked": "tracked\n",
+        }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        path!("/project/.git").as_ref(),
+        &[("tracked", "old tracked\n".into())],
+    );
+    fs.set_branch_name(path!("/project/.git").as_ref(), Some("feature/parity"));
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        let placeholder = panel.commit_placeholder_text(window, cx);
+        assert!(
+            placeholder.contains("feature/parity"),
+            "the placeholder must name the branch the commit lands on, got {placeholder:?}"
+        );
+        assert!(placeholder.starts_with("Message ("), "got {placeholder:?}");
+    });
+}
+
+#[gpui::test]
+async fn test_commit_placeholder_falls_back_to_settings_branch_name(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    // No `.git` anywhere: no repository, so no branch to read.
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/project"), json!({ "tracked": "tracked\n" }))
+        .await;
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        let fallback = GitPanelSettings::get_global(cx)
+            .fallback_branch_name
+            .clone();
+        let placeholder = panel.commit_placeholder_text(window, cx);
+        assert!(
+            placeholder.contains(&fallback),
+            "with no branch resolved the placeholder must name the settings fallback \
+             {fallback:?}, got {placeholder:?}"
+        );
+    });
+}
+
+/// The commit box moved above the file list, so it now draws in every panel state: with
+/// entries, with none, and with a message taller than the editor's line cap.
+#[gpui::test]
+async fn test_panel_draws_commit_box_above_the_list(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".git": {},
+            "tracked": "tracked\n",
+        }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        path!("/project/.git").as_ref(),
+        &[("tracked", "old tracked\n".into())],
+    );
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+
+    let handle = cx.update_window_entity(&panel, |panel, _, _| {
+        std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    handle.await;
+
+    let space = gpui::size(px(360.), px(800.));
+    let draw = |cx: &mut VisualTestContext, panel: &Entity<GitPanel>| {
+        let panel = panel.clone();
+        cx.draw(gpui::point(px(0.), px(0.)), space, |_, _| {
+            panel.into_any_element()
+        });
+    };
+
+    panel.update_in(cx, |panel, _, _| {
+        assert!(!panel.entries.is_empty(), "expected the entry-list path");
+    });
+    draw(cx, &panel);
+
+    // A message well past MAX_PANEL_EDITOR_LINES must not blow the layout out of the panel.
+    panel.update_in(cx, |panel, _, cx| {
+        panel.commit_message_buffer(cx).update(cx, |buffer, cx| {
+            buffer.set_text("line\n".repeat(12).as_str(), cx);
+        });
+    });
+    cx.run_until_parked();
+    draw(cx, &panel);
+
+    // And with nothing to commit, the commit box is still there with the thin empty-state
+    // line beneath it.
+    fs.set_head_and_index_for_repo(
+        path!("/project/.git").as_ref(),
+        &[("tracked", "tracked\n".into())],
+    );
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+    panel.update_in(cx, |panel, _, _| {
+        assert!(
+            panel.entries.is_empty(),
+            "expected the empty-state path once the working tree is clean"
+        );
+    });
+    draw(cx, &panel);
+}
+
+#[gpui::test]
+async fn test_uncommit_and_branch_diff_menu_gating(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({ ".git": {}, "tracked": "tracked\n" }),
+    )
+    .await;
+    fs.set_head_and_index_for_repo(
+        path!("/project/.git").as_ref(),
+        &[("tracked", "old tracked\n".into())],
+    );
+    fs.set_branch_name(path!("/project/.git").as_ref(), Some("main"));
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, _, cx| {
+        assert!(
+            !panel.show_branch_diff(cx),
+            "Branch Diff must stay hidden while HEAD is on main"
+        );
+    });
+
+    fs.set_branch_name(path!("/project/.git").as_ref(), Some("feature/parity"));
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, _, cx| {
+        assert!(
+            panel.show_branch_diff(cx),
+            "Branch Diff must be offered once HEAD leaves main"
+        );
+    });
+}

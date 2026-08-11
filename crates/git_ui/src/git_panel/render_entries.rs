@@ -1,26 +1,27 @@
 use super::*;
 
 impl GitPanel {
+    /// A thin line under the commit box, not a full-panel splash: the commit box is always
+    /// present above it now, so this no longer owns the panel's empty space.
     pub(super) fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_repo = self.active_repository.is_some();
         let has_no_repo = self.active_repository.is_none();
         let worktree_count = self.project.read(cx).visible_worktrees(cx).count();
 
-        let should_show_branch_diff =
-            has_repo && self.changes_count == 0 && !self.is_on_main_branch(cx);
-
-        let label = if has_repo {
-            "No changes to commit"
-        } else {
+        let label = if has_no_repo {
             "No Git repositories"
+        } else {
+            "No changes to commit"
         };
 
         v_flex()
+            .w_full()
+            .flex_none()
             .gap_1p5()
-            .flex_1()
+            .px_2()
+            .py_1p5()
             .items_center()
-            .justify_center()
             .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+            // TODO(phase-03): moves into the Repositories section.
             .when(has_no_repo && worktree_count > 0, |this| {
                 this.child(
                     panel_filled_button("Initialize Repository")
@@ -32,24 +33,6 @@ impl GitPanel {
                         .on_click(move |_, _, cx| {
                             cx.defer(move |cx| {
                                 cx.dispatch_action(&git::Init);
-                            })
-                        }),
-                )
-            })
-            .when(should_show_branch_diff, |this| {
-                this.child(
-                    panel_filled_button("View Branch Diff")
-                        .tooltip(move |_, cx| {
-                            Tooltip::with_meta(
-                                "Branch Diff",
-                                Some(&BranchDiff),
-                                "Show diff between working directory and default branch",
-                                cx,
-                            )
-                        })
-                        .on_click(move |_, _, cx| {
-                            cx.defer(move |cx| {
-                                cx.dispatch_action(&BranchDiff);
                             })
                         }),
                 )

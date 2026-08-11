@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{AnyElement, ClickEvent, ElementId, SharedString};
+use gpui::{AnyElement, AnyView, ClickEvent, ElementId, SharedString};
 use ui::{Disclosure, prelude::*};
 
 /// A collapsible section inside the git panel: disclosure triangle, label, an
@@ -14,6 +14,8 @@ pub(crate) struct PanelSection {
     label: SharedString,
     expanded: bool,
     badge: Option<usize>,
+    badge_tooltip: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
+    on_badge_click: Option<Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     actions: Vec<AnyElement>,
     on_toggle: Option<Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     children: Vec<AnyElement>,
@@ -30,6 +32,8 @@ impl PanelSection {
             label: label.into(),
             expanded,
             badge: None,
+            badge_tooltip: None,
+            on_badge_click: None,
             actions: Vec::new(),
             on_toggle: None,
             children: Vec::new(),
@@ -38,6 +42,18 @@ impl PanelSection {
 
     pub(crate) fn badge(mut self, count: impl Into<Option<usize>>) -> Self {
         self.badge = count.into();
+        self
+    }
+
+    /// Makes the count badge itself actionable. The handler stops the click from reaching the
+    /// header row, which would otherwise fold the section instead.
+    pub(crate) fn on_badge_click(
+        mut self,
+        tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.badge_tooltip = Some(Box::new(tooltip));
+        self.on_badge_click = Some(Arc::new(handler));
         self
     }
 
@@ -99,12 +115,27 @@ impl RenderOnce for PanelSection {
                                     .single_line(),
                             )
                             .when_some(self.badge.filter(|count| *count > 0), |this, count| {
+                                let on_badge_click = self.on_badge_click;
                                 this.child(
                                     h_flex()
+                                        .id("badge")
                                         .flex_none()
                                         .px_1()
                                         .rounded_sm()
                                         .bg(cx.theme().colors().element_background)
+                                        .when_some(on_badge_click, |this, on_badge_click| {
+                                            this.cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(cx.theme().colors().element_hover)
+                                                })
+                                                .on_click(move |event, window, cx| {
+                                                    cx.stop_propagation();
+                                                    on_badge_click(event, window, cx);
+                                                })
+                                        })
+                                        .when_some(self.badge_tooltip, |this, tooltip| {
+                                            this.tooltip(tooltip)
+                                        })
                                         .child(
                                             Label::new(count.to_string())
                                                 .size(LabelSize::XSmall)

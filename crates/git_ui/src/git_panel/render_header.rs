@@ -1,13 +1,20 @@
 use super::*;
 
 impl GitPanel {
-    fn render_overflow_menu(&self, id: impl Into<ElementId>) -> impl IntoElement {
+    fn render_overflow_menu(
+        &self,
+        id: impl Into<ElementId>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let focus_handle = self.focus_handle.clone();
         let has_tracked_changes = self.has_tracked_changes();
         let has_staged_changes = self.has_staged_changes();
         let has_unstaged_changes = self.has_unstaged_changes();
         let has_new_changes = self.new_count > 0;
         let has_stash_items = self.stash_entries.entries.len() > 0;
+        let can_uncommit = self.can_uncommit(cx);
+        let show_branch_diff = self.show_branch_diff(cx);
+        let has_repository = self.active_repository.is_some();
 
         PopoverMenu::new(id.into())
             .trigger(
@@ -26,6 +33,9 @@ impl GitPanel {
                         sort_by_path: GitPanelSettings::get_global(cx).sort_by_path,
                         has_stash_items,
                         tree_view: GitPanelSettings::get_global(cx).tree_view,
+                        can_uncommit,
+                        show_branch_diff,
+                        has_repository,
                     },
                     window,
                     cx,
@@ -149,7 +159,7 @@ impl GitPanel {
             .child(
                 h_flex()
                     .gap_0p5()
-                    .child(self.render_overflow_menu("git-panel-title-overflow-menu"))
+                    .child(self.render_overflow_menu("git-panel-title-overflow-menu", cx))
                     .child(
                         IconButton::new("git-panel-toggle-zoom", IconName::Maximize)
                             .icon_size(IconSize::Small)
@@ -227,73 +237,8 @@ impl GitPanel {
                     this.restore_tracked_files(&RestoreTrackedFiles, window, cx);
                 }))
                 .into_any_element(),
-            self.render_overflow_menu("git-panel-changes-overflow-menu")
+            self.render_overflow_menu("git-panel-changes-overflow-menu", cx)
                 .into_any_element(),
         ]
-    }
-
-    pub(super) fn render_panel_header(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        self.active_repository.as_ref()?;
-
-        let (text, action, stage, tooltip) =
-            if self.total_staged_count() == self.entry_count && self.entry_count > 0 {
-                ("Unstage All", UnstageAll.boxed_clone(), false, "git reset")
-            } else {
-                ("Stage All", StageAll.boxed_clone(), true, "git add --all")
-            };
-
-        let change_string = match self.changes_count {
-            0 => "No Changes".to_string(),
-            1 => "1 Change".to_string(),
-            count => format!("{} Changes", count),
-        };
-
-        Some(
-            self.panel_header_container(window, cx)
-                .px_2()
-                .justify_between()
-                .child(
-                    panel_button(change_string)
-                        .color(Color::Muted)
-                        .tooltip(Tooltip::for_action_title_in(
-                            "Open Diff",
-                            &Diff,
-                            &self.focus_handle,
-                        ))
-                        .on_click(|_, _, cx| {
-                            cx.defer(|cx| {
-                                cx.dispatch_action(&Diff);
-                            })
-                        }),
-                )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(self.render_overflow_menu("overflow_menu"))
-                        .child(
-                            panel_filled_button(text)
-                                .tooltip(Tooltip::for_action_title_in(
-                                    tooltip,
-                                    action.as_ref(),
-                                    &self.focus_handle,
-                                ))
-                                .disabled(self.entry_count == 0)
-                                .on_click({
-                                    let git_panel = cx.weak_entity();
-                                    move |_, _, cx| {
-                                        git_panel
-                                            .update(cx, |git_panel, cx| {
-                                                git_panel.change_all_files_stage(stage, cx);
-                                            })
-                                            .ok();
-                                    }
-                                }),
-                        ),
-                ),
-        )
     }
 }
