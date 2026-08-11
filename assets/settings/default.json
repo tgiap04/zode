@@ -72,9 +72,10 @@
   // fractions of it -- `LabelSize::Default` is 0.875rem, `Small` 0.75rem,
   // `XSmall` 0.625rem -- so a row of text comes out at 0.75x this number.
   // Setting it to VS Code's own 13px therefore renders rows at 9.75px, a
-  // quarter smaller than the thing it was copied from. 17 puts rows at
-  // 12.75px and small print at 10.6px, which is what matching VS Code costs.
-  "ui_font_size": 17,
+  // quarter smaller than the thing it was copied from. 17 is where rows land
+  // on VS Code's 13px exactly; 15 is the chosen middle, putting rows at
+  // 11.25px and small print at 9.4px.
+  "ui_font_size": 15,
   // How much to fade out unused code.
   "unnecessary_code_fade": 0.3,
   // Active pane styling settings.

@@ -2591,6 +2591,8 @@ async fn test_commit_row_keeps_its_subject_beside_two_long_refs(cx: &mut TestApp
     let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(4)).await;
     let cx = &mut cx;
 
+    // Deliberately not the test store's default of 14, where 1.75rem works out to 24.5px and the
+    // old hardcoded graph row of 24px would land within a rounded pixel of it and pass.
     cx.update(|_, cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |settings| {
