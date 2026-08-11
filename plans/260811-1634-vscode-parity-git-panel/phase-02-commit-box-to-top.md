@@ -1,7 +1,7 @@
 # Phase 02 — Commit box lên top, giải tán footer
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-vscode-parity-git-panel.md)
-**Priority:** P2 · **Status:** pending · **Effort:** 3-4d · **Blocked by:** 01
+**Priority:** P2 · **Status:** completed · **Effort:** 3-4d · **Blocked by:** 01
 
 Miếng **A**, quyết định 2 (*chuyển hẳn* lên top, bỏ vị trí footer). Đây là phase mang **checklist tái định cư** (quyết định 8) — phần dễ gây regression thầm lặng nhất của cả plan.
 
@@ -87,17 +87,59 @@ Miếng **A**, quyết định 2 (*chuyển hẳn* lên top, bỏ vị trí foot
 
 ## Todo
 
-- [ ] Placeholder mang tên branch, có đường fallback
-- [ ] Nút Commit full-width primary split
-- [ ] Menu `⋯` nhận Uncommit + View Branch Diff + Open Git Graph
-- [ ] Commit editor + Commit + amend dời lên trên list
-- [ ] `render_previous_commit` xoá, `render_panel_header` xoá
-- [ ] `max_height` đúng cho chiều nở xuống
-- [ ] `render_empty_state` co lại
-- [ ] `Focusable` heuristic xét lại + comment lý do
-- [ ] Thứ tự tab đúng
-- [ ] **Cả 8 dòng checklist tái định cư bấm được**
-- [ ] Không nút `✨` (ghi lý do vào commit message)
+- [x] Placeholder mang tên branch, có đường fallback — `commit_placeholder_text`
+- [x] Nút Commit full-width primary split — `full_width()` + `ButtonStyle::Tinted(Accent)`
+- [x] Menu `⋯` nhận Uncommit + View Branch Diff + Open Git Graph
+- [x] Commit editor + Commit + amend dời lên trên list
+- [x] `render_panel_header` xoá; `render_previous_commit` xoá **nhưng** phần hiển thị giữ lại → `render_last_commit` (xem "Checklist thiếu một dòng")
+- [x] `max_height` đúng cho chiều nở xuống — tiền đề của plan sai, xem điều 1 dưới
+- [x] `render_empty_state` co lại
+- [x] `Focusable` heuristic xét lại + comment lý do
+- [x] Thứ tự tab đúng — title row → commit editor → nút Commit → list
+- [x] **9/9 dòng checklist tái định cư có đường bấm** (8 dòng của plan + 1 dòng plan bỏ sót)
+- [x] Không nút `✨`
+
+## Kết quả (2026-08-11)
+
+Clippy `--deny warnings` exit 0, **70/70 test xanh** (66 sau phase 01 + 4 mới).
+
+| File | Δ |
+|---|---|
+| `git_panel.rs` | +123 / −35 |
+| `git_panel/render_commit_box.rs` | +138 / −196 |
+| `git_panel/render_header.rs` | +13 / −68 |
+| `git_panel/render_entries.rs` | +10 / −27 |
+| `git_panel/panel_section.rs` | +32 / −1 |
+| `git_panel/tests.rs` | +189 |
+
+Bốn test mới: placeholder mang tên branch; placeholder rơi về `fallback_branch_name` khi chưa có branch; `cx.draw()` panel ở **ba** trạng thái (có entries / commit message 12 dòng / tree sạch → empty state); gating `show_branch_diff` lật khi HEAD rời `main`.
+
+### Bốn điều phase này dạy lại cho plan
+
+**1. Tiền đề "editor nở ngược chiều" sai — editor chưa từng nở.** Plan viết editor "ở footer nở *lên*; ở top nở *xuống*", và đặt `max_height` vào diện phải xét lại. Đọc code: `commit_message_editor` dựng `EditorMode::AutoHeight { min_lines: max_lines, max_lines: Some(max_lines) }` với `max_lines = MAX_PANEL_EDITOR_LINES = 6` → **min == max == 6, cao cố định 6 dòng, không nở chiều nào**. Cả phép tính `max_height + footer_size` và cờ `editor_is_long` chỉ để dựng một khung cố định.
+
+Việc thật phải làm không phải "sửa `max_height` cho chiều mới" mà là **cho editor nở lần đầu**: `min_lines: 1` khi ở panel (modal giữ 18/18). Đây đúng là điều success criteria đòi — "nở tới 6 dòng rồi tự scroll" — nên tiêu chí đúng, chỉ phần "Key insights" chẩn đoán sai nguyên nhân. Kèm theo: `panel_editor_container` bỏ `size_full()` → `w_full()`, vì chiều cao giờ do nội dung quyết.
+
+**2. Checklist thiếu một dòng — và thiếu đúng loại affordance dễ mất nhất.** Dòng 1 của checklist ghi "Row previous-commit + **Uncommit**" → nhà mới là menu `⋯`. Nhưng cái row đó làm **bốn** việc: hiện subject của commit cuối, click ra `CommitView`, hover ra `GitPanelMessageTooltip`, và nút Uncommit. Checklist chỉ theo dõi cái **bấm được** (Uncommit) và bỏ qua cái **hiển thị**. Xoá cả row theo bước 4 sẽ làm người dùng mất hẳn đường xem commit vừa tạo cho tới phase 04 — vi phạm chính quy tắc của plan: *"không affordance nào được xoá trước khi nhà mới của nó chạy được"*.
+
+Đã xử: tách `render_last_commit` — giữ subject + click + hover, **bỏ** hai nút đã có nhà mới. Đánh `// TODO(phase-04)`. `GitPanelMessageTooltip` do đó vẫn sống, không cần `#[allow(dead_code)]`.
+
+**Bài học cho phase 03–05:** checklist tái định cư phải kê cả affordance **hiển thị**, không chỉ nút. Một dòng "row X" thường gói nhiều việc hơn tên nó nói.
+
+**3. Gate của action handler không phải gate của menu entry.** `git_ui::git_panel::Open` chỉ được `git_graph` đăng ký qua `register_action_renderer` **khi có repo active**. Ở row cũ điều đó vô hình vì cả row đòi repo + branch + commit mới render. Đưa vào menu thì entry hiện vô điều kiện → bấm khi không có repo là no-op im lặng. Phải tự gate: `action_disabled_when(!has_repository, …)`. Phase 05 dời `Open Git Graph` sang toolbar section Graph sẽ gặp lại.
+
+**4. Placeholder đọc setting thì phải nghe setting.** `commit_placeholder_text` đọc `fallback_branch_name`, nhưng placeholder chỉ được viết lại từ `update_visible_entries` (do git-status kích). Observer `SettingsStore` chỉ theo dõi 5 field và không có field này → sửa setting mà panel không đổi cho tới lần git-status kế tiếp. Đã thêm vào danh sách theo dõi.
+
+### Lệch so với plan
+
+- **`show_branch_diff` bỏ điều kiện `changes_count == 0`.** Bản cũ (`should_show_branch_diff`) là `has_repo && changes_count == 0 && !is_on_main_branch` — điều kiện "không có change" gần như hiển nhiên vì nó là nút *của empty state*. Trong menu `⋯` thì gate theo "không có change" là vô lý (vừa sửa một file là mất entry), nên chỉ giữ `is_on_main_branch` như bước 3 của plan viết. **Có chủ đích.**
+- **Commit box nằm *trong* section `Changes`** theo yêu cầu 1 + sơ đồ của plan. Hệ quả: gập `Changes` là ẩn luôn commit box. Đúng spec, nhưng đáng xét lại ở phase sau — VSCode đặt message box *ngoài* mọi section.
+- **`Focusable` luôn trả `self.focus_handle`.** Lý do ghi thẳng trong comment: tiền đề cũ (empty state chiếm cả panel, commit box là đích duy nhất) đã mất; giữ context `GitPanel` sống thì mọi action panel bấm được ngay khi mở, `FocusEditor` cách một phím. Trả handle của editor sẽ **thu hẹp** context về `CommitEditor` và tắt các action của list.
+- `render_pending_amend` hạ từ `pub(super)` xuống `fn` — chỉ còn `render_commit_box` gọi.
+
+### Còn nợ mắt người
+
+`cx.draw()` chứng minh không panic ở ba trạng thái, kể cả message 12 dòng. Chưa khẳng định được bằng test: (a) editor nở 1→6 dòng trông đúng và không đẩy list mất khung ở panel thấp, (b) nút Commit full-width accent đọc ra "primary" trong cả light/dark theme, (c) thứ tự tab thật khi bấm Tab, (d) chín dòng checklist bấm tay — mỗi dòng đã truy được đường dispatch trong code, nhưng chưa ai bấm.
 
 ## Success criteria
 

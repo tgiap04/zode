@@ -35,7 +35,7 @@ Panel git mở từ rail có cấu trúc + hành vi của VSCode Source Control:
 |---|---|---|---|---|---|
 | 00 | [Tách git_panel.rs thành module](phase-00-extract-git-panel-modules.md) | — | 2-3d | **completed** | — |
 | 01 | [PanelSection + title row + zoom](phase-01-panel-section-and-title-row.md) | B | 2-3d | **completed** | 00 |
-| 02 | [Commit box lên top, giải tán footer](phase-02-commit-box-to-top.md) | A | 3-4d | pending | 01 |
+| 02 | [Commit box lên top, giải tán footer](phase-02-commit-box-to-top.md) | A | 3-4d | **completed** | 01 |
 | 03 | [Section Repositories](phase-03-repositories-section.md) | C | 2-3d | pending | 01 |
 | 04 | [Section Commits](phase-04-commits-section.md) | E | 3-4d | pending | 01 |
 | 05 | [Section Graph compact + crate `git_graph_core`](phase-05-graph-section-compact.md) | D | 6-8d | pending | 01, 04 |
@@ -67,7 +67,7 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 | # | Rủi ro | Phase | Đối phó |
 |---|---|---|---|
 | R1 | Hai vùng scroll lồng nhau (section Graph + Commits, trong panel cũng scroll) | 04, 05 | Section có chiều cao **cố định + resize handle**, không tự co giãn theo nội dung. Chứng minh ở 04 trước khi làm 05. |
-| R2 | Commit box đổi chỗ phá giả định của `Focusable for GitPanel` + `focus_changes_list` / `focus_editor` / `expand_commit_editor` | 02 | Rà cả 3 action + `Focusable` trong cùng phase; test focus order. |
+| R2 | Commit box đổi chỗ phá giả định của `Focusable for GitPanel` + `focus_changes_list` / `focus_editor` / `expand_commit_editor` | 02 | ✅ Đã xử: cả 3 action độc lập với element tree, không phải sửa. `Focusable` giờ luôn trả `focus_handle` — lý do ghi trong comment tại `impl Focusable for GitPanel`. |
 | R3 | Collapse state không persist → mở panel thấy 4 section bung ra, tệ hơn hiện tại | 01 | ✅ Đã xử: `Option<SectionCollapseState>` trên `SerializedGitPanel`, `#[serde(default)]` ở **cả hai** tầng nên blob cũ và blob thiếu field lẻ đều đọc được. Test đi qua kvp thật. |
 | R4 | Nhúng graph → `get_graph_data` chạy mỗi lần mở panel | 05 | Lazy: chỉ khởi tạo `Entity<GitGraph>` khi section Graph expand lần đầu. |
 | R5 | **Hai tầng header**: section `Changes` + group header `Tracked`/`Untracked` (`render_list_header`, đang là list entry có checkbox staging) | 01, 02 | Không xoá group header (nó mang checkbox staging). Giảm nhấn thị giác: group header nhỏ hơn, không có disclosure riêng. |
@@ -77,6 +77,14 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 ## Gate mỗi phase
 
 `./script/clippy` sạch · test `git_ui` (+ `git_graph` ở phase 05) xanh · panel dùng được thật sau mỗi phase.
+
+## Điều phase 02 sửa lại cho các phase sau
+
+- **Checklist tái định cư phải kê cả affordance *hiển thị*, không chỉ nút.** Dòng "row previous-commit" của phase 02 gói 4 việc; checklist chỉ theo dõi 1 (nút Uncommit) và suýt làm mất 3 việc còn lại. Phase 03 (`zode / main`, `Fetch`, `Initialize Repository`) và 05 (`Open Git Graph`) phải soi lại từng dòng theo cách này trước khi xoá gì.
+- **Gate của action handler ≠ gate của menu entry.** `git_ui::git_panel::Open` chỉ có handler khi có repo active. Ảnh hưởng phase 05 khi dời `Open Git Graph` sang toolbar section Graph.
+- **Đọc setting thì phải nghe `SettingsStore`.** Observer trong `GitPanel::new` chỉ theo dõi một danh sách field cố định; thêm chỗ đọc setting mới thì phải thêm field vào đó.
+- **`PanelRepoFooter` + `render_last_commit` đang ở chỗ tạm trong commit box.** Phase 03 nhận `PanelRepoFooter`, phase 04 nhận `render_last_commit`. Cả hai mang `// TODO(phase-0X)`.
+- **Commit box nằm trong section `Changes`** → gập `Changes` ẩn luôn commit box. Đúng spec phase 02; nếu phase sau muốn commit box thường trực thì phải nhấc ra ngoài mọi section.
 
 ## Điều phase 01 sửa lại cho các phase sau
 
