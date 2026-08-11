@@ -755,7 +755,15 @@ const MAX_REPOSITORY_ROWS_HEIGHT: Pixels = px(180.);
 const COMMITS_SECTION_DEFAULT_HEIGHT: Pixels = px(200.);
 const COMMITS_SECTION_MIN_HEIGHT: Pixels = px(80.);
 const COMMITS_SECTION_MAX_HEIGHT: Pixels = px(600.);
-const COMMITS_ROW_HEIGHT: Pixels = px(28.);
+/// The height of a row in any of the panel's lists.
+///
+/// In rems, so it tracks `ui_font_size` the way the `Changes` list and every section header already
+/// do — `rems(1.75)` is the unit all three already agree on. The `Commits` and `Graph` rows used to
+/// carry their own pixel constants, which pinned them to one density while the list directly above
+/// them grew with the font.
+fn panel_row_height(window: &Window) -> Pixels {
+    rems(1.75).to_pixels(window.rem_size())
+}
 /// The window of the log asked for when the section opens.
 ///
 /// This does NOT bound the fetch. `Repository::graph_data` uses the range only to slice what it
@@ -786,8 +794,6 @@ struct DraggedCommitsSectionHandle;
 /// Marks the drag that resizes the `Graph` section.
 #[derive(Clone)]
 pub(crate) struct DraggedGraphSectionHandle;
-
-const GRAPH_ROW_HEIGHT: Pixels = px(24.);
 
 /// Lives only while the `Commits` section has been expanded at least once — that absence is the
 /// laziness the panel relies on, since asking a repository for graph data is what starts the fetch
@@ -4444,7 +4450,7 @@ impl Render for GitPanel {
                                 )
                             }),
                     )
-                    .child(self.render_graph_section(cx))
+                    .child(self.render_graph_section(window, cx))
                     .child(self.render_commits_section(cx))
                     .into_any_element(),
             )

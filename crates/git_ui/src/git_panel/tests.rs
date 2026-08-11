@@ -2591,6 +2591,14 @@ async fn test_commit_row_keeps_its_subject_beside_two_long_refs(cx: &mut TestApp
     let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(4)).await;
     let cx = &mut cx;
 
+    cx.update(|_, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.theme.ui_font_size = Some(17.0.into());
+            });
+        })
+    });
+
     let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
     workspace
         .update_in(cx, |workspace, window, cx| {
@@ -2611,6 +2619,17 @@ async fn test_commit_row_keeps_its_subject_beside_two_long_refs(cx: &mut TestApp
     let subject = cx
         .debug_bounds("commit-row-with-refs-subject")
         .expect("that row must draw a subject");
+
+    // The row follows `ui_font_size` like the `Changes` list above it, rather than a pixel constant
+    // that leaves this section at one density while its neighbour grows with the font.
+    let rem_size = cx.update(|window, _| window.rem_size());
+    assert!(
+        (row.size.height - rem_size * 1.75).abs() <= px(1.),
+        "a commit row is {:?} tall at a rem of {:?}, so it no longer tracks the UI font size \
+         (1.75rem, rounded to whole pixels)",
+        row.size.height,
+        rem_size
+    );
 
     assert!(
         subject.size.width > px(0.),
@@ -2668,12 +2687,13 @@ async fn test_expanded_graph_section_lays_out_its_row_list(cx: &mut TestAppConte
         })
         .expect("the row list must reach layout, not be skipped entirely");
 
+    let section_height = panel.update_in(cx, |panel, _, _| panel.graph_section_height);
     assert!(
-        list_box.item.height >= GRAPH_ROW_HEIGHT,
-        "the graph row list was laid out {:?} tall, too short for even one {:?} row, so the \
-         section shows its lanes against an empty column",
+        list_box.item.height >= section_height - px(1.),
+        "the graph row list was laid out {:?} tall inside a {:?} section, so it shows its lanes \
+         against an empty column instead of the commits beside them",
         list_box.item.height,
-        GRAPH_ROW_HEIGHT
+        section_height
     );
     assert!(
         list_box.item.width > px(0.),

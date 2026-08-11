@@ -129,7 +129,11 @@ impl GitPanel {
         self.ensure_graph_loaded(cx);
     }
 
-    pub(super) fn render_graph_section(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_graph_section(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let expanded = self.section_expanded(PanelSectionKind::Graph);
 
         PanelSection::new("git-panel-graph-section", "Graph", expanded)
@@ -142,7 +146,7 @@ impl GitPanel {
                 self.render_graph_resize_handle(cx),
             )
             .when(expanded, |section| {
-                section.child(self.render_graph_rows(cx))
+                section.child(self.render_graph_rows(window, cx))
             })
             .into_any_element()
     }
@@ -190,7 +194,7 @@ impl GitPanel {
         ]
     }
 
-    fn render_graph_rows(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_graph_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(state) = self.graph_section.as_ref() else {
             return div().into_any_element();
         };
@@ -220,7 +224,7 @@ impl GitPanel {
         v_flex()
             .relative()
             .size_full()
-            .child(self.render_lane_canvas(lane_column_width, cx))
+            .child(self.render_lane_canvas(lane_column_width, window, cx))
             .child(
                 uniform_list(
                     "git-panel-graph",
@@ -266,12 +270,17 @@ impl GitPanel {
     }
 
     /// The lane graph itself, painted by the same function the graph tab uses.
-    fn render_lane_canvas(&self, lane_column_width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+    fn render_lane_canvas(
+        &self,
+        lane_column_width: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(state) = self.graph_section.as_ref() else {
             return div().into_any_element();
         };
 
-        let row_height = self.graph_row_height(cx);
+        let row_height = panel_row_height(window);
         let scroll_offset_y = -state.scroll_handle.0.borrow().base_handle.offset().y;
         let scroll_offset_y = scroll_offset_y.max(px(0.));
         let first_visible_row = (scroll_offset_y / row_height).floor() as usize;
@@ -332,19 +341,13 @@ impl GitPanel {
             .into_any_element()
     }
 
-    fn graph_row_height(&self, cx: &App) -> Pixels {
-        // Matches the row height the list below uses, or the lanes would drift from their subjects.
-        let _ = cx;
-        GRAPH_ROW_HEIGHT
-    }
-
     fn render_graph_row(
         &self,
         ix: usize,
         sha: git::Oid,
         lane_column_width: Pixels,
         repository: &Entity<Repository>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let data = repository.update(cx, |repository, cx| {
@@ -360,7 +363,7 @@ impl GitPanel {
 
         h_flex()
             .id(("graph-row", ix))
-            .h(GRAPH_ROW_HEIGHT)
+            .h(panel_row_height(window))
             .w_full()
             .items_center()
             .pr_2()

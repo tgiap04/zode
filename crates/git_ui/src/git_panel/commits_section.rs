@@ -265,7 +265,7 @@ impl GitPanel {
             .when(has_refs, |this| {
                 this.debug_selector(|| "commit-row-with-refs".into())
             })
-            .h(COMMITS_ROW_HEIGHT)
+            .h(panel_row_height(window))
             .w_full()
             .items_center()
             .px_2()
