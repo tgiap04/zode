@@ -1,0 +1,26 @@
+[package]
+name = "git_graph_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/git_graph_core.rs"
+
+[features]
+default = []
+# Exposes the child/parent oids on `CommitLine`, which only assertions need. They used to be
+# `#[cfg(test)]` while this code lived inside `git_graph`; across a crate boundary that no longer
+# reaches the consumer's tests, so it is a feature instead.
+test-support = []
+
+[dependencies]
+collections.workspace = true
+git.workspace = true
+gpui.workspace = true
+smallvec.workspace = true
+theme.workspace = true

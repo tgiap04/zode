@@ -534,6 +534,43 @@ mod tests {
         }
     }
 
+    /// Every other bundled family gives `element.background` a near-gray
+    /// surface, so pointing `element.disabled` at the same value costs nothing
+    /// -- disabled-ness reads from `text.disabled` and `icon.disabled` instead.
+    /// The 2026 families are the exception: they carry VS Code's
+    /// `button.background`, a saturated blue, on that token. Copying it onto
+    /// `element.disabled` there leaves a disabled button painted the full
+    /// primary color and looking live, and drags the same blue through
+    /// `Toggle`, `Icon` and the fallback `Avatar` disc. VS Code itself has no
+    /// disabled-button color to copy -- it dims with opacity -- which is
+    /// exactly why the importer reaches for the enabled one.
+    #[test]
+    fn the_2026_disabled_state_is_not_the_primary_color() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/themes/vscode-2026/vscode-2026.json");
+        let family = parse_family(&path);
+        assert!(!family.themes.is_empty(), "vscode-2026 defines no themes");
+
+        for theme in &family.themes {
+            let colors = &theme.style.colors;
+            let background = colors
+                .element_background
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no element.background", theme.name));
+            let disabled = colors
+                .element_disabled
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} has no element.disabled", theme.name));
+
+            assert_ne!(
+                disabled, background,
+                "{} paints element.disabled with element.background ({background}), the primary \
+                 button color, so a disabled button is indistinguishable from a live one",
+                theme.name
+            );
+        }
+    }
+
     /// The title bar and status bar are meant to read as one surface with the
     /// editor, with no rule between them. Upstream VS Code does not do this --
     /// its 2026 themes give the chrome its own near-identical shade -- so the
