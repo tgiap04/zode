@@ -392,6 +392,7 @@ impl GitPanel {
             .into_any_element()
     }
 
+    /// The section's top rule, with a hit area straddling it so the boundary itself is grabbable.
     fn render_graph_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("graph-section-resize-container")
@@ -416,8 +417,6 @@ impl GitPanel {
             .into_any_element()
     }
 
-    /// By delta, for the same reason the commits section resizes by delta: `event.bounds` belongs to
-    /// the element the listener sits on — the panel root — not to the handle being dragged.
     pub(super) fn resize_graph_section(
         &mut self,
         event: &gpui::DragMoveEvent<DraggedGraphSectionHandle>,
@@ -426,9 +425,8 @@ impl GitPanel {
     ) {
         let position = event.event.position.y;
         if let Some(previous) = self.graph_resize_drag_start {
-            let height = self.graph_section_height + (position - previous);
             self.graph_section_height =
-                height.clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT);
+                height_dragged_from_top_edge(self.graph_section_height, previous, position);
         }
         self.graph_resize_drag_start = Some(position);
         cx.notify();

@@ -21,7 +21,8 @@ pub(crate) struct PanelSection {
     /// A fixed content height. Set for sections whose content is unbounded (a commit log, a
     /// graph): they scroll inside this height instead of growing the panel.
     height: Option<Pixels>,
-    /// Rendered below the content, outside the fixed-height box, so it stays reachable.
+    /// Rendered on the section's top edge, above the header, so it sits on the boundary with the
+    /// section that gives up the space rather than against the bottom of the panel.
     resize_handle: Option<AnyElement>,
     badge_tooltip: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
     on_badge_click: Option<Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
@@ -120,10 +121,17 @@ impl RenderOnce for PanelSection {
         let content_id = ElementId::Name(format!("{}-content", self.id).into());
         let expanded = self.expanded;
         let on_toggle = self.on_toggle;
+        // Taken before the closures below capture the rest of `self`.
+        let resize_handle = self.resize_handle;
 
         v_flex()
             .w_full()
             .flex_none()
+            // On the section's own top edge, which is the boundary it shares with the section above
+            // — the section that yields the space. A handle under the content would put the last
+            // section's handle against the bottom of the panel, and would grow a section downwards
+            // while its top edge, the edge the pointer is on, stayed put.
+            .when(expanded, |this| this.children(resize_handle))
             .child(
                 h_flex()
                     .id(ElementId::Name(self.id))
@@ -208,7 +216,6 @@ impl RenderOnce for PanelSection {
                             .overflow_hidden()
                             .children(self.children),
                     )
-                    .children(self.resize_handle)
             })
     }
 }

@@ -336,6 +336,7 @@ impl GitPanel {
             .into_any_element()
     }
 
+    /// The section's top rule, with a hit area straddling it so the boundary itself is grabbable.
     fn render_commits_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("commits-section-resize-container")
@@ -360,12 +361,6 @@ impl GitPanel {
             .into_any_element()
     }
 
-    /// Resizes by pointer *delta*, not by distance from `event.bounds`.
-    ///
-    /// The listener is registered on the panel root, so `event.bounds` is the panel's bounds, not
-    /// the section's — measuring from its top would be off by the height of the title row and every
-    /// section above, which with the default layout pins the height at its maximum immediately.
-    /// A delta is independent of whose bounds GPUI reports.
     pub(super) fn resize_commits_section(
         &mut self,
         event: &DragMoveEvent<DraggedCommitsSectionHandle>,
@@ -374,9 +369,8 @@ impl GitPanel {
     ) {
         let position = event.event.position.y;
         if let Some(previous) = self.commits_resize_drag_start {
-            let height = self.commits_section_height + (position - previous);
             self.commits_section_height =
-                height.clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT);
+                height_dragged_from_top_edge(self.commits_section_height, previous, position);
         }
         self.commits_resize_drag_start = Some(position);
         cx.notify();

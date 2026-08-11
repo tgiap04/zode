@@ -765,6 +765,20 @@ const COMMITS_ROW_HEIGHT: Pixels = px(28.);
 /// to collapsed so nothing pays for it unasked.
 const COMMITS_SECTION_PAGE_SIZE: usize = 50;
 
+/// The height a section takes after its handle moves from `previous_y` to `position_y`.
+///
+/// The handle sits on the section's *top* edge, so dragging it up has to make the section taller:
+/// the section keeps its bottom edge and `Changes`, the one section that flexes, gives up the space
+/// above. Hence the delta is `previous - position`, not `position - previous`.
+///
+/// A delta rather than a distance from the handle's own position, because `on_drag_move` reports the
+/// bounds of the element the listener is registered on — the panel root — not the handle being
+/// dragged, so there is no reliable origin to measure from.
+fn height_dragged_from_top_edge(height: Pixels, previous_y: Pixels, position_y: Pixels) -> Pixels {
+    (height + (previous_y - position_y))
+        .clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT)
+}
+
 /// Marks the drag that resizes the `Commits` section.
 #[derive(Clone)]
 struct DraggedCommitsSectionHandle;

@@ -2551,6 +2551,33 @@ async fn test_expanding_graph_section_requests_the_log(cx: &mut TestAppContext) 
     );
 }
 
+/// The handle sits on the section's top edge, the boundary it shares with the section that yields
+/// the space, so dragging it up has to make the section taller. Under the content the opposite held,
+/// and the last section's handle landed against the bottom of the panel.
+#[test]
+fn test_a_section_grows_when_its_top_handle_is_dragged_up() {
+    assert_eq!(
+        height_dragged_from_top_edge(px(200.), px(500.), px(460.)),
+        px(240.),
+        "dragging the top edge 40px up must add 40px to the section"
+    );
+    assert_eq!(
+        height_dragged_from_top_edge(px(200.), px(500.), px(540.)),
+        px(160.),
+        "dragging the top edge down must take height away"
+    );
+    assert_eq!(
+        height_dragged_from_top_edge(px(100.), px(500.), px(900.)),
+        COMMITS_SECTION_MIN_HEIGHT,
+        "a drag past the floor stops at it"
+    );
+    assert_eq!(
+        height_dragged_from_top_edge(px(590.), px(500.), px(0.)),
+        COMMITS_SECTION_MAX_HEIGHT,
+        "a drag past the ceiling stops at it"
+    );
+}
+
 /// The tip of a branch carries two refs -- `HEAD -> <branch>` and `origin/<branch>` -- whose names
 /// together run wider than the panel. Chips that will not shrink take the subject's width first and
 /// the timestamp's next, and the row that should read as a commit reads as two blue labels and a
