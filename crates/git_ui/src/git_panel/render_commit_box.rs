@@ -91,11 +91,7 @@ impl GitPanel {
                             .h(footer_size)
                             .flex_none()
                             .justify_between()
-                            .child(
-                                h_flex()
-                                    .gap_0p5()
-                                    .child(self.render_commit_button(cx)),
-                            ),
+                            .child(h_flex().gap_0p5().child(self.render_commit_button(cx))),
                     )
                     .child(
                         div()

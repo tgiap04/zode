@@ -31,9 +31,8 @@ fn init_test(cx: &mut gpui::TestAppContext) {
 fn test_format_git_error_toast_message_prefers_raw_rpc_message() {
     let rpc_error = RpcError::from_proto(
         &proto::Error {
-            message:
-                "Your local changes to the following files would be overwritten by merge\n"
-                    .to_string(),
+            message: "Your local changes to the following files would be overwritten by merge\n"
+                .to_string(),
             code: proto::ErrorCode::Internal as i32,
             tags: Default::default(),
         },
@@ -51,9 +50,8 @@ fn test_format_git_error_toast_message_prefers_raw_rpc_message() {
 fn test_format_git_error_toast_message_prefers_raw_rpc_message_when_wrapped() {
     let rpc_error = RpcError::from_proto(
         &proto::Error {
-            message:
-                "Your local changes to the following files would be overwritten by merge\n"
-                    .to_string(),
+            message: "Your local changes to the following files would be overwritten by merge\n"
+                .to_string(),
             code: proto::ErrorCode::Internal as i32,
             tags: Default::default(),
         },
@@ -98,8 +96,7 @@ async fn test_entry_worktree_paths(cx: &mut TestAppContext) {
         ],
     );
 
-    let project =
-        Project::test(fs.clone(), [path!("/root/zed/crates/gpui").as_ref()], cx).await;
+    let project = Project::test(fs.clone(), [path!("/root/zed/crates/gpui").as_ref()], cx).await;
     let window_handle =
         cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
     let workspace = window_handle
@@ -855,9 +852,7 @@ async fn test_open_diff(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_tree_view_reveals_collapsed_parent_on_select_entry_by_path(
-    cx: &mut TestAppContext,
-) {
+async fn test_tree_view_reveals_collapsed_parent_on_select_entry_by_path(cx: &mut TestAppContext) {
     init_test(cx);
 
     let fs = FakeFs::new(cx.background_executor.clone());
@@ -949,8 +944,7 @@ async fn test_tree_view_reveals_collapsed_parent_on_select_entry_by_path(
         assert_eq!(state.expanded_dirs.get(&src_key).copied(), Some(false));
     });
 
-    let worktree_id =
-        cx.read(|cx| project.read(cx).worktrees(cx).next().unwrap().read(cx).id());
+    let worktree_id = cx.read(|cx| project.read(cx).worktrees(cx).next().unwrap().read(cx).id());
     let project_path = ProjectPath {
         worktree_id,
         path: RelPath::unix("src/a/foo.rs").unwrap().into_arc(),
@@ -980,9 +974,7 @@ async fn test_tree_view_reveals_collapsed_parent_on_select_entry_by_path(
 }
 
 #[gpui::test]
-async fn test_tree_view_select_next_at_last_visible_collapsed_directory(
-    cx: &mut TestAppContext,
-) {
+async fn test_tree_view_select_next_at_last_visible_collapsed_directory(cx: &mut TestAppContext) {
     init_test(cx);
 
     let fs = FakeFs::new(cx.background_executor.clone());

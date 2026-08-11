@@ -77,8 +77,8 @@ use workspace::{
 };
 
 mod render_commit_box;
-mod render_header;
 mod render_entries;
+mod render_header;
 
 actions!(
     git_panel,
