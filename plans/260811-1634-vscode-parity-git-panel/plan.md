@@ -37,7 +37,7 @@ Panel git mở từ rail có cấu trúc + hành vi của VSCode Source Control:
 | 01 | [PanelSection + title row + zoom](phase-01-panel-section-and-title-row.md) | B | 2-3d | **completed** | 00 |
 | 02 | [Commit box lên top, giải tán footer](phase-02-commit-box-to-top.md) | A | 3-4d | **completed** | 01 |
 | 03 | [Section Repositories](phase-03-repositories-section.md) | C | 2-3d | **completed** | 01 |
-| 04 | [Section Commits](phase-04-commits-section.md) | E | 3-4d | pending | 01 |
+| 04 | [Section Commits](phase-04-commits-section.md) | E | 3-4d | **completed** | 01 |
 | 05 | [Section Graph compact + crate `git_graph_core`](phase-05-graph-section-compact.md) | D | 6-8d | pending | 01, 04 |
 
 Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01. Phase 05 đi sau 04 vì hai section này dùng cùng một cơ chế lazy-load + fixed-height + resize handle; làm 04 trước để cơ chế đó được chứng minh trên section rẻ hơn.
@@ -69,7 +69,7 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 | R1 | Hai vùng scroll lồng nhau (section Graph + Commits, trong panel cũng scroll) | 04, 05 | Section có chiều cao **cố định + resize handle**, không tự co giãn theo nội dung. Chứng minh ở 04 trước khi làm 05. **Phase 03 đã dựng nửa cơ chế:** `fills_height()` opt-in + `max_h` & `overflow_y_scroll` trên `Repositories`. 04/05 **không** gọi `fills_height()`. |
 | R2 | Commit box đổi chỗ phá giả định của `Focusable for GitPanel` + `focus_changes_list` / `focus_editor` / `expand_commit_editor` | 02 | ✅ Đã xử: cả 3 action độc lập với element tree, không phải sửa. `Focusable` giờ luôn trả `focus_handle` — lý do ghi trong comment tại `impl Focusable for GitPanel`. |
 | R3 | Collapse state không persist → mở panel thấy 4 section bung ra, tệ hơn hiện tại | 01 | ✅ Đã xử: `Option<SectionCollapseState>` trên `SerializedGitPanel`, `#[serde(default)]` ở **cả hai** tầng nên blob cũ và blob thiếu field lẻ đều đọc được. Test đi qua kvp thật. |
-| R4 | Nhúng graph → `get_graph_data` chạy mỗi lần mở panel | 05 | Lazy: chỉ khởi tạo `Entity<GitGraph>` khi section Graph expand lần đầu. |
+| R4 | Nhúng graph → `get_graph_data` chạy mỗi lần mở panel | 05 | ✅ Cơ chế đã chứng minh ở phase 04: `graph_data` (kích fetch) chỉ gọi từ đường expand, render chỉ dùng `get_graph_data` (không kích); có test khẳng định gập ⇒ cache vẫn rỗng. `graph` **và** `commits` đều mặc định gập vì fetch không chặn được từ `git_ui`. |
 | R5 | **Hai tầng header**: section `Changes` + group header `Tracked`/`Untracked` (`render_list_header`, đang là list entry có checkbox staging) | 01, 02 | Không xoá group header (nó mang checkbox staging). Giảm nhấn thị giác: group header nhỏ hơn, không có disclosure riêng. |
 | R6 | Phase 00 là diff lớn dạng no-op → khó review | 00 | ✅ Đã xử: 5 commit riêng, clippy + 60/60 test xanh giữa mỗi commit. |
 | R7 | Hàm mới đặt trong submodule của `git_panel` mà được gọi từ `git_panel.rs` sẽ **không compile** — cha không thấy private của con | 01–05 | Đánh `pub(super)`. Không phải nới visibility: mức hiệu dụng y hệt `fn` trần trong module cha. Chi tiết trong phase 00 → "Hai điều phase này dạy lại cho plan". |
@@ -77,6 +77,17 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 ## Gate mỗi phase
 
 `./script/clippy` sạch · test `git_ui` (+ `git_graph` ở phase 05) xanh · panel dùng được thật sau mỗi phase.
+
+## Điều phase 04 sửa lại cho phase 05 — đọc trước khi làm Graph
+
+Phase 05 dùng lại đúng cơ chế phase 04 vừa dựng, nên bốn điều dưới đây áp dụng trực tiếp:
+
+- **`Repository::graph_data` = kích fetch · `Repository::get_graph_data` = chỉ đọc cache.** Render **chỉ** được gọi cái thứ hai. Đây là cách R4 kiểm được bằng test, không phải bằng lời.
+- **Dữ liệu dòng nằm ở hai tầng.** `graph_data` cho topology (`sha`, `parents`, `ref_names`); subject/author/time phải lấy riêng qua `fetch_commit_data(sha)` theo từng dòng. Section Graph cần **cùng** cả hai — và nó chia **chung cache** với section Commits, nên mở Graph khi Commits đã mở là gần như miễn phí.
+- **Invalidate vô điều kiện trên `HeadChanged`/`BranchListChanged`.** `Repository` xoá sạch `initial_graph_data` ở đó, kể cả khi tên branch không đổi. So tên branch để bỏ qua = section treo mãi. Xem điều 1 của phase 04.
+- **`on_drag_move` trả `event.bounds` của element đăng ký listener**, không phải element bị kéo → resize phải tính theo **delta**, không theo khoảng cách tới `bounds.top()`.
+- **`fixed_height()` chỉ `overflow_hidden`, nội dung tự scroll.** `fills_height()` và `fixed_height()` loại trừ nhau (có `debug_assert!`). Graph là fixed-height, **không** gọi `fills_height()`.
+- **Việc còn nợ, ngoài phạm vi `git_ui`:** fetch của `initial_graph_data` chạy `git log` **không `--max-count`** → luôn stream cả history; `commit_data: HashMap<Oid, …>` không evict. Vì thế `commits` **và** `graph` đều mặc định gập. Cap thật cần sửa `crates/git` + `crates/project`.
 
 ## Điều phase 03 sửa lại cho các phase sau
 

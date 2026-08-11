@@ -1,7 +1,7 @@
 # Phase 04 — Section `Commits`
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-vscode-parity-git-panel.md)
-**Priority:** P2 · **Status:** pending · **Effort:** 3-4d · **Blocked by:** 01
+**Priority:** P2 · **Status:** completed · **Effort:** 3-4d · **Blocked by:** 01
 
 Miếng **E** — bản Zode của section GitLens `COMMITS`. **Backend đã đủ, đây thuần là UI.** Phase này cũng là nơi **chứng minh cơ chế fixed-height + lazy-load** trước khi phase 05 dùng lại nó cho Graph (đối phó R1/R4 ở chỗ rẻ hơn).
 
@@ -91,17 +91,60 @@ struct CommitsSectionState {
 
 ## Todo
 
-- [ ] `PanelSection` có fixed height + resize handle, height persist
-- [ ] `CommitsSectionState`, `_load_task` drop = cancel
-- [ ] Lazy load chỉ từ đường expand
-- [ ] Dòng tracking status, đủ 4 nhánh (up-to-date / ahead-behind / Gone / None)
-- [ ] Commit row: avatar + subject + thời gian tương đối + chip ref name
-- [ ] Phân trang load-more theo khuôn `file_history_view`
-- [ ] Click row mở `CommitView`
-- [ ] Re-load khi branch đổi
-- [ ] Cap bộ nhớ, có comment lý do
-- [ ] **Test: gập ⇒ không load** (đây là cái phase 05 dựa vào)
-- [ ] Nhãn section mang tên branch
+- [x] `PanelSection` có fixed height + resize handle, height persist — `fixed_height(height, handle)`
+- [x] `CommitsSectionState` — **không** cần `_load_task`, xem điều 2
+- [x] Lazy load chỉ từ đường expand (+ đường `update_visible_entries`, vẫn ngoài render)
+- [x] Dòng tracking status, đủ 4 nhánh — tách thành fn thuần `tracking_status_label`, test trực tiếp
+- [x] Commit row: avatar + subject + thời gian tương đối + chip ref name
+- [ ] **Phân trang load-more — KHÔNG làm được từ `git_ui`.** Backend bỏ qua `range`; xem điều 3
+- [x] Click row mở `CommitView`
+- [x] Re-load khi branch đổi — và khi HEAD đổi *trên cùng branch*, xem điều 1
+- [x] Cap bộ nhớ, có comment lý do — không giữ bản copy nào; nhưng cache của repo vẫn không chặn, xem điều 3
+- [x] **Test: gập ⇒ không load** — khẳng định thẳng vào cache của repository
+- [x] Nhãn section mang tên branch
+
+## Kết quả (2026-08-11)
+
+Clippy `--deny warnings` exit 0, **80/80 test xanh** (75 sau phase 03 + 5 mới). `cargo check -p git_graph` xanh.
+
+| File | Δ |
+|---|---|
+| `git_panel/commits_section.rs` | +335 (mới) |
+| `git_panel.rs` | +162 / −7 |
+| `git_panel/panel_section.rs` | +32 |
+| `git_panel/tests.rs` | +289 / −4 |
+
+Năm test mới: 4 nhánh tracking status (fn thuần, 6 assertion); gập ⇒ **không** hỏi log (khẳng định thẳng `get_graph_data(...).is_none()`, sau khi đã vẽ panel lúc gập); expand ⇒ hỏi đúng một lần, gọi lại là no-op; invalidate **không** được bỏ qua khi tên branch không đổi; chiều cao section round-trip + bị clamp khi ngoài khoảng.
+
+### Bốn điều phase này dạy lại cho plan
+
+**1. `HeadChanged` xoá *cả* cache graph, kể cả khi tên branch không đổi — nên không được so tên branch để quyết định invalidate.** `Repository` có `subscribe_self`: `HeadChanged | BranchListChanged` → `initial_graph_data.clear()`. **Commit trên đúng branch đang đứng cũng phát `HeadChanged`.** Bản đầu của tôi so `loaded_for_branch == current_branch`, thấy giống nhau nên `return` → cache đã bị xoá mà marker vẫn nói "đã tải" → `ensure_commits_loaded` short-circuit **mãi mãi**, section treo ở "Loading commits…" và gập/mở lại không cứu được. Review bắt được; `git_graph.rs:1161` đã làm đúng từ trước (invalidate vô điều kiện trên `HeadChanged`). Bài học chung: **khi dùng chung một cache với module khác, đọc cách module đó xử lý event trước khi tự viết.**
+
+**2. Cấu trúc backend khác hẳn điều "Key insights" của plan viết.** Plan lập bảng "Field cho mỗi dòng: `GraphCommitData { …, author_name, commit_timestamp, subject }`" và coi `get_graph_data` là đường lấy dữ liệu dòng. Thực tế **hai tầng**:
+
+| Tầng | API | Nội dung |
+|---|---|---|
+| Topology | `Repository::graph_data(source, order, range, cx)` — **gọi là bắt đầu fetch** | `InitialGraphCommitData { sha, parents, ref_names }` — **không có** subject/author/time |
+| Hiển thị | `Repository::fetch_commit_data(sha, cx)` — theo từng sha | `GraphCommitData { subject, author_name, commit_timestamp, … }` |
+
+Cộng thêm `Repository::get_graph_data(source, order)` — đọc cache **không** kích fetch. Chính cặp `graph_data` (kích) / `get_graph_data` (không kích) là thứ làm R4 kiểm được: render **chỉ** dùng `get_graph_data`, `graph_data` chỉ gọi từ đường expand. Hệ quả tốt: không cần `_load_task` như plan thiết kế — task nằm trong cache của repository, không phải của panel, nên cũng không có chuyện "drop = cancel" phải quản.
+
+**3. Phân trang không làm được từ `git_ui`, và cache không chặn là vấn đề thật.** `graph_data` nhận `range` nhưng **chỉ dùng để cắt phần trả về**; fetch nó khởi động chạy `git log` **không có `--max-count`** → luôn stream *toàn bộ* history của branch vào `initial_graph_data`. Nên `COMMITS_SECTION_PAGE_SIZE` là vô hiệu, và yêu cầu 7 (phân trang) + bước 9 (cap bộ nhớ) **không thể** đạt bằng cách sửa trong `git_ui`.
+
+Đã xử phần làm được: **`commits` mặc định gập** (như `graph`), để không panel nào phải trả giá cả history khi mới mở. Trước đó phase 01 để `commits` mở sẵn — lúc đó chưa biết fetch là không chặn. Phần còn lại (`--max-count` cho fetch, evict `commit_data`) là việc ở `crates/git` + `crates/project`, ghi lại thành việc cần làm.
+
+**4. `on_drag_move` cho `event.bounds` của element *đăng ký listener*, không phải element bị kéo.** Listener nằm ở root của panel, nên `event.bounds.top()` là đỉnh **panel**, không phải đỉnh section — tính `height = position.y - bounds.top()` sẽ lệch đúng bằng chiều cao của title row + mọi section phía trên, và với layout mặc định thì kẹp ngay vào max 600px. Đã đổi sang **resize theo delta** (`commits_resize_drag_start`), độc lập với bounds của ai. Tiền lệ `workspace.rs` (`previous_dock_drag_coordinates`) cũng làm vậy. **Phase 05 dùng lại `fixed_height` sẽ gặp lại điều này.**
+
+### Lệch so với plan
+
+- **Nested scroll:** `uniform_list` dùng `flex_1()` (không `h_full()`), và hộp `fixed_height` chỉ `overflow_hidden()` — **không** `overflow_y_scroll()`. Hai vùng scroll lồng nhau chính là R1; `file_history_view` cũng chỉ để `uniform_list` tự lo scroll.
+- **Lỗi `git log` hiện ra UI** (`branch_log_error` → nhãn `Color::Error`) thay vì treo "Loading…". `git_graph` còn để `todo!()` chỗ này; CLAUDE.md đòi lỗi phải tới được UI.
+- `fills_height()` và `fixed_height()` có `debug_assert!` chặn dùng cả hai — phase 05 là caller tiếp theo của đúng API này.
+- Nhãn dòng status: `Up to date with <remote>` / `↑N ahead of <remote>` / `↓M behind <remote>` / `↑N ↓M — <remote>` / `Upstream gone` / `No upstream`. Plan chỉ ghi 4 nhánh; tách ahead-only và behind-only ra thành hai câu riêng đọc rõ hơn `↑N ↓M` với một số bằng 0.
+
+### Còn nợ mắt người
+
+(a) kéo resize handle có mượt và đúng chiều không (đã sửa phép tính, nhưng chưa ai kéo), (b) commit row đọc được ở panel hẹp không — avatar + chip + subject + thời gian trên một dòng 28px, (c) "Loading commits…" xuất hiện bao lâu trên repo lớn, (d) section gập mặc định có làm người dùng không biết nó tồn tại không.
 
 ## Success criteria
 
