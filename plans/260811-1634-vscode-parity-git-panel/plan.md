@@ -36,7 +36,7 @@ Panel git mở từ rail có cấu trúc + hành vi của VSCode Source Control:
 | 00 | [Tách git_panel.rs thành module](phase-00-extract-git-panel-modules.md) | — | 2-3d | **completed** | — |
 | 01 | [PanelSection + title row + zoom](phase-01-panel-section-and-title-row.md) | B | 2-3d | **completed** | 00 |
 | 02 | [Commit box lên top, giải tán footer](phase-02-commit-box-to-top.md) | A | 3-4d | **completed** | 01 |
-| 03 | [Section Repositories](phase-03-repositories-section.md) | C | 2-3d | pending | 01 |
+| 03 | [Section Repositories](phase-03-repositories-section.md) | C | 2-3d | **completed** | 01 |
 | 04 | [Section Commits](phase-04-commits-section.md) | E | 3-4d | pending | 01 |
 | 05 | [Section Graph compact + crate `git_graph_core`](phase-05-graph-section-compact.md) | D | 6-8d | pending | 01, 04 |
 
@@ -66,7 +66,7 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 
 | # | Rủi ro | Phase | Đối phó |
 |---|---|---|---|
-| R1 | Hai vùng scroll lồng nhau (section Graph + Commits, trong panel cũng scroll) | 04, 05 | Section có chiều cao **cố định + resize handle**, không tự co giãn theo nội dung. Chứng minh ở 04 trước khi làm 05. |
+| R1 | Hai vùng scroll lồng nhau (section Graph + Commits, trong panel cũng scroll) | 04, 05 | Section có chiều cao **cố định + resize handle**, không tự co giãn theo nội dung. Chứng minh ở 04 trước khi làm 05. **Phase 03 đã dựng nửa cơ chế:** `fills_height()` opt-in + `max_h` & `overflow_y_scroll` trên `Repositories`. 04/05 **không** gọi `fills_height()`. |
 | R2 | Commit box đổi chỗ phá giả định của `Focusable for GitPanel` + `focus_changes_list` / `focus_editor` / `expand_commit_editor` | 02 | ✅ Đã xử: cả 3 action độc lập với element tree, không phải sửa. `Focusable` giờ luôn trả `focus_handle` — lý do ghi trong comment tại `impl Focusable for GitPanel`. |
 | R3 | Collapse state không persist → mở panel thấy 4 section bung ra, tệ hơn hiện tại | 01 | ✅ Đã xử: `Option<SectionCollapseState>` trên `SerializedGitPanel`, `#[serde(default)]` ở **cả hai** tầng nên blob cũ và blob thiếu field lẻ đều đọc được. Test đi qua kvp thật. |
 | R4 | Nhúng graph → `get_graph_data` chạy mỗi lần mở panel | 05 | Lazy: chỉ khởi tạo `Entity<GitGraph>` khi section Graph expand lần đầu. |
@@ -77,6 +77,13 @@ Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01.
 ## Gate mỗi phase
 
 `./script/clippy` sạch · test `git_ui` (+ `git_graph` ở phase 05) xanh · panel dùng được thật sau mỗi phase.
+
+## Điều phase 03 sửa lại cho các phase sau
+
+- **`PanelSection::fills_height()` là opt-in — chỉ `Changes` gọi.** Nếu phase 04/05 để `Commits`/`Graph` cũng `fills_height()` thì các section chia nhau chiều cao panel. Theo plan hai section đó **cao cố định + resize handle**, nên **không** gọi nó.
+- **Section cao tự nhiên phải có nắp.** `Repositories` giới hạn 5 row + `overflow_y_scroll`. Vì `Changes` là con duy nhất co được, bất kỳ section nào cao không giới hạn đều bóp `Changes` về 0. Ảnh hưởng trực tiếp R1.
+- **Kiểm scope từng affordance trước khi đặt lên row/section không-active.** `set_as_active_repository` và `branch_picker::popover` nhận repo tường minh → scope được. `git::Fetch`/`Push`/`Pull` dispatch toàn cục, giải về `self.active_repository` → **không** scope được. Phase 05 (`Open Git Graph` sang toolbar section Graph) gặp lại đúng câu hỏi này.
+- **Việc còn nợ, tách khỏi phase 03:** (1) emit event khi `work_directory_abs_path` đổi trong `crates/project/src/git_store.rs` để thứ tự row không lệch sau một lần rename lặng; (2) đổi `GitPanel::fetch`/`push`/`pull`/`stash_*` sang nhận repo tường minh — mở đường cho menu `⋯` mỗi row (yêu cầu 6 của phase 03).
 
 ## Điều phase 02 sửa lại cho các phase sau
 
