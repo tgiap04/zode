@@ -3,40 +3,15 @@ use super::*;
 impl GitPanel {
     /// A thin line under the commit box, not a full-panel splash: the commit box is always
     /// present above it now, so this no longer owns the panel's empty space.
-    pub(super) fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_no_repo = self.active_repository.is_none();
-        let worktree_count = self.project.read(cx).visible_worktrees(cx).count();
-
-        let label = if has_no_repo {
-            "No Git repositories"
-        } else {
-            "No changes to commit"
-        };
-
-        v_flex()
-            .w_full()
-            .flex_none()
-            .gap_1p5()
-            .px_2()
-            .py_1p5()
-            .items_center()
-            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
-            // TODO(phase-03): moves into the Repositories section.
-            .when(has_no_repo && worktree_count > 0, |this| {
-                this.child(
-                    panel_filled_button("Initialize Repository")
-                        .tooltip(Tooltip::for_action_title_in(
-                            "git init",
-                            &git::Init,
-                            &self.focus_handle,
-                        ))
-                        .on_click(move |_, _, cx| {
-                            cx.defer(move |cx| {
-                                cx.dispatch_action(&git::Init);
-                            })
-                        }),
-                )
-            })
+    ///
+    /// The no-repository case belongs to the `Repositories` section, which carries
+    /// `Initialize Repository`; this only ever speaks about changes.
+    pub(super) fn render_empty_state(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex().w_full().flex_none().px_2().py_1p5().child(
+            Label::new("No changes to commit")
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
     }
 
     pub(super) fn render_entries(

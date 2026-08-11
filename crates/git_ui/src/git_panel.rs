@@ -8,7 +8,6 @@ use crate::remote_output::{self, RemoteAction, SuccessMessage};
 use crate::{branch_picker, picker_prompt, render_remote_button};
 use crate::{
     file_history_view::FileHistoryView, git_panel_settings::GitPanelSettings, git_status_icon,
-    repository_selector::RepositorySelector,
 };
 use alacritty_terminal::vte::ansi;
 use anyhow::Context as _;
@@ -35,10 +34,10 @@ use git::{
     StashApply, StashPop, TrashUntrackedFiles, UnstageAll,
 };
 use gpui::{
-    Action, Anchor, AsyncWindowContext, Bounds, ClickEvent, DismissEvent, Empty, Entity,
-    EventEmitter, FocusHandle, Focusable, KeyContext, MouseButton, MouseDownEvent, Point,
-    PromptLevel, ScrollStrategy, Subscription, Task, TextStyle, UniformListScrollHandle,
-    WeakEntity, actions, anchored, deferred, point, size, uniform_list,
+    Action, Anchor, AsyncWindowContext, Bounds, ClickEvent, DismissEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, KeyContext, MouseButton, MouseDownEvent, Point, PromptLevel,
+    ScrollStrategy, Subscription, Task, TextStyle, UniformListScrollHandle, WeakEntity, actions,
+    anchored, deferred, point, size, uniform_list,
 };
 use itertools::Itertools;
 use language::{Buffer, File};
@@ -721,6 +720,10 @@ pub struct GitPanel {
     stash_entries: GitStash,
     section_collapse: SectionCollapseState,
     zoomed: bool,
+    /// `GitStore::repositories()` is a `HashMap`, so iterating it directly would reshuffle the
+    /// Repositories section on every render. This is rebuilt off the render path, on the events
+    /// that change the repository set.
+    sorted_repo_ids: Vec<RepositoryId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -730,6 +733,9 @@ struct BulkStaging {
 }
 
 const MAX_PANEL_EDITOR_LINES: usize = 6;
+
+/// Five rows of `RepositoryRow`, which is `px(36.)` tall.
+const MAX_REPOSITORY_ROWS_HEIGHT: Pixels = px(180.);
 
 pub(crate) fn commit_message_editor(
     commit_message_buffer: Entity<Buffer>,
@@ -856,7 +862,14 @@ impl GitPanel {
                     | GitStoreEvent::RepositoryAdded
                     | GitStoreEvent::RepositoryRemoved(_)
                     | GitStoreEvent::ActiveRepositoryChanged(_) => {
+                        this.update_sorted_repo_ids(cx);
                         this.schedule_update(window, cx);
+                    }
+                    // A repository's work directory can move under it, which changes the name the
+                    // row sorts by. That arrives as an ordinary update — of any kind, on any
+                    // repository — so the sort cannot be narrowed to the arms above.
+                    GitStoreEvent::RepositoryUpdated(_, _, _) => {
+                        this.update_sorted_repo_ids(cx);
                     }
                     GitStoreEvent::IndexWriteError(error) => {
                         this.workspace
@@ -865,7 +878,6 @@ impl GitPanel {
                             })
                             .ok();
                     }
-                    GitStoreEvent::RepositoryUpdated(_, _, _) => {}
                     GitStoreEvent::JobsUpdated | GitStoreEvent::ConflictsUpdated => {}
                 },
             )
@@ -909,8 +921,10 @@ impl GitPanel {
                 stash_entries: Default::default(),
                 section_collapse: SectionCollapseState::default(),
                 zoomed: false,
+                sorted_repo_ids: Vec::new(),
             };
 
+            this.update_sorted_repo_ids(cx);
             this.schedule_update(window, cx);
             this
         })
@@ -1036,6 +1050,30 @@ impl GitPanel {
             )
             .await;
         });
+    }
+
+    /// Sorted by the name the row actually shows, with the work directory breaking ties between
+    /// repositories that share a directory basename, so the order is total and does not depend on
+    /// hash iteration.
+    fn update_sorted_repo_ids(&mut self, cx: &mut Context<Self>) {
+        let git_store = self.project.read(cx).git_store().read(cx);
+        let mut repos = git_store
+            .repositories()
+            .iter()
+            .map(|(id, repo)| {
+                let repo = repo.read(cx);
+                (
+                    repo.display_name(),
+                    repo.work_directory_abs_path.clone(),
+                    *id,
+                )
+            })
+            .collect::<Vec<_>>();
+        repos.sort_unstable();
+
+        self.sorted_repo_ids.clear();
+        self.sorted_repo_ids
+            .extend(repos.into_iter().map(|(_, _, id)| id));
     }
 
     fn section_expanded(&self, kind: PanelSectionKind) -> bool {
@@ -4164,8 +4202,10 @@ impl Render for GitPanel {
                 v_flex()
                     .size_full()
                     .child(self.render_title_row(window, cx))
+                    .child(self.render_repositories_section(cx))
                     .child(
                         PanelSection::new("git-panel-changes-section", "Changes", changes_expanded)
+                            .fills_height()
                             .badge(self.changes_count)
                             .on_badge_click(
                                 {
@@ -4191,24 +4231,17 @@ impl Render for GitPanel {
                             // section elements it then throws away.
                             .when(changes_expanded, |section| {
                                 section.children(self.render_commit_box(window, cx)).map(
-                                    |section| {
-                                        if let Some(repo) = self.active_repository.clone()
-                                            && has_entries
-                                        {
-                                            section.child(
-                                                self.render_entries(
-                                                    has_write_access,
-                                                    repo,
-                                                    window,
-                                                    cx,
-                                                )
+                                    |section| match self.active_repository.clone() {
+                                        Some(repo) if has_entries => section.child(
+                                            self.render_entries(has_write_access, repo, window, cx)
                                                 .into_any_element(),
-                                            )
-                                        } else {
-                                            section.child(
-                                                self.render_empty_state(cx).into_any_element(),
-                                            )
-                                        }
+                                        ),
+                                        Some(_) => section
+                                            .child(self.render_empty_state(cx).into_any_element()),
+                                        // With no repository at all, the Repositories section
+                                        // already says so; adding "No changes to commit" below it
+                                        // would only contradict that.
+                                        None => section,
                                     },
                                 )
                             }),
@@ -4455,11 +4488,20 @@ impl Render for GitPanelMessageTooltip {
     }
 }
 
+/// One row of the `Repositories` section: the repository's name, its branch selector, and — on the
+/// active row only — the remote button.
+///
+/// The branch selector is per-row because `branch_picker::popover` takes the repository it should
+/// act on. The remote button is not: `git::Fetch`, `git::Push` and `git::Pull` are dispatched
+/// globally and resolve against the *active* repository, so putting one on an inactive row would
+/// fetch the wrong repository. Clicking the row activates it, which is what makes it appear.
 #[derive(IntoElement, RegisterComponent)]
-pub struct PanelRepoFooter {
+pub struct RepositoryRow {
     active_repository: SharedString,
     branch: Option<Branch>,
     head_commit: Option<CommitDetails>,
+    repo: Option<Entity<Repository>>,
+    is_active: bool,
 
     // Getting a GitPanel in previews will be difficult.
     //
@@ -4467,51 +4509,48 @@ pub struct PanelRepoFooter {
     git_panel: Option<Entity<GitPanel>>,
 }
 
-impl PanelRepoFooter {
+impl RepositoryRow {
     pub fn new(
         active_repository: SharedString,
         branch: Option<Branch>,
         head_commit: Option<CommitDetails>,
+        repo: Entity<Repository>,
+        is_active: bool,
         git_panel: Option<Entity<GitPanel>>,
     ) -> Self {
         Self {
             active_repository,
             branch,
             head_commit,
+            repo: Some(repo),
+            is_active,
             git_panel,
         }
     }
 
+    /// Previews have no repository to switch to, so they render as the active row.
     pub fn new_preview(active_repository: SharedString, branch: Option<Branch>) -> Self {
         Self {
             active_repository,
             branch,
             head_commit: None,
+            repo: None,
+            is_active: true,
             git_panel: None,
         }
     }
 }
 
-impl RenderOnce for PanelRepoFooter {
+impl RenderOnce for RepositoryRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let project = self
+        let workspace = self
             .git_panel
             .as_ref()
-            .map(|panel| panel.read(cx).project.clone());
+            .map(|panel| panel.read(cx).workspace.clone());
 
-        let (workspace, repo) = self
-            .git_panel
-            .as_ref()
-            .map(|panel| {
-                let panel = panel.read(cx);
-                (panel.workspace.clone(), panel.active_repository.clone())
-            })
-            .unzip();
-
-        let single_repo = project
-            .as_ref()
-            .map(|project| project.read(cx).git_store().read(cx).repositories().len() == 1)
-            .unwrap_or(true);
+        let is_active = self.is_active;
+        let repo_id = self.repo.as_ref().map(|repo| repo.read(cx).id);
+        let activate = self.repo.clone().filter(|_| !is_active);
 
         const MAX_BRANCH_LEN: usize = 16;
         const MAX_REPO_LEN: usize = 16;
@@ -4565,36 +4604,16 @@ impl RenderOnce for PanelRepoFooter {
             util::truncate_and_trailoff(branch_name.trim_ascii(), branch_display_len)
         };
 
-        let repo_selector_trigger = Button::new("repo-selector", truncated_repo_name)
-            .size(ButtonSize::None)
-            .label_size(LabelSize::Small);
-
-        let repo_selector = PopoverMenu::new("repository-switcher")
-            .menu({
-                let project = project;
-                move |window, cx| {
-                    let project = project.clone()?;
-                    Some(cx.new(|cx| RepositorySelector::new(project, rems(20.), window, cx)))
-                }
+        // The row itself switches repositories now, so the name is a plain label rather than the
+        // popover trigger it was when a single row stood for "the active repository".
+        let repo_label = Label::new(truncated_repo_name)
+            .size(LabelSize::Small)
+            .color(if is_active {
+                Color::Default
+            } else {
+                Color::Muted
             })
-            .trigger_with_tooltip(
-                repo_selector_trigger
-                    .when(single_repo, |this| this.disabled(true).color(Color::Muted))
-                    .truncate(true),
-                move |_, cx| {
-                    if single_repo {
-                        cx.new(|_| Empty).into()
-                    } else {
-                        Tooltip::simple("Switch Active Repository", cx)
-                    }
-                },
-            )
-            .anchor(Anchor::BottomLeft)
-            .offset(gpui::Point {
-                x: px(0.0),
-                y: px(-2.0),
-            })
-            .into_any_element();
+            .single_line();
 
         let branch_selector_button = Button::new("branch-selector", truncated_branch_name)
             .size(ButtonSize::None)
@@ -4605,10 +4624,19 @@ impl RenderOnce for PanelRepoFooter {
             });
 
         let branch_selector = PopoverMenu::new("popover-button")
-            .menu(move |window, cx| {
-                let workspace = workspace.clone()?;
-                let repo = repo.clone().flatten();
-                Some(branch_picker::popover(workspace, false, repo, window, cx))
+            .menu({
+                // Scoped to this row's repository, not the active one.
+                let repo = self.repo.clone();
+                move |window, cx| {
+                    let workspace = workspace.clone()?;
+                    Some(branch_picker::popover(
+                        workspace,
+                        false,
+                        repo.clone(),
+                        window,
+                        cx,
+                    ))
+                }
             })
             .trigger_with_tooltip(
                 branch_selector_button,
@@ -4621,24 +4649,37 @@ impl RenderOnce for PanelRepoFooter {
             });
 
         h_flex()
+            .id(("repository-row", repo_id.map_or(0, |id| id.0)))
             .h(px(36.))
             .w_full()
             .px_2()
             .justify_between()
             .gap_1()
+            .when(is_active, |this| {
+                this.bg(cx.theme().colors().element_selected)
+            })
+            .when_some(activate, |this, repo| {
+                this.cursor_pointer()
+                    .hover(|this| this.bg(cx.theme().colors().element_hover))
+                    .tooltip(Tooltip::text("Switch Active Repository"))
+                    .on_click(move |_, _, cx| {
+                        // The same path the repository picker takes.
+                        repo.update(cx, |repo, cx| repo.set_as_active_repository(cx));
+                    })
+            })
             .child(
                 h_flex()
                     .flex_1()
                     .overflow_hidden()
                     .gap_px()
                     .child(Icon::new(IconName::GitBranch).size(IconSize::Small).color(
-                        if single_repo {
-                            Color::Disabled
+                        if is_active {
+                            Color::Default
                         } else {
                             Color::Muted
                         },
                     ))
-                    .child(repo_selector)
+                    .child(repo_label)
                     .when(show_separator, |this| {
                         this.child(
                             div()
@@ -4649,15 +4690,13 @@ impl RenderOnce for PanelRepoFooter {
                     })
                     .child(branch_selector),
             )
-            .children(if let Some(git_panel) = self.git_panel {
+            .children(self.git_panel.filter(|_| is_active).and_then(|git_panel| {
                 git_panel.update(cx, |git_panel, cx| git_panel.render_remote_button(cx))
-            } else {
-                None
-            })
+            }))
     }
 }
 
-impl Component for PanelRepoFooter {
+impl Component for RepositoryRow {
     fn scope() -> ComponentScope {
         ComponentScope::VersionControl
     }
@@ -4750,7 +4789,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(active_repository(1), None))
+                                    .child(RepositoryRow::new_preview(active_repository(1), None))
                                     .into_any_element(),
                             ),
                             single_example(
@@ -4758,7 +4797,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         active_repository(2),
                                         Some(branch(unknown_upstream)),
                                     ))
@@ -4769,7 +4808,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         active_repository(3),
                                         Some(branch(no_remote_upstream)),
                                     ))
@@ -4780,7 +4819,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         active_repository(4),
                                         Some(branch(not_ahead_or_behind_upstream)),
                                     ))
@@ -4791,7 +4830,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         active_repository(5),
                                         Some(branch(behind_upstream)),
                                     ))
@@ -4802,7 +4841,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         active_repository(6),
                                         Some(branch(ahead_of_upstream)),
                                     ))
@@ -4813,7 +4852,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         active_repository(7),
                                         Some(branch(ahead_and_behind_upstream)),
                                     ))
@@ -4833,7 +4872,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         SharedString::from("zed"),
                                         Some(custom("main", behind_upstream)),
                                     ))
@@ -4844,7 +4883,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         SharedString::from("zed"),
                                         Some(custom(
                                             "redesign-and-update-git-ui-list-entry-style",
@@ -4858,7 +4897,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         SharedString::from("zed-industries-community-examples"),
                                         Some(custom("gpui", ahead_of_upstream)),
                                     ))
@@ -4869,7 +4908,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         SharedString::from("zed-industries-community-examples"),
                                         Some(custom(
                                             "redesign-and-update-git-ui-list-entry-style",
@@ -4883,7 +4922,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         SharedString::from("LICENSES"),
                                         Some(custom("main", ahead_of_upstream)),
                                     ))
@@ -4894,7 +4933,7 @@ impl Component for PanelRepoFooter {
                                 div()
                                     .w(example_width)
                                     .overflow_hidden()
-                                    .child(PanelRepoFooter::new_preview(
+                                    .child(RepositoryRow::new_preview(
                                         SharedString::from("zed"),
                                         Some(custom("update-README", behind_upstream)),
                                     ))

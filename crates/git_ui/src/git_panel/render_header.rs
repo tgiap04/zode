@@ -193,6 +193,94 @@ impl GitPanel {
             )
     }
 
+    /// One row per repository, in a stable order, above the `Changes` section.
+    pub(super) fn render_repositories_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active_repo_id = self.active_repository.as_ref().map(|repo| repo.read(cx).id);
+        let git_panel = cx.entity();
+        let repositories = self.project.read(cx).git_store().read(cx).repositories();
+
+        let rows = self
+            .sorted_repo_ids
+            .iter()
+            .filter_map(|repo_id| {
+                let repo_entity = repositories.get(repo_id)?.clone();
+                let repo = repo_entity.read(cx);
+                Some(
+                    RepositoryRow::new(
+                        SharedString::from(Arc::from(repo.display_name().trim_end_matches("/"))),
+                        repo.branch.clone(),
+                        repo.head_commit.clone(),
+                        repo_entity.clone(),
+                        Some(*repo_id) == active_repo_id,
+                        Some(git_panel.clone()),
+                    )
+                    .into_any_element(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        PanelSection::new(
+            "git-panel-repositories-section",
+            "Repositories",
+            self.section_expanded(PanelSectionKind::Repositories),
+        )
+        .on_toggle(cx.listener(|this, _, _, cx| {
+            this.toggle_section(PanelSectionKind::Repositories, cx);
+        }))
+        .map(|section| {
+            if rows.is_empty() {
+                section.child(self.render_no_repositories(cx).into_any_element())
+            } else {
+                // Capped and scrollable: the section takes its natural height so `Changes` keeps
+                // the rest, but a workspace with many repositories must not grow this list until
+                // `Changes` — the only shrinkable child — is squeezed to nothing.
+                section.child(
+                    v_flex()
+                        .id("repository-rows")
+                        .w_full()
+                        .max_h(MAX_REPOSITORY_ROWS_HEIGHT)
+                        .overflow_y_scroll()
+                        .children(rows)
+                        .into_any_element(),
+                )
+            }
+        })
+        .into_any_element()
+    }
+
+    /// Took over `Initialize Repository` from the changes empty state.
+    fn render_no_repositories(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let worktree_count = self.project.read(cx).visible_worktrees(cx).count();
+
+        h_flex()
+            .w_full()
+            .flex_none()
+            .px_2()
+            .py_1p5()
+            .gap_1p5()
+            .justify_between()
+            .child(
+                Label::new("No Git repositories")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .when(worktree_count > 0, |this| {
+                this.child(
+                    panel_filled_button("Initialize Repository")
+                        .tooltip(Tooltip::for_action_title_in(
+                            "git init",
+                            &git::Init,
+                            &self.focus_handle,
+                        ))
+                        .on_click(move |_, _, cx| {
+                            cx.defer(move |cx| {
+                                cx.dispatch_action(&git::Init);
+                            })
+                        }),
+                )
+            })
+    }
+
     /// Hover actions for the `Changes` section header.
     pub(super) fn render_changes_section_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let has_entries = self.entry_count > 0;

@@ -1935,3 +1935,231 @@ async fn test_uncommit_and_branch_diff_menu_gating(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// Two repositories whose alphabetical order is the reverse of the order they are added in, so
+/// the assertion fails if the sort is ever dropped and iteration order leaks through.
+async fn init_two_repo_panel(
+    cx: &mut TestAppContext,
+) -> (Entity<GitPanel>, Entity<Workspace>, VisualTestContext) {
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/z-repo"),
+        json!({ ".git": {}, "tracked": "tracked\n" }),
+    )
+    .await;
+    fs.insert_tree(
+        path!("/a-repo"),
+        json!({ ".git": {}, "tracked": "tracked\n" }),
+    )
+    .await;
+
+    let project = Project::test(
+        fs.clone(),
+        [Path::new(path!("/z-repo")), Path::new(path!("/a-repo"))],
+        cx,
+    )
+    .await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let mut visual_cx = VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(&mut visual_cx, GitPanel::new);
+    visual_cx.run_until_parked();
+
+    (panel, workspace, visual_cx)
+}
+
+fn repo_names(panel: &Entity<GitPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+    panel.update_in(cx, |panel, _, cx| {
+        let repositories = panel.project.read(cx).git_store().read(cx).repositories();
+        panel
+            .sorted_repo_ids
+            .iter()
+            .filter_map(|id| Some(repositories.get(id)?.read(cx).display_name().to_string()))
+            .collect()
+    })
+}
+
+#[gpui::test]
+async fn test_repository_rows_are_ordered_by_name_not_hash_order(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _workspace, mut cx) = init_two_repo_panel(cx).await;
+    let cx = &mut cx;
+
+    let names = repo_names(&panel, cx);
+    assert_eq!(
+        names,
+        vec!["a-repo".to_string(), "z-repo".to_string()],
+        "rows must be ordered by the name they display, regardless of the order the \
+         repositories were registered in"
+    );
+
+    // Rebuilding must be idempotent — the order is a function of the repositories alone.
+    panel.update_in(cx, |panel, _, cx| panel.update_sorted_repo_ids(cx));
+    assert_eq!(repo_names(&panel, cx), names);
+}
+
+#[gpui::test]
+async fn test_switching_active_repository_keeps_row_order(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _workspace, mut cx) = init_two_repo_panel(cx).await;
+    let cx = &mut cx;
+
+    let before = repo_names(&panel, cx);
+    let initial_active = panel.update_in(cx, |panel, _, cx| {
+        panel
+            .active_repository
+            .as_ref()
+            .map(|repo| repo.read(cx).display_name().to_string())
+    });
+
+    // Activate the repository that is not currently active, the way a row click does.
+    let other = panel.update_in(cx, |panel, _, cx| {
+        let git_store = panel.project.read(cx).git_store().read(cx);
+        let active_id = panel
+            .active_repository
+            .as_ref()
+            .map(|repo| repo.read(cx).id);
+        panel
+            .sorted_repo_ids
+            .iter()
+            .find(|id| Some(**id) != active_id)
+            .and_then(|id| git_store.repositories().get(id).cloned())
+            .expect("two repositories, so one of them is not the active one")
+    });
+    cx.update(|_, cx| {
+        other.update(cx, |repo, cx| repo.set_as_active_repository(cx));
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    let now_active = panel.update_in(cx, |panel, _, cx| {
+        panel
+            .active_repository
+            .as_ref()
+            .map(|repo| repo.read(cx).display_name().to_string())
+    });
+    assert_ne!(
+        now_active, initial_active,
+        "activating the other repository must move the panel's active repository"
+    );
+    assert_eq!(
+        repo_names(&panel, cx),
+        before,
+        "which repository is active must not reorder the rows"
+    );
+}
+
+/// Draws the panel with two repository rows. Each row builds its own branch-selector popover and
+/// button, so a shared element id across rows would surface here.
+#[gpui::test]
+async fn test_panel_draws_repositories_section(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _workspace, mut cx) = init_two_repo_panel(cx).await;
+    let cx = &mut cx;
+
+    let space = gpui::size(px(360.), px(800.));
+    let draw = |cx: &mut VisualTestContext, panel: &Entity<GitPanel>| {
+        let panel = panel.clone();
+        cx.draw(gpui::point(px(0.), px(0.)), space, |_, _| {
+            panel.into_any_element()
+        });
+    };
+
+    panel.update_in(cx, |panel, _, _| {
+        assert_eq!(panel.sorted_repo_ids.len(), 2);
+        assert!(panel.section_expanded(PanelSectionKind::Repositories));
+    });
+    draw(cx, &panel);
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Repositories, cx);
+    });
+    draw(cx, &panel);
+}
+
+/// The height cap exists so that a workspace with many repositories cannot grow the section until
+/// `Changes` — the only shrinkable child — is squeezed away. Drawn at a deliberately short panel
+/// height, which is where that would show up.
+#[gpui::test]
+async fn test_panel_draws_with_many_repositories(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    const REPO_COUNT: usize = 8;
+    let fs = FakeFs::new(cx.background_executor.clone());
+    let mut roots = Vec::with_capacity(REPO_COUNT);
+    for index in 0..REPO_COUNT {
+        let root = format!("{}-{index}", path!("/repo"));
+        fs.insert_tree(&root, json!({ ".git": {}, "tracked": "tracked\n" }))
+            .await;
+        roots.push(root);
+    }
+
+    let project = Project::test(
+        fs.clone(),
+        roots.iter().map(Path::new).collect::<Vec<_>>(),
+        cx,
+    )
+    .await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, _, _| {
+        assert_eq!(
+            panel.sorted_repo_ids.len(),
+            REPO_COUNT,
+            "every repository must get a row"
+        );
+    });
+
+    for height in [px(300.), px(800.)] {
+        let panel = panel.clone();
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(360.), height),
+            |_, _| panel.into_any_element(),
+        );
+    }
+}
+
+#[gpui::test]
+async fn test_panel_draws_with_no_repository(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    // A worktree with no `.git` anywhere, so the Repositories section owns the empty state.
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/project"), json!({ "file": "contents\n" }))
+        .await;
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, _, _| {
+        assert!(panel.sorted_repo_ids.is_empty());
+        assert!(panel.active_repository.is_none());
+    });
+
+    let panel_to_draw = panel.clone();
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(360.), px(800.)),
+        |_, _| panel_to_draw.into_any_element(),
+    );
+}

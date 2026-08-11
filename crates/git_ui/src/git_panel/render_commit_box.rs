@@ -30,19 +30,9 @@ impl GitPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
-        let active_repository = self.active_repository.clone()?;
+        self.active_repository.as_ref()?;
         let panel_editor_style = panel_editor_style(true, window, cx);
         let expand_tooltip_focus_handle = self.commit_editor.focus_handle(cx);
-
-        let branch = active_repository.read(cx).branch.clone();
-        let head_commit = active_repository.read(cx).head_commit.clone();
-        let git_panel = cx.entity();
-        let display_name = SharedString::from(Arc::from(
-            active_repository
-                .read(cx)
-                .display_name()
-                .trim_end_matches("/"),
-        ));
 
         Some(
             v_flex()
@@ -101,14 +91,6 @@ impl GitPanel {
                 .when(self.amend_pending, |this| {
                     this.child(self.render_pending_amend(cx))
                 })
-                // TODO(phase-03): the repo/branch selectors and the fetch/pull/push button move
-                // into the Repositories section. Kept here so no affordance is lost meanwhile.
-                .child(PanelRepoFooter::new(
-                    display_name,
-                    branch,
-                    head_commit,
-                    Some(git_panel),
-                ))
                 .children(self.render_last_commit(cx)),
         )
     }

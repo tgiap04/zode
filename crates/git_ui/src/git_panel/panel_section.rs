@@ -14,6 +14,10 @@ pub(crate) struct PanelSection {
     label: SharedString,
     expanded: bool,
     badge: Option<usize>,
+    /// Whether the expanded content claims the panel's leftover height. Off by default, so a
+    /// section is only as tall as its rows and sections cannot end up dividing the panel between
+    /// themselves.
+    fills_height: bool,
     badge_tooltip: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
     on_badge_click: Option<Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
     actions: Vec<AnyElement>,
@@ -32,6 +36,7 @@ impl PanelSection {
             label: label.into(),
             expanded,
             badge: None,
+            fills_height: false,
             badge_tooltip: None,
             on_badge_click: None,
             actions: Vec::new(),
@@ -42,6 +47,13 @@ impl PanelSection {
 
     pub(crate) fn badge(mut self, count: impl Into<Option<usize>>) -> Self {
         self.badge = count.into();
+        self
+    }
+
+    /// Let this section's content take whatever height the panel has left. At most one section
+    /// should claim it.
+    pub(crate) fn fills_height(mut self) -> Self {
+        self.fills_height = true;
         self
     }
 
@@ -156,14 +168,15 @@ impl RenderOnce for PanelSection {
                     }),
             )
             .when(expanded, |this| {
-                this.flex_1().min_h_0().child(
-                    v_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .w_full()
-                        .overflow_hidden()
-                        .children(self.children),
-                )
+                let fills_height = self.fills_height;
+                this.when(fills_height, |this| this.flex_1().min_h_0())
+                    .child(
+                        v_flex()
+                            .when(fills_height, |this| this.flex_1().min_h_0())
+                            .w_full()
+                            .overflow_hidden()
+                            .children(self.children),
+                    )
             })
     }
 }
