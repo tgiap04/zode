@@ -140,7 +140,7 @@ From the panel, you can simply type a commit message and hit the commit button, 
 
 <!-- Show a set of changes with default staged -->
 
-Entries can be staged using each individual entry's checkbox. All changes can be staged using the button at the top of the panel, or {#action git::StageAll}.
+Entries can be staged using each individual entry's checkbox. All changes can be staged using the stage-all icon that appears when you hover over the **Changes** section header, or {#action git::StageAll}.
 
 <!-- Add media -->
 
@@ -148,13 +148,14 @@ Entries can be staged using each individual entry's checkbox. All changes can be
 
 Zed offers two commit textareas:
 
-1. The first one is available right at the bottom of the Git Panel. Hitting {#kb git::Commit} immediately commits all of your staged changes.
+1. The first one is available at the top of the Git Panel, inside the **Changes** section, above the file list. Hitting {#kb git::Commit} immediately commits all of your staged changes.
 2. The second is available via the action {#action git::ExpandCommitEditor} or via hitting the {#kb git::ExpandCommitEditor} while focused in the Git Panel commit textarea.
 
 ### Undoing a Commit
 
-As soon as you commit in Zed, in the Git Panel, you'll see a bar right under the commit textarea, which will show the recently submitted commit.
-In there, you can use the "Uncommit" button, which performs the `git reset HEADˆ--soft` command.
+As soon as you commit in Zed, the Git Panel shows the commit's subject line below the commit textarea. Click it to open the commit's details, or hover it for a quick preview.
+
+To undo the commit, open the overflow menu (**⋯**) on the **Changes** section header and choose "Uncommit", which performs the `git reset HEAD^ --soft` command.
 
 ### Configuring Commit Line Length
 
