@@ -46,6 +46,25 @@ The colored bars in the gutter that show added, modified, and deleted lines can 
 
 Zed wraps commit messages at 72 characters (a Git convention). To change this, search for "Git Commit" in Settings and adjust **Preferred Line Length**.
 
+## Repositories
+
+The Git Panel's **Repositories** section, above **Changes**, lists one row per Git repository in
+the project. It is shown whether the project has one repository or several — for example, several
+worktrees opened together. Like the other sections, you can collapse it from its header.
+
+- Click a repository's row to make it the active repository; the active row is highlighted.
+- Every row's branch name is a button — click it to open the branch picker for that row's
+  repository, not only the active one.
+- The fetch/pull/push button (see [Fetch, Push, and Pull](#fetch-push-and-pull)) only appears on
+  the active row, since {#action git::Fetch}, {#action git::Push}, and {#action git::Pull} always
+  act on the active repository.
+- With no repository open, this section shows "No Git repositories" and, if a folder is open, an
+  **Initialize Repository** button.
+- The section shows up to five repositories before it scrolls.
+
+You can also switch the active repository from anywhere in Zed via the {#action git::SelectRepo}
+action in the Command Palette.
+
 ## Project Diff
 
 You can see all of the changes captured by Git in Zed by opening the Project Diff ({#kb git::Diff}), accessible via the {#action git::Diff} action in the Command Palette or the Git Panel.
@@ -309,6 +328,7 @@ When viewing files with changes, Zed displays diff hunks that can be expanded or
 | {#action git::Branch}                     | {#kb git::Branch}                     |
 | {#action git::Switch}                     | {#kb git::Switch}                     |
 | {#action git::CheckoutBranch}             | {#kb git::CheckoutBranch}             |
+| {#action git::SelectRepo}                 | {#kb git::SelectRepo}                 |
 | {#action git::Blame}                      | {#kb git::Blame}                      |
 | {#action git::StashAll}                   | {#kb git::StashAll}                   |
 | {#action git::StashPop}                   | {#kb git::StashPop}                   |
