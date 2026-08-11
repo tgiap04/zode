@@ -14,7 +14,6 @@ impl GitPanel {
         let has_stash_items = self.stash_entries.entries.len() > 0;
         let can_uncommit = self.can_uncommit(cx);
         let show_branch_diff = self.show_branch_diff(cx);
-        let has_repository = self.active_repository.is_some();
 
         PopoverMenu::new(id.into())
             .trigger(
@@ -35,7 +34,6 @@ impl GitPanel {
                         tree_view: GitPanelSettings::get_global(cx).tree_view,
                         can_uncommit,
                         show_branch_diff,
-                        has_repository,
                     },
                     window,
                     cx,

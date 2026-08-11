@@ -2443,8 +2443,103 @@ async fn test_commits_section_height_survives_serialization(cx: &mut TestAppCont
             signoff_enabled: false,
             section_collapse: None,
             commits_section_height: Some(5_000.),
+            graph_section_height: None,
         };
         panel.apply_serialized_state(out_of_range, cx);
         assert_eq!(panel.commits_section_height, COMMITS_SECTION_MAX_HEIGHT);
     });
+}
+
+/// The Graph section rests on the same precondition as Commits: folded costs nothing. `graph_data`
+/// is what starts the fetch, so a folded section must never allocate its state.
+#[gpui::test]
+async fn test_collapsed_graph_section_never_requests_the_log(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, _| {
+        assert!(
+            !panel.section_expanded(PanelSectionKind::Graph),
+            "the graph section must default to folded"
+        );
+        assert!(panel.graph_section.is_none());
+    });
+
+    let panel_to_draw = panel.clone();
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(360.), px(800.)),
+        |_, _| panel_to_draw.into_any_element(),
+    );
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    assert!(
+        !branch_log_was_requested(&panel, &repository, cx),
+        "nothing may ask for the branch log while the graph section is folded"
+    );
+    panel.update_in(cx, |panel, _, _| {
+        assert!(panel.graph_section.is_none());
+    });
+}
+
+#[gpui::test]
+async fn test_expanding_graph_section_requests_the_log(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+        assert!(panel.section_expanded(PanelSectionKind::Graph));
+    });
+    cx.run_until_parked();
+
+    assert!(
+        branch_log_was_requested(&panel, &repository, cx),
+        "expanding the graph must be what asks for the log"
+    );
+    panel.update_in(cx, |panel, _, _| {
+        assert!(
+            panel.graph_section.is_some(),
+            "the expanded section must hold its state"
+        );
+    });
+
+    // Drawing it expanded must not panic — this is the lane canvas plus the row list together.
+    let panel_to_draw = panel.clone();
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(360.), px(800.)),
+        |_, _| panel_to_draw.into_any_element(),
+    );
+}
+
+#[gpui::test]
+async fn test_graph_log_source_toggles_between_branch_and_all(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        panel.update_in(cx, |panel, _, _| panel.graph_log_source_is_auto()),
+        "the graph starts on Auto, following the checked-out branch"
+    );
+
+    panel.update_in(cx, |panel, _, cx| panel.toggle_graph_log_source(cx));
+    cx.run_until_parked();
+    assert!(
+        !panel.update_in(cx, |panel, _, _| panel.graph_log_source_is_auto()),
+        "toggling must move the graph off the current branch onto all refs"
+    );
+
+    panel.update_in(cx, |panel, _, cx| panel.toggle_graph_log_source(cx));
+    cx.run_until_parked();
+    assert!(panel.update_in(cx, |panel, _, _| panel.graph_log_source_is_auto()));
 }

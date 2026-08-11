@@ -5213,6 +5213,7 @@ dependencies = [
  "fuzzy",
  "fuzzy_nucleo",
  "git",
+ "git_graph_core",
  "gpui",
  "indoc",
  "itertools 0.14.0",

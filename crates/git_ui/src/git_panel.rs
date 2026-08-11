@@ -75,11 +75,13 @@ use workspace::{
 };
 
 mod commits_section;
+mod graph_section;
 mod panel_section;
 mod render_commit_box;
 mod render_entries;
 mod render_header;
 
+use graph_section::GraphSectionState;
 use panel_section::PanelSection;
 
 actions!(
@@ -164,7 +166,6 @@ struct GitMenuState {
     /// these re-home the affordances it held.
     can_uncommit: bool,
     show_branch_diff: bool,
-    has_repository: bool,
 }
 
 fn git_panel_context_menu(
@@ -199,9 +200,6 @@ fn git_panel_context_menu(
             .when(state.show_branch_diff, |this| {
                 this.action("View Branch Diff", BranchDiff.boxed_clone())
             })
-            // `git_graph` only registers a handler for `Open` when a repository is active, so
-            // without this the entry would be a silent no-op rather than a disabled one.
-            .action_disabled_when(!state.has_repository, "Open Git Graph", Open.boxed_clone())
             .action_disabled_when(!state.can_uncommit, "Uncommit", git::Uncommit.boxed_clone())
             .separator()
             .action_disabled_when(
@@ -280,6 +278,8 @@ struct SerializedGitPanel {
     /// Height of the `Commits` section in pixels, `None` before it was ever resized.
     #[serde(default)]
     commits_section_height: Option<f32>,
+    #[serde(default)]
+    graph_section_height: Option<f32>,
 }
 
 // The enum mirrors `SectionCollapseState`, which persists all four sections so that a fold
@@ -736,6 +736,9 @@ pub struct GitPanel {
     commits_section_height: Pixels,
     /// Pointer position at the last resize step, so the drag can move by delta.
     commits_resize_drag_start: Option<Pixels>,
+    graph_section: Option<GraphSectionState>,
+    graph_section_height: Pixels,
+    graph_resize_drag_start: Option<Pixels>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -765,6 +768,12 @@ const COMMITS_SECTION_PAGE_SIZE: usize = 50;
 /// Marks the drag that resizes the `Commits` section.
 #[derive(Clone)]
 struct DraggedCommitsSectionHandle;
+
+/// Marks the drag that resizes the `Graph` section.
+#[derive(Clone)]
+pub(crate) struct DraggedGraphSectionHandle;
+
+const GRAPH_ROW_HEIGHT: Pixels = px(24.);
 
 /// Lives only while the `Commits` section has been expanded at least once — that absence is the
 /// laziness the panel relies on, since asking a repository for graph data is what starts the fetch
@@ -908,6 +917,7 @@ impl GitPanel {
                     | GitStoreEvent::ActiveRepositoryChanged(_) => {
                         this.update_sorted_repo_ids(cx);
                         this.invalidate_commits(cx);
+                        this.invalidate_graph(cx);
                         this.schedule_update(window, cx);
                     }
                     GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::StatusesChanged, true)
@@ -924,6 +934,7 @@ impl GitPanel {
                         RepositoryEvent::GraphEvent(_, _),
                         true,
                     ) => {
+                        this.sync_graph_section(cx);
                         cx.notify();
                     }
                     // A repository's work directory can move under it, which changes the name the
@@ -986,6 +997,9 @@ impl GitPanel {
                 commits_section: None,
                 commits_section_height: COMMITS_SECTION_DEFAULT_HEIGHT,
                 commits_resize_drag_start: None,
+                graph_section: None,
+                graph_section_height: COMMITS_SECTION_DEFAULT_HEIGHT,
+                graph_resize_drag_start: None,
             };
 
             this.update_sorted_repo_ids(cx);
@@ -1074,6 +1088,7 @@ impl GitPanel {
             signoff_enabled: self.signoff_enabled,
             section_collapse: Some(self.section_collapse),
             commits_section_height: Some(f32::from(self.commits_section_height)),
+            graph_section_height: Some(f32::from(self.graph_section_height)),
         }
     }
 
@@ -1085,6 +1100,11 @@ impl GitPanel {
             .commits_section_height
             .map(px)
             // A stored height from a build with different bounds must still land inside them.
+            .map(|height| height.clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT))
+            .unwrap_or(COMMITS_SECTION_DEFAULT_HEIGHT);
+        self.graph_section_height = serialized
+            .graph_section_height
+            .map(px)
             .map(|height| height.clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT))
             .unwrap_or(COMMITS_SECTION_DEFAULT_HEIGHT);
         cx.notify();
@@ -1155,8 +1175,12 @@ impl GitPanel {
         self.section_collapse.toggle(kind);
         // Expanding is the only thing that may start a fetch — never `render`, or opening the
         // panel would pay for a commit log nobody asked to see.
-        if kind == PanelSectionKind::Commits && self.section_expanded(kind) {
-            self.ensure_commits_loaded(cx);
+        if self.section_expanded(kind) {
+            match kind {
+                PanelSectionKind::Commits => self.ensure_commits_loaded(cx),
+                PanelSectionKind::Graph => self.ensure_graph_loaded(cx),
+                PanelSectionKind::Repositories | PanelSectionKind::Changes => {}
+            }
         }
         cx.notify();
         self.serialize(cx);
@@ -3695,6 +3719,9 @@ impl GitPanel {
         if self.section_expanded(PanelSectionKind::Commits) {
             self.ensure_commits_loaded(cx);
         }
+        if self.section_expanded(PanelSectionKind::Graph) {
+            self.ensure_graph_loaded(cx);
+        }
 
         let suggested_commit_message = self.suggest_commit_message(cx);
         let placeholder_text = suggested_commit_message
@@ -4105,7 +4132,6 @@ impl GitPanel {
                 tree_view: GitPanelSettings::get_global(cx).tree_view,
                 can_uncommit: self.can_uncommit(cx),
                 show_branch_diff: self.show_branch_diff(cx),
-                has_repository: self.active_repository.is_some(),
             },
             window,
             cx,
@@ -4349,6 +4375,10 @@ impl Render for GitPanel {
             .on_drop::<DraggedCommitsSectionHandle>(cx.listener(|this, _, _, cx| {
                 this.end_commits_section_resize(cx);
             }))
+            .on_drag_move::<DraggedGraphSectionHandle>(cx.listener(Self::resize_graph_section))
+            .on_drop::<DraggedGraphSectionHandle>(cx.listener(|this, _, _, cx| {
+                this.end_graph_section_resize(cx);
+            }))
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
@@ -4400,6 +4430,7 @@ impl Render for GitPanel {
                                 )
                             }),
                     )
+                    .child(self.render_graph_section(cx))
                     .child(self.render_commits_section(cx))
                     .into_any_element(),
             )
