@@ -63,22 +63,24 @@ use strum::{IntoEnumIterator, VariantNames};
 use theme_settings::ThemeSettings;
 use time::OffsetDateTime;
 use ui::{
-    ButtonLike, Checkbox, ContextMenu, ElevationIndex, IndentGuideColors,
-    PopoverMenu, RenderedIndentGuide, ScrollAxes, Scrollbars, SplitButton, Tooltip, WithScrollbar,
-    prelude::*,
+    ButtonLike, Checkbox, ContextMenu, ElevationIndex, IndentGuideColors, PopoverMenu,
+    RenderedIndentGuide, ScrollAxes, Scrollbars, SplitButton, Tooltip, WithScrollbar, prelude::*,
 };
 use util::paths::PathStyle;
 use util::{ResultExt, TryFutureExt, maybe};
 use workspace::SERIALIZATION_THROTTLE_TIME;
 use workspace::{
-    Workspace,
+    ToggleZoom, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, NotifyResultExt},
 };
 
+mod panel_section;
 mod render_commit_box;
 mod render_entries;
 mod render_header;
+
+use panel_section::PanelSection;
 
 actions!(
     git_panel,
@@ -260,6 +262,64 @@ struct SerializedGitPanel {
     amend_pending: bool,
     #[serde(default)]
     signoff_enabled: bool,
+    /// `None` in blobs written before collapsible sections existed.
+    #[serde(default)]
+    section_collapse: Option<SectionCollapseState>,
+}
+
+// The enum mirrors `SectionCollapseState`, which persists all four sections so that a fold
+// state written by a later phase survives a downgrade. Only `Changes` has a section to toggle
+// today; `Repositories`, `Graph`, and `Commits` gain theirs in phases 03, 05, and 04.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PanelSectionKind {
+    Repositories,
+    Changes,
+    Graph,
+    Commits,
+}
+
+/// Per-section fold state, where `true` means collapsed.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(default)]
+struct SectionCollapseState {
+    repositories: bool,
+    changes: bool,
+    graph: bool,
+    commits: bool,
+}
+
+impl Default for SectionCollapseState {
+    fn default() -> Self {
+        Self {
+            repositories: false,
+            changes: false,
+            // Collapsed by default so opening the panel never pays for a graph load.
+            graph: true,
+            commits: false,
+        }
+    }
+}
+
+impl SectionCollapseState {
+    fn is_expanded(&self, kind: PanelSectionKind) -> bool {
+        !match kind {
+            PanelSectionKind::Repositories => self.repositories,
+            PanelSectionKind::Changes => self.changes,
+            PanelSectionKind::Graph => self.graph,
+            PanelSectionKind::Commits => self.commits,
+        }
+    }
+
+    fn toggle(&mut self, kind: PanelSectionKind) {
+        let collapsed = match kind {
+            PanelSectionKind::Repositories => &mut self.repositories,
+            PanelSectionKind::Changes => &mut self.changes,
+            PanelSectionKind::Graph => &mut self.graph,
+            PanelSectionKind::Commits => &mut self.commits,
+        };
+        *collapsed = !*collapsed;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -647,7 +707,8 @@ pub struct GitPanel {
     commit_template: Option<GitCommitTemplate>,
     bulk_staging: Option<BulkStaging>,
     stash_entries: GitStash,
-
+    section_collapse: SectionCollapseState,
+    zoomed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -821,6 +882,8 @@ impl GitPanel {
                 entry_count: 0,
                 bulk_staging: None,
                 stash_entries: Default::default(),
+                section_collapse: SectionCollapseState::default(),
+                zoomed: false,
             };
 
             this.schedule_update(window, cx);
@@ -902,9 +965,23 @@ impl GitPanel {
             .map(|id| format!("{}-{:?}", GIT_PANEL_KEY, id))
     }
 
+    fn serialized_state(&self) -> SerializedGitPanel {
+        SerializedGitPanel {
+            amend_pending: self.amend_pending,
+            signoff_enabled: self.signoff_enabled,
+            section_collapse: Some(self.section_collapse),
+        }
+    }
+
+    fn apply_serialized_state(&mut self, serialized: SerializedGitPanel, cx: &mut Context<Self>) {
+        self.amend_pending = serialized.amend_pending;
+        self.signoff_enabled = serialized.signoff_enabled;
+        self.section_collapse = serialized.section_collapse.unwrap_or_default();
+        cx.notify();
+    }
+
     fn serialize(&mut self, cx: &mut Context<Self>) {
-        let amend_pending = self.amend_pending;
-        let signoff_enabled = self.signoff_enabled;
+        let state = self.serialized_state();
         let kvp = KeyValueStore::global(cx);
 
         self.pending_serialization = cx.spawn(async move |git_panel, cx| {
@@ -926,20 +1003,35 @@ impl GitPanel {
             };
             cx.background_spawn(
                 async move {
-                    kvp.write_kvp(
-                        serialization_key,
-                        serde_json::to_string(&SerializedGitPanel {
-                            amend_pending,
-                            signoff_enabled,
-                        })?,
-                    )
-                    .await?;
+                    kvp.write_kvp(serialization_key, serde_json::to_string(&state)?)
+                        .await?;
                     anyhow::Ok(())
                 }
                 .log_err(),
             )
             .await;
         });
+    }
+
+    fn section_expanded(&self, kind: PanelSectionKind) -> bool {
+        self.section_collapse.is_expanded(kind)
+    }
+
+    fn toggle_section(&mut self, kind: PanelSectionKind, cx: &mut Context<Self>) {
+        self.section_collapse.toggle(kind);
+        cx.notify();
+        self.serialize(cx);
+    }
+
+    fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
+        if self.zoomed {
+            cx.emit(PanelEvent::ZoomOut);
+        } else {
+            if !self.focus_handle(cx).contains_focused(window, cx) {
+                cx.focus_self(window);
+            }
+            cx.emit(PanelEvent::ZoomIn);
+        }
     }
 
     pub(crate) fn set_modal_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -3885,9 +3977,7 @@ impl GitPanel {
 
             if let Some(serialized_panel) = serialized_panel {
                 panel.update(cx, |panel, cx| {
-                    panel.amend_pending = serialized_panel.amend_pending;
-                    panel.signoff_enabled = serialized_panel.signoff_enabled;
-                    cx.notify();
+                    panel.apply_serialized_state(serialized_panel, cx);
                 })
             }
 
@@ -3958,6 +4048,7 @@ impl Render for GitPanel {
         let project = self.project.read(cx);
         let has_entries = !self.entries.is_empty();
         let has_write_access = self.has_write_access(cx);
+        let changes_expanded = self.section_expanded(PanelSectionKind::Changes);
 
         v_flex()
             .id("git_panel")
@@ -3999,22 +4090,42 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::expand_commit_editor))
             .on_action(cx.listener(Self::toggle_sort_by_path))
             .on_action(cx.listener(Self::toggle_tree_view))
+            .on_action(cx.listener(Self::toggle_zoom))
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().colors().panel_background)
             .child(
                 v_flex()
                     .size_full()
+                    .child(self.render_title_row(window, cx))
+                    // TODO(phase-02): dissolved once the commit box moves to the top and the
+                    // affordances here are relocated.
                     .children(self.render_panel_header(window, cx))
-                    .map(|this| {
-                        if let Some(repo) = self.active_repository.clone()
-                            && has_entries
-                        {
-                            this.child(self.render_entries(has_write_access, repo, window, cx))
-                        } else {
-                            this.child(self.render_empty_state(cx).into_any_element())
-                        }
-                    })
+                    .child(
+                        PanelSection::new("git-panel-changes-section", "Changes", changes_expanded)
+                            .badge(self.changes_count)
+                            .on_toggle(cx.listener(|this, _, _, cx| {
+                                this.toggle_section(PanelSectionKind::Changes, cx);
+                            }))
+                            .actions(self.render_changes_section_actions(cx))
+                            // Building the list while the section is folded would only feed an
+                            // element the section then throws away.
+                            .when(changes_expanded, |section| {
+                                if let Some(repo) = self.active_repository.clone()
+                                    && has_entries
+                                {
+                                    section.child(
+                                        self.render_entries(has_write_access, repo, window, cx)
+                                            .into_any_element(),
+                                    )
+                                } else {
+                                    section.child(self.render_empty_state(cx).into_any_element())
+                                }
+                            }),
+                    )
+                    // Keeps the commit box at the bottom of the panel while every section is
+                    // folded away. Goes when the commit box moves to the top in phase 02.
+                    .when(!changes_expanded, |this| this.child(div().flex_1()))
                     .children(self.render_footer(window, cx))
                     .when(self.amend_pending, |this| {
                         this.child(self.render_pending_amend(cx))
@@ -4128,6 +4239,15 @@ impl Panel for GitPanel {
 
     fn activation_priority(&self) -> u32 {
         3
+    }
+
+    fn is_zoomed(&self, _: &Window, _: &App) -> bool {
+        self.zoomed
+    }
+
+    fn set_zoomed(&mut self, zoomed: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoomed = zoomed;
+        cx.notify();
     }
 }
 

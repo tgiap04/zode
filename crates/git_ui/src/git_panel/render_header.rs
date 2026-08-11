@@ -130,6 +130,108 @@ impl GitPanel {
         }
     }
 
+    pub(super) fn render_title_row(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let zoomed = self.zoomed;
+
+        self.panel_header_container(window, cx)
+            .px_2()
+            .justify_between()
+            .child(
+                Label::new("Source Control")
+                    .size(LabelSize::Small)
+                    .line_height_style(LineHeightStyle::UiLabel)
+                    .single_line(),
+            )
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(self.render_overflow_menu("git-panel-title-overflow-menu"))
+                    .child(
+                        IconButton::new("git-panel-toggle-zoom", IconName::Maximize)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .toggle_state(zoomed)
+                            .selected_icon(IconName::Minimize)
+                            .tooltip(move |_, cx| {
+                                Tooltip::for_action(
+                                    if zoomed { "Zoom Out" } else { "Zoom In" },
+                                    &ToggleZoom,
+                                    cx,
+                                )
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_zoom(&ToggleZoom, window, cx);
+                            })),
+                    )
+                    .child(
+                        IconButton::new("git-panel-close", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::for_action_title_in(
+                                "Close Panel",
+                                &Close,
+                                &self.focus_handle,
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_panel(&Close, window, cx);
+                            })),
+                    ),
+            )
+    }
+
+    /// Hover actions for the `Changes` section header.
+    pub(super) fn render_changes_section_actions(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let has_entries = self.entry_count > 0;
+        let all_staged = self.total_staged_count() == self.entry_count && self.entry_count > 0;
+        let has_tracked_changes = self.has_tracked_changes();
+
+        let (stage_icon, stage_tooltip, stage_action, stage) = if all_staged {
+            (
+                IconName::Dash,
+                "Unstage All",
+                UnstageAll.boxed_clone(),
+                false,
+            )
+        } else {
+            (IconName::Plus, "Stage All", StageAll.boxed_clone(), true)
+        };
+
+        vec![
+            IconButton::new("changes-section-stage-all", stage_icon)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .disabled(!has_entries)
+                .tooltip(Tooltip::for_action_title_in(
+                    stage_tooltip,
+                    stage_action.as_ref(),
+                    &self.focus_handle,
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.change_all_files_stage(stage, cx);
+                }))
+                .into_any_element(),
+            IconButton::new("changes-section-discard", IconName::Undo)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .disabled(!has_tracked_changes)
+                .tooltip(Tooltip::for_action_title_in(
+                    "Discard Tracked Changes",
+                    &RestoreTrackedFiles,
+                    &self.focus_handle,
+                ))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.restore_tracked_files(&RestoreTrackedFiles, window, cx);
+                }))
+                .into_any_element(),
+            self.render_overflow_menu("git-panel-changes-overflow-menu")
+                .into_any_element(),
+        ]
+    }
+
     pub(super) fn render_panel_header(
         &self,
         window: &mut Window,

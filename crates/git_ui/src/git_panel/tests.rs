@@ -1528,3 +1528,221 @@ async fn test_dispatch_context_with_focus_states(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[test]
+fn test_section_collapse_state_defaults() {
+    let state = SectionCollapseState::default();
+
+    assert!(state.is_expanded(PanelSectionKind::Repositories));
+    assert!(state.is_expanded(PanelSectionKind::Changes));
+    assert!(state.is_expanded(PanelSectionKind::Commits));
+    assert!(
+        !state.is_expanded(PanelSectionKind::Graph),
+        "graph must start collapsed so opening the panel never pays for a graph load"
+    );
+}
+
+#[test]
+fn test_deserialize_panel_written_before_collapsible_sections() {
+    let serialized = serde_json::from_str::<SerializedGitPanel>(
+        r#"{"amend_pending":false,"signoff_enabled":true}"#,
+    )
+    .expect("a blob written before collapsible sections must still deserialize");
+
+    assert!(serialized.signoff_enabled);
+    assert_eq!(serialized.section_collapse, None);
+}
+
+#[test]
+fn test_deserialize_section_collapse_state_with_missing_fields() {
+    let state = serde_json::from_str::<SectionCollapseState>(r#"{"changes":true}"#)
+        .expect("a partially written collapse state must fall back to the defaults");
+
+    assert!(!state.is_expanded(PanelSectionKind::Changes));
+    assert!(!state.is_expanded(PanelSectionKind::Graph));
+    assert!(state.is_expanded(PanelSectionKind::Repositories));
+    assert!(state.is_expanded(PanelSectionKind::Commits));
+}
+
+#[gpui::test]
+async fn test_section_collapse_state_survives_serialization(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".git": {},
+            "tracked": "tracked\n",
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+
+    let serialization_key = workspace
+        .read_with(cx, |workspace, _| GitPanel::serialization_key(workspace))
+        .expect("test workspaces carry a session id, so a serialization key must exist");
+
+    panel.update_in(cx, |panel, _, cx| {
+        assert!(panel.section_expanded(PanelSectionKind::Changes));
+        panel.toggle_section(PanelSectionKind::Changes, cx);
+        assert!(!panel.section_expanded(PanelSectionKind::Changes));
+    });
+
+    cx.executor().advance_clock(2 * SERIALIZATION_THROTTLE_TIME);
+    cx.run_until_parked();
+
+    let written = cx
+        .update(|_, cx| KeyValueStore::global(cx).read_kvp(&serialization_key))
+        .expect("reading the serialized panel back must not fail")
+        .expect("toggling a section must write the panel state");
+    let serialized = serde_json::from_str::<SerializedGitPanel>(&written)
+        .expect("the written blob must deserialize");
+
+    let restored = workspace.update_in(cx, GitPanel::new);
+    restored.update_in(cx, |restored, _, cx| {
+        restored.apply_serialized_state(serialized, cx);
+        assert!(
+            !restored.section_expanded(PanelSectionKind::Changes),
+            "a collapsed Changes section must come back collapsed"
+        );
+        assert!(
+            !restored.section_expanded(PanelSectionKind::Graph),
+            "graph must stay collapsed across a round trip"
+        );
+        assert!(restored.section_expanded(PanelSectionKind::Commits));
+    });
+}
+
+/// Draws the whole panel in both fold states. A real draw is what catches element-id
+/// collisions — the overflow menu is now built three times per frame — and layout panics
+/// from nesting the entry list inside a section.
+#[gpui::test]
+async fn test_panel_draws_with_changes_section_collapsed_and_expanded(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".git": {},
+            "tracked": "tracked\n",
+            "untracked": "untracked\n",
+        }),
+    )
+    .await;
+
+    fs.set_head_and_index_for_repo(
+        path!("/project/.git").as_ref(),
+        &[("tracked", "old tracked\n".into())],
+    );
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+
+    let handle = cx.update_window_entity(&panel, |panel, _, _| {
+        std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    handle.await;
+
+    panel.update_in(cx, |panel, _, _| {
+        assert!(
+            !panel.entries.is_empty(),
+            "the entry list path must be the one under test"
+        );
+    });
+
+    let space = gpui::size(px(360.), px(800.));
+    cx.draw(gpui::point(px(0.), px(0.)), space, |_, _| {
+        panel.clone().into_any_element()
+    });
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Changes, cx);
+    });
+
+    cx.draw(gpui::point(px(0.), px(0.)), space, |_, _| {
+        panel.clone().into_any_element()
+    });
+}
+
+/// The title row's `⛶` and `✕` go through the dock: the panel emits `PanelEvent::ZoomIn` /
+/// `ZoomOut` / `Close` and `Dock` calls back into `set_zoomed` or closes itself. Driving the
+/// real dock is the only way to prove that round trip.
+#[gpui::test]
+async fn test_title_row_zoom_and_close(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+
+    let dock_position = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.open_panel::<GitPanel>(window, cx);
+        panel.read(cx).position(window, cx)
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(cx, |workspace, _, cx| {
+        assert!(
+            workspace.is_dock_at_position_open(dock_position, cx),
+            "the panel's dock must be open before we test closing it"
+        );
+    });
+
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(!panel.is_zoomed(window, cx));
+        panel.toggle_zoom(&ToggleZoom, window, cx);
+    });
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(
+            panel.is_zoomed(window, cx),
+            "the dock must zoom the panel in response to ZoomIn"
+        );
+        panel.toggle_zoom(&ToggleZoom, window, cx);
+    });
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(
+            !panel.is_zoomed(window, cx),
+            "toggling zoom a second time must restore the panel"
+        );
+        panel.close_panel(&Close, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(cx, |workspace, _, cx| {
+        assert!(
+            !workspace.is_dock_at_position_open(dock_position, cx),
+            "closing the panel must close its dock"
+        );
+    });
+}

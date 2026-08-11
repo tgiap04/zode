@@ -243,10 +243,12 @@ impl GitPanel {
             .border_1()
             .border_r_2()
             .child(
+                // Smaller than the enclosing `PanelSection` header so the two header tiers read
+                // as a hierarchy rather than as rivals (R5).
                 h_flex().flex_1().child(
                     Label::new(header.title())
                         .color(Color::Muted)
-                        .size(LabelSize::Small)
+                        .size(LabelSize::XSmall)
                         .line_height_style(LineHeightStyle::UiLabel)
                         .single_line(),
                 ),
