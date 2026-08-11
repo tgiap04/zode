@@ -4,7 +4,7 @@ description: >-
   Tách git_panel.rs (7.6k dòng) thành module, dựng PanelSection collapsible, đưa
   commit box lên top, thêm section Repositories + Commits, và nhúng git_graph
   dạng compact — 6 phase, mỗi phase ship được độc lập.
-status: pending
+status: completed
 priority: P2
 effort: 3.5-5w
 branch: feat/vscode-parity-git-panel
@@ -38,7 +38,7 @@ Panel git mở từ rail có cấu trúc + hành vi của VSCode Source Control:
 | 02 | [Commit box lên top, giải tán footer](phase-02-commit-box-to-top.md) | A | 3-4d | **completed** | 01 |
 | 03 | [Section Repositories](phase-03-repositories-section.md) | C | 2-3d | **completed** | 01 |
 | 04 | [Section Commits](phase-04-commits-section.md) | E | 3-4d | **completed** | 01 |
-| 05 | [Section Graph compact + crate `git_graph_core`](phase-05-graph-section-compact.md) | D | 6-8d | pending | 01, 04 |
+| 05 | [Section Graph compact + crate `git_graph_core`](phase-05-graph-section-compact.md) | D | 6-8d | **completed** | 01, 04 |
 
 Phase 02 / 03 / 04 độc lập với nhau — chạy song song được sau 01. Phase 05 đi sau 04 vì hai section này dùng cùng một cơ chế lazy-load + fixed-height + resize handle; làm 04 trước để cơ chế đó được chứng minh trên section rẻ hơn.
 
@@ -111,6 +111,19 @@ Phase 05 dùng lại đúng cơ chế phase 04 vừa dựng, nên bốn điều 
 - **Nội dung section phải gate `expanded` ở call site**, không chỉ trong `PanelSection`. Nếu không, element bị dựng rồi bỏ mỗi lần re-render lúc gập. Ảnh hưởng phase 03, 04, 05 — đặc biệt 05, nơi nội dung đắt nhất (R4).
 - **Ba variant `PanelSectionKind` còn `#[allow(dead_code)]`.** Phase 03/04/05 phải **xoá dần** attribute đó khi variant của mình được dựng, không để nguyên.
 - **`div().flex_1()` tạm khi `Changes` gập** (giữ commit box ở đáy) — phase 02 xoá nó.
+
+## Trạng thái — plan đã hết phase (2026-08-11)
+
+Cả 6 phase `completed`. Clippy `--deny warnings` exit 0 trên `git_ui` + `git_graph` + `git_graph_core`; **83/83** test `git_ui`, **10/10** `git_graph`. Branch `feat/vscode-parity-git-panel`, 17+ commit, đã push.
+
+**Việc còn nợ, xếp theo mức quan trọng:**
+
+1. **Rà nested-scroll bằng tay (R1)** — bước 10 của phase 05, chưa làm. Rủi ro UX rõ nhất của cả plan và vẫn đang mở. `cx.draw()` chỉ chứng minh không panic.
+2. **Mở app xem thật** — mỗi phase đều để lại một mục "còn nợ mắt người"; không tiêu chí thị giác nào được kiểm.
+3. **Cap fetch của `initial_graph_data`** (`crates/git` + `crates/project`): `git log` không có `--max-count` nên luôn stream cả history; `commit_data` không evict. Vì thế `graph` **và** `commits` đều mặc định gập. Đây cũng là lý do yêu cầu 7 của phase 04 (phân trang) không làm được.
+4. **Emit event khi `work_directory_abs_path` đổi** (`crates/project/src/git_store.rs`) — không có nó, một lần rename lặng làm thứ tự row Repositories lệch tới lần add/remove/activate kế tiếp.
+5. **Cho `GitPanel::fetch`/`push`/`pull`/`stash_*` nhận repo tường minh** — mở đường cho menu `⋯` mỗi row (yêu cầu 6 phase 03) và cho `↓`/`↑` trên toolbar Graph (phase 05).
+6. `/tkm:rebuild-spec --features F011` — `docs/features/F011_GitIntegration/*` vượt ngưỡng hand-patch suốt 5 phase.
 
 ## Bước tiếp theo
 

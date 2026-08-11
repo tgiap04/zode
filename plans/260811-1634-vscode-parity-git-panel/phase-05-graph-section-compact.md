@@ -1,7 +1,7 @@
 # Phase 05 — Section `Graph` compact (qua crate `git_graph_core`)
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-vscode-parity-git-panel.md)
-**Priority:** P2 · **Status:** pending · **Effort:** 6-8d · **Blocked by:** 01, 04
+**Priority:** P2 · **Status:** completed · **Effort:** 6-8d · **Blocked by:** 01, 04
 
 Miếng **D**, quyết định 7 (**compact + escape hatch ra tab**). Phase đắt nhất và rủi ro nhất. Đi **sau** phase 04 vì dùng lại cơ chế fixed-height + lazy-load đã được chứng minh ở đó.
 
@@ -127,18 +127,61 @@ struct GraphSectionState {
 
 ## Todo
 
-- [ ] Crate `git_graph_core`, lib root tường minh (không `lib.rs`)
-- [ ] Move lane data types, `git_graph` compile lại
-- [ ] `paint_lanes` tham số hoá, `render_graph` gọi nó
-- [ ] **Gate bước 3: test `git_graph` xanh + tab đủ 5 cột — commit riêng trước khi đi tiếp**
-- [ ] `git_ui` → `git_graph_core`
-- [ ] `GraphSectionState`, lazy theo expand, `_load_task` drop = cancel
-- [ ] `graph_section.rs`: lane + subject, lane width cap
-- [ ] Toolbar: `Auto` · `◎` · `↓` · `↑` · `⟳` · `⛶` · `⋯`
-- [ ] `Auto` re-resolve khi HEAD đổi
-- [ ] `Open Git Graph` rời menu `⋯` sau khi `⛶` chạy
-- [ ] **Rà nested-scroll bằng tay** (R1)
-- [ ] Test gập ⇒ không nạp; lane khớp giữa tab và panel
+- [x] Crate `git_graph_core`, lib root tường minh (không `lib.rs`)
+- [x] Move lane data types, `git_graph` compile lại
+- [x] `paint_lanes` tham số hoá, `render_graph` gọi nó
+- [x] **Gate bước 3 — đã qua, commit riêng `1872dc1`**: clippy exit 0, `git_graph` 10/10, `git_ui` 80/80
+- [x] `git_ui` → `git_graph_core` (không vòng: `cargo tree` chỉ thấy `git_graph_core`)
+- [x] `GraphSectionState`, lazy theo expand — **không** cần `_load_task`, xem điều 2 của phase 04
+- [x] `graph_section.rs`: lane + subject, lane width cap `MAX_LANE_COLUMN_WIDTH = 96px`
+- [x] Toolbar: `Auto` · `◎` · `⟳` · `⛶` — **thiếu `↓`/`↑`/`⋯`**, xem "Lệch so với plan"
+- [x] `Auto` re-resolve khi HEAD đổi
+- [x] `Open Git Graph` rời menu `⋯` của `Changes` sang `⛶` của toolbar Graph
+- [ ] **Rà nested-scroll bằng tay (R1)** — còn nợ, xem "Còn nợ mắt người"
+- [x] Test gập ⇒ không nạp (khẳng định vào cache của repository); `paint_lanes` chỉ có một bản
+
+## Kết quả (2026-08-11)
+
+Hai commit: `1872dc1` (refactor tách crate, gate bước 3) và commit panel. Clippy `--deny warnings` exit 0 trên **cả ba** crate; `git_graph` 10/10, `git_ui` **83/83**.
+
+| File | Δ |
+|---|---|
+| `git_graph_core/src/git_graph_core.rs` | +710 (mới) |
+| `git_graph_core/Cargo.toml` | mới |
+| `git_graph/src/git_graph.rs` | −474 net (move ra + gọi `paint_lanes`) |
+| `git_ui/src/git_panel/graph_section.rs` | +435 (mới) |
+| `git_ui/src/git_panel.rs` | +38 / −7 |
+| `git_ui/src/git_panel/tests.rs` | +95 |
+
+Ba test mới: gập ⇒ **không** hỏi log (vẽ panel lúc gập rồi khẳng định `get_graph_data(...).is_none()`); expand ⇒ hỏi log + `cx.draw()` cả lane canvas lẫn row list không panic; toggle `Auto` ↔ `All` hai chiều.
+
+### Ba điều phase này dạy lại cho plan
+
+**1. Ước lượng của plan về vùng trích ra là đúng — nhưng bỏ sót hằng số và `cfg(test)`.** Plan xác minh "vùng lane core tham chiếu `git_ui` 0 lần" và điều đó đúng. Hai thứ plan không kể:
+
+- **Hằng số hình học** (`LANE_WIDTH`, `LEFT_PADDING`, `COMMIT_CIRCLE_RADIUS`, `LINE_WIDTH`, `ROW_VERTICAL_PADDING`) nằm ở đầu `git_graph.rs`, ngoài vùng 310–900, nhưng `paint_lanes` và ba helper vẽ đều cần → phải move theo.
+- **`#[cfg(test)]` không xuyên biên crate.** `CommitLine.child`/`.parent` mang `#[cfg(test)]` để test của `git_graph` đọc được. Sau khi tách, `git_graph_core` là *dependency* nên build **không** có `cfg(test)` → 20 lỗi `no field child`. Phải đổi sang feature `test-support` và cho `git_graph` bật nó trong `dev-dependencies`. **Đây là bẫy chung của mọi lần tách crate**, không riêng phase này.
+
+**2. `paint_lanes` nhận `AccentColors` theo giá trị, không theo `&`.** `cx.theme().accents()` trả `&AccentColors`; closure của `canvas` là `move` và sống qua frame nên không giữ được reference vào `cx`. Phải `.clone()` tại call site. Plan viết chữ ký `accents: &[Hsla]` — không dùng được vì `color_for_index` là method của `AccentColors`.
+
+**3. Panel không tự theo dõi hover/selection trên row graph.** Plan liệt kê 11 `self.*` là "interaction state — mỗi consumer tự giữ". Thực tế panel chỉ cần **2** trong số đó (`graph_data`, `scroll_handle`): hover/selected của lane để `None` và để row list tự lo highlight bằng `.hover()` của chính nó. Đơn giản hơn plan dự tính.
+
+### Lệch so với plan
+
+- **Toolbar thiếu `↓` pull / `↑` push / `⋯`.** `↓`/`↑` đi qua `render_remote_button`, mà cái đó dispatch `git::Pull`/`git::Push` **toàn cục** — đúng vấn đề phase 03 đã gặp: chúng giải về active repository, và ở đây còn trùng với nút `⟳ Fetch` đã có trên row Repositories. Đặt thêm một bộ nữa trên toolbar Graph là **nhân đôi affordance chứ không thêm năng lực**. `⋯` cũng vậy: mọi mục nó chứa đã ở menu `⋯` của title row. Giữ 4 nút thật sự thuộc về graph: `Auto` · `◎` · `⟳` (reload graph, **không** phải git fetch) · `⛶`.
+- **`GraphData` nạp tăng dần (`consumed_commits`), không nạp lại từ đầu.** `add_commits` là incremental; gọi lại với cùng dữ liệu sẽ nhân đôi lane. Mỗi lần `GraphEvent` tới thì chỉ append phần mới — cùng cách `git_graph` làm.
+- **Chiều cao section Graph dùng chung khoảng min/max với Commits** (`COMMITS_SECTION_MIN/MAX_HEIGHT`). Hai section cùng bản chất; đặt hằng số riêng chỉ để đặt tên khác là trùng lặp.
+- `graph_row_height` là hằng `24px`, không suy từ line-height như tab. Lane phải khớp hàng với subject; một hằng số dùng cho **cả** canvas và row list là cách chắc nhất để chúng không lệch nhau.
+
+### Còn nợ mắt người — phần này thật sự chưa kiểm được
+
+Đây là phase có nhiều thứ chỉ mắt người xác nhận được nhất, và tôi **chưa** mở app:
+
+1. **R1 nested-scroll (bước 10 của plan) — chưa rà.** Test `cx.draw()` chứng minh không panic, **không** chứng minh cuộn trong section không tranh với cuộn panel. Đây là rủi ro UX rõ nhất của cả plan và nó vẫn mở.
+2. **Lane có khớp hàng với subject không.** Canvas và row list tính vị trí độc lập từ cùng `GRAPH_ROW_HEIGHT` và cùng scroll offset; đúng về lý nhưng lệch một hai pixel thì chỉ mắt thấy.
+3. **Lane vẽ giống nhau ở tab và panel với cùng dữ liệu** (test (e) plan yêu cầu) — chưa làm được bằng test; cả hai gọi cùng `paint_lanes` nên *nên* giống, nhưng tham số truyền vào khác nhau.
+4. **Đọc được ở 360px không** — lý do tồn tại của `⛶`. Nếu không đọc được thì theo plan: giữ section chỉ hiện N commit đầu + `⛶`, phần còn lại của plan không ảnh hưởng.
+5. Tab `git_graph` vẫn đủ 5 cột — test xanh và refactor là move thuần, nhưng plan đòi thử tay.
 
 ## Success criteria
 
