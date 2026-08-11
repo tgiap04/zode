@@ -2228,6 +2228,40 @@ fn test_tracking_status_label_covers_every_case() {
 async fn init_commits_panel(
     cx: &mut TestAppContext,
 ) -> (Entity<GitPanel>, Entity<Repository>, VisualTestContext) {
+    init_commits_panel_with_log(cx, Vec::new()).await
+}
+
+/// A linear log, newest first: commit `i` has commit `i + 1` as its only parent. The tip carries the
+/// two long refs a checked-out branch really carries, which is what pushes a commit row's subject
+/// out of the way when the row lets them.
+fn linear_graph_log(count: usize) -> Vec<Arc<git::repository::InitialGraphCommitData>> {
+    let shas = (0..count)
+        .map(|ix| git::Oid::from_bytes(&[ix as u8 + 1; 20]).expect("20 bytes is a valid oid"))
+        .collect::<Vec<_>>();
+
+    shas.iter()
+        .enumerate()
+        .map(|(ix, sha)| {
+            Arc::new(git::repository::InitialGraphCommitData {
+                sha: *sha,
+                parents: shas.get(ix + 1).copied().into_iter().collect(),
+                ref_names: if ix == 0 {
+                    vec![
+                        "HEAD -> feat/vscode-parity-git-panel".into(),
+                        "origin/feat/vscode-parity-git-panel".into(),
+                    ]
+                } else {
+                    Vec::new()
+                },
+            })
+        })
+        .collect()
+}
+
+async fn init_commits_panel_with_log(
+    cx: &mut TestAppContext,
+    graph_commits: Vec<Arc<git::repository::InitialGraphCommitData>>,
+) -> (Entity<GitPanel>, Entity<Repository>, VisualTestContext) {
     let fs = FakeFs::new(cx.background_executor.clone());
     fs.insert_tree(
         path!("/project"),
@@ -2239,6 +2273,7 @@ async fn init_commits_panel(
         &[("tracked", "old tracked\n".into())],
     );
     fs.set_branch_name(path!("/project/.git").as_ref(), Some("main"));
+    fs.set_graph_commits(path!("/project/.git").as_ref(), graph_commits);
 
     let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
     let window_handle =
@@ -2513,6 +2548,109 @@ async fn test_expanding_graph_section_requests_the_log(cx: &mut TestAppContext) 
         gpui::point(px(0.), px(0.)),
         gpui::size(px(360.), px(800.)),
         |_, _| panel_to_draw.into_any_element(),
+    );
+}
+
+/// The tip of a branch carries two refs -- `HEAD -> <branch>` and `origin/<branch>` -- whose names
+/// together run wider than the panel. Chips that will not shrink take the subject's width first and
+/// the timestamp's next, and the row that should read as a commit reads as two blue labels and a
+/// clipped word. The subject is the row's point, so it has to keep a usable share of the width.
+///
+/// Measured from a docked panel: the window draws that itself and publishes the frame, whereas
+/// `cx.draw` paints into the pending frame and never swaps it, leaving `debug_bounds` empty.
+#[gpui::test]
+async fn test_commit_row_keeps_its_subject_beside_two_long_refs(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(4)).await;
+    let cx = &mut cx;
+
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        })
+        .expect("the fixture's workspace is alive");
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Commits, cx);
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    let row = cx
+        .debug_bounds("commit-row-with-refs")
+        .expect("the commits section must draw the row carrying the branch's refs");
+    let subject = cx
+        .debug_bounds("commit-row-with-refs-subject")
+        .expect("that row must draw a subject");
+
+    assert!(
+        subject.size.width > px(0.),
+        "the refs took the whole {:?}-wide row and left the subject nothing",
+        row.size.width
+    );
+    assert!(
+        subject.size.width >= row.size.width * 0.2,
+        "the subject got {:?} of a {:?}-wide row, too little to read a commit message in",
+        subject.size.width,
+        row.size.width
+    );
+}
+
+/// Drawing without panicking was all phase 05 asserted, and it let a blank section ship: the lane
+/// canvas takes its height from an explicit `h_full` so it painted, while the row list took
+/// `flex_1` inside a row-direction `div`, where that grows the width and leaves the height alone.
+/// A `uniform_list` contributes no height of its own (`ListSizingBehavior::Auto`), so the list was
+/// laid out zero pixels tall and rendered no rows — lanes on screen, not one subject beside them.
+/// `last_item_size.item` is the box the list actually got.
+#[gpui::test]
+async fn test_expanded_graph_section_lays_out_its_row_list(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(8)).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    assert_ne!(
+        panel.update_in(cx, |panel, _, _| panel
+            .graph_section
+            .as_ref()
+            .map_or(0, |state| state.graph_data.commits.len())),
+        0,
+        "the fixture's log must have arrived, or this test cannot see the row list at all"
+    );
+
+    let panel_to_draw = panel.clone();
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(px(360.), px(800.)),
+        |_, _| panel_to_draw.into_any_element(),
+    );
+
+    let list_box = panel
+        .update_in(cx, |panel, _, _| {
+            panel
+                .graph_section
+                .as_ref()
+                .and_then(|state| state.scroll_handle.0.borrow().last_item_size)
+        })
+        .expect("the row list must reach layout, not be skipped entirely");
+
+    assert!(
+        list_box.item.height >= GRAPH_ROW_HEIGHT,
+        "the graph row list was laid out {:?} tall, too short for even one {:?} row, so the \
+         section shows its lanes against an empty column",
+        list_box.item.height,
+        GRAPH_ROW_HEIGHT
+    );
+    assert!(
+        list_box.item.width > px(0.),
+        "the graph row list was laid out with no width"
     );
 }
 

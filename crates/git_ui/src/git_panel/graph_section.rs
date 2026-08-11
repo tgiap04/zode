@@ -10,14 +10,16 @@ const MAX_LANE_COLUMN_WIDTH: Pixels = px(96.);
 /// Present only once the Graph section has been expanded at least once. Absence is the laziness:
 /// building this is what asks a repository for graph data, and asking is what starts the fetch.
 pub(super) struct GraphSectionState {
-    graph_data: GraphData,
+    pub(super) graph_data: GraphData,
     /// `Branch(_)` is "Auto" — follow HEAD; `All` shows every ref.
     log_source: LogSource,
     loaded_for_branch: Option<SharedString>,
     /// How many commits have already been fed to `graph_data`, so the stream can be appended
     /// rather than rebuilt from scratch on every batch.
     consumed_commits: usize,
-    scroll_handle: UniformListScrollHandle,
+    /// Read by the lane canvas to follow the list's scrolling, and by the panel's tests, which take
+    /// `last_item_size` as the proof that the list was laid out with a height at all.
+    pub(super) scroll_handle: UniformListScrollHandle,
 }
 
 impl GraphSectionState {
@@ -211,7 +213,11 @@ impl GitPanel {
             + LANE_WIDTH * (state.graph_data.max_lanes.max(1) as f32))
             .min(MAX_LANE_COLUMN_WIDTH);
 
-        div()
+        // A column, not a bare `div`: `div()` lays its children out in a row, where the `flex_1`
+        // below grows the list's width and leaves its height at zero. A `uniform_list` contributes
+        // no height of its own, so in a row it renders no rows at all — the lane canvas, which sets
+        // `h_full` outright, would be the only thing on screen.
+        v_flex()
             .relative()
             .size_full()
             .child(self.render_lane_canvas(lane_column_width, cx))

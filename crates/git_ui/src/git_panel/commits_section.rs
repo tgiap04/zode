@@ -2,6 +2,7 @@ use super::*;
 use crate::commit_tooltip::CommitAvatar;
 use gpui::DragMoveEvent;
 use project::git_store::CommitDataState;
+use ui::Chip;
 
 /// What the branch's position relative to its upstream reads as. A free function taking only the
 /// upstream so all four cases can be asserted without fabricating a repository.
@@ -20,6 +21,37 @@ pub(super) fn tracking_status_label(upstream: Option<&Upstream>) -> SharedString
             (ahead, behind) => format!("↑{ahead} ↓{behind} — {remote}").into(),
         },
     }
+}
+
+/// A ref name as the graph tab draws it: the same `ui::Chip`, tinted with the same accent, so the
+/// two places that show a branch's refs do not disagree about what one looks like. The colors are
+/// passed rather than left to `Chip`'s flat default because the strength of the tint is what
+/// separates the checked-out ref from the others.
+fn render_ref_chip(ref_name: &SharedString, cx: &App) -> impl IntoElement {
+    let accent = cx
+        .theme()
+        .accents()
+        .0
+        .first()
+        .copied()
+        .unwrap_or(cx.theme().colors().text_accent);
+    // `git log --decorate` writes the checked-out ref as `HEAD -> <branch>`, so the tip is the one
+    // ref that names itself.
+    let is_head = ref_name.starts_with("HEAD");
+
+    Chip::new(ref_name.clone())
+        .label_size(LabelSize::XSmall)
+        .truncate()
+        .map(|chip| {
+            if is_head {
+                chip.icon(IconName::Check)
+                    .bg_color(accent.opacity(0.25))
+                    .border_color(accent.opacity(0.5))
+            } else {
+                chip.bg_color(accent.opacity(0.08))
+                    .border_color(accent.opacity(0.25))
+            }
+        })
 }
 
 impl GitPanel {
@@ -224,8 +256,15 @@ impl GitPanel {
         let workspace = self.workspace.clone();
         let repo = repository.downgrade();
 
+        // Only the ref-bearing row is named, so the panel's tests can measure the one row where the
+        // chips compete with the subject. `debug_selector` compiles away outside tests.
+        let has_refs = !commit.ref_names.is_empty();
+
         h_flex()
             .id(("commit-row", ix))
+            .when(has_refs, |this| {
+                this.debug_selector(|| "commit-row-with-refs".into())
+            })
             .h(COMMITS_ROW_HEIGHT)
             .w_full()
             .items_center()
@@ -252,32 +291,47 @@ impl GitPanel {
                     .size(px(14.))
                     .render(window, cx),
             )
-            .children(commit.ref_names.iter().take(2).map(|ref_name| {
+            .children(has_refs.then(|| {
+                // Bounded and shrinkable. A checked-out branch carries two refs whose names are
+                // together longer than the panel is wide, and chips that refuse to shrink take the
+                // subject's width and then the timestamp's, leaving a row with neither.
                 h_flex()
-                    .flex_none()
-                    .px_1()
-                    .rounded_sm()
-                    .bg(cx.theme().colors().element_background)
-                    .child(
-                        Label::new(ref_name.clone())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .single_line(),
+                    .min_w_0()
+                    .max_w(relative(0.45))
+                    .gap_1()
+                    .overflow_hidden()
+                    .children(
+                        commit
+                            .ref_names
+                            .iter()
+                            .take(2)
+                            .map(|ref_name| render_ref_chip(ref_name, cx)),
                     )
             }))
             .child(
-                div().flex_1().overflow_hidden().child(
-                    Label::new(subject)
-                        .size(LabelSize::Small)
-                        .single_line()
-                        .truncate(),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .when(has_refs, |this| {
+                        this.debug_selector(|| "commit-row-with-refs-subject".into())
+                    })
+                    .child(
+                        Label::new(subject)
+                            .size(LabelSize::Small)
+                            .single_line()
+                            .truncate(),
+                    ),
             )
             .children(relative_time.map(|relative_time| {
-                Label::new(relative_time)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
-                    .single_line()
+                // `flex_none`: the subject is the part that should truncate, not the timestamp,
+                // which is unreadable the moment it loses its last word.
+                h_flex().flex_none().child(
+                    Label::new(relative_time)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .single_line(),
+                )
             }))
             .into_any_element()
     }
