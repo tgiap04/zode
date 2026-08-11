@@ -51,6 +51,7 @@ members = [
     "crates/fuzzy_nucleo",
     "crates/git",
     "crates/git_graph",
+    "crates/git_graph_core",
     "crates/git_hosting_providers",
     "crates/git_ui",
     "crates/go_to_line",
@@ -259,6 +260,7 @@ fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
 git = { path = "crates/git" }
 git_graph = { path = "crates/git_graph" }
+git_graph_core = { path = "crates/git_graph_core" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }
 go_to_line = { path = "crates/go_to_line" }

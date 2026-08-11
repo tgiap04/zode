@@ -5141,6 +5141,7 @@ dependencies = [
  "editor",
  "fs",
  "git",
+ "git_graph_core",
  "git_ui",
  "gpui",
  "language",
@@ -5158,6 +5159,17 @@ dependencies = [
  "time",
  "ui",
  "workspace",
+]
+
+[[package]]
+name = "git_graph_core"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "git",
+ "gpui",
+ "smallvec",
+ "theme",
 ]
 
 [[package]]
