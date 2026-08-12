@@ -632,14 +632,6 @@ impl Item for AgentView {
     }
 }
 
-/// Room between the agent pane and the editor next to it, so the two do not read
-/// as one surface.
-///
-/// It sits inside this view rather than in the workspace's pane group: widening
-/// the divider there would push apart every split in the window, and the editor
-/// next to an agent is the only seam this is about.
-const EDITOR_GAP: Pixels = px(8.);
-
 impl AgentView {
     /// The switch between the conversation and the agent's own terminal.
     ///
@@ -722,34 +714,37 @@ impl Render for AgentView {
         // same setting `agent_split_direction` reads to open it there.
         let opens_left = matches!(agent_split_direction(cx), SplitDirection::Left);
 
-        div()
+        v_flex()
             .size_full()
-            .bg(colors.background)
+            .bg(colors.editor_background)
             .track_focus(&self.focus_handle)
-            .when(opens_left, |this| this.pr(EDITOR_GAP))
-            .when(!opens_left, |this| this.pl(EDITOR_GAP))
+            // The seam is a border, not a gutter — the same way the rail separates
+            // itself from the rest of the window. Padding here would have been
+            // space *inside* the agent rather than between it and the editor, which
+            // an item cannot create: the room outside a pane belongs to the pane
+            // group, and widening that divider would push apart every split in the
+            // window rather than this one seam.
+            .map(|this| match opens_left {
+                true => this.border_r_1(),
+                false => this.border_l_1(),
+            })
+            .border_color(colors.border)
             .child(measure)
             .child(
-                v_flex()
-                    .size_full()
-                    .bg(colors.editor_background)
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .justify_end()
-                            .border_b_1()
-                            .border_color(colors.border)
-                            .child(mode_switch),
-                    )
-                    // `flex_1` with a floor of zero, in a column so it grows along
-                    // the axis meant: the body's children size themselves against a
-                    // definite height, and `size_full` here would run them straight
-                    // through the header.
-                    .child(v_flex().flex_1().min_h_0().child(body)),
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .justify_end()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(mode_switch),
             )
+            // `flex_1` with a floor of zero, in a column so it grows along the axis
+            // meant: the body's children size themselves against a definite height,
+            // and `size_full` here would run them straight through the header.
+            .child(v_flex().flex_1().min_h_0().child(body))
     }
 }
 

@@ -201,3 +201,17 @@ Test `the_view_draws_inside_a_pane_without_deadlocking`: **regression này làm 
 | Adapter hỏng / cần auth | Probe trực tiếp: `initialize` 5ms, `session/new` **517ms**, `authMethods: []` |
 | Message ACP quá lớn | `session/new` 32KB, `session/update` 34KB, 106 command |
 | Shell env treo | App mở từ CLI ⇒ `get_cli_environment()` trả ngay, không spawn shell |
+
+---
+
+## Seam với editor: border, không phải gutter (2026-08-13)
+
+8px ở mục trên **đặt sai chỗ**. Nó nằm *trong* pane agent, nên content lùi vào mà tab bar phía trên vẫn dính editor — đúng cái đánh đổi tôi đã tự ghi ra và đúng chỗ người dùng chỉ ra: phải là khoảng cách giữa hai khối, không phải padding trong một khối.
+
+Sự thật của layout: **một item không tạo được khoảng trống bên ngoài chính nó.** Chỗ đó thuộc pane group của workspace, và nới divider ở đó thì mọi split trong cửa sổ đều giãn ra, không riêng seam agent–editor.
+
+Đã đặt ba lựa chọn lên bàn kèm hình: (1) border 1px như rail, (2) gutter thật ở pane group, (3) border + nền panel riêng. Người dùng chọn **(1)**.
+
+Làm đúng như rail tách khỏi phần còn lại của cửa sổ (`sidebar/src/rail.rs:106`): `border_r_1`/`border_l_1` + `colors.border` ở cạnh **hướng về editor**, bỏ hẳn padding và bỏ luôn lớp `div` bọc ngoài chỉ để tô gutter. Cạnh nào do `agent_split_direction` quyết — cùng setting đã quyết pane mở bên nào — nên đổi rail sang trái/phải thì border cũng đổi theo, không bao giờ nằm sai phía.
+
+Kiểm chứng runtime trên workspace thật: adapter sống như tiến trình con (frame vẽ trọn), **0 frame** trong `bounding_box_for_pane`. Phần nhìn thì vẫn là mắt người — đây là thay đổi thị giác.
