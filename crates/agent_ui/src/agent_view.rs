@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task, WeakEntity,
-    Window,
+    Window, canvas,
 };
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
@@ -290,40 +290,43 @@ impl AgentView {
 
     /// Keeps the pane's width in step with what this agent was left at.
     ///
-    /// Driven from `render` because that is where a laid-out width exists at all:
-    /// the workspace measures panes, and a pane that was split into being a moment
-    /// ago has no bounds until it has been drawn once.
-    fn track_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        let item = cx.entity();
-        let measured = workspace.read_with(cx, |workspace, _| {
-            let pane = workspace.pane_for(&item)?;
-            let bounds = workspace.bounding_box_for_pane(&pane)?;
-            Some((workspace.active_pane() == &pane, bounds.size.width))
-        });
-        let Some((is_active, width)) = measured else {
-            return;
-        };
+    /// Handed this view's own laid-out width from paint, rather than asking the
+    /// workspace for its pane's bounds. That question deadlocks the entire
+    /// application: `PaneAxis::bounding_box_for_pane` takes a lock the pane group
+    /// is already holding while it renders its children, so an item asking it from
+    /// inside `render` parks the main thread against itself, and the window stops
+    /// drawing altogether. Everything here that touches the workspace is deferred
+    /// past the end of the frame for the same reason.
+    fn width_measured(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         if width <= px(0.) {
             return;
         }
 
         if let Some(target) = self.pending_width.take() {
-            // `resize_pane` moves whichever pane is active, and the one just opened
-            // is exactly that. A restored tab is not: it comes back with the editor
-            // focused, and there the pane group's own serialized flexes already hold
-            // the layout — resizing then would drag a pane the user is working in.
             let delta = target - width;
-            if is_active && delta.abs() > px(1.) {
-                let workspace = workspace.downgrade();
-                cx.defer_in(window, move |_, window, cx| {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.resize_pane(gpui::Axis::Horizontal, delta, window, cx);
-                        })
-                        .log_err();
+            if delta.abs() > px(1.) {
+                cx.defer_in(window, move |this, window, cx| {
+                    let Some(workspace) = this.workspace.upgrade() else {
+                        return;
+                    };
+                    // `resize_pane` moves whichever pane is active, and the one just
+                    // opened is exactly that. A restored tab is not: it comes back
+                    // with the editor focused, and there the pane group's own
+                    // serialized flexes already hold the layout — resizing then
+                    // would drag a pane the user is working in.
+                    let item = cx.entity();
+                    let is_active = workspace.read_with(cx, |workspace, _| {
+                        workspace
+                            .pane_for(&item)
+                            .is_some_and(|pane| workspace.active_pane() == &pane)
+                    });
+                    if !is_active {
+                        return;
+                    }
+
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.resize_pane(gpui::Axis::Horizontal, delta, window, cx);
+                    });
                 });
             }
             return;
@@ -674,8 +677,23 @@ impl AgentView {
 }
 
 impl Render for AgentView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.track_width(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Nothing here may ask the workspace about this view's pane — see
+        // `width_measured`. The width arrives from the canvas below instead, out of
+        // paint, where no pane-group lock is held.
+        let measure = {
+            let view = cx.entity();
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, cx| {
+                    view.update(cx, |this, cx| {
+                        this.width_measured(bounds.size.width, window, cx)
+                    });
+                },
+            )
+            .absolute()
+            .size_full()
+        };
 
         // Both of these need `cx` mutably, so they are built before the theme is
         // borrowed — that borrow lives to the end of the element tree below.
@@ -710,6 +728,7 @@ impl Render for AgentView {
             .track_focus(&self.focus_handle)
             .when(opens_left, |this| this.pr(EDITOR_GAP))
             .when(!opens_left, |this| this.pl(EDITOR_GAP))
+            .child(measure)
             .child(
                 v_flex()
                     .size_full()
@@ -823,6 +842,56 @@ mod tests {
             ensure_prompt_store(cx);
             drop(prompt_store::PromptStore::global(cx));
         });
+    }
+
+    /// Drawing the view inside a real pane, which is the only place the bug this
+    /// guards against can appear.
+    ///
+    /// Asking the workspace for this view's pane bounds during `render` takes a
+    /// lock the pane group already holds while it renders its children, and parks
+    /// the main thread against itself — the whole window stops, not just the agent.
+    /// A regression here does not fail this test, it **hangs** it; that is the
+    /// signal, and the stack will point straight at the culprit.
+    #[gpui::test]
+    async fn the_view_draws_inside_a_pane_without_deadlocking(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/test"), json!({})).await;
+        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+
+        // Built by hand rather than through `open`: starting for real would resolve
+        // the agent's CLI and spawn it, and this is about the frame, not the agent.
+        let view = cx.new_window_entity(|_window, cx| AgentView {
+            agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+            display_name: "Claude Code".into(),
+            mode: AgentViewMode::Chat,
+            state: State::Starting,
+            project: project.clone(),
+            workspace: workspace.downgrade(),
+            focus_handle: cx.focus_handle(),
+            _startup: None,
+            pending_width: Some(px(400.)),
+            recorded_width: None,
+            _record_width: None,
+        });
+
+        // Split, not added to the active pane: with one pane the group's root is a
+        // `Member::Pane` and `bounding_box_for_pane` returns before it touches a
+        // lock. The deadlock needs the `Member::Axis` that a second pane creates —
+        // which is exactly how an agent opens.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_item(SplitDirection::Right, Box::new(view), window, cx);
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     }
 
     /// Leaving a mode has to end it. Each mode owns a child process — an npx

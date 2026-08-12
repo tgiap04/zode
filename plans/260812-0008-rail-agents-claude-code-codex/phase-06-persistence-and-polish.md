@@ -158,3 +158,46 @@ Yêu cầu: chọn CLI hay UI thì lần sau mở phải đúng cái đó, và n
 
 - Width áp theo trục ngang. Kéo pane agent xuống dưới editor rồi mở lại thì width nhớ được không có tác dụng — chưa xử lý, vì "kích thước" theo trục nào là câu hỏi khác.
 - Hai click rất nhanh vào cùng một agent: đã chặn bằng lần kiểm thứ hai *sau* await, click thứ hai activate cái thứ nhất thay vì mở trùng.
+
+---
+
+## Deadlock toàn app khi mở agent (2026-08-13)
+
+Triệu chứng: mở agent thì load mãi, app như treo hẳn.
+
+**Nguyên nhân, chứng minh bằng stack thật** (`sample` trên tiến trình đang treo, 281/281 mẫu ở cùng một frame):
+
+```
+com.apple.main-thread
+  AgentView::render
+    AgentView::track_width
+      Workspace::bounding_box_for_pane
+        PaneGroup::bounding_box_for_pane
+          PaneAxis::bounding_box_for_pane
+            parking_lot RawMutex::lock_slow → park → pthread_cond_wait
+```
+
+`PaneAxis::bounding_box_for_pane` (`pane_group.rs:900`) khoá `bounding_boxes`, mà **chính main thread đang giữ** khoá đó trong lúc pane group render các con của nó. Item con hỏi bounds trong `render` của mình = tự khoá chính mình. Main thread park vĩnh viễn ⇒ cả cửa sổ ngừng vẽ, không riêng view agent.
+
+Đây là lỗi tôi tự tạo ở phần đo width (`ea2bf24`).
+
+**Sửa:** không hỏi workspace trong lúc render nữa. Width lấy từ bounds của **chính element này** qua `canvas` (giai đoạn paint), và mọi thứ chạm workspace — kể cả `resize_pane` và cả phép kiểm active-pane — đẩy hết vào `cx.defer_in`, chạy sau khi frame kết thúc.
+
+**Kiểm chứng bằng runtime, không phải suy luận:** chạy lại đúng workspace đã treo (`tickerx`, có tab agent được serialize) →
+- trước: 0.1% CPU, không tiến trình con, 281/281 mẫu trong `bounding_box_for_pane`;
+- sau: 11% CPU, `npm exec @agentclientprotocol/claude-agent-acp` + tiến trình node của nó **sống như con của zode**, **0 frame** trong `bounding_box_for_pane`.
+
+### Điều này dạy lại cho plan
+
+**Test một pane không tái hiện được deadlock này.** Bản đầu của test dùng `add_item_to_active_pane` → workspace một pane → `PaneGroup.root` là `Member::Pane` → `bounding_box_for_pane` trả `None` **trước khi** chạm mutex, nên test pass ngay cả khi bug còn nguyên (0.21s). Phải `split_item` để có `Member::Axis` — đúng hình mà agent mở ra. Sau khi sửa, test treo với đúng stack `bounding_box_for_pane → RawMutex::lock_slow → pthread_cond_wait`.
+
+Test `the_view_draws_inside_a_pane_without_deadlocking`: **regression này làm test treo chứ không fail** — đó là tín hiệu, và stack chỉ thẳng vào thủ phạm.
+
+### Những gì đã loại trừ (đo, không đoán)
+
+| Nghi ngờ | Bằng chứng loại trừ |
+|---|---|
+| npx tải gói lâu | npm debug log: `exit 0`, gói resolve từ cache 196ms |
+| Adapter hỏng / cần auth | Probe trực tiếp: `initialize` 5ms, `session/new` **517ms**, `authMethods: []` |
+| Message ACP quá lớn | `session/new` 32KB, `session/update` 34KB, 106 command |
+| Shell env treo | App mở từ CLI ⇒ `get_cli_environment()` trả ngay, không spawn shell |
