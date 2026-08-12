@@ -1,9 +1,9 @@
 # Phase 04 — Chat UI thành center item
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-rail-agents-claude-code-codex.md)
-**Priority:** P2 · **Status:** in_progress *(~70% phần cơ học)* · **Effort:** 8-12d · **Blocked by:** 00, 02
+**Priority:** P2 · **Status:** completed · **Effort:** 8-12d · **Blocked by:** 00, 02
 
-> **Trạng thái 2026-08-12.** 26.413 dòng đã khôi phục lên đĩa và **cố ý chưa nối vào module tree** — xem khối comment trong `crates/agent_ui/src/agent_ui.rs`. Cây xanh hoàn toàn (`cargo check --workspace --all-targets` exit 0, 123 test xanh); đưa một module vào `agent_ui.rs` là **bước cuối** của việc port nó, không phải bước đầu. `crates/agent_settings` **đã trim xong và về lại workspace** — nợ kỹ thuật #1 đã trả.
+> **Xong 2026-08-12.** Toàn bộ lát ACP đã nằm trong module tree và compile sạch. *(Ghi chú lịch sử: trong lúc làm, 26.413 dòng từng được khôi phục lên đĩa mà cố ý chưa nối vào module tree — xem khối comment trong `crates/agent_ui/src/agent_ui.rs`. Cây xanh hoàn toàn (`cargo check --workspace --all-targets` exit 0, 123 test xanh); đưa một module vào `agent_ui.rs` là **bước cuối** của việc port nó, không phải bước đầu. `crates/agent_settings` đã trim xong và về lại workspace.)*
 
 Phase lớn nhất. Mang lát ACP của `agent_ui` về, và **thay `agent_panel.rs` (dock Panel) bằng `agent_view.rs` implement `workspace::Item`** — đây là chỗ upstream và zode rẽ đôi: upstream để agent trong dock, quyết định #6 đặt nó ở center.
 
@@ -226,3 +226,48 @@ Sau đó mới tới `conversation_view` (7.307) + `thread_view` (9.311) — hai
 | `AgentFontSize`, `upgrade_to_zed_pro_url`, `shared_agent_thread_url`, `show_undo_reject_toast`, `AgentDiffPane` | 6 | Fork đã bỏ |
 
 **17 chỗ `AgentPanel` là trọng tâm thật của phase này** — đúng như plan đã ghi từ đầu. Chúng không cắt được: `conversation_view` được viết để sống trong `AgentPanel` và gọi ngược lên nó. Mỗi chỗ phải trả lời "trong thiết kế center-pane, ai làm việc này?" — và một số câu trả lời sẽ là "`AgentView`", số khác là "không ai, bỏ tính năng đó".
+
+
+---
+
+## Phiên 4 (2026-08-12) — PHASE 04 XONG
+
+`cargo check --workspace --all-targets` 0 lỗi · `./script/clippy` 0 lỗi · **121 test xanh** (27 `agent_ui`, 16 `sidebar`, 48 `acp_thread`, 14 `agent_servers`, 14 `project`, 2 `agent_settings`) · `cargo build -p zode` xanh.
+
+### Plan của tôi sai một chỗ, và nó là chỗ đắt nhất
+
+Tôi từng xếp `model_selector`, `config_options`, `mode_selector` vào diện **"không port"** chỉ dựa trên tên file. Kiểm lại: cả ba có **0 tham chiếu native**. Chúng là tính năng **ACP thật** mà agent ngoài phơi ra — `session/set_mode`, `session/set_config_option`, `AgentModelSelector`. Claude Code có mode; Codex có model. Suýt cắt mất.
+
+Đã port thêm ~2.300 dòng vì phát hiện này: `config_options` (880), `model_selector` (840), `mode_selector` (211), `model_selector_popover` (101), cùng `ui/{hold_for_default, model_selector_components, undo_reject_toast}` và `external_source_prompt` (162), `markdown_style` (28), `outline` (218), `mention_image` (~150), `diagnostics` (252).
+
+### 17 chỗ `AgentPanel` hoá ra chỉ là 3 chỗ production
+
+Con số 17 làm tôi hoãn hai phiên. Thực tế: phần lớn nằm trong test module, và cả 3 site production đều là **một vị ngữ duy nhất** — *"người dùng có đang nhìn agent không?"*, dùng để quyết có notify hay không.
+
+Viết lại thành: `workspace.panes()` → pane nào có `AgentView` là active item → nó có giữ đúng conversation này không. Đúng nghĩa "trên màn hình", không phải "đang mở".
+
+### Đã cắt (mỗi cái kèm lý do trong code)
+
+| Nhánh | Vì sao |
+|---|---|
+| `From<LanguageModelCompletionError> for ThreadError` — 13 variant | Mô tả request **editor** tự gửi. Agent ngoài tự nói với provider của nó rồi báo lại qua ACP |
+| `ProfileSelector` + `impl ProfileProvider for Entity<agent::Thread>` | Profile là tập tool **Zed tự enforce**; agent ngoài tự quản tool của mình. Gỡ field này mở khoá cascade 123 → 3 lỗi |
+| thinking-mode / effort-level / fast-mode | Ghi vào `LanguageModelSelection`. ACP có `SessionConfigOption` cho việc này, và `config_options` đã render |
+| `as_native_connection` / `as_native_thread` + 20 caller | Downcast sang agent in-process; luôn trả `None`, mọi caller đi nhánh còn lại |
+| `share_thread`, `sync_thread`, feedback `submit`, organization gating | Đều nói với backend của Zed |
+| `upgrade_button` (Zed Pro upsell) | Fork này không bán gì |
+| `token_limit_callout` | ACP báo tổng token nhưng không báo ngưỡng để so |
+
+### Ba lần tôi tự làm hỏng và compiler bắt được
+
+1. `humanize_token_count` bị truncate mất cùng `ManageProfiles` (phiên trước).
+2. Vòng brace-matching đếm lệch một cấp → ăn luôn `}` đóng `impl ThreadView`, **xoá 2.479 dòng**. Phải restore từ HEAD rồi replay lại 23 cut bằng script.
+3. Cut test module "tới EOF" trong khi `mod tests` nằm **giữa file** → xoá 2.542 + 684 + 136 dòng production của `message_editor`, `mention_set`, `entry_view_state`. Restore và cắt lại bằng brace-matching.
+
+Bài học chung: **cắt bằng chỉ số/EOF là sai; phải brace-match, và phải kiểm số dòng trước/sau mỗi lần cắt lớn.**
+
+### Còn nợ
+
+- **Test của upstream cho `conversation_view`/`thread_view`/`message_editor`/`mention_set`/`entry_view_state` đã bị xoá**, không phải port. Chúng dựng `AgentPanel` và native thread. Coverage cho view phải viết lại từ đầu — chưa làm.
+- `insert_dragged_files`, `insert_selections`, `reauthenticate` giữ lại kèm `#![allow(dead_code)]` có ghi chú: caller duy nhất của chúng là dock panel. Là affordance thật, cần re-home lên `AgentView`.
+- `agent_diff` chưa port (phase 05); `AgentDiff::set_active_thread` và đường nhảy tới diff pane đang là no-op có ghi chú.

@@ -14,6 +14,9 @@ pub struct BufferContent {
     /// The actual content (either full text or outline)
     pub text: String,
     /// Whether this is an outline (true) or full content (false)
+    /// Whether the content is an outline rather than the whole file. Read by the
+    /// caller that decides how to label a mention; nothing does yet.
+    #[allow(dead_code)]
     pub is_outline: bool,
 }
 

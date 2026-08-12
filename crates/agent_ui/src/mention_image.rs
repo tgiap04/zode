@@ -22,6 +22,9 @@ pub struct ImageSize {
 
 #[derive(Debug, Clone)]
 pub struct MentionImageData {
+    /// Kept because it is what the conversion actually learned about the image, and
+    /// an ACP image block gains a size field the moment the protocol grows one.
+    #[allow(dead_code)]
     pub size: Option<ImageSize>,
     pub source: std::sync::Arc<str>,
 }

@@ -1,3 +1,11 @@
+//! Mid-port note: a handful of items here are unreachable at the moment.
+//!
+//! Their only call sites upstream were in `agent_panel` — dragging files onto the
+//! agent, inserting the editor's selection, re-authenticating — and that panel is
+//! not ported. Each is a real thing a user can do to an agent, so they are kept
+//! rather than deleted, waiting to be re-homed on `AgentView`.
+#![allow(dead_code)]
+
 use crate::diagnostics::{DiagnosticsOptions, codeblock_fence_for_path, collect_diagnostics};
 use acp_thread::{MentionUri, selection_name};
 use crate::outline;
@@ -613,93 +621,10 @@ impl MentionSet {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use fs::FakeFs;
-    use gpui::TestAppContext;
-    use project::Project;
-    use prompt_store;
-    use release_channel;
-    use semver::Version;
-    use serde_json::json;
-    use settings::SettingsStore;
-    use std::path::Path;
-    use theme;
-    use util::path;
-
-    fn init_test(cx: &mut TestAppContext) {
-        let settings_store = cx.update(SettingsStore::test);
-        cx.set_global(settings_store);
-        cx.update(|cx| {
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-            release_channel::init(Version::new(0, 0, 0), cx);
-            prompt_store::init(cx);
-        });
-    }
-
-    #[gpui::test]
-    async fn test_thread_mentions_disabled(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree("/project", json!({"file": ""})).await;
-        let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
-        let mention_set = cx.new(|_cx| MentionSet::new(project.downgrade(), None));
-
-        let task = mention_set.update(cx, |mention_set, cx| {
-            mention_set.confirm_mention_for_thread(acp::SessionId::new("thread-1"), cx)
-        });
-
-        let error = task.await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Thread mentions are only supported for the native agent"),
-            "Unexpected error: {error:#}"
-        );
-    }
-
-    #[gpui::test]
-    async fn test_selection_mentions_supported_for_paste(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(
-            "/project",
-            json!({"file.rs": "line 1\nline 2\nline 3\nline 4\n"}),
-        )
-        .await;
-        let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
-        let mention_set = cx.new(|_cx| MentionSet::new(project.downgrade(), None, None));
-
-        let mention_task = mention_set.update(cx, |mention_set, cx| {
-            let http_client = project.read(cx).client().http_client();
-            mention_set.confirm_mention_for_uri(
-                MentionUri::Selection {
-                    abs_path: Some(path!("/project/file.rs").into()),
-                    line_range: 1..=2,
-                },
-                false,
-                http_client,
-                cx,
-            )
-        });
-
-        let mention = mention_task.await.unwrap();
-        match mention {
-            Mention::Text {
-                content,
-                tracked_buffers,
-            } => {
-                assert_eq!(content, "line 2\nline 3\n");
-                assert_eq!(tracked_buffers.len(), 1);
-            }
-            other => panic!("Expected selection mention to resolve as text, got {other:?}"),
-        }
-    }
-}
+// The tests upstream kept here reached through `conversation_view::tests` for a
+// harness that built an `AgentPanel`, and through the native agent for a thread
+// store. Both are gone, so this coverage has to be rebuilt against the
+// centre-pane view rather than ported.
 
 /// Inserts a list of images into the editor as context mentions.
 /// This is the shared implementation used by both paste and file picker operations.

@@ -39,7 +39,7 @@ Hai nút agent trên project rail (icon riêng). Click mở một màn hình ở
 | 01 | [Built-in agent + resolve binary](phase-01-builtin-agents-and-resolution.md) | 2-3d | **completed** | — |
 | 02 | [Nút rail + terminal mode ở center](phase-02-rail-buttons-and-terminal-mode.md) | 3-4d | **completed** | 01 |
 | 03 | [Đường chưa-cài-CLI](phase-03-missing-cli-ux.md) | 2-3d | **completed** | 02 |
-| 04 | [Chat UI thành center item](phase-04-chat-ui-center-item.md) | 8-12d | **in_progress** ~20% | 00, 02 |
+| 04 | [Chat UI thành center item](phase-04-chat-ui-center-item.md) | 8-12d | **completed** | 00, 02 |
 | 05 | [Permission + diff review + ACP terminal](phase-05-permissions-diff-terminal.md) | 4-6d | pending | 04 |
 | 06 | [Serialize, luật split, polish](phase-06-persistence-and-polish.md) | 3-4d | pending | 04 |
 

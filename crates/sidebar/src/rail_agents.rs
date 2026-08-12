@@ -31,7 +31,14 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let buttons = RAIL_AGENTS.iter().map(|(agent, icon, label)| {
-            let action = OpenAgent {
+            // One click opens the conversation — the case people are in most of the
+            // time. The terminal is a right-click away rather than a second click
+            // every time.
+            let chat = OpenAgent {
+                agent: (*agent).to_string(),
+                mode: AgentViewMode::Chat,
+            };
+            let terminal = OpenAgent {
                 agent: (*agent).to_string(),
                 mode: AgentViewMode::Terminal,
             };
@@ -39,13 +46,19 @@ impl Sidebar {
             IconButton::new(*agent, *icon)
                 .icon_size(RAIL_ICON_SIZE)
                 .tooltip({
-                    let action = action.clone();
-                    move |_window, cx| Tooltip::for_action(*label, &action, cx)
+                    let chat = chat.clone();
+                    move |_window, cx| Tooltip::for_action(*label, &chat, cx)
                 })
                 // Dispatch rather than opening the view directly: this body runs
                 // inside `Sidebar::update`, and opening a pane reaches back into
                 // the workspace. Same reasoning as `render_rail_footer`.
-                .on_click(move |_, window, cx| window.dispatch_action(Box::new(action.clone()), cx))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(chat.clone()), cx)
+                })
+                .on_right_click(move |_, window, cx| {
+                    let terminal = terminal.clone();
+                    window.dispatch_action(Box::new(terminal), cx);
+                })
         });
 
         v_flex()

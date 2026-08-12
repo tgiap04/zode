@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 
 pub const DEFAULT_THREAD_TITLE: &str = "New Agent Thread";
-const PARALLEL_AGENT_LAYOUT_BACKFILL_KEY: &str = "parallel_agent_layout_backfilled";
+// `PARALLEL_AGENT_LAYOUT_BACKFILL_KEY` keyed a one-off migration that moved users
+// onto the parallel-agent window layout. There is no agent dock here to lay out.
 actions!(
     agent,
     [
@@ -190,7 +191,7 @@ pub struct NewExternalAgentThread {
 #[action(namespace = agent)]
 #[serde(deny_unknown_fields)]
 pub struct NewNativeAgentThreadFromSummary {
-    from_session_id: acp::SessionId,
+    pub from_session_id: acp::SessionId,
 }
 
 /// Which agent a thread belongs to.
@@ -258,6 +259,13 @@ pub enum AgentInitialContent {
         blocks: Vec<acp::ContentBlock>,
         auto_submit: bool,
     },
+    FromExternalSource(crate::external_source_prompt::ExternalSourcePrompt),
+}
+
+impl From<crate::external_source_prompt::ExternalSourcePrompt> for AgentInitialContent {
+    fn from(prompt: crate::external_source_prompt::ExternalSourcePrompt) -> Self {
+        Self::FromExternalSource(prompt)
+    }
 }
 
 pub(crate) fn humanize_token_count(count: u64) -> String {
@@ -287,5 +295,32 @@ pub(crate) fn humanize_token_count(count: u64) -> String {
             }
         }
         10_000_000.. => format!("{}M", (count + 500_000) / 1_000_000),
+    }
+}
+
+/// Identity for a conversation, so a subagent can name the thread it branched from.
+///
+/// Upstream kept this in `thread_metadata_store`, alongside the sqlite persistence
+/// for saved threads. Threads are not persisted here, but the identity still earns
+/// its place: it is how a parent thread and its subagents refer to each other
+/// within a session.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ThreadId(uuid::Uuid);
+
+impl ThreadId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for ThreadId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }

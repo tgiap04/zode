@@ -41,6 +41,9 @@ pub struct AgentView {
 enum State {
     Starting,
     Terminal(Entity<TerminalView>),
+    /// The ACP conversation, driven by the npx adapter. The CLI itself speaks no
+    /// ACP, so this mode never runs the binary the terminal mode runs.
+    Chat(Entity<crate::conversation_view::ConversationView>),
     /// The agent's own CLI is not on this machine. Carries what the install
     /// screen needs, so the view never has to ask which agent it is showing for.
     MissingBinary(AgentBinaryMissing),
@@ -49,6 +52,38 @@ enum State {
 
 pub enum AgentViewEvent {
     UpdateTab,
+}
+
+impl AgentView {
+    /// The conversation this view is showing, if it is showing one.
+    ///
+    /// `ConversationView` asks for this to answer whether the user is currently
+    /// looking at it — the question that decides whether a finished turn is worth
+    /// a notification.
+    pub fn conversation_view(
+        &self,
+    ) -> Option<&Entity<crate::conversation_view::ConversationView>> {
+        match &self.state {
+            State::Chat(view) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// Brings an agent tab forward — the response to accepting a notification.
+    pub fn activate_for_agent(
+        workspace: Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        workspace.update(cx, |workspace, cx| {
+            let chat = workspace
+                .items_of_type::<AgentView>(cx)
+                .find(|view| matches!(view.read(cx).state, State::Chat(_)));
+            if let Some(chat) = chat {
+                workspace.activate_item(&chat, true, true, window, cx);
+            }
+        });
+    }
 }
 
 impl EventEmitter<AgentViewEvent> for AgentView {}
@@ -108,6 +143,52 @@ impl AgentView {
         workspace.split_item(agent_split_direction(cx), Box::new(view), window, cx);
     }
 
+    /// Opens the ACP conversation.
+    ///
+    /// Nothing is resolved against the local CLI first: the conversation reaches the
+    /// agent through its npx adapter, since the CLI itself speaks no ACP. The
+    /// install screen belongs to terminal mode, where the binary is what runs.
+    pub(crate) fn start_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agent = crate::Agent::Custom {
+            id: self.agent.clone(),
+        };
+        let connection_store = cx.new(|cx| {
+            crate::agent_connection_store::AgentConnectionStore::new(self.project.clone(), cx)
+        });
+        let prompt_store = prompt_store::PromptStore::global(cx);
+        let project = self.project.clone();
+        let workspace = self.workspace.clone();
+        let server = agent.server();
+
+        self._startup = Some(cx.spawn_in(window, async move |this, cx| {
+            let prompt_store = prompt_store.await.log_err();
+            this.update_in(cx, |this, window, cx| {
+                let conversation = cx.new(|cx| {
+                    crate::conversation_view::ConversationView::new(
+                        server,
+                        connection_store,
+                        agent,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        workspace,
+                        project,
+                        prompt_store,
+                        "agent_view",
+                        window,
+                        cx,
+                    )
+                });
+                this.state = State::Chat(conversation);
+                cx.emit(AgentViewEvent::UpdateTab);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Re-runs startup from scratch — the way back after the CLI is installed.
     pub(crate) fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.state = State::Starting;
@@ -129,14 +210,9 @@ impl AgentView {
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == AgentViewMode::Chat {
-            // Phase 04 brings the ACP conversation view; until then say so plainly
-            // rather than opening an empty pane.
-            self.state = State::Failed("The chat view is not available yet.".into());
-            return;
-        }
 
         let agent = self.agent.clone();
+        let mode = self.mode;
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
@@ -170,6 +246,12 @@ impl AgentView {
                     return;
                 }
             };
+
+            if mode == AgentViewMode::Chat {
+                this.update_in(cx, |this, window, cx| this.start_chat(window, cx))
+                    .ok();
+                return;
+            }
 
             let terminal = project
                 .update(cx, |project, cx| {
@@ -288,6 +370,7 @@ impl Render for AgentView {
             .track_focus(&self.focus_handle)
             .child(match &self.state {
                 State::Terminal(terminal) => terminal.clone().into_any_element(),
+                State::Chat(conversation) => conversation.clone().into_any_element(),
                 State::Starting => centered_message(
                     IconName::ArrowCircle,
                     format!("Starting {}…", self.display_name).into(),
@@ -295,7 +378,13 @@ impl Render for AgentView {
                     cx,
                 ),
                 State::MissingBinary(missing) => {
-                    crate::missing_binary::render(&cx.entity(), &self.display_name, missing, cx)
+                    crate::missing_binary::render(
+                        &cx.entity(),
+                        &self.display_name,
+                        missing,
+                        self.mode == AgentViewMode::Chat,
+                        cx,
+                    )
                 }
                 State::Failed(error) => {
                     centered_message(IconName::Warning, error.clone(), None, cx)

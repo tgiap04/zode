@@ -7,19 +7,26 @@ mod missing_binary;
 // only make the crate red. See the phase-04 file for the remaining work, module
 // by module.
 //
-// mod actions;
-// mod diagnostics;
-// mod markdown_style;
-// mod mention_image;
-// mod outline;
-// mod agent_connection_store;
-// mod completion_provider;
-// mod conversation_view;
-// mod entry_view_state;
-// mod mention_set;
-// mod message_editor;
-// mod ui;
+mod actions;
+mod diagnostics;
+mod markdown_style;
+mod mention_image;
+mod outline;
+mod agent_connection_store;
+mod completion_provider;
+mod config_options;
+mod conversation_view;
+mod entry_view_state;
+mod external_source_prompt;
+mod mention_set;
+mod mode_selector;
+mod model_selector;
+mod model_selector_popover;
+mod message_editor;
+mod ui;
 
+pub use actions::*;
+pub use model_selector::ModelSelector;
 pub use agent_view::{AgentView, agent_icon};
 
 use gpui::App;
