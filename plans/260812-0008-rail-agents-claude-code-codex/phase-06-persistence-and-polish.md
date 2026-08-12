@@ -111,3 +111,25 @@ Hai thứ người dùng chỉ ra ngay lần đầu mở được app.
 **Pane agent dán sát code editor.** Thêm 8px ở đúng cạnh hướng về editor, đọc `agent_split_direction` — cùng setting đã quyết pane mở bên nào, nên gap không bao giờ nằm sai phía. Gap đặt **trong view**, không phải ở pane group của workspace: nới divider ở đó sẽ đẩy mọi split trong cửa sổ ra xa, không riêng seam này.
 
 Đánh đổi phải nói rõ: hàng tab bar phía trên **vẫn liền nhau**, vì gap nằm trong item chứ không trong pane. Muốn inset cả pane thì phải sửa pane group, và đó là quyết định khác — chưa làm.
+
+### Switch có thật sự kill cái kia không — audit chuỗi sở hữu
+
+Yêu cầu: mỗi lần switch phải kill mode kia, không để rò process. Việc kill **hoàn toàn nằm ở `Drop`**, nên câu hỏi thật là: còn ai giữ strong handle không.
+
+| Nơi có thể giữ | Giữ kiểu gì | Kết luận |
+|---|---|---|
+| `Terminal::drop` (`terminal.rs:2475`) | gửi `Msg::Shutdown` → `terminate_child_process` → `kill_child_process` sau 100ms | ✅ pty chết |
+| `AcpConnection::drop` (`agent_servers/src/acp.rs:1037`) | `child.kill()` | ✅ npx adapter chết |
+| `ConversationView::on_release` (`conversation_view.rs:563`) | `close_all_sessions` + `remove_window` mọi notification | ✅ session đóng tử tế, không rò cửa sổ OS |
+| `AgentDiff` global | `WorkspaceThread { thread: WeakEntity<AcpThread> }` | ✅ weak |
+| `AcpConnectionRegistry` | chỉ id + ring buffer có chặn | ✅ không giữ entity |
+| `Project.terminals.local_handles` | `Vec<WeakEntity<Terminal>>` + `observe_release` dọn | ✅ weak |
+| **`AgentDiffPane`** (`agent_diff.rs:44`) | **`thread: Entity<AcpThread>` — strong** | ⚠️ **ngoại lệ duy nhất** |
+
+**Ngoại lệ:** mở tab diff review rồi switch mode → thread (và connection của nó) sống tới khi đóng tab diff đó. Đây là hành vi của upstream và có lý của nó (diff còn phải keep/reject được), nhưng nó nghĩa là một npx process sống mà không còn UI hội thoại nào. Chưa đổi — đổi vòng đời diff pane là quyết định khác, cần chốt riêng.
+
+Ba việc đã làm thay vì chỉ tin vào phép gán:
+
+1. `restart` **lấy state cũ ra bằng `mem::replace`** rồi drop tường minh trong `end_previous_mode`, kèm ghi rõ chuỗi Drop trong comment.
+2. `warn_if_retained` — chỉ debug build (`cfg!(debug_assertions)`), sau 5s kiểm `WeakEntity::upgrade()`; còn sống thì `log::warn!`. Đây là tripwire cho người sửa ownership sau này, vì audit không sống qua lần đổi code kế tiếp.
+3. Test `leaving_a_mode_releases_it` — dựng terminal **display-only** (không pty thật), switch, khẳng định weak handle chết. Đã kiểm phản chứng: thay `drop` bằng `mem::forget` thì test fail đúng chỗ.

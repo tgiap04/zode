@@ -228,11 +228,74 @@ impl AgentView {
         cx.emit(AgentViewEvent::UpdateTab);
     }
 
-    /// Re-runs startup from scratch — the way back after the CLI is installed.
+    /// Re-runs startup from scratch — the way back after the CLI is installed, and
+    /// the way across when the mode changes.
     pub(crate) fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.state = State::Starting;
+        // Taken out by name rather than overwritten in place, because what becomes
+        // of this value is the whole point. Each mode owns a child process, and the
+        // chain that kills one is entirely `Drop`: dropping `TerminalView` drops
+        // its `Terminal`, whose `Drop` shuts the pty down and terminates the child;
+        // dropping `ConversationView` runs its `on_release`, which closes the ACP
+        // sessions and the notification windows before `AcpConnection::drop` kills
+        // the npx adapter.
+        //
+        // Every link fires only on the *last* strong handle. The other holders were
+        // audited — `AgentDiff` keeps the thread weakly, `AcpConnectionRegistry`
+        // keeps no entity at all, `Project` keeps terminals as weak handles — but an
+        // audit does not survive the next change, which is what the check is for.
+        self.end_previous_mode(cx);
         self.start(window, cx);
         cx.notify();
+    }
+
+    /// Drops whatever the view was showing, and with it the process behind it.
+    ///
+    /// Separate from `restart` so a test can reach the teardown without also
+    /// starting an agent — which is the only way to assert the release, since
+    /// `start` would spawn a real one.
+    fn end_previous_mode(&mut self, cx: &mut Context<Self>) {
+        let previous = std::mem::replace(&mut self.state, State::Starting);
+        Self::warn_if_retained(&previous, cx);
+        drop(previous);
+    }
+
+    /// Reports a mode that outlived the switch away from it.
+    ///
+    /// A handle held anywhere else costs a whole child process — an npx adapter, or
+    /// the CLI under a pty — left running with no view attached to it, invisible
+    /// precisely because the surface that showed it is gone. Debug builds only:
+    /// this is a tripwire for whoever changes the ownership next, not a check the
+    /// shipped app spends anything on.
+    ///
+    /// One holder trips it legitimately: an open `AgentDiffPane` keeps its
+    /// `Entity<AcpThread>` strongly, so reviewing a diff and then switching mode
+    /// holds the conversation's connection until that tab closes.
+    fn warn_if_retained(previous: &State, cx: &mut Context<Self>) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+
+        fn watch<T: 'static>(label: &'static str, entity: &Entity<T>, cx: &mut Context<AgentView>) {
+            let weak = entity.downgrade();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(5))
+                    .await;
+                if weak.upgrade().is_some() {
+                    log::warn!(
+                        "agent {label} outlived the switch away from it — something \
+                         still holds it, and its child process is still running"
+                    );
+                }
+            })
+            .detach();
+        }
+
+        match previous {
+            State::Chat(view) => watch("conversation", view, cx),
+            State::Terminal(view) => watch("terminal", view, cx),
+            State::Starting | State::MissingBinary(_) | State::Failed(_) => {}
+        }
     }
 
     pub(crate) fn open_install_terminal(
@@ -543,7 +606,12 @@ fn centered_message(
 mod tests {
     use super::*;
     use gpui::{TestAppContext, UpdateGlobal as _};
+    use project::FakeFs;
+    use serde_json::json;
     use settings::SettingsStore;
+    use terminal::terminal_settings::{AlternateScroll, CursorShape};
+    use util::{path, paths::PathStyle};
+    use workspace::MultiWorkspace;
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -599,6 +667,72 @@ mod tests {
             ensure_prompt_store(cx);
             drop(prompt_store::PromptStore::global(cx));
         });
+    }
+
+    /// Leaving a mode has to end it. Each mode owns a child process — an npx
+    /// adapter over ACP, or the agent's CLI under a pty — and nothing kills those
+    /// but `Drop`, which runs only on the last strong handle. Assigning over
+    /// `state` looks like it is enough and silently is not the moment anything else
+    /// keeps a handle, so this asserts the count really reached zero.
+    #[gpui::test]
+    async fn leaving_a_mode_releases_it(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/test"), json!({})).await;
+        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+
+        // Display-only: the claim under test is about ownership, and a real pty
+        // would be a process this test then has to be trusted to clean up.
+        let terminal_view = cx.new_window_entity(|window, cx| {
+            let terminal = cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    CursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    PathStyle::local(),
+                )
+                .expect("a display-only terminal needs nothing from the system")
+                .subscribe(cx)
+            });
+            TerminalView::new(
+                terminal,
+                workspace.downgrade(),
+                None,
+                project.downgrade(),
+                window,
+                cx,
+            )
+        });
+
+        let agent_view = cx.new_window_entity(|_window, cx| AgentView {
+            agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+            display_name: "Claude Code".into(),
+            mode: AgentViewMode::Terminal,
+            state: State::Terminal(terminal_view.clone()),
+            project: project.clone(),
+            workspace: workspace.downgrade(),
+            focus_handle: cx.focus_handle(),
+            _startup: None,
+        });
+
+        let left_behind = terminal_view.downgrade();
+        drop(terminal_view);
+
+        agent_view.update(cx, |view, cx| view.end_previous_mode(cx));
+        cx.run_until_parked();
+
+        assert!(
+            left_behind.upgrade().is_none(),
+            "the terminal outlived the switch away from it, so its child process is still running"
+        );
     }
 
     #[gpui::test]
