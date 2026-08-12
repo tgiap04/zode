@@ -111,6 +111,115 @@ pub enum ExternalAgentSource {
     Custom,
     Extension,
     Registry,
+    /// Ships with the editor. Same npx machinery as `Registry`, but with the
+    /// version pinned in the binary instead of fetched — see [`BuiltinAgent`].
+    Builtin,
+}
+
+/// An agent that ships with the editor.
+///
+/// The npx package version is pinned here rather than read from the ACP registry.
+/// Resolving these through the registry would put an HTTPS fetch to
+/// `cdn.agentclientprotocol.com` on the cold-start path of every user, including
+/// those who never open an agent — `AgentRegistryStore::init_global` refreshes
+/// whenever its cache is empty. The registry is still reachable for anyone who
+/// opts in through the `agent_servers` setting; it is simply not on the startup path.
+pub struct BuiltinAgent {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    /// The CLI the user installs themselves. Terminal mode runs this directly, and
+    /// its presence is what the "not installed" prompt tests for.
+    pub binary: &'static str,
+    /// The ACP adapter, run through npx. The CLI itself speaks no ACP — verified
+    /// against Claude Code 2.1.227, which offers `--output-format=stream-json`,
+    /// `mcp` and `agents` but no ACP subcommand.
+    pub package_name: &'static str,
+    pub version: &'static str,
+    pub docs_url: &'static str,
+    /// Install line for macOS/Linux and for Windows, taken from each vendor's docs.
+    install_unix: &'static str,
+    install_windows: &'static str,
+}
+
+impl BuiltinAgent {
+    /// The `name@version` spec handed to `npm exec`, so a cold start never has to
+    /// ask the registry which version to run.
+    pub fn package_spec(&self) -> String {
+        format!("{}@{}", self.package_name, self.version)
+    }
+
+    pub fn install_command(&self) -> &'static str {
+        if cfg!(target_os = "windows") {
+            self.install_windows
+        } else {
+            self.install_unix
+        }
+    }
+}
+
+pub const CLAUDE_CODE_AGENT_ID: &str = "claude-acp";
+pub const CODEX_AGENT_ID: &str = "codex-acp";
+
+pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
+    BuiltinAgent {
+        id: CLAUDE_CODE_AGENT_ID,
+        display_name: "Claude Code",
+        binary: "claude",
+        package_name: "@agentclientprotocol/claude-agent-acp",
+        version: "0.66.0",
+        docs_url: "https://code.claude.com/docs/en/setup",
+        install_unix: "curl -fsSL https://claude.ai/install.sh | bash",
+        install_windows: "irm https://claude.ai/install.ps1 | iex",
+    },
+    BuiltinAgent {
+        id: CODEX_AGENT_ID,
+        display_name: "Codex",
+        binary: "codex",
+        package_name: "@agentclientprotocol/codex-acp",
+        version: "1.1.14",
+        docs_url: "https://developers.openai.com/codex/cli",
+        install_unix: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        install_windows: "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
+    },
+];
+
+pub fn builtin_agent(id: &str) -> Option<&'static BuiltinAgent> {
+    BUILTIN_AGENTS.iter().find(|agent| agent.id == id)
+}
+
+/// Looks `binary` up in `search_path`, which is meant to be the `PATH` of the
+/// user's own shell rather than the one this process was started with.
+///
+/// The process `PATH` is only a fallback for when the shell environment could not
+/// be loaded at all: reporting "not installed" because a login shell failed is a
+/// worse answer than searching a narrower `PATH`.
+fn locate_binary(binary: &str, search_path: Option<String>) -> Option<PathBuf> {
+    let search_path = search_path
+        .filter(|path| !path.is_empty())
+        .or_else(|| std::env::var("PATH").ok())?;
+    // `cwd` only affects relative `PATH` entries, which are vanishingly rare; an
+    // unreadable working directory must not fail the lookup.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    which::which_in(binary, Some(search_path), cwd).ok()
+}
+
+/// Everything the UI needs to tell the user how to install a missing CLI, without
+/// having to know which agent it is asking about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentBinaryMissing {
+    pub agent: AgentId,
+    pub binary: &'static str,
+    pub install_command: &'static str,
+    pub docs_url: &'static str,
+}
+
+/// A missing CLI is an expected state with a screen of its own, not a failure — so
+/// it rides back as a value. The surrounding `Result` is reserved for a resolution
+/// that genuinely could not be performed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentBinary {
+    Found(PathBuf),
+    Missing(AgentBinaryMissing),
 }
 
 pub trait ExternalAgentServer {
@@ -465,6 +574,31 @@ impl AgentServerStore {
             }
         }
 
+        // Built-ins go in first, so an extension or a user's own `agent_servers`
+        // entry carrying the same id simply overwrites them.
+        for builtin in BUILTIN_AGENTS {
+            self.external_agents.insert(
+                AgentId(builtin.id.into()),
+                ExternalAgentEntry::new(
+                    Box::new(LocalRegistryNpxAgent {
+                        fs: fs.clone(),
+                        node_runtime: node_runtime.clone(),
+                        project_environment: project_environment.clone(),
+                        registry_id: Arc::from(builtin.id),
+                        version: builtin.version.into(),
+                        package: builtin.package_spec().into(),
+                        args: Vec::new(),
+                        distribution_env: HashMap::default(),
+                        settings_env: HashMap::default(),
+                        new_version_available_tx: None,
+                    }) as Box<dyn ExternalAgentServer>,
+                    ExternalAgentSource::Builtin,
+                    None,
+                    Some(builtin.display_name.into()),
+                ),
+            );
+        }
+
         // Insert extension agents before custom/registry so registry entries override extensions.
         for entry in extension_agents.iter() {
             let name = AgentId(entry.agent_name.clone().into());
@@ -730,6 +864,68 @@ impl AgentServerStore {
         self.external_agents
             .get_mut(name)
             .map(|entry| entry.server.as_mut())
+    }
+
+    /// Locates the agent's own CLI — the one terminal mode runs, and the one the
+    /// "not installed" screen asks about.
+    ///
+    /// The lookup goes through [`ProjectEnvironment`] rather than the process
+    /// environment on purpose. A GUI application on macOS starts with a minimal
+    /// `PATH`, so the native Claude Code installer's `~/.local/bin/claude` is
+    /// invisible to `which` unless the user's real shell environment is loaded
+    /// first — checking the process `PATH` reports "not installed" on a machine
+    /// where the CLI is installed and working.
+    ///
+    /// The environment task is shared and cached by `ProjectEnvironment`, so the
+    /// login shell is spawned at most once; this is still called on demand rather
+    /// than at startup, since nothing before the first click needs the answer.
+    pub fn resolve_agent_binary(
+        &self,
+        agent: &AgentId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<AgentBinary>> {
+        let Some(builtin) = builtin_agent(agent.as_ref()) else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "agent `{agent}` has no CLI of its own to locate"
+            )));
+        };
+
+        let AgentServerStoreState::Local {
+            project_environment,
+            ..
+        } = &self.state
+        else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "locating an agent CLI is only supported for local projects"
+            )));
+        };
+
+        let environment = project_environment.downgrade();
+        cx.spawn(async move |_, cx| {
+            let environment = environment
+                .update(cx, |environment, cx| environment.default_environment(cx))?
+                .await
+                .unwrap_or_default();
+
+            let search_path = environment.get("PATH").cloned();
+
+            // `which_in` stats every `PATH` entry; keep that off the foreground
+            // thread so a click never costs a frame.
+            let found = cx
+                .background_executor()
+                .spawn(async move { locate_binary(builtin.binary, search_path) })
+                .await;
+
+            Ok(match found {
+                Some(path) => AgentBinary::Found(path),
+                None => AgentBinary::Missing(AgentBinaryMissing {
+                    agent: AgentId(builtin.id.into()),
+                    binary: builtin.binary,
+                    install_command: builtin.install_command(),
+                    docs_url: builtin.docs_url,
+                }),
+            })
+        })
     }
 
     pub fn no_browser(&self) -> bool {
@@ -1994,6 +2190,151 @@ mod tests {
                 )
             })
         })
+    }
+
+    /// The bug this guards against: a GUI application on macOS inherits a minimal
+    /// `PATH`, so the native Claude Code installer's `~/.local/bin/claude` is
+    /// invisible unless the user's shell environment is consulted first. Both
+    /// halves matter — finding it through the supplied path proves nothing unless
+    /// the process `PATH` alone demonstrably fails to find the same binary.
+    #[test]
+    fn locates_a_binary_that_the_process_path_cannot_see() {
+        let exe = std::env::current_exe().expect("test binary has a path");
+        let dir = exe.parent().expect("test binary lives in a directory");
+        let name = exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("test binary has a name");
+
+        assert_eq!(
+            locate_binary(name, Some(dir.to_string_lossy().into_owned())).as_deref(),
+            Some(exe.as_path()),
+            "a binary in the supplied PATH must be found"
+        );
+
+        assert_eq!(
+            locate_binary(name, None),
+            None,
+            "the same binary must be invisible to the process PATH, or this test \
+             proves nothing about reading the shell environment"
+        );
+    }
+
+    #[test]
+    fn empty_shell_path_falls_back_rather_than_reporting_missing() {
+        // A login shell that fails to report a PATH must not be turned into a
+        // "not installed" verdict.
+        let exe = std::env::current_exe().expect("test binary has a path");
+        let name = exe.file_name().and_then(|name| name.to_str()).unwrap();
+        assert_eq!(locate_binary(name, Some(String::new())), None);
+        assert!(locate_binary("sh", Some(String::new())).is_some() || cfg!(windows));
+    }
+
+    #[test]
+    fn builtin_package_specs_pin_their_version() {
+        for builtin in BUILTIN_AGENTS {
+            let spec = builtin.package_spec();
+            assert!(
+                spec.ends_with(&format!("@{}", builtin.version)),
+                "{} must run a pinned version, got {spec}",
+                builtin.id
+            );
+            assert!(!builtin.install_command().is_empty());
+        }
+
+        assert!(builtin_agent(CLAUDE_CODE_AGENT_ID).is_some());
+        assert!(builtin_agent(CODEX_AGENT_ID).is_some());
+        assert!(builtin_agent("nope").is_none());
+    }
+
+    /// "Install Now" types the command into a terminal and deliberately stops
+    /// short of pressing return. A newline anywhere in these strings would run it
+    /// instead — turning an offer into an unrequested `curl … | bash`.
+    #[test]
+    fn install_commands_never_carry_a_newline() {
+        for builtin in BUILTIN_AGENTS {
+            for command in [builtin.install_unix, builtin.install_windows] {
+                assert!(
+                    !command.contains('\n') && !command.contains('\r'),
+                    "{} would execute on its own: {command:?}",
+                    builtin.id
+                );
+                assert!(!command.trim().is_empty());
+            }
+        }
+    }
+
+    /// Built-ins must appear with no registry global installed at all: that is what
+    /// keeps `cdn.agentclientprotocol.com` off the cold-start path.
+    #[gpui::test]
+    async fn builtin_agents_register_without_the_registry(cx: &mut TestAppContext) {
+        init_test_settings(cx);
+        let store = create_agent_server_store(cx);
+
+        store.read_with(cx, |store, _| {
+            for builtin in BUILTIN_AGENTS {
+                let entry = store
+                    .external_agents
+                    .get(builtin.id)
+                    .unwrap_or_else(|| panic!("{} should be registered", builtin.id));
+                assert_eq!(entry.source, ExternalAgentSource::Builtin);
+                assert_eq!(
+                    store
+                        .agent_display_name(&AgentId::new(builtin.id))
+                        .map(|name| name.to_string()),
+                    Some(builtin.display_name.to_string())
+                );
+            }
+        });
+
+        assert!(
+            cx.update(|cx| AgentRegistryStore::try_global(cx).is_none()),
+            "registering built-ins must not require the ACP registry global"
+        );
+    }
+
+    #[gpui::test]
+    async fn user_settings_override_a_builtin_agent(cx: &mut TestAppContext) {
+        init_test_settings(cx);
+        let store = create_agent_server_store(cx);
+
+        cx.update(|cx| {
+            AllAgentServersSettings::override_global(
+                AllAgentServersSettings(
+                    [(
+                        CLAUDE_CODE_AGENT_ID.to_string(),
+                        settings::CustomAgentServerSettings::Custom {
+                            path: PathBuf::from("/usr/local/bin/my-claude"),
+                            args: Vec::new(),
+                            env: HashMap::default(),
+                            default_mode: None,
+                            default_model: None,
+                            favorite_models: Vec::new(),
+                            default_config_options: HashMap::default(),
+                            favorite_config_option_values: HashMap::default(),
+                        }
+                        .into(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.agent_source(&AgentId::new(CLAUDE_CODE_AGENT_ID)),
+                Some(ExternalAgentSource::Custom),
+                "a user's own entry must win over the built-in"
+            );
+            assert_eq!(
+                store.agent_source(&AgentId::new(CODEX_AGENT_ID)),
+                Some(ExternalAgentSource::Builtin),
+                "overriding one built-in must not disturb the other"
+            );
+        });
     }
 
     #[test]
