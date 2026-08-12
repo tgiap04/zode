@@ -87,7 +87,6 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panels = self.render_rail_panels(window, cx);
-        let has_panels = panels.is_some();
         let colors = cx.theme().colors();
         let entries = self.contents.rail_entries.clone();
         let side = rail_side(cx);
@@ -122,7 +121,8 @@ impl Sidebar {
                     ),
             )
             .children(panels)
-            .child(self.render_rail_footer(has_panels, cx))
+            .child(self.render_rail_agents(window, cx))
+            .child(self.render_rail_footer(cx))
             .into_any_element()
     }
 
@@ -225,10 +225,9 @@ impl Sidebar {
     /// alone shows no project names, so the panel needs a discoverable way
     /// in that isn't only the `cmd-alt-j` keybinding.
     ///
-    /// `follows_panels` draws the seam against the panel switcher above. Absent
-    /// that block the footer sits straight under the project squares, where a
-    /// rule would divide nothing.
-    fn render_rail_footer(&self, follows_panels: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The seam above is unconditional: the agent block always draws, so there is
+    /// always a block between the project squares and this footer to rule off from.
+    fn render_rail_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let panel_open = self.panel_open(cx);
         let border = cx.theme().colors().border;
 
@@ -237,7 +236,8 @@ impl Sidebar {
             .py(RAIL_ICON_GAP)
             .gap(RAIL_ICON_GAP)
             .items_center()
-            .when(follows_panels, |el| el.border_t_1().border_color(border))
+            .border_t_1()
+            .border_color(border)
             .child(
                 // Not a tree glyph: the panel switcher directly above already
                 // carries `FileTree` and `ListTree` from the project and

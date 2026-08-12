@@ -5256,6 +5256,7 @@ mod tests {
             terminal_view::init(cx);
             image_viewer::init(cx);
             git_graph::init(cx);
+            agent_ui::init(cx);
 
             repl::init(app_state.fs.clone(), cx);
             repl::notebook::init(cx);

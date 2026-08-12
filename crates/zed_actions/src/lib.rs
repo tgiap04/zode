@@ -474,7 +474,36 @@ pub mod settings_profile_selector {
 pub mod agent {
     use gpui::{Action, SharedString, actions};
     use schemars::JsonSchema;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
+
+    /// Which face of an agent to open. The two are separate processes — an
+    /// interactive CLI in a pty on one side, an ACP connection over stdio on the
+    /// other — so a view is one or the other for its whole life, never both.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AgentViewMode {
+        /// The agent's own terminal UI, running the CLI the user installed.
+        // TODO(phase-04): `Chat` takes over as the default once the ACP view exists.
+        #[default]
+        Terminal,
+        /// The native conversation view, driven over ACP.
+        Chat,
+    }
+
+    /// Opens an agent beside the editor.
+    ///
+    /// This lives here rather than in `agent_ui` so the sidebar can dispatch it
+    /// without depending on `agent_ui` — which from phase 04 onwards pulls in the
+    /// whole ACP stack, and the rail has no business linking against that.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenAgent {
+        /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
+        pub agent: String,
+        #[serde(default)]
+        pub mode: AgentViewMode,
+    }
 
     actions!(
         agent,
