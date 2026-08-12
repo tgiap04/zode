@@ -5,7 +5,7 @@ description: >-
   agent vào AgentServerStore đang sống, dựng nút rail và màn hình agent ở center
   cạnh editor với hai mode terminal / chat UI, kèm đường báo-và-hướng-dẫn-cài khi
   chưa có CLI — 7 phase, P2 đã dùng được thật.
-status: pending
+status: completed
 priority: P2
 effort: 4-6w
 branch: feat/rail-agents-claude-code-codex
@@ -40,8 +40,8 @@ Hai nút agent trên project rail (icon riêng). Click mở một màn hình ở
 | 02 | [Nút rail + terminal mode ở center](phase-02-rail-buttons-and-terminal-mode.md) | 3-4d | **completed** | 01 |
 | 03 | [Đường chưa-cài-CLI](phase-03-missing-cli-ux.md) | 2-3d | **completed** | 02 |
 | 04 | [Chat UI thành center item](phase-04-chat-ui-center-item.md) | 8-12d | **completed** | 00, 02 |
-| 05 | [Permission + diff review + ACP terminal](phase-05-permissions-diff-terminal.md) | 4-6d | pending | 04 |
-| 06 | [Serialize, luật split, polish](phase-06-persistence-and-polish.md) | 3-4d | pending | 04 |
+| 05 | [Permission + diff review + ACP terminal](phase-05-permissions-diff-terminal.md) | 4-6d | **completed** | 04 |
+| 06 | [Serialize, luật split, polish](phase-06-persistence-and-polish.md) | 3-4d | **completed** *(trừ kiểm mắt)* | 04 |
 
 **00 và 01 chạy song song được** — 01 chỉ chạm `crates/project` + assets, 00 chỉ chạm crate mới khôi phục. 02 chỉ cần 01. Đây là lý do 02 đứng trước 04: terminal mode dùng **chung đúng đường resolve binary** với chat UI, nên nó là bài kiểm tra rẻ cho 01 trước khi đổ 45k dòng vào.
 
@@ -105,7 +105,7 @@ Package đã đổi org — **không** còn là `@zed-industries/claude-code-acp
 
 ## Ghi chú cross-plan
 
-Không có blocker sống. Ba plan còn `status: pending` (`260726-1531` hard-fork, `260805-1913` multi-project, `260807-1300` themes) đều đã hạ cánh trong code (`c3e2ac3`, `crates/sidebar`, họ theme 2026) — status của chúng là **stale**, không phải việc đang chạy. Plan này khôi phục một lát mỏng của thứ `260726-1531` đã xoá; đó là bổ sung có chủ ý, không phải revert, và không cần `blockedBy`.
+Không có blocker sống. Ba plan còn `status: completed` (`260726-1531` hard-fork, `260805-1913` multi-project, `260807-1300` themes) đều đã hạ cánh trong code (`c3e2ac3`, `crates/sidebar`, họ theme 2026) — status của chúng là **stale**, không phải việc đang chạy. Plan này khôi phục một lát mỏng của thứ `260726-1531` đã xoá; đó là bổ sung có chủ ý, không phải revert, và không cần `blockedBy`.
 
 ## Bước tiếp theo
 

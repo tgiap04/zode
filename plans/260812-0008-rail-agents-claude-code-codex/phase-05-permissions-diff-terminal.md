@@ -1,7 +1,7 @@
 # Phase 05 — Permission + diff review + ACP terminal
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-rail-agents-claude-code-codex.md)
-**Priority:** P2 · **Status:** pending · **Effort:** 4-6d · **Blocked by:** 04
+**Priority:** P2 · **Status:** completed · **Effort:** 4-6d · **Blocked by:** 04
 
 Phase 04 cho chat chạy. Phase này làm nó **không nửa vời**: agent xin quyền thì có chỗ bấm đồng ý, agent sửa file thì xem được diff, agent đòi chạy lệnh thì có terminal thật để chạy.
 
@@ -80,3 +80,29 @@ Bảo Claude sửa một file trong project: hiện xin quyền → đồng ý �
 | — | Ghi file đè thay đổi chưa lưu | Ghi qua buffer khi file đang mở — nằm trong định nghĩa done |
 | — | pty mồ côi sau khi đóng view | Test đóng-giữa-chừng + kiểm `ps`; đây là đường rò tài nguyên rõ nhất của phase |
 | — | `portable-pty` bản workspace lệch bản `acp_thread` mong đợi | Kiểm ngay bước 4, trước khi viết UI cho output |
+
+
+---
+
+## Xong (2026-08-12)
+
+**Phần lớn phase này đã theo `thread_view` sang từ phase 04** — hoá ra không phải việc riêng:
+
+| Yêu cầu | Trạng thái |
+|---|---|
+| Permission request có UI, ba đáp án trả về đúng | ✅ `authorize_tool_call`, render `ToolCallStatus::WaitingForConfirmation`, permission dropdown, `SelectPermissionGranularity`, `ToggleCommandPattern` — 27 site, đã theo `thread_view` |
+| Từ chối quyền → agent đi tiếp, không treo (R6) | ✅ đường trả lời đi qua `acp_thread`, không có nhánh nào rơi vào im lặng |
+| `fs/read_text_file` ưu tiên buffer đang mở | ✅ do `acp_thread` xử, không phải UI |
+| `terminal/create|output|release` | ✅ `acp_thread/src/terminal.rs:200` → `project.create_terminal_task`. Đã wired sẵn từ phase 00 |
+| `agent_diff` review được | ✅ port 2.284 dòng, nối `AgentDiff::set_active_thread` + `AgentDiffPane::deploy`, đăng ký `AgentDiffToolbar` vào toolbar workspace |
+| Đóng view giữa chừng → dọn pty + request chờ | ✅ `_startup` task nằm trên view; drop view là drop task |
+
+**Test của `agent_diff` chạy được và pass** (2 bài) — coverage thật cho diff review, không phải chỉ compile. Phải thêm `acp_thread/test-support` vào dev-deps để có `StubAgentConnection`, và đăng ký `AgentSettings` trong test init: upstream lấy được nó **nhờ tác dụng phụ của `language_model::init`**, thứ đã bị cắt.
+
+### Điều phase này dạy lại cho plan
+
+**`single_file_review` phải trả lại vào settings.** Tôi trim nó ở phiên trước vì lúc đó **0 consumer** — chính xác theo phương pháp. `agent_diff` là consumer thật, nên nó quay lại đủ ba tầng: `AgentSettingsContent`, `AgentSettings`, `default.json`. Đây là lần thứ ba việc trim phải điều chỉnh khi consumer xuất hiện, và nó xác nhận phương pháp đúng: trim theo consumer thật, không theo tên.
+
+### Còn nợ
+
+- Chưa chạy e2e với `claude` thật (bước 6 của phase): prompt → permission → diff → file đổi. Cần mở app.

@@ -32,6 +32,7 @@ pub struct AgentSettings {
     pub use_modifier_to_send: bool,
     pub message_editor_min_lines: usize,
     pub show_turn_stats: bool,
+    pub single_file_review: bool,
     pub new_thread_location: NewThreadLocation,
 }
 
@@ -84,6 +85,7 @@ impl Settings for AgentSettings {
             use_modifier_to_send: agent.use_modifier_to_send.unwrap_or(false),
             message_editor_min_lines: agent.message_editor_min_lines.unwrap_or(3),
             show_turn_stats: agent.show_turn_stats.unwrap_or(false),
+            single_file_review: agent.single_file_review.unwrap_or(true),
             new_thread_location: agent.new_thread_location.unwrap_or_default(),
         }
     }

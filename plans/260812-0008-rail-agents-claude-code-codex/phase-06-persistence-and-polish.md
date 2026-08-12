@@ -1,7 +1,7 @@
 # Phase 06 — Serialize, luật split, polish
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-rail-agents-claude-code-codex.md)
-**Priority:** P2 · **Status:** pending · **Effort:** 3-4d · **Blocked by:** 04
+**Priority:** P2 · **Status:** completed *(trừ mục kiểm bằng mắt)* · **Effort:** 3-4d · **Blocked by:** 04
 
 Đóng commission: tab agent sống qua lần khởi động lại, luật split được viết ra rõ ràng, và những chỗ còn thô được vuốt lại. Chạy song song được với phase 05.
 
@@ -75,3 +75,25 @@ Mở 2 agent, kéo pane thứ hai xuống dưới, đóng app, mở lại → đ
 | R4 | 3 pane + sidebar hết chiều ngang | Bước 6 là bài kiểm bắt buộc bằng mắt. Được phép đổi mặc định nếu thực tế nói vậy — nhưng phải **ghi lại**, không đổi lặng |
 | — | Blob cũ làm vỡ khôi phục sau này | `#[serde(default)]` từ đầu, kể cả khi hôm nay chỉ có 2 trường |
 | — | Cám dỗ resume hội thoại | Ngoài scope theo #10. Muốn làm thì mở plan mới, kèm store cho thread |
+
+
+---
+
+## Xong (2026-08-12)
+
+`impl SerializableItem for AgentView` + module `persistence` với bảng `agent_views(workspace_id, item_id, agent, mode)`, theo đúng khuôn `git_ui::project_diff`. Đăng ký qua `workspace::register_serializable_item::<AgentView>` trong `agent_ui::init`.
+
+| Yêu cầu | Trạng thái |
+|---|---|
+| Blob chỉ `agent_id` + `mode` | ✅ hai cột, không hơn |
+| Agent không còn trong settings → khôi phục êm | ✅ `deserialize` trả `Err` ⇒ workspace bỏ qua item đó, không vỡ cả layout |
+| CLI đã gỡ → rơi vào `MissingBinary` | ✅ `new()` gọi `start()` gọi `resolve_agent_binary` như mọi lần mở khác |
+| Kéo pane sang dọc → restart vẫn dọc | ✅ vị trí pane do pane-group của workspace serialize, không phải view |
+| **Mở trên màn 13" thật** | ❌ **cần mắt người** |
+
+Refactor kèm theo: constructor `AgentView::new` được tách khỏi `open` — `deserialize` cần nó, và giờ cả hai đường vào view đều đi qua cùng một chỗ.
+
+### Còn nợ
+
+- **Mục R4 (chiều ngang trên màn 13")** là thứ duy nhất của phase này chưa làm được, và nó vốn được ghi là "mắt người, không phải test".
+- Không hứa resume hội thoại (quyết định #10). Ai muốn tiếp tục thật thì `/resume` trong terminal mode.

@@ -119,25 +119,10 @@ impl AgentView {
             return;
         }
 
-        let display_name = builtin_agent(agent)
-            .map(|builtin| SharedString::from(builtin.display_name))
-            .unwrap_or_else(|| SharedString::from(agent.to_string()));
-
         let project = workspace.project().clone();
         let workspace_handle = cx.weak_entity();
         let view = cx.new(|cx| {
-            let mut view = Self {
-                agent: agent_id.clone(),
-                display_name,
-                mode,
-                state: State::Starting,
-                project,
-                workspace: workspace_handle,
-                focus_handle: cx.focus_handle(),
-                _startup: None,
-            };
-            view.start(window, cx);
-            view
+            Self::new(agent_id.clone(), mode, project, workspace_handle, window, cx)
         });
 
         workspace.split_item(agent_split_direction(cx), Box::new(view), window, cx);
@@ -187,6 +172,32 @@ impl AgentView {
             })
             .ok();
         }));
+    }
+
+    fn new(
+        agent: AgentId,
+        mode: AgentViewMode,
+        project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let display_name = builtin_agent(agent.as_ref())
+            .map(|builtin| SharedString::from(builtin.display_name))
+            .unwrap_or_else(|| agent.0.clone());
+
+        let mut view = Self {
+            agent,
+            display_name,
+            mode,
+            state: State::Starting,
+            project,
+            workspace,
+            focus_handle: cx.focus_handle(),
+            _startup: None,
+        };
+        view.start(window, cx);
+        view
     }
 
     /// Re-runs startup from scratch — the way back after the CLI is installed.
@@ -470,5 +481,178 @@ mod tests {
             "the two agents must be told apart on the rail and the tab"
         );
         assert_ne!(claude, agent_icon("something-else"));
+    }
+}
+
+impl workspace::item::SerializableItem for AgentView {
+    fn serialized_item_kind() -> &'static str {
+        "AgentView"
+    }
+
+    fn cleanup(
+        workspace_id: workspace::WorkspaceId,
+        alive_items: Vec<workspace::ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let db = persistence::AgentViewDb::global(cx);
+        cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
+    }
+
+    /// Restores the tab, not the conversation.
+    ///
+    /// The agent and the mode are all that is kept: a thread is the agent's own
+    /// state, reachable through its CLI (`claude --resume`) rather than anything
+    /// this editor could reconstruct. Restoring a tab and lying about its history
+    /// would be worse than restoring an empty one.
+    fn deserialize(
+        project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
+        workspace_id: workspace::WorkspaceId,
+        item_id: workspace::ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Entity<Self>>> {
+        let db = persistence::AgentViewDb::global(cx);
+        window.spawn(cx, async move |cx| {
+            let (agent, mode) = db.get_agent(item_id, workspace_id)?;
+            let mode = match mode.as_str() {
+                "terminal" => AgentViewMode::Terminal,
+                _ => AgentViewMode::Chat,
+            };
+
+            cx.update(|window, cx| {
+                Ok(cx.new(|cx| {
+                    Self::new(
+                        AgentId::new(agent),
+                        mode,
+                        project,
+                        workspace,
+                        window,
+                        cx,
+                    )
+                }))
+            })?
+        })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: workspace::ItemId,
+        _closing: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<()>>> {
+        let workspace_id = workspace.database_id()?;
+        let agent = self.agent.to_string();
+        let mode = match self.mode {
+            AgentViewMode::Terminal => "terminal",
+            AgentViewMode::Chat => "chat",
+        };
+
+        let db = persistence::AgentViewDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_agent(item_id, workspace_id, agent, mode.to_string())
+                .await
+        }))
+    }
+
+    fn should_serialize(&self, _event: &Self::Event) -> bool {
+        false
+    }
+}
+
+mod persistence {
+    use anyhow::Context as _;
+    use db::{
+        sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
+        sqlez_macros::sql,
+    };
+    use workspace::{ItemId, WorkspaceDb, WorkspaceId};
+
+    pub struct AgentViewDb(ThreadSafeConnection);
+
+    impl Domain for AgentViewDb {
+        const NAME: &str = stringify!(AgentViewDb);
+
+        const MIGRATIONS: &[&str] = &[sql!(
+            CREATE TABLE agent_views(
+                workspace_id INTEGER,
+                item_id INTEGER UNIQUE,
+
+                agent TEXT,
+                mode TEXT,
+
+                PRIMARY KEY(workspace_id, item_id),
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                ON DELETE CASCADE
+            ) STRICT;
+        )];
+    }
+
+    db::static_connection!(AgentViewDb, [WorkspaceDb]);
+
+    impl AgentViewDb {
+        pub async fn save_agent(
+            &self,
+            item_id: ItemId,
+            workspace_id: WorkspaceId,
+            agent: String,
+            mode: String,
+        ) -> anyhow::Result<()> {
+            self.write(move |connection| {
+                let sql_stmt = sql!(
+                    INSERT OR REPLACE INTO agent_views(item_id, workspace_id, agent, mode)
+                    VALUES (?, ?, ?, ?)
+                );
+                let mut query =
+                    connection.exec_bound::<(ItemId, WorkspaceId, String, String)>(sql_stmt)?;
+                query((item_id, workspace_id, agent, mode)).context(format!(
+                    "exec_bound failed to execute or parse for: {}",
+                    sql_stmt
+                ))
+            })
+            .await
+        }
+
+        pub fn get_agent(
+            &self,
+            item_id: ItemId,
+            workspace_id: WorkspaceId,
+        ) -> anyhow::Result<(String, String)> {
+            let sql_stmt = sql!(
+                SELECT agent, mode FROM agent_views WHERE item_id = ? AND workspace_id = ?
+            );
+            self.select_row_bound::<(ItemId, WorkspaceId), (String, String)>(sql_stmt)?((
+                item_id,
+                workspace_id,
+            ))?
+            .context("no agent view saved for this item")
+        }
+
+        pub async fn delete_unloaded(
+            &self,
+            workspace_id: WorkspaceId,
+            alive_items: Vec<ItemId>,
+        ) -> anyhow::Result<()> {
+            let placeholders = alive_items
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "DELETE FROM agent_views WHERE workspace_id = ? AND item_id NOT IN ({placeholders})"
+            );
+            self.write(move |connection| {
+                let mut statement = db::sqlez::statement::Statement::prepare(connection, query)?;
+                let mut next_index = statement.bind(&workspace_id, 1)?;
+                for id in alive_items {
+                    next_index = statement.bind(&id, next_index)?;
+                }
+                statement.exec()
+            })
+            .await
+        }
     }
 }

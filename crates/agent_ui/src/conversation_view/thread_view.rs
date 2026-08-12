@@ -1856,9 +1856,22 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Opening the agent diff pane at a given buffer. `agent_diff` is phase 05's
-        // work, so the jump has nowhere to land yet.
-        let _ = (buffer, window, cx);
+        let thread = &self.thread;
+
+        let Some(diff) = crate::agent_diff::AgentDiffPane::deploy(
+            thread.clone(),
+            self.workspace.clone(),
+            window,
+            cx,
+        )
+        .log_err()
+        else {
+            return;
+        };
+
+        diff.update(cx, |diff, cx| {
+            diff.move_to_path(multi_buffer::PathKey::for_buffer(buffer, cx), window, cx)
+        })
     }
 
     // thread stuff

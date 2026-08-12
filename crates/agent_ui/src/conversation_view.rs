@@ -907,8 +907,7 @@ impl ConversationView {
             list_state.scroll_to_end();
         }
 
-        // `AgentDiff` tracks which thread's edits the diff pane is showing. It is
-        // phase 05's work, so nothing is tracking yet.
+        crate::agent_diff::AgentDiff::set_active_thread(&self.workspace, thread.clone(), window, cx);
 
         let connection = thread.read(cx).connection().clone();
         let session_id = thread.read(cx).session_id().clone();

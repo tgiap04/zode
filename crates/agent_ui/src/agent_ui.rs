@@ -13,6 +13,7 @@ mod markdown_style;
 mod mention_image;
 mod outline;
 mod agent_connection_store;
+mod agent_diff;
 mod completion_provider;
 mod config_options;
 mod conversation_view;
@@ -26,6 +27,7 @@ mod message_editor;
 mod ui;
 
 pub use actions::*;
+pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
 pub use model_selector::ModelSelector;
 pub use agent_view::{AgentView, agent_icon};
 
@@ -34,6 +36,10 @@ use workspace::Workspace;
 use zed_actions::agent::OpenAgent;
 
 pub fn init(cx: &mut App) {
+    // Restores the agent tabs a workspace had open. The conversation itself is not
+    // restored — see `SerializableItem for AgentView`.
+    workspace::register_serializable_item::<AgentView>(cx);
+
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|workspace, action: &OpenAgent, window, cx| {
             AgentView::open(workspace, action.agent.as_str(), action.mode, window, cx);

@@ -155,6 +155,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: false
     pub show_turn_stats: Option<bool>,
+    /// Whether the agent's edits open one file at a time for review, rather than
+    /// all of them together in the diff pane.
+    ///
+    /// Default: true
+    pub single_file_review: Option<bool>,
 }
 
 impl AgentSettingsContent {
