@@ -8,6 +8,9 @@ mod missing_binary;
 // by module.
 //
 // mod actions;
+// mod diagnostics;
+// mod mention_image;
+// mod outline;
 // mod agent_connection_store;
 // mod completion_provider;
 // mod conversation_view;

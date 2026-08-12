@@ -5,8 +5,8 @@
 //! so only the declarations the ported views actually reference come across.
 
 use agent_client_protocol::schema as acp;
-use agent_settings::AgentProfileId;
-use gpui::{Action, Entity, IconName, SharedString, actions};
+use gpui::{Action, SharedString, actions};
+use ui::IconName;
 use project::AgentId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -258,73 +258,4 @@ pub enum AgentInitialContent {
         blocks: Vec<acp::ContentBlock>,
         auto_submit: bool,
     },
-    FromExternalSource(ExternalSourcePrompt),
-}
-
-impl From<ExternalSourcePrompt> for AgentInitialContent {
-    fn from(prompt: ExternalSourcePrompt) -> Self {
-        Self::FromExternalSource(prompt)
-    }
-}
-
-/// Opens the profile management interface for configuring agent tools and settings.
-#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = agent)]
-#[serde(deny_unknown_fields)]
-pub struct ManageProfiles {
-    #[serde(default)]
-    pub customize_tools: Option<AgentProfileId>,
-}
-
-impl ManageProfiles {
-    pub fn customize_tools(profile_id: AgentProfileId) -> Self {
-        Self {
-            customize_tools: Some(profile_id),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) enum ModelUsageContext {
-    InlineAssistant,
-}
-
-impl ModelUsageContext {
-    pub fn configured_model(&self, cx: &App) -> Option<ConfiguredModel> {
-        match self {
-            Self::InlineAssistant => {
-                LanguageModelRegistry::read_global(cx).inline_assistant_model()
-            }
-        }
-    }
-}
-
-pub(crate) fn humanize_token_count(count: u64) -> String {
-    match count {
-        0..=999 => count.to_string(),
-        1000..=9999 => {
-            let thousands = count / 1000;
-            let hundreds = (count % 1000 + 50) / 100;
-            if hundreds == 0 {
-                format!("{}k", thousands)
-            } else if hundreds == 10 {
-                format!("{}k", thousands + 1)
-            } else {
-                format!("{}.{}k", thousands, hundreds)
-            }
-        }
-        10_000..=999_999 => format!("{}k", (count + 500) / 1000),
-        1_000_000..=9_999_999 => {
-            let millions = count / 1_000_000;
-            let hundred_thousands = (count % 1_000_000 + 50_000) / 100_000;
-            if hundred_thousands == 0 {
-                format!("{}M", millions)
-            } else if hundred_thousands == 10 {
-                format!("{}M", millions + 1)
-            } else {
-                format!("{}.{}M", millions, hundred_thousands)
-            }
-        }
-        10_000_000.. => format!("{}M", (count + 500_000) / 1_000_000),
-    }
 }

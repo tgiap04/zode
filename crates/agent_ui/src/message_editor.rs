@@ -9,7 +9,6 @@ use crate::{
     mention_set::{Mention, MentionImage, MentionSet, insert_crease_for_mention},
 };
 use acp_thread::MentionUri;
-use agent::ThreadStore;
 use agent_client_protocol::schema as acp;
 use anyhow::{Result, anyhow};
 use editor::{
@@ -1792,7 +1791,7 @@ impl Render for MessageEditor {
                     font_family: settings.buffer_font.family.clone(),
                     font_fallbacks: settings.buffer_font.fallbacks.clone(),
                     font_features: settings.buffer_font.features.clone(),
-                    font_size: settings.agent_buffer_font_size(cx).into(),
+                    font_size: settings.buffer_font_size(cx).into(),
                     font_weight: settings.buffer_font.weight,
                     line_height: relative(settings.buffer_line_height.value()),
                     ..Default::default()

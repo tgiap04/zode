@@ -1,7 +1,6 @@
 use std::ops::Range;
 
 use acp_thread::{AcpThread, AgentThreadEntry};
-use agent::ThreadStore;
 use agent_client_protocol::schema as acp;
 use collections::HashMap;
 use editor::{Editor, EditorEvent, EditorMode, MinimapVisibility, SizingBehavior};
@@ -24,7 +23,6 @@ use crate::message_editor::{MessageEditor, MessageEditorEvent, SharedSessionCapa
 pub struct EntryViewState {
     workspace: WeakEntity<Workspace>,
     project: WeakEntity<Project>,
-    thread_store: Option<Entity<ThreadStore>>,
     prompt_store: Option<Entity<PromptStore>>,
     entries: Vec<Entry>,
     session_capabilities: SharedSessionCapabilities,
@@ -35,8 +33,7 @@ impl EntryViewState {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         project: WeakEntity<Project>,
-        thread_store: Option<Entity<ThreadStore>>,
-        prompt_store: Option<Entity<PromptStore>>,
+            prompt_store: Option<Entity<PromptStore>>,
         session_capabilities: SharedSessionCapabilities,
         agent_id: AgentId,
     ) -> Self {

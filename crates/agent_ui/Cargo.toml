@@ -16,7 +16,9 @@ acp_thread.workspace = true
 action_log.workspace = true
 agent-client-protocol.workspace = true
 agent_servers.workspace = true
+agent_settings.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 audio.workspace = true
 buffer_diff.workspace = true
 chrono.workspace = true
@@ -53,9 +55,11 @@ postage.workspace = true
 project.workspace = true
 prompt_store.workspace = true
 proto.workspace = true
+regex.workspace = true
 release_channel.workspace = true
 rope.workspace = true
 schemars.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
@@ -81,6 +85,7 @@ editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 indoc.workspace = true
+pretty_assertions.workspace = true
 language = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }

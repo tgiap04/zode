@@ -1,6 +1,6 @@
 use crate::diagnostics::{DiagnosticsOptions, codeblock_fence_for_path, collect_diagnostics};
 use acp_thread::{MentionUri, selection_name};
-use agent::{ThreadStore, outline};
+use crate::outline;
 use agent_client_protocol::schema as acp;
 use agent_servers::{AgentServer, AgentServerDelegate};
 use anyhow::{Context as _, Result, anyhow};
@@ -18,7 +18,7 @@ use gpui::{
 use http_client::{AsyncBody, HttpClientWithUrl};
 use itertools::Either;
 use language::Buffer;
-use language_model::{LanguageModelImage, LanguageModelImageExt};
+use crate::mention_image::{MentionImageData, MentionImageExt as _};
 use multi_buffer::MultiBufferRow;
 use postage::stream::Stream as _;
 use project::{Project, ProjectItem, ProjectPath, Worktree};
@@ -358,12 +358,12 @@ impl MentionSet {
                 let image = task.await?;
                 let image = image.update(cx, |image, _| image.image.clone());
                 let image = cx
-                    .update(|cx| LanguageModelImage::from_image(image, cx))
+                    .update(|cx| MentionImageData::from_image(image, cx))
                     .await;
                 if let Some(image) = image {
                     Ok(Mention::Image(MentionImage {
                         data: image.source,
-                        format: LanguageModelImage::FORMAT,
+                        format: MentionImageData::FORMAT,
                     }))
                 } else {
                     Err(anyhow!("Failed to convert image"))
@@ -790,14 +790,14 @@ pub(crate) async fn insert_images_as_context(
         let task = cx
             .spawn(async move |cx| {
                 let image = cx
-                    .update(|_, cx| LanguageModelImage::from_image(image, cx))
+                    .update(|_, cx| MentionImageData::from_image(image, cx))
                     .map_err(|e| e.to_string())?
                     .await;
                 drop(tx);
                 if let Some(image) = image {
                     Ok(Mention::Image(MentionImage {
                         data: image.source,
-                        format: LanguageModelImage::FORMAT,
+                        format: MentionImageData::FORMAT,
                     }))
                 } else {
                     Err("Failed to convert image".into())

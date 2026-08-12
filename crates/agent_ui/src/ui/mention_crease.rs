@@ -1,7 +1,6 @@
 use std::{ops::RangeInclusive, path::PathBuf, time::Duration};
 
 use acp_thread::MentionUri;
-use agent_client_protocol::schema as acp;
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use gpui::{
     Animation, AnimationExt, AnyView, Context, IntoElement, WeakEntity, Window, pulsating_between,
@@ -13,7 +12,6 @@ use theme_settings::ThemeSettings;
 use ui::{ButtonLike, TintColor, Tooltip, prelude::*};
 use workspace::{OpenOptions, Workspace};
 
-use crate::Agent;
 
 #[derive(IntoElement)]
 pub struct MentionCrease {
@@ -84,7 +82,7 @@ impl MentionCrease {
 impl RenderOnce for MentionCrease {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let settings = ThemeSettings::get_global(cx);
-        let font_size = settings.agent_buffer_font_size(cx);
+        let font_size = settings.buffer_font_size(cx);
         let buffer_font = settings.buffer_font.clone();
         let is_loading = self.is_loading;
         let tooltip = self.tooltip;
@@ -175,9 +173,9 @@ fn open_mention_uri(
         MentionUri::Directory { abs_path } => {
             reveal_in_project_panel(workspace, abs_path, cx);
         }
-        MentionUri::Thread { id, name } => {
-            open_thread(workspace, id, name, window, cx);
-        }
+        // A thread mention has nowhere to open to: threads are not persisted
+        // here, and the view it would have loaded into was a dock panel.
+        MentionUri::Thread { .. } => {}
         MentionUri::Rule { id, .. } => {
             open_rule(workspace, id, window, cx);
         }
@@ -263,33 +261,6 @@ fn reveal_in_project_panel(
     });
 }
 
-fn open_thread(
-    workspace: &mut Workspace,
-    id: acp::SessionId,
-    name: String,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    use crate::AgentPanel;
-
-    let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
-        return;
-    };
-
-    // Right now we only support loading threads in the native agent
-    panel.update(cx, |panel, cx| {
-        panel.load_agent_thread(
-            Agent::NativeAgent,
-            id,
-            None,
-            Some(name.into()),
-            true,
-            "agent_panel",
-            window,
-            cx,
-        )
-    });
-}
 
 fn open_rule(
     _workspace: &mut Workspace,
