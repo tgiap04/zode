@@ -1,3 +1,4 @@
+mod agent_panel;
 mod agent_view;
 mod missing_binary;
 
@@ -28,6 +29,7 @@ mod ui;
 
 pub use actions::*;
 pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
+pub use agent_panel::AgentPanel;
 pub use agent_view::{AgentView, agent_icon};
 pub use model_selector::ModelSelector;
 

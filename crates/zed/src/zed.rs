@@ -641,7 +641,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         // Built here but inert: it starts no agent until someone opens it, so a
         // session that never touches an agent never pays for one.
-        let agent_panel = agent_ui::AgentView::load(workspace_handle.clone(), cx.clone());
+        let agent_panel = agent_ui::AgentPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(

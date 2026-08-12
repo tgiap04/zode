@@ -1,20 +1,14 @@
-use agent_settings::AgentSettings;
 use gpui::{
-    AnyElement, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
-    SharedString, Task, WeakEntity, Window,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task, WeakEntity,
+    Window,
 };
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
-use settings::SidebarDockPosition;
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal_view::TerminalView;
 use ui::{ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, prelude::*};
-use workspace::{
-    SidebarSide, Workspace,
-    dock::{DockPosition, Panel, PanelEvent},
-};
+use workspace::Workspace;
 use zed_actions::agent::AgentViewMode;
 
-use settings::Settings as _;
 use util::ResultExt as _;
 
 /// The rail draws hard-coded buttons for the two built-in agents, and the tab has
@@ -38,10 +32,6 @@ pub struct AgentView {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     _startup: Option<Task<()>>,
-    /// Whether the agent has been started. The panel exists from the moment a
-    /// workspace loads, and starting one there would spawn an adapter for every
-    /// session that never opens an agent at all.
-    started: bool,
 }
 
 enum State {
@@ -76,35 +66,22 @@ impl AgentView {
     /// Brings the agent forward — the response to accepting a notification.
     pub fn activate_for_agent(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
         workspace.update(cx, |workspace, cx| {
-            workspace.focus_panel::<AgentView>(window, cx);
+            workspace.focus_panel::<crate::agent_panel::AgentPanel>(window, cx);
         });
     }
 
-    /// Builds the panel for a workspace that is still loading.
-    ///
-    /// Registered like every other dock panel in `zed.rs`, and deliberately inert
-    /// until someone asks for an agent.
-    pub async fn load(
-        workspace: WeakEntity<Workspace>,
-        mut cx: AsyncWindowContext,
-    ) -> anyhow::Result<Entity<Self>> {
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let project = workspace.project().clone();
-            let handle = cx.weak_entity();
-            cx.new(|cx| AgentView::new(project, handle, cx))
-        })
+    pub(crate) fn is_agent(&self, agent: &AgentId) -> bool {
+        &self.agent == agent
     }
 }
 
 impl EventEmitter<AgentViewEvent> for AgentView {}
 
 impl AgentView {
-    /// Shows `agent` in the dock, starting it if this is the first time.
+    /// Routes a rail click to the dock.
     ///
-    /// The panel is not a tab. It lives in a dock, which is not part of
-    /// `workspace.panes`, so `open_path` — which falls back to the active pane —
-    /// can never reach it. That is the whole reason the agent moved here: an item
-    /// in the centre group collects whatever file the editor opens next.
+    /// The panel decides where the view goes — beside an agent already open, or
+    /// into the pane that is there. This only resolves which agent and which mode.
     pub fn open(
         workspace: &mut Workspace,
         agent: &str,
@@ -113,11 +90,10 @@ impl AgentView {
         cx: &mut Context<Workspace>,
     ) {
         let agent_id = AgentId::new(agent.to_string());
-        let Some(panel) = workspace.panel::<AgentView>(cx) else {
+        let Some(panel) = workspace.panel::<crate::agent_panel::AgentPanel>(cx) else {
             return;
         };
-
-        workspace.focus_panel::<AgentView>(window, cx);
+        workspace.focus_panel::<crate::agent_panel::AgentPanel>(window, cx);
 
         let db = persistence::AgentViewDb::global(cx);
         let stored_agent = agent_id.to_string();
@@ -150,36 +126,22 @@ impl AgentView {
         .detach();
     }
 
-    /// Points the panel at an agent, ending whatever it was showing before.
-    ///
-    /// One panel holds one agent: a dock shows one thing at a time, and keeping the
-    /// other alive behind it would leave a second adapter running for something
-    /// nobody can see.
-    fn show(
+    /// Moves an already-open agent to a mode, if it is not there already.
+    pub(crate) fn show(
         &mut self,
-        agent: AgentId,
         mode: AgentViewMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let same_agent = self.agent == agent;
-        if same_agent && self.mode == mode && self.started {
-            // Already showing exactly this. Coming back to a view that gave up on a
-            // missing CLI is a retry, though — it may well have been installed since.
+        if self.mode == mode {
+            // Coming back to a view that gave up on a missing CLI is a retry: it may
+            // well have been installed since.
             if matches!(self.state, State::MissingBinary(_)) {
                 self.restart(window, cx);
             }
             return;
         }
-
-        if !same_agent {
-            self.agent = agent;
-            self.display_name = display_name(&self.agent);
-        }
-        self.mode = mode;
-        self.started = true;
-        self.restart(window, cx);
-        cx.emit(AgentViewEvent::UpdateTab);
+        self.set_mode(mode, window, cx);
     }
 
     /// Opens the ACP conversation.
@@ -229,27 +191,26 @@ impl AgentView {
         }));
     }
 
-    /// Builds the panel without starting anything.
-    ///
-    /// Every workspace gets one of these at load, so starting an agent here would
-    /// run an adapter for people who never open one. `show` is what starts it.
-    fn new(
+    pub(crate) fn new(
+        agent: AgentId,
+        mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
-        Self {
+        let mut view = Self {
             display_name: display_name(&agent),
             agent,
-            mode: AgentViewMode::default(),
+            mode,
             state: State::Starting,
             project,
             workspace,
             focus_handle: cx.focus_handle(),
             _startup: None,
-            started: false,
-        }
+        };
+        view.start(window, cx);
+        view
     }
 
     /// Moves this view to the other mode, restarting the agent.
@@ -436,94 +397,6 @@ fn display_name(agent: &AgentId) -> SharedString {
         .unwrap_or_else(|| agent.0.clone())
 }
 
-impl EventEmitter<PanelEvent> for AgentView {}
-
-impl Panel for AgentView {
-    fn persistent_name() -> &'static str {
-        "Agent Panel"
-    }
-
-    fn panel_key() -> &'static str {
-        "AgentPanel"
-    }
-
-    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
-        match AgentSettings::get_global(cx).sidebar_side() {
-            SidebarSide::Left => DockPosition::Left,
-            SidebarSide::Right => DockPosition::Right,
-        }
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(
-        &mut self,
-        position: DockPosition,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let side = match position {
-            DockPosition::Left => SidebarDockPosition::Left,
-            _ => SidebarDockPosition::Right,
-        };
-        let fs = self.project.read(cx).fs().clone();
-        settings::update_settings_file(fs, cx, move |settings, _| {
-            settings.agent.get_or_insert_default().sidebar_side = Some(side)
-        });
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(480.)
-    }
-
-    /// No icon, and therefore no button.
-    ///
-    /// Both button renderers skip a panel whose icon is `None` — the rail at
-    /// `rail_panels.rs:78` and the status bar at `dock.rs:1272`. The rail already
-    /// draws one button per agent with that agent's own mark, and a third generic
-    /// button for "the agent panel" would stand for both of them at once.
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        None
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        None
-    }
-
-    fn toggle_action(&self) -> Box<dyn gpui::Action> {
-        Box::new(zed_actions::agent::OpenAgent {
-            agent: self.agent.to_string(),
-            mode: None,
-        })
-    }
-
-    /// Closed until asked for. The panel exists in every workspace from load, and
-    /// opening it starts an agent — a cost no session should pay before someone
-    /// asks for one.
-    fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
-        false
-    }
-
-    /// Last in the activation order: the panels above it are places to look
-    /// something up, while this one starts a process when it opens.
-    fn activation_priority(&self) -> u32 {
-        9
-    }
-}
-
-/// Seeds the prompt store the first time a conversation asks for it.
-///
-/// Upstream seeded it from `rules_library::init`, called out of `agent_ui::init`;
-/// this fork removed that crate, so the global had no owner left and
-/// `PromptStore::global` panicked on a store nobody had set. Seeding it here
-/// rather than at startup keeps an LMDB open off the cold path of every session
-/// that never opens an agent — the store is a shared future, so the first
-/// conversation pays for it and the rest join.
-/// The name a mode is stored under, in both the per-tab row and the per-agent
-/// preference. One spelling, so a tab restored from one cannot disagree with a
-/// rail click reading the other.
 fn mode_name(mode: AgentViewMode) -> &'static str {
     match mode {
         AgentViewMode::Terminal => "terminal",
@@ -636,6 +509,26 @@ impl AgentView {
     }
 }
 
+impl workspace::item::Item for AgentView {
+    type Event = AgentViewEvent;
+
+    fn to_item_events(_event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
+        f(workspace::item::ItemEvent::UpdateTab);
+    }
+
+    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+        self.display_name.clone()
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+        Some(Icon::new(agent_icon(self.agent.as_ref())))
+    }
+
+    fn telemetry_event_text(&self) -> Option<&'static str> {
+        None
+    }
+}
+
 impl Render for AgentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Both of these need `cx` mutably, so they are built before the theme is
@@ -713,7 +606,7 @@ fn centered_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, UpdateGlobal as _};
+    use gpui::TestAppContext;
     use project::FakeFs;
     use serde_json::json;
     use settings::SettingsStore;
@@ -726,44 +619,6 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
-    }
-
-    /// The panel opens on the side its setting names. Dragging it across writes
-    /// that setting back, so the two directions have to agree.
-    #[gpui::test]
-    async fn the_panel_docks_on_the_side_the_setting_names(cx: &mut TestAppContext) {
-        init_test(cx);
-        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(path!("/test"), json!({})).await;
-        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
-        let panel = cx.new_window_entity(|_window, cx| {
-            AgentView::new(project.clone(), workspace.downgrade(), cx)
-        });
-
-        for (side, expected) in [
-            (SidebarDockPosition::Left, DockPosition::Left),
-            (SidebarDockPosition::Right, DockPosition::Right),
-        ] {
-            cx.update(|_window, cx| {
-                SettingsStore::update_global(cx, |store, _cx| {
-                    let mut agent_settings = store.get::<AgentSettings>(None).clone();
-                    agent_settings.sidebar_side = side;
-                    store.override_global(agent_settings);
-                });
-            });
-            cx.run_until_parked();
-
-            assert_eq!(
-                cx.update(|window, cx| panel.read(cx).position(window, cx)),
-                expected,
-                "the panel must dock where `sidebar_side` says"
-            );
-        }
     }
 
     /// Opening a conversation asked for a prompt store that nothing in this fork
@@ -836,7 +691,6 @@ mod tests {
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             _startup: None,
-            started: true,
         });
 
         let left_behind = terminal_view.downgrade();
