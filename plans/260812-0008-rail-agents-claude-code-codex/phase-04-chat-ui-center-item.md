@@ -1,9 +1,9 @@
 # Phase 04 — Chat UI thành center item
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-rail-agents-claude-code-codex.md)
-**Priority:** P2 · **Status:** in_progress *(~20% phần cơ học)* · **Effort:** 8-12d · **Blocked by:** 00, 02
+**Priority:** P2 · **Status:** in_progress *(~35% phần cơ học)* · **Effort:** 8-12d · **Blocked by:** 00, 02
 
-> **Trạng thái 2026-08-12.** 26.413 dòng đã khôi phục lên đĩa và **cố ý chưa nối vào module tree** — xem khối comment trong `crates/agent_ui/src/agent_ui.rs`. Cây xanh hoàn toàn (`cargo check --workspace --all-targets` exit 0, 123 test xanh); đưa một module vào `agent_ui.rs` là **bước cuối** của việc port nó, không phải bước đầu. `crates/agent_settings` cũng đã khôi phục + trim một phần nhưng **park khỏi workspace** — lý do và cách gỡ ở mục "Nợ kỹ thuật" cuối file.
+> **Trạng thái 2026-08-12.** 26.413 dòng đã khôi phục lên đĩa và **cố ý chưa nối vào module tree** — xem khối comment trong `crates/agent_ui/src/agent_ui.rs`. Cây xanh hoàn toàn (`cargo check --workspace --all-targets` exit 0, 123 test xanh); đưa một module vào `agent_ui.rs` là **bước cuối** của việc port nó, không phải bước đầu. `crates/agent_settings` **đã trim xong và về lại workspace** — nợ kỹ thuật #1 đã trả.
 
 Phase lớn nhất. Mang lát ACP của `agent_ui` về, và **thay `agent_panel.rs` (dock Panel) bằng `agent_view.rs` implement `workspace::Item`** — đây là chỗ upstream và zode rẽ đôi: upstream để agent trong dock, quyết định #6 đặt nó ở center.
 
@@ -137,3 +137,53 @@ Lần compile đầu: **75 lỗi, 100% là lỗi phân giải tên**, không m�
 1. **`crates/agent_settings` đang nằm ngoài workspace.** Nó compile được sau khi gỡ `language_model`, nhưng **5 test đỏ** vì `assets/settings/default.json` của fork không có key `"agent"`. Vá bằng cách nhét nguyên `AgentSettingsContent` của upstream vào `default.json` chính là thứ R3 cấm. Cách đúng: trim `agent_settings` xuống **~15 key UI mà lát ACP thật sự đọc** (`max_content_width`, `thinking_display`, `expand_edit_card`, `expand_terminal_card`, `message_editor_min_lines`, `show_turn_stats`, `enable_feedback`, `cancel_generation_on_terminal_stop`, `new_thread_location`, `notify_when_agent_waiting`, `play_sound_when_agent_done`, `agent_buffer_font_size`, …), rồi mới thêm `pub agent: Option<AgentSettingsContent>` vào `SettingsContent` **và** một section tương ứng trong `default.json`. Ba thứ đó phải đi cùng nhau trong một bước.
 2. **`PanelLayout` trong `agent_settings` vẫn theo dõi dock của mọi panel.** Vô nghĩa với thiết kế agent-ở-center. Là ứng viên xoá khi trim.
 3. `crates/agent_ui/Cargo.toml` hiện khai 68 dep, trong đó nhiều cái chỉ phục vụ module còn parked. Rà lại sau khi nối xong module.
+
+
+---
+
+## Phiên 2 (2026-08-12) — trả nợ `agent_settings` và port helper
+
+### `agent_settings` đã trim xong — nợ #1 đã trả
+
+Trim **theo bằng chứng**, không đoán: grep từng field của `AgentSettings` trên toàn bộ 26k dòng lát ACP, loại false positive (`dock` hoá ra là `TerminalSettings.dock`; `default_model`/`profiles` chỉ xuất hiện ở nhánh chọn model đang cắt), còn lại **14 field có consumer thật**.
+
+| Tầng | Trước | Sau |
+|---|---|---|
+| `AgentSettingsContent` (sinh JSON schema người dùng thấy) | 32 field | **14** |
+| `AgentSettings` | 32 field | **14** |
+| `assets/settings/default.json` | không có key `agent` | 14 key kèm chú thích |
+
+Cắt kèm: `PanelLayout`/`WindowLayout` (mô tả agent nằm ở cạnh nào của dock — vô nghĩa khi agent ở center), `agent_profile.rs`, cỗ máy compile `tool_permissions`, `language_model_to_selection`, `temperature_for_model`.
+
+**Đổi một hành vi có chủ ý:** upstream đọc mọi field bằng `.unwrap()`, khiến `default.json` thành thứ chịu lực — thiếu một key là panic lúc khởi động. Bản trim mang default của chính nó, nên section trong `default.json` giờ là **tài liệu, không phải điều kiện**. Có test khoá lại.
+
+**Test bắt được lỗi thật:** `default.json` tôi viết dùng `"thinking_display": "automatic"` trong khi variant hợp lệ là `auto`/`preview`/`always_expanded`/`always_collapsed`. 7 crate đỏ cùng lúc vì settings parse hỏng ở init. Đây đúng là loại lỗi mà đọc code không bắt được.
+
+### Helper đã port (đang park cùng consumer của chúng)
+
+| Module | Dòng | Vì sao |
+|---|---|---|
+| `outline.rs` | 218 | Từ crate `agent`. `mention_set` cần nó để gửi outline thay vì toàn văn khi file quá lớn — cắt đi là mention một file lớn sẽ thổi bay context |
+| `mention_image.rs` | ~150 | Thay `language_model::LanguageModelImage`: decode → resize theo giới hạn provider → PNG → base64. Giới hạn kích thước giữ nguyên của upstream vì đó là thứ họ đã học được |
+| `diagnostics.rs` | 252 | `mention_set` dùng để gom diagnostic vào mention |
+| `actions.rs`, `ui.rs` | 335 + 20 | Đã xanh ở phiên trước |
+
+`Agent` enum đã bỏ variant `NativeAgent`; `agent_connection_store`, `ui/mention_crease` đã cắt xong nhánh dock panel và `open_thread` (mention thread giờ trơ — fork không lưu thread).
+
+### Vì sao helper vẫn park
+
+Clippy chạy `-D warnings`, nên module `mod` private không có consumer là **dead code = lỗi**. Các helper này chỉ tồn tại để phục vụ `mention_set`/`message_editor` đang park, nên chúng chết theo. Bật lại cùng lúc với consumer, không sớm hơn.
+
+### Còn lại — 22 lỗi trong 4 module
+
+`message_editor` · `mention_set` · `completion_provider` · `entry_view_state`, chủ yếu:
+
+| Nhóm | Cách xử |
+|---|---|
+| `thread_store` xuyên 5 file (~80 ref) | Gỡ tham số — kho thread của agent native |
+| `crate::thread_metadata_store`, `crate::AgentPanel` trong `completion_provider` | Cắt |
+| `Arc<str>` vs `SharedString` (2 chỗ trong `mention_set`) | `.into()` |
+| `agent_ui_font_size`/`agent_buffer_font_size` trên `ThemeSettings` | Fork đã bỏ → dùng `ui_font_size`/`buffer_font_size` |
+| `agent::NativeAgentServer` trong test của `mention_set` | Cắt |
+
+Sau đó mới tới `conversation_view` (7.307) + `thread_view` (9.311) — hai file lớn nhất, **chưa động tới**.
