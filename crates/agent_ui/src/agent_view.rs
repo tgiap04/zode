@@ -36,6 +36,12 @@ pub struct AgentView {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     _startup: Option<Task<()>>,
+    /// The width this agent was last left at, waiting for a laid-out pane to
+    /// measure against. Cleared once applied — or once it is clear it cannot be.
+    pending_width: Option<Pixels>,
+    /// Last width written down, so an unchanged frame costs nothing.
+    recorded_width: Option<Pixels>,
+    _record_width: Option<Task<()>>,
 }
 
 enum State {
@@ -90,7 +96,7 @@ impl AgentView {
     pub fn open(
         workspace: &mut Workspace,
         agent: &str,
-        mode: AgentViewMode,
+        mode: Option<AgentViewMode>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -98,16 +104,17 @@ impl AgentView {
 
         // Resolved in its own statement: the iterator borrows the workspace, and
         // activating the item needs it back mutably.
-        let existing = workspace
-            .items_of_type::<AgentView>(cx)
-            .find(|view| view.read(cx).agent == agent_id);
+        let existing = Self::already_open(workspace, &agent_id, cx);
         if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
             existing.update(cx, |view, cx| {
-                // Asking for the other mode has to move this view to it. Without
+                // Asking for a particular mode has to move this view to it. Without
                 // this the rail's right-click just re-focuses whichever mode is
-                // already open, which reads as the button doing nothing at all.
-                view.set_mode(mode, window, cx);
+                // already open, which reads as the button doing nothing at all. A
+                // plain click asks for no mode in particular and leaves it alone.
+                if let Some(mode) = mode {
+                    view.set_mode(mode, window, cx);
+                }
                 // The CLI may well have been installed since this view gave up on
                 // it, so coming back to it is a retry rather than a look at a
                 // stale verdict.
@@ -120,18 +127,66 @@ impl AgentView {
 
         let project = workspace.project().clone();
         let workspace_handle = cx.weak_entity();
-        let view = cx.new(|cx| {
-            Self::new(
-                agent_id.clone(),
-                mode,
-                project,
-                workspace_handle,
-                window,
-                cx,
-            )
-        });
+        let db = persistence::AgentViewDb::global(cx);
+        let stored_agent = agent_id.to_string();
 
-        workspace.split_item(agent_split_direction(cx), Box::new(view), window, cx);
+        // Opening waits on one indexed sqlite read for the mode and width this
+        // agent was last left at. The alternative — opening in one mode and jumping
+        // to the other a frame later — is worse to watch than a tab that arrives a
+        // beat late.
+        cx.spawn_in(window, async move |workspace, cx| {
+            let remembered = cx
+                .background_executor()
+                .spawn(async move { db.preferences(stored_agent) })
+                .await
+                .log_err()
+                .flatten()
+                .unwrap_or_default();
+
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    // Checked again on this side of the await: two quick clicks both
+                    // miss the first check, and the second would otherwise open a
+                    // duplicate of the pane the first one is still building.
+                    if let Some(existing) = Self::already_open(workspace, &agent_id, cx) {
+                        workspace.activate_item(&existing, true, true, window, cx);
+                        return;
+                    }
+
+                    let (stored_mode, stored_width) = remembered;
+                    let chosen = mode;
+                    let mode = chosen
+                        .or_else(|| stored_mode.as_deref().map(mode_from_name))
+                        .unwrap_or_default();
+                    // A choice is what gets remembered; a plain click never
+                    // overwrites the very preference it just read.
+                    if chosen.is_some() {
+                        remember_mode(&agent_id, mode, cx);
+                    }
+
+                    let view = cx.new(|cx| {
+                        Self::new(
+                            agent_id.clone(),
+                            mode,
+                            project,
+                            workspace_handle,
+                            stored_width.map(|width| px(width as f32)),
+                            window,
+                            cx,
+                        )
+                    });
+
+                    workspace.split_item(agent_split_direction(cx), Box::new(view), window, cx);
+                })
+                .log_err();
+        })
+        .detach();
+    }
+
+    fn already_open(workspace: &Workspace, agent: &AgentId, cx: &App) -> Option<Entity<AgentView>> {
+        workspace
+            .items_of_type::<AgentView>(cx)
+            .find(|view| view.read(cx).agent == *agent)
     }
 
     /// Opens the ACP conversation.
@@ -186,6 +241,7 @@ impl AgentView {
         mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
+        width: Option<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -202,6 +258,9 @@ impl AgentView {
             workspace,
             focus_handle: cx.focus_handle(),
             _startup: None,
+            pending_width: width,
+            recorded_width: None,
+            _record_width: None,
         };
         view.start(window, cx);
         view
@@ -224,8 +283,73 @@ impl AgentView {
             return;
         }
         self.mode = mode;
+        remember_mode(&self.agent, mode, cx);
         self.restart(window, cx);
         cx.emit(AgentViewEvent::UpdateTab);
+    }
+
+    /// Keeps the pane's width in step with what this agent was left at.
+    ///
+    /// Driven from `render` because that is where a laid-out width exists at all:
+    /// the workspace measures panes, and a pane that was split into being a moment
+    /// ago has no bounds until it has been drawn once.
+    fn track_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let item = cx.entity();
+        let measured = workspace.read_with(cx, |workspace, _| {
+            let pane = workspace.pane_for(&item)?;
+            let bounds = workspace.bounding_box_for_pane(&pane)?;
+            Some((workspace.active_pane() == &pane, bounds.size.width))
+        });
+        let Some((is_active, width)) = measured else {
+            return;
+        };
+        if width <= px(0.) {
+            return;
+        }
+
+        if let Some(target) = self.pending_width.take() {
+            // `resize_pane` moves whichever pane is active, and the one just opened
+            // is exactly that. A restored tab is not: it comes back with the editor
+            // focused, and there the pane group's own serialized flexes already hold
+            // the layout — resizing then would drag a pane the user is working in.
+            let delta = target - width;
+            if is_active && delta.abs() > px(1.) {
+                let workspace = workspace.downgrade();
+                cx.defer_in(window, move |_, window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.resize_pane(gpui::Axis::Horizontal, delta, window, cx);
+                        })
+                        .log_err();
+                });
+            }
+            return;
+        }
+
+        // Under four pixels is the divider being dragged past; four is someone
+        // meaning it.
+        if self
+            .recorded_width
+            .is_some_and(|recorded| (recorded - width).abs() < px(4.))
+        {
+            return;
+        }
+        self.recorded_width = Some(width);
+
+        let db = persistence::AgentViewDb::global(cx);
+        let agent = self.agent.to_string();
+        self._record_width = Some(cx.spawn(async move |_, cx| {
+            // Debounced, because a drag crosses dozens of widths and only the one it
+            // stops at is worth a row. Held in a field, so the drop that ends this
+            // view also cancels a write it no longer means.
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            db.save_width(agent, width.to_f64()).await.log_err();
+        }));
     }
 
     /// Re-runs startup from scratch — the way back after the CLI is installed, and
@@ -406,6 +530,36 @@ fn agent_split_direction(cx: &App) -> SplitDirection {
 /// rather than at startup keeps an LMDB open off the cold path of every session
 /// that never opens an agent — the store is a shared future, so the first
 /// conversation pays for it and the rest join.
+/// The name a mode is stored under, in both the per-tab row and the per-agent
+/// preference. One spelling, so a tab restored from one cannot disagree with a
+/// rail click reading the other.
+fn mode_name(mode: AgentViewMode) -> &'static str {
+    match mode {
+        AgentViewMode::Terminal => "terminal",
+        AgentViewMode::Chat => "chat",
+    }
+}
+
+fn mode_from_name(name: &str) -> AgentViewMode {
+    match name {
+        "terminal" => AgentViewMode::Terminal,
+        _ => AgentViewMode::Chat,
+    }
+}
+
+/// Writes down which mode this agent should come back in.
+///
+/// Recorded per agent and not per workspace: it is a habit of the person using
+/// the editor, not a property of the project they happen to have open. Claude in
+/// conversation and Codex in its terminal is a perfectly ordinary pair of habits,
+/// which is why the row is keyed by agent rather than shared between them.
+fn remember_mode(agent: &AgentId, mode: AgentViewMode, cx: &mut App) {
+    let db = persistence::AgentViewDb::global(cx);
+    let agent = agent.to_string();
+    cx.background_spawn(async move { db.save_mode(agent, mode_name(mode).to_string()).await })
+        .detach_and_log_err(cx);
+}
+
 fn ensure_prompt_store(cx: &mut App) {
     if !cx.has_global::<prompt_store::GlobalPromptStore>() {
         prompt_store::init(cx);
@@ -520,7 +674,9 @@ impl AgentView {
 }
 
 impl Render for AgentView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.track_width(window, cx);
+
         // Both of these need `cx` mutably, so they are built before the theme is
         // borrowed — that borrow lives to the end of the element tree below.
         let mode_switch = self.render_mode_switch(cx);
@@ -721,6 +877,9 @@ mod tests {
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             _startup: None,
+            pending_width: None,
+            recorded_width: None,
+            _record_width: None,
         });
 
         let left_behind = terminal_view.downgrade();
@@ -733,6 +892,70 @@ mod tests {
             left_behind.upgrade().is_none(),
             "the terminal outlived the switch away from it, so its child process is still running"
         );
+    }
+
+    /// The mode and the width are written by two different gestures — a click on
+    /// the switch, a drag on the divider — and each writes one column. A plain
+    /// `INSERT OR REPLACE` would have each of them quietly blank the other's value
+    /// on the way past, which is why the write is an insert followed by an update.
+    #[gpui::test]
+    async fn writing_one_preference_leaves_the_other_alone() {
+        // Opened first and under the same name: `agent_views` carries a foreign key
+        // into `workspaces`, and sqlez sweeps orphans out of every table that has
+        // one as part of migrating. Without the parent table in place that sweep is
+        // a query against nothing, and the whole migration fails.
+        let _workspaces =
+            workspace::WorkspaceDb::open_test_db("writing_one_preference_leaves_the_other_alone")
+                .await;
+        let db =
+            persistence::AgentViewDb::open_test_db("writing_one_preference_leaves_the_other_alone")
+                .await;
+
+        assert_eq!(
+            db.preferences("claude-acp".into()).unwrap(),
+            None,
+            "an agent nobody has opened should have nothing written down"
+        );
+
+        db.save_width("claude-acp".into(), 480.).await.unwrap();
+        db.save_mode("claude-acp".into(), "terminal".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.preferences("claude-acp".into()).unwrap(),
+            Some((Some("terminal".into()), Some(480.))),
+            "choosing a mode must not forget the width"
+        );
+
+        // The other order, because the two gestures have no fixed sequence.
+        db.save_mode("codex-acp".into(), "chat".into())
+            .await
+            .unwrap();
+        db.save_width("codex-acp".into(), 320.).await.unwrap();
+        assert_eq!(
+            db.preferences("codex-acp".into()).unwrap(),
+            Some((Some("chat".into()), Some(320.))),
+            "dragging the divider must not forget the mode"
+        );
+
+        db.save_mode("claude-acp".into(), "chat".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            db.preferences("claude-acp".into()).unwrap(),
+            Some((Some("chat".into()), Some(480.))),
+            "a second choice replaces the first without touching the width"
+        );
+    }
+
+    /// Two tables store a mode by name — the per-tab row and the per-agent
+    /// preference — and a tab restored from one must not disagree with a rail click
+    /// reading the other.
+    #[gpui::test]
+    async fn a_mode_survives_the_round_trip_through_its_name(_cx: &mut TestAppContext) {
+        for mode in [AgentViewMode::Chat, AgentViewMode::Terminal] {
+            assert_eq!(mode_from_name(mode_name(mode)), mode);
+        }
     }
 
     #[gpui::test]
@@ -779,14 +1002,23 @@ impl workspace::item::SerializableItem for AgentView {
         let db = persistence::AgentViewDb::global(cx);
         window.spawn(cx, async move |cx| {
             let (agent, mode) = db.get_agent(item_id, workspace_id)?;
-            let mode = match mode.as_str() {
-                "terminal" => AgentViewMode::Terminal,
-                _ => AgentViewMode::Chat,
-            };
+            let mode = mode_from_name(&mode);
 
             cx.update(|window, cx| {
-                Ok(cx
-                    .new(|cx| Self::new(AgentId::new(agent), mode, project, workspace, window, cx)))
+                Ok(cx.new(|cx| {
+                    // No width to restore here: a workspace comes back with its own
+                    // serialized pane flexes, and forcing a remembered width on top
+                    // of them would fight the layout the user actually left.
+                    Self::new(
+                        AgentId::new(agent),
+                        mode,
+                        project,
+                        workspace,
+                        None,
+                        window,
+                        cx,
+                    )
+                }))
             })?
         })
     }
@@ -801,10 +1033,7 @@ impl workspace::item::SerializableItem for AgentView {
     ) -> Option<Task<anyhow::Result<()>>> {
         let workspace_id = workspace.database_id()?;
         let agent = self.agent.to_string();
-        let mode = match self.mode {
-            AgentViewMode::Terminal => "terminal",
-            AgentViewMode::Chat => "chat",
-        };
+        let mode = mode_name(self.mode);
 
         let db = persistence::AgentViewDb::global(cx);
         Some(cx.background_spawn(async move {
@@ -831,19 +1060,32 @@ mod persistence {
     impl Domain for AgentViewDb {
         const NAME: &str = stringify!(AgentViewDb);
 
-        const MIGRATIONS: &[&str] = &[sql!(
-            CREATE TABLE agent_views(
-                workspace_id INTEGER,
-                item_id INTEGER UNIQUE,
+        const MIGRATIONS: &[&str] = &[
+            sql!(
+                CREATE TABLE agent_views(
+                    workspace_id INTEGER,
+                    item_id INTEGER UNIQUE,
 
-                agent TEXT,
-                mode TEXT,
+                    agent TEXT,
+                    mode TEXT,
 
-                PRIMARY KEY(workspace_id, item_id),
-                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
-                ON DELETE CASCADE
-            ) STRICT;
-        )];
+                    PRIMARY KEY(workspace_id, item_id),
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                    ON DELETE CASCADE
+                ) STRICT;
+            ),
+            // Deliberately without a workspace: `agent_views` restores the tabs a
+            // project had open, while this is how the person likes to work with an
+            // agent, and that travels with them from project to project.
+            sql!(
+                CREATE TABLE agent_preferences(
+                    agent TEXT PRIMARY KEY,
+
+                    mode TEXT,
+                    width REAL
+                ) STRICT;
+            ),
+        ];
     }
 
     db::static_connection!(AgentViewDb, [WorkspaceDb]);
@@ -884,6 +1126,68 @@ mod persistence {
                 workspace_id,
             ))?
             .context("no agent view saved for this item")
+        }
+
+        /// The mode and width this agent was last left at, if it ever has been.
+        ///
+        /// Both columns are nullable and read as a pair: someone can have chosen a
+        /// mode without ever having dragged the divider, and the two are written by
+        /// different gestures.
+        pub fn preferences(
+            &self,
+            agent: String,
+        ) -> anyhow::Result<Option<(Option<String>, Option<f64>)>> {
+            let sql_stmt = sql!(
+                SELECT mode, width FROM agent_preferences WHERE agent = ?
+            );
+            self.select_row_bound::<String, (Option<String>, Option<f64>)>(sql_stmt)?(agent)
+        }
+
+        pub async fn save_mode(&self, agent: String, mode: String) -> anyhow::Result<()> {
+            self.write(move |connection| {
+                Self::ensure_row(connection, &agent)?;
+                let sql_stmt = sql!(
+                    UPDATE agent_preferences SET mode = ? WHERE agent = ?
+                );
+                let mut query = connection.exec_bound::<(String, String)>(sql_stmt)?;
+                query((mode, agent)).context(format!(
+                    "exec_bound failed to execute or parse for: {}",
+                    sql_stmt
+                ))
+            })
+            .await
+        }
+
+        pub async fn save_width(&self, agent: String, width: f64) -> anyhow::Result<()> {
+            self.write(move |connection| {
+                Self::ensure_row(connection, &agent)?;
+                let sql_stmt = sql!(
+                    UPDATE agent_preferences SET width = ? WHERE agent = ?
+                );
+                let mut query = connection.exec_bound::<(f64, String)>(sql_stmt)?;
+                query((width, agent)).context(format!(
+                    "exec_bound failed to execute or parse for: {}",
+                    sql_stmt
+                ))
+            })
+            .await
+        }
+
+        /// Insert-then-update rather than one upsert: the two writers set different
+        /// columns, and `INSERT OR REPLACE` would have each of them blank the
+        /// other's value on the way past.
+        fn ensure_row(
+            connection: &db::sqlez::connection::Connection,
+            agent: &str,
+        ) -> anyhow::Result<()> {
+            let sql_stmt = sql!(
+                INSERT OR IGNORE INTO agent_preferences(agent) VALUES (?)
+            );
+            let mut query = connection.exec_bound::<String>(sql_stmt)?;
+            query(agent.to_string()).context(format!(
+                "exec_bound failed to execute or parse for: {}",
+                sql_stmt
+            ))
         }
 
         pub async fn delete_unloaded(

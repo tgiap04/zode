@@ -31,16 +31,17 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let buttons = RAIL_AGENTS.iter().map(|(agent, icon, label)| {
-            // One click opens the conversation — the case people are in most of the
-            // time. The terminal is a right-click away rather than a second click
-            // every time.
-            let chat = OpenAgent {
+            // One click reopens the agent the way it was last used — the mode is a
+            // choice someone already made, and asking them to make it again every
+            // time is the same as not having asked. The terminal stays one
+            // right-click away for the times the answer is "not that, this once".
+            let remembered = OpenAgent {
                 agent: (*agent).to_string(),
-                mode: AgentViewMode::Chat,
+                mode: None,
             };
             let terminal = OpenAgent {
                 agent: (*agent).to_string(),
-                mode: AgentViewMode::Terminal,
+                mode: Some(AgentViewMode::Terminal),
             };
 
             IconButton::new(*agent, *icon)
@@ -48,11 +49,11 @@ impl Sidebar {
                 // A right-click is the only way to open straight into the terminal,
                 // and a gesture with nothing naming it is a gesture nobody finds.
                 .tooltip({
-                    let chat = chat.clone();
+                    let remembered = remembered.clone();
                     move |_window, cx| {
                         Tooltip::with_meta(
                             *label,
-                            Some(&chat),
+                            Some(&remembered),
                             "Right-click to open its terminal",
                             cx,
                         )
@@ -61,7 +62,9 @@ impl Sidebar {
                 // Dispatch rather than opening the view directly: this body runs
                 // inside `Sidebar::update`, and opening a pane reaches back into
                 // the workspace. Same reasoning as `render_rail_footer`.
-                .on_click(move |_, window, cx| window.dispatch_action(Box::new(chat.clone()), cx))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(remembered.clone()), cx)
+                })
                 .on_right_click(move |_, window, cx| {
                     let terminal = terminal.clone();
                     window.dispatch_action(Box::new(terminal), cx);

@@ -483,10 +483,12 @@ pub mod agent {
     #[serde(rename_all = "snake_case")]
     pub enum AgentViewMode {
         /// The agent's own terminal UI, running the CLI the user installed.
-        // TODO(phase-04): `Chat` takes over as the default once the ACP view exists.
-        #[default]
         Terminal,
         /// The native conversation view, driven over ACP.
+        ///
+        /// The default is what an agent opens in before it has ever been opened —
+        /// after that, whichever mode it was last used in wins.
+        #[default]
         Chat,
     }
 
@@ -501,8 +503,11 @@ pub mod agent {
     pub struct OpenAgent {
         /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
         pub agent: String,
+        /// Which mode to open in, or `None` to reopen in whichever mode this agent
+        /// was last used in. A plain click on the rail means `None`: come back the
+        /// way I left you.
         #[serde(default)]
-        pub mode: AgentViewMode,
+        pub mode: Option<AgentViewMode>,
     }
 
     actions!(
