@@ -26,17 +26,15 @@ use audio::{Audio, Sound};
 use buffer_diff::BufferDiff;
 use collections::{HashMap, HashSet, IndexMap};
 use editor::scroll::Autoscroll;
-use editor::{
-    Editor, EditorEvent, EditorMode, MultiBuffer, SelectionEffects, SizingBehavior,
-};
+use editor::{Editor, EditorEvent, EditorMode, MultiBuffer, SelectionEffects, SizingBehavior};
 use feature_flags::{AgentSharingFeatureFlag, FeatureFlagAppExt as _};
 use file_icons::FileIcons;
 use futures::FutureExt as _;
 use gpui::{
-    Action, Animation, AnimationExt, AnyView, App, ClickEvent, ClipboardItem, CursorStyle, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState,
-    ObjectFit, PlatformDisplay, ScrollHandle, SharedString, Subscription, Task, TextStyle,
-    WeakEntity, Window, WindowHandle, div, img, linear_color_stop, linear_gradient,
-    list, point, pulsating_between,
+    Action, Animation, AnimationExt, AnyView, App, ClickEvent, ClipboardItem, CursorStyle, Empty,
+    Entity, EventEmitter, FocusHandle, Focusable, Hsla, ListOffset, ListState, ObjectFit,
+    PlatformDisplay, ScrollHandle, SharedString, Subscription, Task, TextStyle, WeakEntity, Window,
+    WindowHandle, div, img, linear_color_stop, linear_gradient, list, point, pulsating_between,
 };
 use language::Buffer;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -66,9 +64,7 @@ use ui::{
 use util::{ResultExt, size::format_file_size, time::duration_alt_display};
 use util::{debug_panic, defer};
 use workspace::PathList;
-use workspace::{
-    CollaboratorId, MultiWorkspace, NewTerminal, Workspace,
-};
+use workspace::{CollaboratorId, MultiWorkspace, NewTerminal, Workspace};
 use zed_actions::agent::{Chat, ToggleModelSelector};
 use zed_actions::assistant::OpenRulesLibrary;
 
@@ -85,12 +81,12 @@ use crate::mode_selector::ModeSelector;
 use crate::model_selector_popover::ModelSelectorPopover;
 use crate::ui::{AgentNotification, AgentNotificationEvent};
 use crate::{
-    Agent, AgentInitialContent, AllowAlways, AllowOnce,
-    AuthorizeToolCall, ClearMessageQueue, CycleFavoriteModels, CycleModeSelector, EditFirstQueuedMessage, ExpandMessageEditor, Follow, KeepAll, NewThread,
-    OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce, RemoveFirstQueuedMessage,
-    ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown, ScrollOutputPageUp,
-    ScrollOutputToBottom, ScrollOutputToNextMessage, ScrollOutputToPreviousMessage,
-    ScrollOutputToTop, SendImmediately, SendNextQueuedMessage,
+    Agent, AgentInitialContent, AllowAlways, AllowOnce, AuthorizeToolCall, ClearMessageQueue,
+    CycleFavoriteModels, CycleModeSelector, EditFirstQueuedMessage, ExpandMessageEditor, Follow,
+    KeepAll, NewThread, OpenAddContextMenu, OpenAgentDiff, RejectAll, RejectOnce,
+    RemoveFirstQueuedMessage, ScrollOutputLineDown, ScrollOutputLineUp, ScrollOutputPageDown,
+    ScrollOutputPageUp, ScrollOutputToBottom, ScrollOutputToNextMessage,
+    ScrollOutputToPreviousMessage, ScrollOutputToTop, SendImmediately, SendNextQueuedMessage,
     ToggleProfileSelector, UndoLastReject,
 };
 
@@ -173,7 +169,6 @@ impl From<anyhow::Error> for ThreadError {
         }
     }
 }
-
 
 #[derive(Default)]
 pub(crate) struct Conversation {
@@ -411,7 +406,6 @@ impl ConversationView {
                 .is_some()
         })
     }
-
 
     pub fn root_thread_view(&self) -> Option<Entity<ThreadView>> {
         self.root_session_id
@@ -907,7 +901,12 @@ impl ConversationView {
             list_state.scroll_to_end();
         }
 
-        crate::agent_diff::AgentDiff::set_active_thread(&self.workspace, thread.clone(), window, cx);
+        crate::agent_diff::AgentDiff::set_active_thread(
+            &self.workspace,
+            thread.clone(),
+            window,
+            cx,
+        );
 
         let connection = thread.read(cx).connection().clone();
         let session_id = thread.read(cx).session_id().clone();
@@ -2037,8 +2036,6 @@ impl ConversationView {
             )
             .into_any_element()
     }
-
-
 
     // `as_native_connection` / `as_native_thread` downcast the ACP connection to
     // Zed's in-process agent. Every agent here is an external CLI, so the downcast

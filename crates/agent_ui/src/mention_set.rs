@@ -7,8 +7,9 @@
 #![allow(dead_code)]
 
 use crate::diagnostics::{DiagnosticsOptions, codeblock_fence_for_path, collect_diagnostics};
-use acp_thread::{MentionUri, selection_name};
+use crate::mention_image::{MentionImageData, MentionImageExt as _};
 use crate::outline;
+use acp_thread::{MentionUri, selection_name};
 use agent_client_protocol::schema as acp;
 use anyhow::{Context as _, Result, anyhow};
 use collections::{HashMap, HashSet};
@@ -25,7 +26,6 @@ use gpui::{
 use http_client::{AsyncBody, HttpClientWithUrl};
 use itertools::Either;
 use language::Buffer;
-use crate::mention_image::{MentionImageData, MentionImageExt as _};
 use multi_buffer::MultiBufferRow;
 use postage::stream::Stream as _;
 use project::{Project, ProjectItem, ProjectPath, Worktree};
@@ -72,10 +72,7 @@ pub struct MentionSet {
 }
 
 impl MentionSet {
-    pub fn new(
-        project: WeakEntity<Project>,
-        prompt_store: Option<Entity<PromptStore>>,
-    ) -> Self {
+    pub fn new(project: WeakEntity<Project>, prompt_store: Option<Entity<PromptStore>>) -> Self {
         Self {
             project,
             prompt_store,

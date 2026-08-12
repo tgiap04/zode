@@ -12,7 +12,6 @@ use theme_settings::ThemeSettings;
 use ui::{ButtonLike, TintColor, Tooltip, prelude::*};
 use workspace::{OpenOptions, Workspace};
 
-
 #[derive(IntoElement)]
 pub struct MentionCrease {
     id: ElementId,
@@ -260,7 +259,6 @@ fn reveal_in_project_panel(
         cx.emit(project::Event::RevealInProjectPanel(entry_id));
     });
 }
-
 
 fn open_rule(
     _workspace: &mut Workspace,

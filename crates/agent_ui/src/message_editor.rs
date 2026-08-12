@@ -450,8 +450,7 @@ impl MessageEditor {
 
             editor
         });
-        let mention_set =
-            cx.new(|_cx| MentionSet::new(project, prompt_store.clone()));
+        let mention_set = cx.new(|_cx| MentionSet::new(project, prompt_store.clone()));
         let completion_provider = Rc::new(PromptCompletionProvider::new(
             MessageEditorCompletionDelegate {
                 session_capabilities: session_capabilities.clone(),

@@ -6,11 +6,11 @@
 
 use agent_client_protocol::schema as acp;
 use gpui::{Action, SharedString, actions};
-use ui::IconName;
 use project::AgentId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
+use ui::IconName;
 
 pub const DEFAULT_THREAD_TITLE: &str = "New Agent Thread";
 // `PARALLEL_AGENT_LAYOUT_BACKFILL_KEY` keyed a one-off migration that moved users

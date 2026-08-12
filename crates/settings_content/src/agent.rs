@@ -7,7 +7,6 @@ use std::{borrow::Cow, path::PathBuf};
 
 use crate::ExtendingVec;
 
-
 /// Where new threads should start by default.
 #[derive(
     Clone,

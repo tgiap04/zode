@@ -52,9 +52,7 @@ impl Sidebar {
                 // Dispatch rather than opening the view directly: this body runs
                 // inside `Sidebar::update`, and opening a pane reaches back into
                 // the workspace. Same reasoning as `render_rail_footer`.
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(Box::new(chat.clone()), cx)
-                })
+                .on_click(move |_, window, cx| window.dispatch_action(Box::new(chat.clone()), cx))
                 .on_right_click(move |_, window, cx| {
                     let terminal = terminal.clone();
                     window.dispatch_action(Box::new(terminal), cx);

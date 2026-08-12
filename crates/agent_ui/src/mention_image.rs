@@ -8,7 +8,9 @@
 
 use anyhow::Result;
 use base64::write::EncoderWriter;
-use gpui::{App, AppContext as _, DevicePixels, Image, ImageFormat, ObjectFit, Task, point, px, size};
+use gpui::{
+    App, AppContext as _, DevicePixels, Image, ImageFormat, ObjectFit, Task, point, px, size,
+};
 use image::{GenericImageView as _, codecs::png::PngEncoder};
 use std::io::{Cursor, Write as _};
 use std::sync::Arc;

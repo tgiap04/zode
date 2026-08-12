@@ -33,7 +33,7 @@ impl EntryViewState {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         project: WeakEntity<Project>,
-            prompt_store: Option<Entity<PromptStore>>,
+        prompt_store: Option<Entity<PromptStore>>,
         session_capabilities: SharedSessionCapabilities,
         agent_id: AgentId,
     ) -> Self {

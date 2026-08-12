@@ -9,8 +9,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    DEFAULT_THREAD_TITLE, SelectPermissionGranularity,
-    markdown_style::default_markdown_style,
+    DEFAULT_THREAD_TITLE, SelectPermissionGranularity, markdown_style::default_markdown_style,
 };
 use agent_client_protocol::schema as acp;
 use std::cell::RefCell;
@@ -312,7 +311,7 @@ impl ThreadView {
             let mut editor = MessageEditor::new(
                 workspace.clone(),
                 project.clone(),
-                    prompt_store,
+                prompt_store,
                 session_capabilities.clone(),
                 agent_id.clone(),
                 &placeholder,
@@ -511,9 +510,7 @@ impl ThreadView {
             cx.background_executor()
                 .timer(SERIALIZATION_THROTTLE_TIME)
                 .await;
-            this.update(cx, |_this, _cx| {
-            })
-            .ok();
+            this.update(cx, |_this, _cx| {}).ok();
         }));
     }
 
@@ -539,8 +536,6 @@ impl ThreadView {
     pub fn is_draft(&self, cx: &App) -> bool {
         self.thread.read(cx).entries().is_empty()
     }
-
-
 
     /// Resolves the message editor's contents into content blocks. For profiles
     /// that do not enable any tools, directory mentions are expanded to inline
@@ -1864,8 +1859,7 @@ impl ThreadView {
             window,
             cx,
         )
-        .log_err()
-        else {
+        .log_err() else {
             return;
         };
 
@@ -3104,7 +3098,7 @@ impl ThreadView {
                                 h_flex()
                                     .gap_0p5()
                                     .child(self.render_add_context_button(cx))
-                                    .child(self.render_follow_toggle(cx))
+                                    .child(self.render_follow_toggle(cx)),
                             )
                             .child(
                                 h_flex()
@@ -3488,10 +3482,6 @@ impl ThreadView {
             )
         }
     }
-
-
-
-
 
     fn render_send_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let message_editor = self.message_editor.read(cx);
@@ -6729,7 +6719,6 @@ impl ThreadView {
             }))
     }
 
-
     fn render_tool_call_label(
         &self,
         entry_ix: usize,
@@ -8303,9 +8292,6 @@ impl ThreadView {
             menu_handle.toggle(window, cx);
         });
     }
-
-
-
 }
 
 impl Render for ThreadView {

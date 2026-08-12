@@ -10,7 +10,6 @@ pub use mention_crease::*;
 pub use model_selector_components::*;
 pub use undo_reject_toast::*;
 
-
 /// Upstream picked this side from the agent panel's dock position. Agents live in
 /// the centre here, beside the editor, so the aside goes on the side the pane's
 /// own rail sits on — the same setting everything else in this feature reads.

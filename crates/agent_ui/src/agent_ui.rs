@@ -8,28 +8,28 @@ mod missing_binary;
 // by module.
 //
 mod actions;
-mod diagnostics;
-mod markdown_style;
-mod mention_image;
-mod outline;
 mod agent_connection_store;
 mod agent_diff;
 mod completion_provider;
 mod config_options;
 mod conversation_view;
+mod diagnostics;
 mod entry_view_state;
 mod external_source_prompt;
+mod markdown_style;
+mod mention_image;
 mod mention_set;
+mod message_editor;
 mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
-mod message_editor;
+mod outline;
 mod ui;
 
 pub use actions::*;
 pub use agent_diff::{AgentDiffPane, AgentDiffToolbar};
-pub use model_selector::ModelSelector;
 pub use agent_view::{AgentView, agent_icon};
+pub use model_selector::ModelSelector;
 
 use gpui::App;
 use workspace::Workspace;
