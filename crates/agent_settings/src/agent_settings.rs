@@ -1,12 +1,9 @@
-
-
 use gpui::{App, Pixels, px};
 use project::DisableAiSettings;
 use settings::{
-    NewThreadLocation,
-    NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, Settings, SidebarDockPosition, SidebarSide, ThinkingBlockDisplay,
+    NewThreadLocation, NotifyWhenAgentWaiting, PlaySoundWhenAgentDone, RegisterSetting, Settings,
+    SidebarDockPosition, SidebarSide, ThinkingBlockDisplay,
 };
-
 
 pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread_prompt.txt");
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
@@ -17,7 +14,10 @@ pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
 // layout preset. Agents open in the centre pane in this fork, beside the editor,
 // so there is no agent dock for a layout to be about.
 
-#[derive(Debug, Clone, PartialEq)]
+// `RegisterSetting` is what puts this type into the `inventory` registry that
+// `SettingsStore::new` loads, and it is the only thing that does — every read
+// through `AgentSettings::get_global` panics without it.
+#[derive(Debug, Clone, PartialEq, RegisterSetting)]
 pub struct AgentSettings {
     pub enabled: bool,
     pub sidebar_side: SidebarDockPosition,
@@ -55,7 +55,6 @@ impl AgentSettings {
     pub fn set_message_editor_max_lines(&self) -> usize {
         self.message_editor_min_lines * 2
     }
-
 }
 // Upstream also carried `language_model_to_selection` here, mapping one of
 // Zed's own models onto a stored selection. It served the native agent only —
@@ -118,6 +117,22 @@ mod tests {
         assert!(settings.cancel_generation_on_terminal_stop);
         assert!(!settings.use_modifier_to_send);
         assert!(!settings.show_turn_stats);
+    }
+
+    /// Every other test here calls `from_settings` directly, which is exactly how a
+    /// dropped `RegisterSetting` derive survived them: nothing exercised the
+    /// registry that each of the 27 `get_global` reads goes through. This one does,
+    /// and it deliberately registers nothing by hand — the derive is the subject.
+    #[gpui::test]
+    fn the_store_carries_these_settings_without_a_hand_written_registration(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+
+            assert!(AgentSettings::get_global(cx).enabled);
+        });
     }
 
     /// `limit_content_width: false` is the one setting whose whole job is to turn

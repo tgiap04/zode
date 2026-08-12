@@ -271,3 +271,31 @@ Bài học chung: **cắt bằng chỉ số/EOF là sai; phải brace-match, và
 - **Test của upstream cho `conversation_view`/`thread_view`/`message_editor`/`mention_set`/`entry_view_state` đã bị xoá**, không phải port. Chúng dựng `AgentPanel` và native thread. Coverage cho view phải viết lại từ đầu — chưa làm.
 - `insert_dragged_files`, `insert_selections`, `reauthenticate` giữ lại kèm `#![allow(dead_code)]` có ghi chú: caller duy nhất của chúng là dock panel. Là affordance thật, cần re-home lên `AgentView`.
 - `agent_diff` chưa port (phase 05); `AgentDiff::set_active_thread` và đường nhảy tới diff pane đang là no-op có ghi chú.
+
+---
+
+## Lần chạy thật đầu tiên (2026-08-12) — hai panic, cùng một lớp
+
+App mở lên và abort. Cả hai lỗi cùng một hình dạng: **một global mà production không ai khởi tạo, nhưng test thì tự khởi tạo lấy** — nên 123 test xanh không nói gì về chúng.
+
+| # | Lỗi | Nguyên nhân | Sửa |
+|---|---|---|---|
+| 1 | `no state of type prompt_store::GlobalPromptStore exists` (`gpui/global.rs:39`) | Upstream seed prompt store trong `rules_library::init`, gọi từ `agent_ui::init`. Fork đã xoá crate `rules_library`; khi port `init` tôi bỏ dòng đó cùng crate, nên global mất chủ. `agent_view.rs` đọc `PromptStore::global` → unwrap | `ensure_prompt_store` seed **lazy** ngay tại reader duy nhất — cold start không phải mở LMDB cho phiên không dùng agent |
+| 2 | `unregistered setting type agent_settings::AgentSettings` (`settings_store.rs:446`) | Commit trim `9a0029a` làm rơi `RegisterSetting` khỏi derive list. Đó là **thứ duy nhất** đưa type vào registry `inventory` mà `SettingsStore::new` nạp | Trả `RegisterSetting` vào derive; **xoá** hai dòng `AgentSettings::register(cx)` trong test của `agent_diff` |
+
+### Điều này dạy lại cho plan
+
+**Sửa test bằng cách đăng ký tay là che lỗi production, không phải vá lỗi test.** Phase 05 gặp `unregistered setting type` trong test `agent_diff`, tôi thêm `AgentSettings::register(cx)` vào test init và ghi "upstream lấy được nhờ tác dụng phụ của `language_model::init`". Ghi chú đó **sai**, và dòng register đó đã bịt kín đúng cái bug người dùng gặp sau đó. Quy ước thật của repo: `#[derive(RegisterSetting)]` + `inventory`, chạy y nhau ở prod và test — nên test **không được** đăng ký tay; đăng ký tay là chỗ bug lọt qua.
+
+Đã quét hết `::global(cx)` trong cả slice để không còn cái thứ ba: `AgentDiff::global` và `AcpConnectionRegistry::default_global` tự set khi thiếu; `AgentViewDb` dùng `db::static_connection!` như `ProjectDiffDb`; `ReleaseChannel`/`AppVersion` do `main.rs` set. `AgentSettings` là settings type duy nhất mà slice sở hữu.
+
+### Hai test hồi quy, đã kiểm phản chứng
+
+Cả hai đều được xác nhận **fail trên code cũ** với đúng thông điệp production, không phải chỉ pass trên code mới:
+
+- `a_conversation_can_ask_for_the_prompt_store_on_a_bare_app` — bỏ `ensure_prompt_store` ⇒ panic đúng `gpui/src/global.rs:39:12`, trùng log của người dùng.
+- `the_store_carries_these_settings_without_a_hand_written_registration` — bỏ derive ⇒ `unregistered setting type agent_settings::AgentSettings`.
+
+### Còn nợ (không đổi)
+
+Chuỗi e2e vẫn chưa chạy: prompt → xin quyền → diff → file đổi. Hai panic này chỉ chặn ở bước mở view; mở được rồi mới biết đường ACP có sống hay không.

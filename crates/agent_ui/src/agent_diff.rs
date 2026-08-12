@@ -1811,8 +1811,6 @@ mod tests {
             cx.set_global(settings_store);
             prompt_store::init(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            // Upstream picked this up as a side effect of `language_model::init`.
-            agent_settings::AgentSettings::register(cx);
         });
 
         let fs = FakeFs::new(cx.executor());
@@ -1970,8 +1968,6 @@ mod tests {
             prompt_store::init(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             workspace::register_project_item::<Editor>(cx);
-            // Upstream picked this up as a side effect of `language_model::init`.
-            agent_settings::AgentSettings::register(cx);
         });
 
         cx.update(|cx| {

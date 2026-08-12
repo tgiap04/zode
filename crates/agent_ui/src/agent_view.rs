@@ -60,9 +60,7 @@ impl AgentView {
     /// `ConversationView` asks for this to answer whether the user is currently
     /// looking at it — the question that decides whether a finished turn is worth
     /// a notification.
-    pub fn conversation_view(
-        &self,
-    ) -> Option<&Entity<crate::conversation_view::ConversationView>> {
+    pub fn conversation_view(&self) -> Option<&Entity<crate::conversation_view::ConversationView>> {
         match &self.state {
             State::Chat(view) => Some(view),
             _ => None,
@@ -70,11 +68,7 @@ impl AgentView {
     }
 
     /// Brings an agent tab forward — the response to accepting a notification.
-    pub fn activate_for_agent(
-        workspace: Entity<Workspace>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
+    pub fn activate_for_agent(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
         workspace.update(cx, |workspace, cx| {
             let chat = workspace
                 .items_of_type::<AgentView>(cx)
@@ -122,7 +116,14 @@ impl AgentView {
         let project = workspace.project().clone();
         let workspace_handle = cx.weak_entity();
         let view = cx.new(|cx| {
-            Self::new(agent_id.clone(), mode, project, workspace_handle, window, cx)
+            Self::new(
+                agent_id.clone(),
+                mode,
+                project,
+                workspace_handle,
+                window,
+                cx,
+            )
         });
 
         workspace.split_item(agent_split_direction(cx), Box::new(view), window, cx);
@@ -140,6 +141,7 @@ impl AgentView {
         let connection_store = cx.new(|cx| {
             crate::agent_connection_store::AgentConnectionStore::new(self.project.clone(), cx)
         });
+        ensure_prompt_store(cx);
         let prompt_store = prompt_store::PromptStore::global(cx);
         let project = self.project.clone();
         let workspace = self.workspace.clone();
@@ -221,7 +223,6 @@ impl AgentView {
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-
         let agent = self.agent.clone();
         let mode = self.mode;
         let project = self.project.clone();
@@ -308,6 +309,20 @@ fn agent_split_direction(cx: &App) -> SplitDirection {
     }
 }
 
+/// Seeds the prompt store the first time a conversation asks for it.
+///
+/// Upstream seeded it from `rules_library::init`, called out of `agent_ui::init`;
+/// this fork removed that crate, so the global had no owner left and
+/// `PromptStore::global` panicked on a store nobody had set. Seeding it here
+/// rather than at startup keeps an LMDB open off the cold path of every session
+/// that never opens an agent — the store is a shared future, so the first
+/// conversation pays for it and the rest join.
+fn ensure_prompt_store(cx: &mut App) {
+    if !cx.has_global::<prompt_store::GlobalPromptStore>() {
+        prompt_store::init(cx);
+    }
+}
+
 /// The agent's CLI is run as a task rather than typed into a shell, so the pty
 /// holds the agent itself: closing the tab ends the session, and no stray shell
 /// outlives it. The summary, command echo and rerun button are all off — this is
@@ -388,15 +403,13 @@ impl Render for AgentView {
                     None,
                     cx,
                 ),
-                State::MissingBinary(missing) => {
-                    crate::missing_binary::render(
-                        &cx.entity(),
-                        &self.display_name,
-                        missing,
-                        self.mode == AgentViewMode::Chat,
-                        cx,
-                    )
-                }
+                State::MissingBinary(missing) => crate::missing_binary::render(
+                    &cx.entity(),
+                    &self.display_name,
+                    missing,
+                    self.mode == AgentViewMode::Chat,
+                    cx,
+                ),
                 State::Failed(error) => {
                     centered_message(IconName::Warning, error.clone(), None, cx)
                 }
@@ -472,6 +485,24 @@ mod tests {
         }
     }
 
+    /// Opening a conversation asked for a prompt store that nothing in this fork
+    /// had set, and `PromptStore::global` unwraps its global — so the very first
+    /// click on a chat agent aborted the process. No test reached that line
+    /// because every test that touches the prompt store seeds it itself.
+    #[gpui::test]
+    fn a_conversation_can_ask_for_the_prompt_store_on_a_bare_app(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            assert!(
+                !cx.has_global::<prompt_store::GlobalPromptStore>(),
+                "no startup path in this fork seeds the prompt store; \
+                 if one appears, this view should stop seeding it too"
+            );
+
+            ensure_prompt_store(cx);
+            drop(prompt_store::PromptStore::global(cx));
+        });
+    }
+
     #[gpui::test]
     async fn every_built_in_agent_has_its_own_glyph(_cx: &mut TestAppContext) {
         let claude = agent_icon(project::CLAUDE_CODE_AGENT_ID);
@@ -522,16 +553,8 @@ impl workspace::item::SerializableItem for AgentView {
             };
 
             cx.update(|window, cx| {
-                Ok(cx.new(|cx| {
-                    Self::new(
-                        AgentId::new(agent),
-                        mode,
-                        project,
-                        workspace,
-                        window,
-                        cx,
-                    )
-                }))
+                Ok(cx
+                    .new(|cx| Self::new(AgentId::new(agent), mode, project, workspace, window, cx)))
             })?
         })
     }
