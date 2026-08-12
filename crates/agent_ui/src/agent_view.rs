@@ -1,14 +1,16 @@
+use agent_settings::AgentSettings;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task, WeakEntity,
-    Window, canvas,
+    AnyElement, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
+    SharedString, Task, WeakEntity, Window,
 };
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
+use settings::SidebarDockPosition;
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal_view::TerminalView;
 use ui::{ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, prelude::*};
 use workspace::{
-    SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
-    item::{Item, ItemEvent},
+    SidebarSide, Workspace,
+    dock::{DockPosition, Panel, PanelEvent},
 };
 use zed_actions::agent::AgentViewMode;
 
@@ -36,12 +38,10 @@ pub struct AgentView {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     _startup: Option<Task<()>>,
-    /// The width this agent was last left at, waiting for a laid-out pane to
-    /// measure against. Cleared once applied — or once it is clear it cannot be.
-    pending_width: Option<Pixels>,
-    /// Last width written down, so an unchanged frame costs nothing.
-    recorded_width: Option<Pixels>,
-    _record_width: Option<Task<()>>,
+    /// Whether the agent has been started. The panel exists from the moment a
+    /// workspace loads, and starting one there would spawn an adapter for every
+    /// session that never opens an agent at all.
+    started: bool,
 }
 
 enum State {
@@ -73,26 +73,38 @@ impl AgentView {
         }
     }
 
-    /// Brings an agent tab forward — the response to accepting a notification.
+    /// Brings the agent forward — the response to accepting a notification.
     pub fn activate_for_agent(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
         workspace.update(cx, |workspace, cx| {
-            let chat = workspace
-                .items_of_type::<AgentView>(cx)
-                .find(|view| matches!(view.read(cx).state, State::Chat(_)));
-            if let Some(chat) = chat {
-                workspace.activate_item(&chat, true, true, window, cx);
-            }
+            workspace.focus_panel::<AgentView>(window, cx);
         });
+    }
+
+    /// Builds the panel for a workspace that is still loading.
+    ///
+    /// Registered like every other dock panel in `zed.rs`, and deliberately inert
+    /// until someone asks for an agent.
+    pub async fn load(
+        workspace: WeakEntity<Workspace>,
+        mut cx: AsyncWindowContext,
+    ) -> anyhow::Result<Entity<Self>> {
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let project = workspace.project().clone();
+            let handle = cx.weak_entity();
+            cx.new(|cx| AgentView::new(project, handle, cx))
+        })
     }
 }
 
 impl EventEmitter<AgentViewEvent> for AgentView {}
 
 impl AgentView {
-    /// Opens `agent`, or brings the one already open to the front.
+    /// Shows `agent` in the dock, starting it if this is the first time.
     ///
-    /// Re-activating rather than opening a second copy is what makes the rail
-    /// button behave like a toggle instead of a duplicator.
+    /// The panel is not a tab. It lives in a dock, which is not part of
+    /// `workspace.panes`, so `open_path` — which falls back to the active pane —
+    /// can never reach it. That is the whole reason the agent moved here: an item
+    /// in the centre group collects whatever file the editor opens next.
     pub fn open(
         workspace: &mut Workspace,
         agent: &str,
@@ -101,40 +113,15 @@ impl AgentView {
         cx: &mut Context<Workspace>,
     ) {
         let agent_id = AgentId::new(agent.to_string());
-
-        // Resolved in its own statement: the iterator borrows the workspace, and
-        // activating the item needs it back mutably.
-        let existing = Self::already_open(workspace, &agent_id, cx);
-        if let Some(existing) = existing {
-            workspace.activate_item(&existing, true, true, window, cx);
-            existing.update(cx, |view, cx| {
-                // Asking for a particular mode has to move this view to it. Without
-                // this the rail's right-click just re-focuses whichever mode is
-                // already open, which reads as the button doing nothing at all. A
-                // plain click asks for no mode in particular and leaves it alone.
-                if let Some(mode) = mode {
-                    view.set_mode(mode, window, cx);
-                }
-                // The CLI may well have been installed since this view gave up on
-                // it, so coming back to it is a retry rather than a look at a
-                // stale verdict.
-                if matches!(view.state, State::MissingBinary(_)) {
-                    view.restart(window, cx);
-                }
-            });
+        let Some(panel) = workspace.panel::<AgentView>(cx) else {
             return;
-        }
+        };
 
-        let project = workspace.project().clone();
-        let workspace_handle = cx.weak_entity();
+        workspace.focus_panel::<AgentView>(window, cx);
+
         let db = persistence::AgentViewDb::global(cx);
         let stored_agent = agent_id.to_string();
-
-        // Opening waits on one indexed sqlite read for the mode and width this
-        // agent was last left at. The alternative — opening in one mode and jumping
-        // to the other a frame later — is worse to watch than a tab that arrives a
-        // beat late.
-        cx.spawn_in(window, async move |workspace, cx| {
+        cx.spawn_in(window, async move |_workspace, cx| {
             let remembered = cx
                 .background_executor()
                 .spawn(async move { db.preferences(stored_agent) })
@@ -143,50 +130,56 @@ impl AgentView {
                 .flatten()
                 .unwrap_or_default();
 
-            workspace
-                .update_in(cx, |workspace, window, cx| {
-                    // Checked again on this side of the await: two quick clicks both
-                    // miss the first check, and the second would otherwise open a
-                    // duplicate of the pane the first one is still building.
-                    if let Some(existing) = Self::already_open(workspace, &agent_id, cx) {
-                        workspace.activate_item(&existing, true, true, window, cx);
-                        return;
-                    }
-
-                    let (stored_mode, stored_width) = remembered;
+            panel
+                .update_in(cx, |panel, window, cx| {
+                    let (stored_mode, _) = remembered;
+                    // A choice is what gets remembered; a plain click never
+                    // overwrites the very preference it just read.
                     let chosen = mode;
                     let mode = chosen
                         .or_else(|| stored_mode.as_deref().map(mode_from_name))
                         .unwrap_or_default();
-                    // A choice is what gets remembered; a plain click never
-                    // overwrites the very preference it just read.
                     if chosen.is_some() {
                         remember_mode(&agent_id, mode, cx);
                     }
 
-                    let view = cx.new(|cx| {
-                        Self::new(
-                            agent_id.clone(),
-                            mode,
-                            project,
-                            workspace_handle,
-                            stored_width.map(|width| px(width as f32)),
-                            window,
-                            cx,
-                        )
-                    });
-
-                    workspace.split_item(agent_split_direction(cx), Box::new(view), window, cx);
+                    panel.show(agent_id, mode, window, cx);
                 })
                 .log_err();
         })
         .detach();
     }
 
-    fn already_open(workspace: &Workspace, agent: &AgentId, cx: &App) -> Option<Entity<AgentView>> {
-        workspace
-            .items_of_type::<AgentView>(cx)
-            .find(|view| view.read(cx).agent == *agent)
+    /// Points the panel at an agent, ending whatever it was showing before.
+    ///
+    /// One panel holds one agent: a dock shows one thing at a time, and keeping the
+    /// other alive behind it would leave a second adapter running for something
+    /// nobody can see.
+    fn show(
+        &mut self,
+        agent: AgentId,
+        mode: AgentViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let same_agent = self.agent == agent;
+        if same_agent && self.mode == mode && self.started {
+            // Already showing exactly this. Coming back to a view that gave up on a
+            // missing CLI is a retry, though — it may well have been installed since.
+            if matches!(self.state, State::MissingBinary(_)) {
+                self.restart(window, cx);
+            }
+            return;
+        }
+
+        if !same_agent {
+            self.agent = agent;
+            self.display_name = display_name(&self.agent);
+        }
+        self.mode = mode;
+        self.started = true;
+        self.restart(window, cx);
+        cx.emit(AgentViewEvent::UpdateTab);
     }
 
     /// Opens the ACP conversation.
@@ -236,34 +229,27 @@ impl AgentView {
         }));
     }
 
+    /// Builds the panel without starting anything.
+    ///
+    /// Every workspace gets one of these at load, so starting an agent here would
+    /// run an adapter for people who never open one. `show` is what starts it.
     fn new(
-        agent: AgentId,
-        mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
-        width: Option<Pixels>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let display_name = builtin_agent(agent.as_ref())
-            .map(|builtin| SharedString::from(builtin.display_name))
-            .unwrap_or_else(|| agent.0.clone());
-
-        let mut view = Self {
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        Self {
+            display_name: display_name(&agent),
             agent,
-            display_name,
-            mode,
+            mode: AgentViewMode::default(),
             state: State::Starting,
             project,
             workspace,
             focus_handle: cx.focus_handle(),
             _startup: None,
-            pending_width: width,
-            recorded_width: None,
-            _record_width: None,
-        };
-        view.start(window, cx);
-        view
+            started: false,
+        }
     }
 
     /// Moves this view to the other mode, restarting the agent.
@@ -286,73 +272,6 @@ impl AgentView {
         remember_mode(&self.agent, mode, cx);
         self.restart(window, cx);
         cx.emit(AgentViewEvent::UpdateTab);
-    }
-
-    /// Keeps the pane's width in step with what this agent was left at.
-    ///
-    /// Handed this view's own laid-out width from paint, rather than asking the
-    /// workspace for its pane's bounds. That question deadlocks the entire
-    /// application: `PaneAxis::bounding_box_for_pane` takes a lock the pane group
-    /// is already holding while it renders its children, so an item asking it from
-    /// inside `render` parks the main thread against itself, and the window stops
-    /// drawing altogether. Everything here that touches the workspace is deferred
-    /// past the end of the frame for the same reason.
-    fn width_measured(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        if width <= px(0.) {
-            return;
-        }
-
-        if let Some(target) = self.pending_width.take() {
-            let delta = target - width;
-            if delta.abs() > px(1.) {
-                cx.defer_in(window, move |this, window, cx| {
-                    let Some(workspace) = this.workspace.upgrade() else {
-                        return;
-                    };
-                    // `resize_pane` moves whichever pane is active, and the one just
-                    // opened is exactly that. A restored tab is not: it comes back
-                    // with the editor focused, and there the pane group's own
-                    // serialized flexes already hold the layout — resizing then
-                    // would drag a pane the user is working in.
-                    let item = cx.entity();
-                    let is_active = workspace.read_with(cx, |workspace, _| {
-                        workspace
-                            .pane_for(&item)
-                            .is_some_and(|pane| workspace.active_pane() == &pane)
-                    });
-                    if !is_active {
-                        return;
-                    }
-
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.resize_pane(gpui::Axis::Horizontal, delta, window, cx);
-                    });
-                });
-            }
-            return;
-        }
-
-        // Under four pixels is the divider being dragged past; four is someone
-        // meaning it.
-        if self
-            .recorded_width
-            .is_some_and(|recorded| (recorded - width).abs() < px(4.))
-        {
-            return;
-        }
-        self.recorded_width = Some(width);
-
-        let db = persistence::AgentViewDb::global(cx);
-        let agent = self.agent.to_string();
-        self._record_width = Some(cx.spawn(async move |_, cx| {
-            // Debounced, because a drag crosses dozens of widths and only the one it
-            // stops at is worth a row. Held in a field, so the drop that ends this
-            // view also cancels a write it no longer means.
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(400))
-                .await;
-            db.save_width(agent, width.to_f64()).await.log_err();
-        }));
     }
 
     /// Re-runs startup from scratch — the way back after the CLI is installed, and
@@ -511,17 +430,86 @@ impl AgentView {
     }
 }
 
-/// Agents open on the same side of the window as the rail button that opened
-/// them; a button at one edge opening a pane at the other puts the width of the
-/// screen between cause and effect.
-///
-/// This reads the very setting `sidebar::rail_side` reads, so the two cannot end
-/// up mirrored against each other — the same reasoning the rail already applies
-/// to its own separator and active-project pill.
-fn agent_split_direction(cx: &App) -> SplitDirection {
-    match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
-        SidebarSide::Left => SplitDirection::Left,
-        SidebarSide::Right => SplitDirection::Right,
+fn display_name(agent: &AgentId) -> SharedString {
+    builtin_agent(agent.as_ref())
+        .map(|builtin| SharedString::from(builtin.display_name))
+        .unwrap_or_else(|| agent.0.clone())
+}
+
+impl EventEmitter<PanelEvent> for AgentView {}
+
+impl Panel for AgentView {
+    fn persistent_name() -> &'static str {
+        "Agent Panel"
+    }
+
+    fn panel_key() -> &'static str {
+        "AgentPanel"
+    }
+
+    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
+        match AgentSettings::get_global(cx).sidebar_side() {
+            SidebarSide::Left => DockPosition::Left,
+            SidebarSide::Right => DockPosition::Right,
+        }
+    }
+
+    fn position_is_valid(&self, position: DockPosition) -> bool {
+        matches!(position, DockPosition::Left | DockPosition::Right)
+    }
+
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let side = match position {
+            DockPosition::Left => SidebarDockPosition::Left,
+            _ => SidebarDockPosition::Right,
+        };
+        let fs = self.project.read(cx).fs().clone();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            settings.agent.get_or_insert_default().sidebar_side = Some(side)
+        });
+    }
+
+    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
+        px(480.)
+    }
+
+    /// No icon, and therefore no button.
+    ///
+    /// Both button renderers skip a panel whose icon is `None` — the rail at
+    /// `rail_panels.rs:78` and the status bar at `dock.rs:1272`. The rail already
+    /// draws one button per agent with that agent's own mark, and a third generic
+    /// button for "the agent panel" would stand for both of them at once.
+    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
+        None
+    }
+
+    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
+        None
+    }
+
+    fn toggle_action(&self) -> Box<dyn gpui::Action> {
+        Box::new(zed_actions::agent::OpenAgent {
+            agent: self.agent.to_string(),
+            mode: None,
+        })
+    }
+
+    /// Closed until asked for. The panel exists in every workspace from load, and
+    /// opening it starts an agent — a cost no session should pay before someone
+    /// asks for one.
+    fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
+        false
+    }
+
+    /// Last in the activation order: the panels above it are places to look
+    /// something up, while this one starts a process when it opens.
+    fn activation_priority(&self) -> u32 {
+        9
     }
 }
 
@@ -612,26 +600,6 @@ impl Focusable for AgentView {
     }
 }
 
-impl Item for AgentView {
-    type Event = AgentViewEvent;
-
-    fn to_item_events(_event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
-        f(ItemEvent::UpdateTab);
-    }
-
-    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        self.display_name.clone()
-    }
-
-    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(agent_icon(self.agent.as_ref())))
-    }
-
-    fn telemetry_event_text(&self) -> Option<&'static str> {
-        None
-    }
-}
-
 impl AgentView {
     /// The switch between the conversation and the agent's own terminal.
     ///
@@ -670,23 +638,6 @@ impl AgentView {
 
 impl Render for AgentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Nothing here may ask the workspace about this view's pane — see
-        // `width_measured`. The width arrives from the canvas below instead, out of
-        // paint, where no pane-group lock is held.
-        let measure = {
-            let view = cx.entity();
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, cx| {
-                    view.update(cx, |this, cx| {
-                        this.width_measured(bounds.size.width, window, cx)
-                    });
-                },
-            )
-            .absolute()
-            .size_full()
-        };
-
         // Both of these need `cx` mutably, so they are built before the theme is
         // borrowed — that borrow lives to the end of the element tree below.
         let mode_switch = self.render_mode_switch(cx);
@@ -710,26 +661,13 @@ impl Render for AgentView {
         };
         let colors = cx.theme().colors();
 
-        // Which edge faces the editor follows the side the agent opened on, the
-        // same setting `agent_split_direction` reads to open it there.
-        let opens_left = matches!(agent_split_direction(cx), SplitDirection::Left);
-
+        // No border and no gutter here: the dock draws its own edge against the
+        // editor and its own resize handle, which is exactly the seam this view
+        // spent two attempts failing to build for itself from the inside.
         v_flex()
             .size_full()
             .bg(colors.editor_background)
             .track_focus(&self.focus_handle)
-            // The seam is a border, not a gutter — the same way the rail separates
-            // itself from the rest of the window. Padding here would have been
-            // space *inside* the agent rather than between it and the editor, which
-            // an item cannot create: the room outside a pane belongs to the pane
-            // group, and widening that divider would push apart every split in the
-            // window rather than this one seam.
-            .map(|this| match opens_left {
-                true => this.border_r_1(),
-                false => this.border_l_1(),
-            })
-            .border_color(colors.border)
-            .child(measure)
             .child(
                 h_flex()
                     .flex_none()
@@ -790,33 +728,40 @@ mod tests {
         });
     }
 
-    /// A rail button on one edge that opens a pane on the other is the width of
-    /// the screen between cause and effect, so the side has to track the setting
-    /// rather than being fixed.
+    /// The panel opens on the side its setting names. Dragging it across writes
+    /// that setting back, so the two directions have to agree.
     #[gpui::test]
-    async fn the_agent_pane_opens_on_the_rail_side(cx: &mut TestAppContext) {
+    async fn the_panel_docks_on_the_side_the_setting_names(cx: &mut TestAppContext) {
         init_test(cx);
+        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/test"), json!({})).await;
+        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let panel = cx.new_window_entity(|_window, cx| {
+            AgentView::new(project.clone(), workspace.downgrade(), cx)
+        });
 
         for (side, expected) in [
-            (SidebarSide::Left, SplitDirection::Left),
-            (SidebarSide::Right, SplitDirection::Right),
+            (SidebarDockPosition::Left, DockPosition::Left),
+            (SidebarDockPosition::Right, DockPosition::Right),
         ] {
-            cx.update(|cx| {
-                SettingsStore::update_global(cx, |settings, cx| {
-                    settings.update_user_settings(cx, |settings| {
-                        settings
-                            .workspace
-                            .multi_project
-                            .get_or_insert_default()
-                            .sidebar_side = Some(side);
-                    });
+            cx.update(|_window, cx| {
+                SettingsStore::update_global(cx, |store, _cx| {
+                    let mut agent_settings = store.get::<AgentSettings>(None).clone();
+                    agent_settings.sidebar_side = side;
+                    store.override_global(agent_settings);
                 });
             });
+            cx.run_until_parked();
 
             assert_eq!(
-                cx.update(|cx| agent_split_direction(cx)),
+                cx.update(|window, cx| panel.read(cx).position(window, cx)),
                 expected,
-                "a {side:?} rail must open its agents on the {side:?}"
+                "the panel must dock where `sidebar_side` says"
             );
         }
     }
@@ -837,56 +782,6 @@ mod tests {
             ensure_prompt_store(cx);
             drop(prompt_store::PromptStore::global(cx));
         });
-    }
-
-    /// Drawing the view inside a real pane, which is the only place the bug this
-    /// guards against can appear.
-    ///
-    /// Asking the workspace for this view's pane bounds during `render` takes a
-    /// lock the pane group already holds while it renders its children, and parks
-    /// the main thread against itself — the whole window stops, not just the agent.
-    /// A regression here does not fail this test, it **hangs** it; that is the
-    /// signal, and the stack will point straight at the culprit.
-    #[gpui::test]
-    async fn the_view_draws_inside_a_pane_without_deadlocking(cx: &mut TestAppContext) {
-        init_test(cx);
-        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
-
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(path!("/test"), json!({})).await;
-        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
-
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
-
-        // Built by hand rather than through `open`: starting for real would resolve
-        // the agent's CLI and spawn it, and this is about the frame, not the agent.
-        let view = cx.new_window_entity(|_window, cx| AgentView {
-            agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
-            display_name: "Claude Code".into(),
-            mode: AgentViewMode::Chat,
-            state: State::Starting,
-            project: project.clone(),
-            workspace: workspace.downgrade(),
-            focus_handle: cx.focus_handle(),
-            _startup: None,
-            pending_width: Some(px(400.)),
-            recorded_width: None,
-            _record_width: None,
-        });
-
-        // Split, not added to the active pane: with one pane the group's root is a
-        // `Member::Pane` and `bounding_box_for_pane` returns before it touches a
-        // lock. The deadlock needs the `Member::Axis` that a second pane creates —
-        // which is exactly how an agent opens.
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.split_item(SplitDirection::Right, Box::new(view), window, cx);
-        });
-
-        cx.run_until_parked();
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
     }
 
     /// Leaving a mode has to end it. Each mode owns a child process — an npx
@@ -941,9 +836,7 @@ mod tests {
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             _startup: None,
-            pending_width: None,
-            recorded_width: None,
-            _record_width: None,
+            started: true,
         });
 
         let left_behind = terminal_view.downgrade();
@@ -958,22 +851,21 @@ mod tests {
         );
     }
 
-    /// The mode and the width are written by two different gestures — a click on
-    /// the switch, a drag on the divider — and each writes one column. A plain
-    /// `INSERT OR REPLACE` would have each of them quietly blank the other's value
-    /// on the way past, which is why the write is an insert followed by an update.
+    /// Each agent remembers its own mode, so the rail's plain click can reopen the
+    /// one it was last used in.
+    ///
+    /// The width used to live in this row too, written by a different gesture than
+    /// the mode; the dock owns it now, which is why the write no longer has to
+    /// guard one column against the other.
     #[gpui::test]
-    async fn writing_one_preference_leaves_the_other_alone() {
+    async fn each_agent_remembers_its_own_mode() {
         // Opened first and under the same name: `agent_views` carries a foreign key
         // into `workspaces`, and sqlez sweeps orphans out of every table that has
         // one as part of migrating. Without the parent table in place that sweep is
         // a query against nothing, and the whole migration fails.
         let _workspaces =
-            workspace::WorkspaceDb::open_test_db("writing_one_preference_leaves_the_other_alone")
-                .await;
-        let db =
-            persistence::AgentViewDb::open_test_db("writing_one_preference_leaves_the_other_alone")
-                .await;
+            workspace::WorkspaceDb::open_test_db("each_agent_remembers_its_own_mode").await;
+        let db = persistence::AgentViewDb::open_test_db("each_agent_remembers_its_own_mode").await;
 
         assert_eq!(
             db.preferences("claude-acp".into()).unwrap(),
@@ -981,25 +873,21 @@ mod tests {
             "an agent nobody has opened should have nothing written down"
         );
 
-        db.save_width("claude-acp".into(), 480.).await.unwrap();
         db.save_mode("claude-acp".into(), "terminal".into())
             .await
             .unwrap();
-        assert_eq!(
-            db.preferences("claude-acp".into()).unwrap(),
-            Some((Some("terminal".into()), Some(480.))),
-            "choosing a mode must not forget the width"
-        );
-
-        // The other order, because the two gestures have no fixed sequence.
         db.save_mode("codex-acp".into(), "chat".into())
             .await
             .unwrap();
-        db.save_width("codex-acp".into(), 320.).await.unwrap();
+
+        assert_eq!(
+            db.preferences("claude-acp".into()).unwrap(),
+            Some((Some("terminal".into()), None)),
+        );
         assert_eq!(
             db.preferences("codex-acp".into()).unwrap(),
-            Some((Some("chat".into()), Some(320.))),
-            "dragging the divider must not forget the mode"
+            Some((Some("chat".into()), None)),
+            "one agent's choice must not stand for the other's"
         );
 
         db.save_mode("claude-acp".into(), "chat".into())
@@ -1007,8 +895,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             db.preferences("claude-acp".into()).unwrap(),
-            Some((Some("chat".into()), Some(480.))),
-            "a second choice replaces the first without touching the width"
+            Some((Some("chat".into()), None)),
+            "a second choice replaces the first"
         );
     }
 
@@ -1034,90 +922,13 @@ mod tests {
     }
 }
 
-impl workspace::item::SerializableItem for AgentView {
-    fn serialized_item_kind() -> &'static str {
-        "AgentView"
-    }
-
-    fn cleanup(
-        workspace_id: workspace::WorkspaceId,
-        alive_items: Vec<workspace::ItemId>,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> Task<anyhow::Result<()>> {
-        let db = persistence::AgentViewDb::global(cx);
-        cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
-    }
-
-    /// Restores the tab, not the conversation.
-    ///
-    /// The agent and the mode are all that is kept: a thread is the agent's own
-    /// state, reachable through its CLI (`claude --resume`) rather than anything
-    /// this editor could reconstruct. Restoring a tab and lying about its history
-    /// would be worse than restoring an empty one.
-    fn deserialize(
-        project: Entity<Project>,
-        workspace: WeakEntity<Workspace>,
-        workspace_id: workspace::WorkspaceId,
-        item_id: workspace::ItemId,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Task<anyhow::Result<Entity<Self>>> {
-        let db = persistence::AgentViewDb::global(cx);
-        window.spawn(cx, async move |cx| {
-            let (agent, mode) = db.get_agent(item_id, workspace_id)?;
-            let mode = mode_from_name(&mode);
-
-            cx.update(|window, cx| {
-                Ok(cx.new(|cx| {
-                    // No width to restore here: a workspace comes back with its own
-                    // serialized pane flexes, and forcing a remembered width on top
-                    // of them would fight the layout the user actually left.
-                    Self::new(
-                        AgentId::new(agent),
-                        mode,
-                        project,
-                        workspace,
-                        None,
-                        window,
-                        cx,
-                    )
-                }))
-            })?
-        })
-    }
-
-    fn serialize(
-        &mut self,
-        workspace: &mut Workspace,
-        item_id: workspace::ItemId,
-        _closing: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Task<anyhow::Result<()>>> {
-        let workspace_id = workspace.database_id()?;
-        let agent = self.agent.to_string();
-        let mode = mode_name(self.mode);
-
-        let db = persistence::AgentViewDb::global(cx);
-        Some(cx.background_spawn(async move {
-            db.save_agent(item_id, workspace_id, agent, mode.to_string())
-                .await
-        }))
-    }
-
-    fn should_serialize(&self, _event: &Self::Event) -> bool {
-        false
-    }
-}
-
 mod persistence {
     use anyhow::Context as _;
     use db::{
         sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
         sqlez_macros::sql,
     };
-    use workspace::{ItemId, WorkspaceDb, WorkspaceId};
+    use workspace::WorkspaceDb;
 
     pub struct AgentViewDb(ThreadSafeConnection);
 
@@ -1155,43 +966,6 @@ mod persistence {
     db::static_connection!(AgentViewDb, [WorkspaceDb]);
 
     impl AgentViewDb {
-        pub async fn save_agent(
-            &self,
-            item_id: ItemId,
-            workspace_id: WorkspaceId,
-            agent: String,
-            mode: String,
-        ) -> anyhow::Result<()> {
-            self.write(move |connection| {
-                let sql_stmt = sql!(
-                    INSERT OR REPLACE INTO agent_views(item_id, workspace_id, agent, mode)
-                    VALUES (?, ?, ?, ?)
-                );
-                let mut query =
-                    connection.exec_bound::<(ItemId, WorkspaceId, String, String)>(sql_stmt)?;
-                query((item_id, workspace_id, agent, mode)).context(format!(
-                    "exec_bound failed to execute or parse for: {}",
-                    sql_stmt
-                ))
-            })
-            .await
-        }
-
-        pub fn get_agent(
-            &self,
-            item_id: ItemId,
-            workspace_id: WorkspaceId,
-        ) -> anyhow::Result<(String, String)> {
-            let sql_stmt = sql!(
-                SELECT agent, mode FROM agent_views WHERE item_id = ? AND workspace_id = ?
-            );
-            self.select_row_bound::<(ItemId, WorkspaceId), (String, String)>(sql_stmt)?((
-                item_id,
-                workspace_id,
-            ))?
-            .context("no agent view saved for this item")
-        }
-
         /// The mode and width this agent was last left at, if it ever has been.
         ///
         /// Both columns are nullable and read as a pair: someone can have chosen a
@@ -1222,21 +996,6 @@ mod persistence {
             .await
         }
 
-        pub async fn save_width(&self, agent: String, width: f64) -> anyhow::Result<()> {
-            self.write(move |connection| {
-                Self::ensure_row(connection, &agent)?;
-                let sql_stmt = sql!(
-                    UPDATE agent_preferences SET width = ? WHERE agent = ?
-                );
-                let mut query = connection.exec_bound::<(f64, String)>(sql_stmt)?;
-                query((width, agent)).context(format!(
-                    "exec_bound failed to execute or parse for: {}",
-                    sql_stmt
-                ))
-            })
-            .await
-        }
-
         /// Insert-then-update rather than one upsert: the two writers set different
         /// columns, and `INSERT OR REPLACE` would have each of them blank the
         /// other's value on the way past.
@@ -1252,30 +1011,6 @@ mod persistence {
                 "exec_bound failed to execute or parse for: {}",
                 sql_stmt
             ))
-        }
-
-        pub async fn delete_unloaded(
-            &self,
-            workspace_id: WorkspaceId,
-            alive_items: Vec<ItemId>,
-        ) -> anyhow::Result<()> {
-            let placeholders = alive_items
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ");
-            let query = format!(
-                "DELETE FROM agent_views WHERE workspace_id = ? AND item_id NOT IN ({placeholders})"
-            );
-            self.write(move |connection| {
-                let mut statement = db::sqlez::statement::Statement::prepare(connection, query)?;
-                let mut next_index = statement.bind(&workspace_id, 1)?;
-                for id in alive_items {
-                    next_index = statement.bind(&id, next_index)?;
-                }
-                statement.exec()
-            })
-            .await
         }
     }
 }

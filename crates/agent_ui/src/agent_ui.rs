@@ -36,10 +36,6 @@ use workspace::Workspace;
 use zed_actions::agent::OpenAgent;
 
 pub fn init(cx: &mut App) {
-    // Restores the agent tabs a workspace had open. The conversation itself is not
-    // restored — see `SerializableItem for AgentView`.
-    workspace::register_serializable_item::<AgentView>(cx);
-
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|workspace, action: &OpenAgent, window, cx| {
             AgentView::open(workspace, action.agent.as_str(), action.mode, window, cx);
