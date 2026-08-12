@@ -5,6 +5,7 @@ members = [
     "crates/acp_tools",
     "crates/action_log",
     "crates/agent_servers",
+    "crates/agent_settings",
     "crates/activity_indicator",
     "crates/agent_ui",
     "crates/askpass",
@@ -221,6 +222,7 @@ acp_thread = { path = "crates/acp_thread" }
 acp_tools = { path = "crates/acp_tools" }
 action_log = { path = "crates/action_log" }
 agent_servers = { path = "crates/agent_servers" }
+agent_settings = { path = "crates/agent_settings" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent_ui = { path = "crates/agent_ui" }
 askpass = { path = "crates/askpass" }

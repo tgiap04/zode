@@ -114,6 +114,8 @@ pub struct SettingsContent {
 
     pub preview_tabs: Option<PreviewTabsSettingsContent>,
 
+    pub agent: Option<AgentSettingsContent>,
+
     pub agent_servers: Option<AllAgentServersSettings>,
 
     /// Configuration of audio in Zed.

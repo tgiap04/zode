@@ -7,7 +7,6 @@ use std::{borrow::Cow, path::PathBuf};
 
 use crate::ExtendingVec;
 
-use crate::DockPosition;
 
 /// Where new threads should start by default.
 #[derive(
@@ -95,32 +94,10 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub enabled: Option<bool>,
-    /// Whether to show the agent panel button in the status bar.
-    ///
-    /// Default: true
-    pub button: Option<bool>,
-    /// Where to dock the agent panel.
-    ///
-    /// Default: right
-    pub dock: Option<DockPosition>,
-    /// Whether the agent panel should use flexible (proportional) sizing.
-    ///
-    /// Default: true
-    pub flexible: Option<bool>,
     /// Where to position the threads sidebar.
     ///
     /// Default: left
     pub sidebar_side: Option<SidebarDockPosition>,
-    /// Default width in pixels when the agent panel is docked to the left or right.
-    ///
-    /// Default: 640
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub default_width: Option<f32>,
-    /// Default height in pixels when the agent panel is docked to the bottom.
-    ///
-    /// Default: 320
-    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
-    pub default_height: Option<f32>,
     /// Whether to limit the content width in the agent panel. When enabled,
     /// content will be constrained to `max_content_width` and centered when
     /// the panel is wider than that value, for optimal readability.
@@ -133,33 +110,10 @@ pub struct AgentSettingsContent {
     /// Default: 850
     #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
     pub max_content_width: Option<f32>,
-    /// The default model to use when creating new chats and for other features when a specific model is not specified.
-    pub default_model: Option<LanguageModelSelection>,
-    /// Favorite models to show at the top of the model selector.
-    #[serde(default)]
-    pub favorite_models: Vec<LanguageModelSelection>,
-    /// Model to use for the inline assistant. Defaults to default_model when not specified.
-    pub inline_assistant_model: Option<LanguageModelSelection>,
-    /// Model to use for the inline assistant when streaming tools are enabled.
-    ///
-    /// Default: true
-    pub inline_assistant_use_streaming_tools: Option<bool>,
-    /// Model to use for generating git commit messages. Defaults to default_model when not specified.
-    pub commit_message_model: Option<LanguageModelSelection>,
-    /// Model to use for generating thread summaries. Defaults to default_model when not specified.
-    pub thread_summary_model: Option<LanguageModelSelection>,
-    /// Additional models with which to generate alternatives when performing inline assists.
-    pub inline_alternatives: Option<Vec<LanguageModelSelection>>,
-    /// The default profile to use in the Agent.
-    ///
-    /// Default: write
-    pub default_profile: Option<Arc<str>>,
     /// Where new threads should start by default.
     ///
     /// Default: "local_project"
     pub new_thread_location: Option<NewThreadLocation>,
-    /// The available agent profiles.
-    pub profiles: Option<IndexMap<Arc<str>, AgentProfileContent>>,
     /// Where to show a popup notification when the agent is waiting for user input.
     ///
     /// Default: "primary_screen"
@@ -168,19 +122,6 @@ pub struct AgentSettingsContent {
     ///
     /// Default: never
     pub play_sound_when_agent_done: Option<PlaySoundWhenAgentDone>,
-    /// Whether to display agent edits in single-file editors in addition to the review multibuffer pane.
-    ///
-    /// Default: true
-    pub single_file_review: Option<bool>,
-    /// Additional parameters for language model requests. When making a request
-    /// to a model, parameters will be taken from the last entry in this list
-    /// that matches the model's provider and name. In each entry, both provider
-    /// and model are optional, so that you can specify parameters for either
-    /// one.
-    ///
-    /// Default: []
-    #[serde(default)]
-    pub model_parameters: Vec<LanguageModelParameters>,
     /// Whether to show thumb buttons for feedback in the agent panel.
     ///
     /// Default: true
@@ -214,127 +155,15 @@ pub struct AgentSettingsContent {
     ///
     /// Default: false
     pub show_turn_stats: Option<bool>,
-    /// Whether to show the merge conflict indicator in the status bar
-    /// that offers to resolve conflicts using the agent.
-    ///
-    /// Default: true
-    pub show_merge_conflict_indicator: Option<bool>,
-    /// Per-tool permission rules for granular control over which tool actions
-    /// require confirmation.
-    ///
-    /// The global `default` applies when no tool-specific rules match.
-    /// For external agent servers (e.g. Claude Agent) that define their own
-    /// permission modes, "deny" and "confirm" still take precedence — the
-    /// external agent's permission system is only used when Zed would allow
-    /// the action. Per-tool regex patterns (`always_allow`, `always_deny`,
-    /// `always_confirm`) match against the tool's text input (command, path,
-    /// URL, etc.).
-    pub tool_permissions: Option<ToolPermissionsContent>,
 }
 
 impl AgentSettingsContent {
-    pub fn set_dock(&mut self, dock: DockPosition) {
-        self.dock = Some(dock);
-    }
-
     pub fn set_sidebar_side(&mut self, position: SidebarDockPosition) {
         self.sidebar_side = Some(position);
     }
 
-    pub fn set_flexible_size(&mut self, flexible: bool) {
-        self.flexible = Some(flexible);
-    }
-
-    pub fn set_model(&mut self, language_model: LanguageModelSelection) {
-        self.default_model = Some(language_model)
-    }
-
-    pub fn set_inline_assistant_model(&mut self, provider: String, model: String) {
-        self.inline_assistant_model = Some(LanguageModelSelection {
-            provider: provider.into(),
-            model,
-            enable_thinking: false,
-            effort: None,
-            speed: None,
-        });
-    }
-
-    pub fn set_profile(&mut self, profile_id: Arc<str>) {
-        self.default_profile = Some(profile_id);
-    }
-
     pub fn set_new_thread_location(&mut self, value: NewThreadLocation) {
         self.new_thread_location = Some(value);
-    }
-
-    pub fn add_favorite_model(&mut self, model: LanguageModelSelection) {
-        // Note: this is intentional to not compare using `PartialEq`here.
-        // Full equality would treat entries that differ just in thinking/effort/speed
-        // as distinct and silently produce duplicates.
-        if !self
-            .favorite_models
-            .iter()
-            .any(|m| m.provider == model.provider && m.model == model.model)
-        {
-            self.favorite_models.push(model);
-        }
-    }
-
-    pub fn remove_favorite_model(&mut self, model: &LanguageModelSelection) {
-        self.favorite_models
-            .retain(|m| !(m.provider == model.provider && m.model == model.model));
-    }
-
-    pub fn update_favorite_model<F>(&mut self, provider: &str, model: &str, f: F)
-    where
-        F: FnOnce(&mut LanguageModelSelection),
-    {
-        if let Some(entry) = self
-            .favorite_models
-            .iter_mut()
-            .find(|m| m.provider.0 == provider && m.model == model)
-        {
-            f(entry);
-        }
-    }
-
-    pub fn set_tool_default_permission(&mut self, tool_id: &str, mode: ToolPermissionMode) {
-        let tool_permissions = self.tool_permissions.get_or_insert_default();
-        let tool_rules = tool_permissions
-            .tools
-            .entry(Arc::from(tool_id))
-            .or_default();
-        tool_rules.default = Some(mode);
-    }
-
-    pub fn add_tool_allow_pattern(&mut self, tool_name: &str, pattern: String) {
-        let tool_permissions = self.tool_permissions.get_or_insert_default();
-        let tool_rules = tool_permissions
-            .tools
-            .entry(Arc::from(tool_name))
-            .or_default();
-        let always_allow = tool_rules.always_allow.get_or_insert_default();
-        if !always_allow.0.iter().any(|r| r.pattern == pattern) {
-            always_allow.0.push(ToolRegexRule {
-                pattern,
-                case_sensitive: None,
-            });
-        }
-    }
-
-    pub fn add_tool_deny_pattern(&mut self, tool_name: &str, pattern: String) {
-        let tool_permissions = self.tool_permissions.get_or_insert_default();
-        let tool_rules = tool_permissions
-            .tools
-            .entry(Arc::from(tool_name))
-            .or_default();
-        let always_deny = tool_rules.always_deny.get_or_insert_default();
-        if !always_deny.0.iter().any(|r| r.pattern == pattern) {
-            always_deny.0.push(ToolRegexRule {
-                pattern,
-                case_sensitive: None,
-            });
-        }
     }
 }
 
@@ -717,180 +546,6 @@ impl std::fmt::Display for ToolPermissionMode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_set_tool_default_permission_creates_structure() {
-        let mut settings = AgentSettingsContent::default();
-        assert!(settings.tool_permissions.is_none());
-
-        settings.set_tool_default_permission("terminal", ToolPermissionMode::Allow);
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        assert_eq!(terminal_rules.default, Some(ToolPermissionMode::Allow));
-    }
-
-    #[test]
-    fn test_set_tool_default_permission_updates_existing() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.set_tool_default_permission("terminal", ToolPermissionMode::Confirm);
-        settings.set_tool_default_permission("terminal", ToolPermissionMode::Allow);
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        assert_eq!(terminal_rules.default, Some(ToolPermissionMode::Allow));
-    }
-
-    #[test]
-    fn test_set_tool_default_permission_for_mcp_tool() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.set_tool_default_permission("mcp:github:create_issue", ToolPermissionMode::Allow);
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let mcp_rules = tool_permissions
-            .tools
-            .get("mcp:github:create_issue")
-            .unwrap();
-        assert_eq!(mcp_rules.default, Some(ToolPermissionMode::Allow));
-    }
-
-    #[test]
-    fn test_add_tool_allow_pattern_creates_structure() {
-        let mut settings = AgentSettingsContent::default();
-        assert!(settings.tool_permissions.is_none());
-
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        let always_allow = terminal_rules.always_allow.as_ref().unwrap();
-        assert_eq!(always_allow.0.len(), 1);
-        assert_eq!(always_allow.0[0].pattern, "^cargo\\s");
-    }
-
-    #[test]
-    fn test_add_tool_allow_pattern_appends_to_existing() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-        settings.add_tool_allow_pattern("terminal", "^npm\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        let always_allow = terminal_rules.always_allow.as_ref().unwrap();
-        assert_eq!(always_allow.0.len(), 2);
-        assert_eq!(always_allow.0[0].pattern, "^cargo\\s");
-        assert_eq!(always_allow.0[1].pattern, "^npm\\s");
-    }
-
-    #[test]
-    fn test_add_tool_allow_pattern_does_not_duplicate() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        let always_allow = terminal_rules.always_allow.as_ref().unwrap();
-        assert_eq!(
-            always_allow.0.len(),
-            1,
-            "Duplicate patterns should not be added"
-        );
-    }
-
-    #[test]
-    fn test_add_tool_allow_pattern_for_different_tools() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-        settings.add_tool_allow_pattern("fetch", "^https?://github\\.com".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        assert_eq!(
-            terminal_rules.always_allow.as_ref().unwrap().0[0].pattern,
-            "^cargo\\s"
-        );
-
-        let fetch_rules = tool_permissions.tools.get("fetch").unwrap();
-        assert_eq!(
-            fetch_rules.always_allow.as_ref().unwrap().0[0].pattern,
-            "^https?://github\\.com"
-        );
-    }
-
-    #[test]
-    fn test_add_tool_deny_pattern_creates_structure() {
-        let mut settings = AgentSettingsContent::default();
-        assert!(settings.tool_permissions.is_none());
-
-        settings.add_tool_deny_pattern("terminal", "^rm\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        let always_deny = terminal_rules.always_deny.as_ref().unwrap();
-        assert_eq!(always_deny.0.len(), 1);
-        assert_eq!(always_deny.0[0].pattern, "^rm\\s");
-    }
-
-    #[test]
-    fn test_add_tool_deny_pattern_appends_to_existing() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.add_tool_deny_pattern("terminal", "^rm\\s".to_string());
-        settings.add_tool_deny_pattern("terminal", "^sudo\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        let always_deny = terminal_rules.always_deny.as_ref().unwrap();
-        assert_eq!(always_deny.0.len(), 2);
-        assert_eq!(always_deny.0[0].pattern, "^rm\\s");
-        assert_eq!(always_deny.0[1].pattern, "^sudo\\s");
-    }
-
-    #[test]
-    fn test_add_tool_deny_pattern_does_not_duplicate() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.add_tool_deny_pattern("terminal", "^rm\\s".to_string());
-        settings.add_tool_deny_pattern("terminal", "^rm\\s".to_string());
-        settings.add_tool_deny_pattern("terminal", "^rm\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-        let always_deny = terminal_rules.always_deny.as_ref().unwrap();
-        assert_eq!(
-            always_deny.0.len(),
-            1,
-            "Duplicate patterns should not be added"
-        );
-    }
-
-    #[test]
-    fn test_add_tool_deny_and_allow_patterns_separate() {
-        let mut settings = AgentSettingsContent::default();
-
-        settings.add_tool_allow_pattern("terminal", "^cargo\\s".to_string());
-        settings.add_tool_deny_pattern("terminal", "^rm\\s".to_string());
-
-        let tool_permissions = settings.tool_permissions.as_ref().unwrap();
-        let terminal_rules = tool_permissions.tools.get("terminal").unwrap();
-
-        let always_allow = terminal_rules.always_allow.as_ref().unwrap();
-        assert_eq!(always_allow.0.len(), 1);
-        assert_eq!(always_allow.0[0].pattern, "^cargo\\s");
-
-        let always_deny = terminal_rules.always_deny.as_ref().unwrap();
-        assert_eq!(always_deny.0.len(), 1);
-        assert_eq!(always_deny.0[0].pattern, "^rm\\s");
-    }
-}
+// Upstream tested the `tool_permissions` setters here. That surface described
+// Zed's own allow/deny/confirm pre-filter over tool calls; external agents ask
+// over ACP instead, so both the setters and their tests went with it.
