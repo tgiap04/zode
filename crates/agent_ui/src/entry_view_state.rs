@@ -40,7 +40,6 @@ impl EntryViewState {
         Self {
             workspace,
             project,
-            thread_store,
             prompt_store,
             entries: Vec::new(),
             session_capabilities,
@@ -82,7 +81,6 @@ impl EntryViewState {
                         let mut editor = MessageEditor::new(
                             self.workspace.clone(),
                             self.project.clone(),
-                            self.thread_store.clone(),
                             self.prompt_store.clone(),
                             self.session_capabilities.clone(),
                             self.agent_id.clone(),
@@ -465,7 +463,7 @@ fn diff_editor_text_style_refinement(cx: &mut App) -> TextStyleRefinement {
         font_size: Some(
             TextSize::Small
                 .rems(cx)
-                .to_pixels(ThemeSettings::get_global(cx).agent_ui_font_size(cx))
+                .to_pixels(ThemeSettings::get_global(cx).ui_font_size(cx))
                 .into(),
         ),
         ..Default::default()
@@ -535,13 +533,10 @@ mod tests {
             connection.send_update(session_id, acp::SessionUpdate::ToolCall(tool_call), cx)
         });
 
-        let thread_store = None;
-
         let view_state = cx.new(|_cx| {
             EntryViewState::new(
                 workspace.downgrade(),
                 project.downgrade(),
-                thread_store,
                 None,
                 Arc::new(RwLock::new(SessionCapabilities::default())),
                 "Test Agent".into(),

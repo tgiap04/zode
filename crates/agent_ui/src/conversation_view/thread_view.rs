@@ -1,6 +1,6 @@
 use crate::{
     DEFAULT_THREAD_TITLE, SelectPermissionGranularity,
-    agent_configuration::configure_context_server_modal::default_markdown_style,
+    markdown_style::default_markdown_style,
 };
 use agent_client_protocol::schema as acp;
 use std::cell::RefCell;

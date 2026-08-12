@@ -9,6 +9,7 @@ mod missing_binary;
 //
 // mod actions;
 // mod diagnostics;
+// mod markdown_style;
 // mod mention_image;
 // mod outline;
 // mod agent_connection_store;

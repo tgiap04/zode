@@ -2,7 +2,6 @@ use crate::diagnostics::{DiagnosticsOptions, codeblock_fence_for_path, collect_d
 use acp_thread::{MentionUri, selection_name};
 use crate::outline;
 use agent_client_protocol::schema as acp;
-use agent_servers::{AgentServer, AgentServerDelegate};
 use anyhow::{Context as _, Result, anyhow};
 use collections::{HashMap, HashSet};
 use editor::{
@@ -60,7 +59,6 @@ pub struct MentionImage {
 
 pub struct MentionSet {
     project: WeakEntity<Project>,
-    thread_store: Option<Entity<ThreadStore>>,
     prompt_store: Option<Entity<PromptStore>>,
     mentions: HashMap<CreaseId, (MentionUri, MentionTask)>,
 }
@@ -68,12 +66,10 @@ pub struct MentionSet {
 impl MentionSet {
     pub fn new(
         project: WeakEntity<Project>,
-        thread_store: Option<Entity<ThreadStore>>,
         prompt_store: Option<Entity<PromptStore>>,
     ) -> Self {
         Self {
             project,
-            thread_store,
             prompt_store,
             mentions: HashMap::default(),
         }
@@ -183,8 +179,11 @@ impl MentionSet {
     }
 
     #[cfg(test)]
+    /// Always false: thread mentions need a persisted thread store, and this fork
+    /// keeps no thread history. Left in place so the completion delegate reads the
+    /// same way it does upstream.
     pub fn has_thread_store(&self) -> bool {
-        self.thread_store.is_some()
+        false
     }
 
     pub fn confirm_mention_completion(
@@ -362,7 +361,7 @@ impl MentionSet {
                     .await;
                 if let Some(image) = image {
                     Ok(Mention::Image(MentionImage {
-                        data: image.source,
+                        data: image.source.into(),
                         format: MentionImageData::FORMAT,
                     }))
                 } else {
@@ -533,41 +532,18 @@ impl MentionSet {
         });
     }
 
+    /// Upstream resolved a thread mention by asking its own in-process agent for
+    /// that thread's summary — its own error message already said the path was
+    /// native-only. There is no native agent here and no thread store behind it,
+    /// so the mention resolves to a plain refusal rather than a broken lookup.
     fn confirm_mention_for_thread(
         &mut self,
-        id: acp::SessionId,
-        cx: &mut Context<Self>,
+        _id: acp::SessionId,
+        _cx: &mut Context<Self>,
     ) -> Task<Result<Mention>> {
-        let Some(thread_store) = self.thread_store.clone() else {
-            return Task::ready(Err(anyhow!(
-                "Thread mentions are only supported for the native agent"
-            )));
-        };
-        let Some(project) = self.project.upgrade() else {
-            return Task::ready(Err(anyhow!("project not found")));
-        };
-
-        let server = Rc::new(agent::NativeAgentServer::new(
-            project.read(cx).fs().clone(),
-            thread_store,
-        ));
-        let delegate =
-            AgentServerDelegate::new(project.read(cx).agent_server_store().clone(), None);
-        let connection = server.connect(delegate, project.clone(), cx);
-        cx.spawn(async move |_, cx| {
-            let agent = connection.await?;
-            let agent = agent.downcast::<agent::NativeAgentConnection>().unwrap();
-            let summary = agent
-                .0
-                .update(cx, |agent, cx| {
-                    agent.thread_summary(id, project.clone(), cx)
-                })
-                .await?;
-            Ok(Mention::Text {
-                content: summary.to_string(),
-                tracked_buffers: Vec::new(),
-            })
-        })
+        Task::ready(Err(anyhow!(
+            "Thread mentions are not supported: threads are not persisted here"
+        )))
     }
 
     fn confirm_mention_for_diagnostics(
@@ -670,8 +646,7 @@ mod tests {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/project", json!({"file": ""})).await;
         let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
-        let thread_store = None;
-        let mention_set = cx.new(|_cx| MentionSet::new(project.downgrade(), thread_store, None));
+        let mention_set = cx.new(|_cx| MentionSet::new(project.downgrade(), None));
 
         let task = mention_set.update(cx, |mention_set, cx| {
             mention_set.confirm_mention_for_thread(acp::SessionId::new("thread-1"), cx)
@@ -796,7 +771,7 @@ pub(crate) async fn insert_images_as_context(
                 drop(tx);
                 if let Some(image) = image {
                     Ok(Mention::Image(MentionImage {
-                        data: image.source,
+                        data: image.source.into(),
                         format: MentionImageData::FORMAT,
                     }))
                 } else {

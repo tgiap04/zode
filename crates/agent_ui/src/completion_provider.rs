@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::DEFAULT_THREAD_TITLE;
-use crate::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
 use acp_thread::MentionUri;
 use agent_client_protocol::schema as acp;
 use anyhow::Result;
@@ -37,7 +36,6 @@ use util::truncate_and_remove_front;
 use workspace::Workspace;
 use workspace::dock::DockPosition;
 
-use crate::AgentPanel;
 use crate::mention_set::MentionSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1076,22 +1074,12 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
     ) -> Task<Vec<Match>> {
         let mut recent = Vec::with_capacity(6);
 
-        let mut mentions = self
+        let mentions = self
             .mention_set
             .read_with(cx, |store, _cx| store.mentions());
         let workspace = workspace.read(cx);
         let project = workspace.project().read(cx);
         let include_root_name = workspace.visible_worktrees(cx).count() > 1;
-
-        if let Some(agent_panel) = workspace.panel::<AgentPanel>(cx)
-            && let Some(thread) = agent_panel.read(cx).active_agent_thread(cx)
-            && let Some(title) = thread.read(cx).title()
-        {
-            mentions.insert(MentionUri::Thread {
-                id: thread.read(cx).session_id().clone(),
-                name: title.to_string(),
-            });
-        }
 
         recent.extend(
             workspace
@@ -2011,26 +1999,11 @@ pub(crate) fn search_symbols(
     })
 }
 
-fn collect_session_matches(cx: &App) -> Vec<SessionMatch> {
-    let Some(store) = ThreadMetadataStore::try_global(cx) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<&ThreadMetadata> = store
-        .read(cx)
-        .entries()
-        .filter(|t| !t.archived && t.agent_id == *agent::ZED_AGENT_ID)
-        .collect();
-    entries.sort_by_key(|t| Reverse(t.updated_at));
-    entries
-        .into_iter()
-        .map(|metadata| {
-            let info = acp_thread::AgentSessionInfo::from(metadata);
-            SessionMatch {
-                session_id: info.session_id,
-                title: session_title(info.title),
-            }
-        })
-        .collect()
+/// Upstream listed the user's saved threads here, read out of a global metadata
+/// store and filtered to its own agent's id. Threads are not persisted in this
+/// fork, so there is nothing to list.
+fn collect_session_matches(_cx: &App) -> Vec<SessionMatch> {
+    Vec::new()
 }
 
 fn filter_sessions_by_query(

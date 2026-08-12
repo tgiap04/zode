@@ -1,4 +1,3 @@
-use crate::DEFAULT_THREAD_TITLE;
 use crate::SendImmediately;
 use crate::{
     ChatWithFollow,
@@ -137,7 +136,6 @@ pub struct MessageEditor {
     workspace: WeakEntity<Workspace>,
     session_capabilities: SharedSessionCapabilities,
     agent_id: AgentId,
-    thread_store: Option<Entity<ThreadStore>>,
     _subscriptions: Vec<Subscription>,
     _parse_slash_command_task: Task<()>,
 }
@@ -391,7 +389,6 @@ impl MessageEditor {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         project: WeakEntity<Project>,
-        thread_store: Option<Entity<ThreadStore>>,
         prompt_store: Option<Entity<PromptStore>>,
         session_capabilities: SharedSessionCapabilities,
         agent_id: AgentId,
@@ -446,11 +443,11 @@ impl MessageEditor {
             editor
         });
         let mention_set =
-            cx.new(|_cx| MentionSet::new(project, thread_store.clone(), prompt_store.clone()));
+            cx.new(|_cx| MentionSet::new(project, prompt_store.clone()));
         let completion_provider = Rc::new(PromptCompletionProvider::new(
             MessageEditorCompletionDelegate {
                 session_capabilities: session_capabilities.clone(),
-                has_thread_store: thread_store.is_some(),
+                has_thread_store: false,
                 message_editor: cx.weak_entity(),
             },
             editor.downgrade(),
@@ -547,7 +544,6 @@ impl MessageEditor {
             workspace,
             session_capabilities,
             agent_id,
-            thread_store,
             _subscriptions: subscriptions,
             _parse_slash_command_task: Task::ready(()),
         }
@@ -609,56 +605,17 @@ impl MessageEditor {
         ))
     }
 
+    /// Inserting a previous thread's summary needed a thread store to read it out
+    /// of; upstream even gated the whole body on having one. Threads are not
+    /// persisted here, so there is nothing to summarise and the call is a no-op
+    /// rather than a half-working path.
     pub fn insert_thread_summary(
         &mut self,
-        session_id: acp::SessionId,
-        title: Option<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _session_id: acp::SessionId,
+        _title: Option<SharedString>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) {
-        if self.thread_store.is_none() {
-            return;
-        }
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        let thread_title = title
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| SharedString::new_static(DEFAULT_THREAD_TITLE));
-        let uri = MentionUri::Thread {
-            id: session_id,
-            name: thread_title.to_string(),
-        };
-        let content = format!("{}\n", uri.as_link());
-
-        let content_len = content.len() - 1;
-
-        let start = self.editor.update(cx, |editor, cx| {
-            editor.set_text(content, window, cx);
-            let snapshot = editor.buffer().read(cx).snapshot(cx);
-            snapshot
-                .anchor_to_buffer_anchor(snapshot.anchor_before(Point::zero()))
-                .unwrap()
-                .0
-        });
-
-        let supports_images = self.session_capabilities.read().supports_images();
-
-        self.mention_set
-            .update(cx, |mention_set, cx| {
-                mention_set.confirm_mention_completion(
-                    thread_title,
-                    start,
-                    content_len,
-                    uri,
-                    supports_images,
-                    self.editor.clone(),
-                    &workspace,
-                    window,
-                    cx,
-                )
-            })
-            .detach();
     }
 
     #[cfg(test)]

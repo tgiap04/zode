@@ -1,7 +1,7 @@
 # Phase 04 — Chat UI thành center item
 
 **Context:** [plan.md](plan.md) · [brainstorm](../reports/brainstorm-260811-rail-agents-claude-code-codex.md)
-**Priority:** P2 · **Status:** in_progress *(~35% phần cơ học)* · **Effort:** 8-12d · **Blocked by:** 00, 02
+**Priority:** P2 · **Status:** in_progress *(~70% phần cơ học)* · **Effort:** 8-12d · **Blocked by:** 00, 02
 
 > **Trạng thái 2026-08-12.** 26.413 dòng đã khôi phục lên đĩa và **cố ý chưa nối vào module tree** — xem khối comment trong `crates/agent_ui/src/agent_ui.rs`. Cây xanh hoàn toàn (`cargo check --workspace --all-targets` exit 0, 123 test xanh); đưa một module vào `agent_ui.rs` là **bước cuối** của việc port nó, không phải bước đầu. `crates/agent_settings` **đã trim xong và về lại workspace** — nợ kỹ thuật #1 đã trả.
 
@@ -187,3 +187,42 @@ Clippy chạy `-D warnings`, nên module `mod` private không có consumer là *
 | `agent::NativeAgentServer` trong test của `mention_set` | Cắt |
 
 Sau đó mới tới `conversation_view` (7.307) + `thread_view` (9.311) — hai file lớn nhất, **chưa động tới**.
+
+
+---
+
+## Phiên 3 (2026-08-12) — 6/7 module đã cắt sạch nhánh native
+
+**Đã đưa về 0 lỗi:** `completion_provider`, `entry_view_state`, `mention_set`, `message_editor` (cộng `actions`, `ui`, `agent_connection_store`, và 4 helper). Chỉ còn **`conversation_view` + `thread_view`**.
+
+### Đã cắt
+
+| Chỗ | Thay bằng |
+|---|---|
+| `confirm_mention_for_thread` (`mention_set`) gọi `agent::NativeAgentServer` + `NativeAgentConnection` để lấy summary thread | Lỗi trung thực. Error message gốc của upstream đã tự nói *"only supported for the native agent"* |
+| `thread_store: Option<Entity<ThreadStore>>` xuyên `mention_set` → `message_editor` → `entry_view_state` | Gỡ hẳn tham số. `has_thread_store()` trả `false` — giữ lại để completion delegate đọc y như upstream |
+| `MessageEditor::insert_thread_summary` | No-op có tài liệu. Upstream cũng gate cả thân hàm trên việc có thread store |
+| `collect_session_matches` (`completion_provider`) đọc `ThreadMetadataStore` global, lọc theo `agent::ZED_AGENT_ID` | `Vec::new()` — không có thread nào để liệt kê |
+| Thread đang mở được đề xuất làm mention candidate, đọc qua `workspace.panel::<AgentPanel>()` | Cắt — không có panel |
+| `humanize_token_count` | **Đã lấy lại.** Nó bị cắt mất cùng `ManageProfiles` ở phiên trước — lỗi của tôi, compiler bắt được |
+| `agent_configuration::configure_context_server_modal::default_markdown_style` | Module mới `markdown_style.rs` (28 dòng). Chỉ hàm style đi theo, modal thì không |
+
+### Vì sao cả lát vẫn park
+
+`conversation_view` là **consumer duy nhất** của 6 module kia. Clippy chạy `-D warnings`, nên `mod` private không ai dùng là dead code = lỗi. Cả lát phải vào cùng lúc hoặc park cùng lúc — không có trạng thái giữa. Đây là lý do các module đã-xanh vẫn nằm ngoài module tree.
+
+### Việc còn lại — đây là phần thiết kế, không phải cắt máy móc
+
+`conversation_view` + `thread_view` còn **43 lỗi**, nhưng con số không phản ánh đúng độ khó. Phân bố:
+
+| Symbol | Số chỗ | Bản chất |
+|---|---|---|
+| `AgentPanel` | **17** | `conversation_view` gọi ngược vào dock panel: mở diff, follow agent, đổi thread… Mỗi chỗ cần một quyết định `AgentView` thay bằng gì |
+| `ThreadStore` | **16** | Kho thread native |
+| `ThreadId` / `ThreadMetadataStore` | 12 | Lịch sử thread |
+| `LanguageModelRegistry` | 6 | Registry model native |
+| `AgentProfileId`, `ProfileSelector`, `ModeSelector`, `ModelSelectorPopover`, `ConfigOptionsView` | 12 | Chọn model/profile/mode — thuộc agent native |
+| `From<LanguageModelCompletionError> for ThreadError` | 1 impl, 13 variant | Map lỗi của LLM provider sang lỗi thread |
+| `AgentFontSize`, `upgrade_to_zed_pro_url`, `shared_agent_thread_url`, `show_undo_reject_toast`, `AgentDiffPane` | 6 | Fork đã bỏ |
+
+**17 chỗ `AgentPanel` là trọng tâm thật của phase này** — đúng như plan đã ghi từ đầu. Chúng không cắt được: `conversation_view` được viết để sống trong `AgentPanel` và gọi ngược lên nó. Mỗi chỗ phải trả lời "trong thiết kế center-pane, ai làm việc này?" — và một số câu trả lời sẽ là "`AgentView`", số khác là "không ai, bỏ tính năng đó".

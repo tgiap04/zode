@@ -1,6 +1,8 @@
 mod agent_notification;
 mod mention_crease;
 
+pub use mention_crease::*;
+
 
 /// Upstream picked this side from the agent panel's dock position. Agents live in
 /// the centre here, beside the editor, so the aside goes on the side the pane's
