@@ -97,3 +97,17 @@ Refactor kèm theo: constructor `AgentView::new` được tách khỏi `open` �
 
 - **Mục R4 (chiều ngang trên màn 13")** là thứ duy nhất của phase này chưa làm được, và nó vốn được ghi là "mắt người, không phải test".
 - Không hứa resume hội thoại (quyết định #10). Ai muốn tiếp tục thật thì `/resume` trong terminal mode.
+
+---
+
+## Sau khi dùng thật (2026-08-12)
+
+Hai thứ người dùng chỉ ra ngay lần đầu mở được app.
+
+**Không có chỗ nào để chuyển giữa hai mode.** Quyết định #3 chọn mode *lúc mở* — click = chat, chuột phải = terminal — và điều đó để lại người đang xem một mode không có đường sang mode kia; trên màn hình cũng không có gì gọi tên hai mode. Thêm switch `Chat | Terminal` ở đầu view. Chuyển mode = **restart agent**: hai mode là hai process khác nhau (npx adapter vs CLI local), giữ cái đang nhàn rỗi sống nghĩa là hai agent chạy cho một view — cùng lý lẽ tiết kiệm process của #10.
+
+Đọc lại chỗ đó lộ ra một lỗi thật: **`AgentView::open` bỏ qua `mode`** khi agent đó đã có view mở, nên chuột phải trên rail chỉ focus lại chat đang có. Đó chính là thứ làm người dùng kết luận không có cách nào chuyển. Giờ `open` gọi `set_mode`, và tooltip của rail nói ra cử chỉ chuột phải thay vì để nó ẩn.
+
+**Pane agent dán sát code editor.** Thêm 8px ở đúng cạnh hướng về editor, đọc `agent_split_direction` — cùng setting đã quyết pane mở bên nào, nên gap không bao giờ nằm sai phía. Gap đặt **trong view**, không phải ở pane group của workspace: nới divider ở đó sẽ đẩy mọi split trong cửa sổ ra xa, không riêng seam này.
+
+Đánh đổi phải nói rõ: hàng tab bar phía trên **vẫn liền nhau**, vì gap nằm trong item chứ không trong pane. Muốn inset cả pane thì phải sửa pane group, và đó là quyết định khác — chưa làm.

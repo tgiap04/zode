@@ -45,9 +45,18 @@ impl Sidebar {
 
             IconButton::new(*agent, *icon)
                 .icon_size(RAIL_ICON_SIZE)
+                // A right-click is the only way to open straight into the terminal,
+                // and a gesture with nothing naming it is a gesture nobody finds.
                 .tooltip({
                     let chat = chat.clone();
-                    move |_window, cx| Tooltip::for_action(*label, &chat, cx)
+                    move |_window, cx| {
+                        Tooltip::with_meta(
+                            *label,
+                            Some(&chat),
+                            "Right-click to open its terminal",
+                            cx,
+                        )
+                    }
                 })
                 // Dispatch rather than opening the view directly: this body runs
                 // inside `Sidebar::update`, and opening a pane reaches back into

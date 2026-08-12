@@ -5,7 +5,7 @@ use gpui::{
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal_view::TerminalView;
-use ui::prelude::*;
+use ui::{ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, prelude::*};
 use workspace::{
     SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
     item::{Item, ItemEvent},
@@ -103,9 +103,14 @@ impl AgentView {
             .find(|view| view.read(cx).agent == agent_id);
         if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
-            // The CLI may well have been installed since this view gave up on it,
-            // so coming back to it is a retry rather than a look at a stale verdict.
             existing.update(cx, |view, cx| {
+                // Asking for the other mode has to move this view to it. Without
+                // this the rail's right-click just re-focuses whichever mode is
+                // already open, which reads as the button doing nothing at all.
+                view.set_mode(mode, window, cx);
+                // The CLI may well have been installed since this view gave up on
+                // it, so coming back to it is a retry rather than a look at a
+                // stale verdict.
                 if matches!(view.state, State::MissingBinary(_)) {
                     view.restart(window, cx);
                 }
@@ -200,6 +205,27 @@ impl AgentView {
         };
         view.start(window, cx);
         view
+    }
+
+    /// Moves this view to the other mode, restarting the agent.
+    ///
+    /// The conversation and the terminal are two different processes — an npx
+    /// adapter against ACP, and the CLI itself — so holding the idle one open
+    /// would leave a second agent running for something nobody is looking at. The
+    /// cost is that switching ends the session in progress, which is the same
+    /// bargain the plan already struck for restoring a tab.
+    pub(crate) fn set_mode(
+        &mut self,
+        mode: AgentViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.restart(window, cx);
+        cx.emit(AgentViewEvent::UpdateTab);
     }
 
     /// Re-runs startup from scratch — the way back after the CLI is installed.
@@ -386,34 +412,106 @@ impl Item for AgentView {
     }
 }
 
+/// Room between the agent pane and the editor next to it, so the two do not read
+/// as one surface.
+///
+/// It sits inside this view rather than in the workspace's pane group: widening
+/// the divider there would push apart every split in the window, and the editor
+/// next to an agent is the only seam this is about.
+const EDITOR_GAP: Pixels = px(8.);
+
+impl AgentView {
+    /// The switch between the conversation and the agent's own terminal.
+    ///
+    /// The mode is picked when the agent opens — a click on the rail for the
+    /// conversation, a right-click for the terminal — which left anyone already
+    /// looking at one mode with no way to reach the other, and nothing on screen
+    /// naming the two modes at all. This is that way, and that naming.
+    fn render_mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        ToggleButtonGroup::single_row(
+            "agent-view-mode",
+            [
+                ToggleButtonSimple::new(
+                    "Chat",
+                    cx.listener(|this, _, window, cx| {
+                        this.set_mode(AgentViewMode::Chat, window, cx)
+                    }),
+                ),
+                ToggleButtonSimple::new(
+                    "Terminal",
+                    cx.listener(|this, _, window, cx| {
+                        this.set_mode(AgentViewMode::Terminal, window, cx)
+                    }),
+                ),
+            ],
+        )
+        .label_size(LabelSize::Small)
+        .style(ToggleButtonGroupStyle::Outlined)
+        .auto_width()
+        .selected_index(match self.mode {
+            AgentViewMode::Chat => 0,
+            AgentViewMode::Terminal => 1,
+        })
+        .into_any_element()
+    }
+}
+
 impl Render for AgentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Both of these need `cx` mutably, so they are built before the theme is
+        // borrowed — that borrow lives to the end of the element tree below.
+        let mode_switch = self.render_mode_switch(cx);
+        let body = match &self.state {
+            State::Terminal(terminal) => terminal.clone().into_any_element(),
+            State::Chat(conversation) => conversation.clone().into_any_element(),
+            State::Starting => centered_message(
+                IconName::ArrowCircle,
+                format!("Starting {}…", self.display_name).into(),
+                None,
+                cx,
+            ),
+            State::MissingBinary(missing) => crate::missing_binary::render(
+                &cx.entity(),
+                &self.display_name,
+                missing,
+                self.mode == AgentViewMode::Chat,
+                cx,
+            ),
+            State::Failed(error) => centered_message(IconName::Warning, error.clone(), None, cx),
+        };
         let colors = cx.theme().colors();
+
+        // Which edge faces the editor follows the side the agent opened on, the
+        // same setting `agent_split_direction` reads to open it there.
+        let opens_left = matches!(agent_split_direction(cx), SplitDirection::Left);
 
         div()
             .size_full()
-            .bg(colors.editor_background)
+            .bg(colors.background)
             .track_focus(&self.focus_handle)
-            .child(match &self.state {
-                State::Terminal(terminal) => terminal.clone().into_any_element(),
-                State::Chat(conversation) => conversation.clone().into_any_element(),
-                State::Starting => centered_message(
-                    IconName::ArrowCircle,
-                    format!("Starting {}…", self.display_name).into(),
-                    None,
-                    cx,
-                ),
-                State::MissingBinary(missing) => crate::missing_binary::render(
-                    &cx.entity(),
-                    &self.display_name,
-                    missing,
-                    self.mode == AgentViewMode::Chat,
-                    cx,
-                ),
-                State::Failed(error) => {
-                    centered_message(IconName::Warning, error.clone(), None, cx)
-                }
-            })
+            .when(opens_left, |this| this.pr(EDITOR_GAP))
+            .when(!opens_left, |this| this.pl(EDITOR_GAP))
+            .child(
+                v_flex()
+                    .size_full()
+                    .bg(colors.editor_background)
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .justify_end()
+                            .border_b_1()
+                            .border_color(colors.border)
+                            .child(mode_switch),
+                    )
+                    // `flex_1` with a floor of zero, in a column so it grows along
+                    // the axis meant: the body's children size themselves against a
+                    // definite height, and `size_full` here would run them straight
+                    // through the header.
+                    .child(v_flex().flex_1().min_h_0().child(body)),
+            )
     }
 }
 
