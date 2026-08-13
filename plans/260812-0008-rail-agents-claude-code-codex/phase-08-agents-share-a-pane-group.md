@@ -81,3 +81,20 @@ Bản đầu tôi chỉ xử `Focus` và `Remove`, **quên `pane::Event::Split`*
 
 - **Layout không được serialize.** Dock nhớ mở/đóng và width, nhưng tab/split bên trong thì chưa — mở lại app sẽ về một pane. `TerminalPanel` làm việc này bằng DB riêng của nó; đây là phần chưa làm.
 - Phase 09 (bo góc + gutter cả vỏ cửa sổ) chưa bắt đầu.
+
+### Panic khi kéo tab (2026-08-13)
+
+`cannot read workspace::pane::Pane while it is already being updated` — abort cả process, trong `handle_view_event` (tức lúc xử lý sự kiện chuột).
+
+Chỗ sai nằm trong predicate `set_can_split` tôi viết: nó gọi `tab.pane.read(cx)` **vô điều kiện**. Kéo một tab **trong cùng một pane** — trường hợp thường gặp nhất, không phải hiếm — thì `tab.pane` chính là pane đang được update, nên đọc lại nó là re-entrant.
+
+`TerminalPanel` có đúng guard đó và tôi đã sao thiếu (`terminal_panel.rs:1241`):
+
+```rust
+let item = if is_current_pane { pane.item_for_index(tab.ix) }
+           else { tab.pane.read(cx).item_for_index(tab.ix) };
+```
+
+Dùng tham số `pane` đã mượn sẵn khi tab đến từ chính pane đó. Đã sửa y vậy. Cùng lớp rủi ro: `focus_handle` của tôi đọc pane rồi lần vào active item — rút về `self.active_pane.focus_handle(cx)` như `TerminalPanel`, ít bề mặt hơn trên một đường mà workspace gọi liên tục.
+
+**Chưa tái hiện được bằng test.** Ba lần thử (show → docked+focused → có vẽ) đều pass; đường drag cần `DraggedTab` thật và máy kéo-thả đứng sau nó. Test `showing_an_agent_in_a_docked_panel_draws` chỉ phủ đường thêm-và-vẽ, và tên nó nói đúng chừng đó — không nhận vơ phủ luôn drag.

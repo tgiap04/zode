@@ -165,11 +165,21 @@ impl AgentPanel {
             // Only agents belong in here. An editor tab dragged over this dock is
             // refused at the predicate rather than being talked out of it later,
             // which is the same reason the agent left the centre group at all.
-            pane.set_can_split(Some(Arc::new(move |_pane, dragged_item, _window, cx| {
+            pane.set_can_split(Some(Arc::new(move |pane, dragged_item, _window, cx| {
                 let Some(tab) = dragged_item.downcast_ref::<pane::DraggedTab>() else {
                     return false;
                 };
-                let Some(item) = tab.pane.read(cx).item_for_index(tab.ix) else {
+                // Read through the borrow already in hand when the tab comes from
+                // this very pane. Reaching for `tab.pane.read(cx)` there reads a
+                // pane that is mid-update — which aborts the process rather than
+                // failing the drag, and dragging a tab within one pane is the
+                // ordinary case, not the corner one.
+                let item = if tab.pane == cx.entity() {
+                    pane.item_for_index(tab.ix)
+                } else {
+                    tab.pane.read(cx).item_for_index(tab.ix)
+                };
+                let Some(item) = item else {
                     return false;
                 };
                 if item.downcast::<AgentView>().is_none() {
@@ -229,12 +239,13 @@ impl AgentPanel {
 }
 
 impl Focusable for AgentPanel {
+    /// Straight to the pane, the way `TerminalPanel` does it.
+    ///
+    /// Walking from here into the active item costs another read of the pane on a
+    /// path the workspace calls constantly, including from inside pane updates —
+    /// and the pane already forwards focus to its active item.
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.active_pane
-            .read(cx)
-            .active_item()
-            .map(|item| item.item_focus_handle(cx))
-            .unwrap_or_else(|| self.focus_handle.clone())
+        self.active_pane.focus_handle(cx)
     }
 }
 
@@ -398,6 +409,44 @@ mod tests {
                 "the panel must dock where `sidebar_side` says"
             );
         }
+    }
+
+    /// An agent is added to a docked, focused panel and the window is drawn.
+    ///
+    /// This does **not** cover the drag path, where the re-entrant read that
+    /// aborted the process actually lived — reproducing that needs a real
+    /// `DraggedTab` and the drag machinery behind it. What it does cover is the
+    /// add-and-paint path, which is what a rail click runs.
+    #[gpui::test]
+    async fn showing_an_agent_in_a_docked_panel_draws(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+
+        // In the dock and focused, which is the path a rail click takes: that is
+        // where the workspace starts asking this panel for its focus handle.
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx);
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Terminal mode: `start` is spawned, so nothing runs before the assertion.
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+
+        // Drawing is the missing half: the panic this guards against happens while
+        // the window is painting the pane, not while the item is being added.
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     }
 
     /// The dock's pane group must never be one of the workspace's own panes, or
