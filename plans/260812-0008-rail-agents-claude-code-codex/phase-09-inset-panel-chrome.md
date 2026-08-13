@@ -47,3 +47,32 @@ Nên đây là một lượt thống nhất, không phải bốn miếng vá r�
 Đây là thay đổi chạm **toàn bộ chrome của app**, không riêng agent. Border/divider hiện có ở rail (`rail.rs:106`) và dock (`dock.rs:1153`) sẽ thành thừa hoặc phải đổi vai khi đã có gap thật — bỏ sót thì thành "vừa có viền vừa có khoảng cách", trông bẩn hơn cả hai.
 
 R4 quay lại: mỗi gap ăn chiều ngang thật, và phase 06 đã ghi nợ kiểm 13".
+
+---
+
+## Một phần đã làm (2026-08-13)
+
+**Hệ thống này đã có sẵn trong fork, tôi chỉ chưa cho agent tham gia.** `pane_group.rs` giữ `SURFACE_MARGIN = 3px` và `SURFACE_ROUNDING = 5px`, nhưng `PaneGroup::render` chỉ áp cho **centre group**:
+
+```rust
+if !self.is_center { return element; }
+```
+
+Group của `AgentPanel` không phải centre nên nhận element trần — đúng lý do agent section không bo góc, không khoảng cách.
+
+Đã cho agent dock vẽ **cùng một surface**, dùng chung hằng số (đổi từ private sang `pub`) chứ không chép số sang file khác: hai surface bo khác nhau thì đọc ra là hai app khác nhau, mà số chép đi thì lệch ngay lần sửa đầu tiên.
+
+### Điều code cũ đã ghi lại, và nó là cảnh báo cho phần còn lại
+
+Comment ngay tại chỗ áp margin nói rõ vì sao chỉ centre mới có:
+
+> *The centre alone carries the seam. Everything it touches — the project rail, the docks — is drawn flush, so this margin is the entire gap between them rather than one half of a doubled channel, which is what read as a grey bar when the sidebar had a surface of its own.*
+
+Tức fork **đã thử** cho sidebar surface riêng và rút lại vì hai margin cạnh nhau tạo ra một rãnh xám đôi. Nên "px hai bên cho cả editor, sidebar, rail" không phải thêm margin ở bốn chỗ — phải quyết ai chịu seam, nếu không lặp lại đúng lỗi cũ.
+
+Riêng seam agent–editor giờ là 3px (centre) + 3px (agent) = 6px. Cần nhìn mới biết dày quá không.
+
+### Chưa làm
+
+- **px/py giữa hai agent pane.** Surface đang áp cho cả group; muốn từng pane một tấm riêng thì phải luồn cờ qua `Member::render` (`pane_group.rs:561`), và đó là code dùng chung với centre — đáng một thay đổi riêng, review riêng.
+- Inset cho editor / sidebar / rail — xem cảnh báo trên.

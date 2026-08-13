@@ -13,7 +13,7 @@ use workspace::{
     Pane, SidebarSide, SplitDirection, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
     pane,
-    pane_group::PaneGroup,
+    pane_group::{PaneGroup, SURFACE_MARGIN, SURFACE_ROUNDING},
 };
 use zed_actions::agent::AgentViewMode;
 
@@ -165,6 +165,22 @@ impl AgentPanel {
             // Only agents belong in here. An editor tab dragged over this dock is
             // refused at the predicate rather than being talked out of it later,
             // which is the same reason the agent left the centre group at all.
+            // Dropping a tab on this pane's edge must split *this* group. Left to
+            // itself `handle_tab_drop` calls `Workspace::split_pane`, which splits
+            // the centre group — where these panes do not exist, so the drag lands
+            // nowhere at all. That is why dragging Codex under Claude did nothing.
+            let panel_for_split = panel.clone();
+            pane.set_split_for_drop(Some(Arc::new(move |pane, direction, window, cx| {
+                let panel = panel_for_split.upgrade()?;
+                let pane = pane.clone();
+                Some(panel.update(cx, |panel, cx| {
+                    let new_pane = panel.add_pane(window, cx);
+                    panel.center.split(&pane, &new_pane, direction, cx);
+                    panel.active_pane = new_pane.clone();
+                    new_pane
+                }))
+            })));
+
             pane.set_can_split(Some(Arc::new(move |pane, dragged_item, _window, cx| {
                 let Some(tab) = dragged_item.downcast_ref::<pane::DraggedTab>() else {
                     return false;
@@ -272,10 +288,24 @@ impl Render for AgentPanel {
             })
             .ok();
 
-        div()
-            .size_full()
-            .track_focus(&self.focus_handle)
-            .children(center)
+        // The same surface the centre group draws for itself: `PaneGroup::render`
+        // applies it only to the centre, on the reasoning that everything it
+        // touches is flush — but this dock is a section of its own, so it carries
+        // its own gap and corner rather than sitting flush against the editor.
+        //
+        // `flex_1` and `self_stretch` rather than `size_full`, for the reason the
+        // centre records: a 100% box plus a margin overflows its parent, and the
+        // parent clips exactly the seam the margin exists to make.
+        div().size_full().track_focus(&self.focus_handle).child(
+            div()
+                .flex_1()
+                .self_stretch()
+                .m(SURFACE_MARGIN)
+                .rounded(SURFACE_ROUNDING)
+                .overflow_hidden()
+                .bg(cx.theme().colors().editor_background)
+                .children(center),
+        )
     }
 }
 
@@ -447,6 +477,68 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// Dragging a tab to a pane edge is `Pane::split` underneath, so that is what
+    /// this drives — the drag machinery itself needs a real `DraggedTab`.
+    #[gpui::test]
+    async fn dragging_one_of_two_agents_out_makes_a_second_section(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+
+        for agent in [project::CLAUDE_CODE_AGENT_ID, project::CODEX_AGENT_ID] {
+            panel.update_in(cx, |panel, window, cx| {
+                panel.show(
+                    AgentId::new(agent.to_string()),
+                    AgentViewMode::Terminal,
+                    window,
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+
+        // Both in one pane is what a user gets after dragging them together.
+        let pane = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        panel.update_in(cx, |panel, window, cx| {
+            let other: Vec<_> = panel
+                .center
+                .panes()
+                .into_iter()
+                .filter(|p| **p != pane)
+                .cloned()
+                .collect();
+            for source in other {
+                let item = source
+                    .update(cx, |source, cx| source.take_active_item(window, cx))
+                    .unwrap();
+                pane.update(cx, |pane, cx| {
+                    pane.add_item(item, false, false, None, window, cx)
+                });
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len()),
+            2,
+            "both agents should now be tabs in one pane"
+        );
+        let before = panel.read_with(cx, |panel, _| panel.center.panes().len());
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.split(SplitDirection::Down, pane::SplitMode::MovePane, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.center.panes().len()),
+            before + 1,
+            "splitting one agent away from the other must add a section"
+        );
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len()),
+            1,
+            "the agent that moved should be alone in the new section"
+        );
     }
 
     /// The dock's pane group must never be one of the workspace's own panes, or
