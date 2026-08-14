@@ -2,10 +2,24 @@ use super::*;
 use git_graph_core::{GraphData, LANE_WIDTH, LEFT_PADDING, LanePaint, accent_colors_count};
 use gpui::Bounds;
 
-/// Widest the lane column is allowed to grow in the panel. The panel is 360px by default, so lanes
-/// have to yield to the subject rather than the other way round — the graph tab is the place to go
-/// when a branch is too tangled to read here, which is what the toolbar's expand button is for.
-const MAX_LANE_COLUMN_WIDTH: Pixels = px(96.);
+/// Lanes the panel's column has room for.
+///
+/// Fixed, and deliberately not derived from `max_lanes`: sized to the data, one deeply merged
+/// commit anywhere in the log pushed *every* subject to the right, so how much of a commit message
+/// you could read depended on how tangled the rest of the repository was. A constant costs the
+/// tangled repository some lanes and pays every repository a subject line of the same length.
+///
+/// Anything deeper is clipped, which is the stance the section already takes: the graph tab is
+/// where to go when a branch is too tangled to read here, and that is what the toolbar's expand
+/// button is for.
+const VISIBLE_LANES: f32 = 5.;
+
+/// Takes no arguments on purpose. The dependency on `max_lanes` is the whole defect, and a
+/// signature with nothing to read it from is a stronger guard than a test asserting a constant
+/// equals itself.
+fn lane_column_width() -> Pixels {
+    LEFT_PADDING + LANE_WIDTH * VISIBLE_LANES
+}
 
 /// Present only once the Graph section has been expanded at least once. Absence is the laziness:
 /// building this is what asks a repository for graph data, and asking is what starts the fetch.
@@ -213,9 +227,7 @@ impl GitPanel {
                 .into_any_element();
         }
 
-        let lane_column_width = (LEFT_PADDING
-            + LANE_WIDTH * (state.graph_data.max_lanes.max(1) as f32))
-            .min(MAX_LANE_COLUMN_WIDTH);
+        let lane_column_width = lane_column_width();
 
         // A column, not a bare `div`: `div()` lays its children out in a row, where the `flex_1`
         // below grows the list's width and leaves its height at zero. A `uniform_list` contributes
