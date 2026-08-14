@@ -78,6 +78,17 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
+    /// Whether this panel wants the editor's space as well as its own.
+    ///
+    /// Deliberately not `is_zoomed`, which drives the window-wide zoom overlay:
+    /// that keys off `DockPosition`, and the agent column shares its position
+    /// with the tool dock beside it — so zooming the agent that way would take
+    /// the git panel down with it, and cover the docks the request asks to keep.
+    /// Read only, never written to, so a panel answering it cannot reach back
+    /// into the workspace mid-update.
+    fn fills_the_center(&self, _window: &Window, _cx: &App) -> bool {
+        false
+    }
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
@@ -106,6 +117,7 @@ pub trait PanelHandle: Send + Sync {
     fn position_is_valid(&self, position: DockPosition, cx: &App) -> bool;
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
+    fn fills_the_center(&self, window: &Window, cx: &App) -> bool;
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn remote_id(&self) -> Option<proto::PanelId>;
@@ -173,6 +185,10 @@ where
 
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool {
         self.read(cx).is_zoomed(window, cx)
+    }
+
+    fn fills_the_center(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).fills_the_center(window, cx)
     }
 
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App) {
@@ -1622,19 +1638,16 @@ impl Render for Dock {
                 // paint their own square backgrounds inside it, and without the
                 // clip those corners paint straight over the radius.
                 .child(
-                    div()
-                        .size_full()
-                        .p(SURFACE_MARGIN)
-                        .child(
-                            div()
-                                .size_full()
-                                .rounded(SURFACE_ROUNDING)
-                                .border_1()
-                                .border_color(cx.theme().colors().border)
-                                .bg(cx.theme().colors().panel_background)
-                                .overflow_hidden()
-                                .child(showing),
-                        ),
+                    div().size_full().p(SURFACE_MARGIN).child(
+                        div()
+                            .size_full()
+                            .rounded(SURFACE_ROUNDING)
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().panel_background)
+                            .overflow_hidden()
+                            .child(showing),
+                    ),
                 )
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())

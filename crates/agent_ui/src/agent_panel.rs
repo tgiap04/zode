@@ -36,6 +36,10 @@ pub struct AgentPanel {
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
+    /// The pane asking for the editor's space, if one is. Held here rather than
+    /// on the workspace so zooming an agent cannot take the tool dock sharing
+    /// this column's `DockPosition` down with it.
+    zoomed_pane: Option<WeakEntity<Pane>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,6 +55,7 @@ impl AgentPanel {
             project,
             workspace: workspace.weak_handle(),
             focus_handle: cx.focus_handle(),
+            zoomed_pane: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -197,7 +202,16 @@ impl AgentPanel {
                 workspace,
                 project,
                 Default::default(),
-                None,
+                Some(Arc::new(|dragged_item, _window, cx: &mut App| {
+                    // Runs from a `MouseUpEvent` handler, never mid-render, so
+                    // reading the source pane here is safe — unlike the split
+                    // predicate below, which the pane calls from inside its own
+                    // update and which has to read around the live borrow.
+                    dragged_item
+                        .downcast_ref::<pane::DraggedTab>()
+                        .and_then(|tab| tab.pane.read(cx).item_for_index(tab.ix))
+                        .is_some_and(|item| item.downcast::<AgentView>().is_some())
+                })),
                 zed_actions::agent::OpenAgent {
                     agent: project::CLAUDE_CODE_AGENT_ID.to_string(),
                     mode: None,
@@ -213,9 +227,12 @@ impl AgentPanel {
             pane.set_zoom_out_on_close(false);
             Self::apply_tab_bar_buttons(&mut pane, cx);
 
-            // Only agents belong in here. An editor tab dragged over this dock is
-            // refused at the predicate rather than being talked out of it later,
-            // which is the same reason the agent left the centre group at all.
+            // Only agents belong in here, and a tab can arrive by two doors: onto
+            // the tab bar, which `can_drop` above guards, and onto an edge to
+            // split, which the predicate below guards. Guarding one and writing
+            // the comment as though both were covered is how an editor tab could
+            // be dropped in here for as long as it could.
+            //
             // Dropping a tab on this pane's edge must split *this* group. Left to
             // itself `handle_tab_drop` calls `Workspace::split_pane`, which splits
             // the centre group — where these panes do not exist, so the drag lands
@@ -393,6 +410,20 @@ impl AgentPanel {
                 self.close_if_empty(cx);
                 cx.notify();
             }
+            // Handled here rather than let through to the workspace: the dock's
+            // zoom is keyed by `DockPosition`, which this column shares with the
+            // tool dock beside it. Falling through to `_ => {}` is why the
+            // maximise button only ever lit up.
+            pane::Event::ZoomIn => {
+                self.zoomed_pane = Some(pane.downgrade());
+                pane.update(cx, |pane, cx| pane.set_zoomed(true, cx));
+                cx.notify();
+            }
+            pane::Event::ZoomOut => {
+                self.zoomed_pane = None;
+                pane.update(cx, |pane, cx| pane.set_zoomed(false, cx));
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -417,7 +448,10 @@ impl Render for AgentPanel {
             .workspace
             .update(cx, |workspace, cx| {
                 self.center.render(
-                    workspace.zoomed_item(),
+                    self.zoomed_pane
+                        .as_ref()
+                        .map(|pane| pane.clone().into())
+                        .as_ref(),
                     &workspace::PaneRenderContext {
                         follower_states: &Default::default(),
                         active_call: workspace.active_call(),
@@ -457,6 +491,16 @@ impl Render for AgentPanel {
 impl Panel for AgentPanel {
     fn persistent_name() -> &'static str {
         "Agent Panel"
+    }
+
+    /// Zoomed, this column asks for the editor's space too.
+    ///
+    /// `Workspace::render_centre_with_agent` reads it and stands the centre
+    /// down. Not routed through `PanelEvent::ZoomIn`, which would put the dock
+    /// machinery in charge: that keys on `DockPosition`, which this column
+    /// shares with the tool dock beside it.
+    fn fills_the_center(&self, _window: &Window, _cx: &App) -> bool {
+        self.zoomed_pane.is_some()
     }
 
     fn panel_key() -> &'static str {
@@ -980,6 +1024,136 @@ mod tests {
             first_pane,
             "and it should arrive as its own section, the way a second agent does"
         );
+    }
+
+    /// The column takes only agents.
+    ///
+    /// A tab reaches a pane by two doors — the tab bar (`can_drop_predicate`)
+    /// and an edge to split (`can_split_predicate`) — and only the second was
+    /// guarded, so an editor tab could be dropped straight into the agent
+    /// column. This asserts the first door specifically.
+    #[gpui::test]
+    async fn an_editor_tab_cannot_be_dropped_into_the_agent_column(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let agent_pane = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        let editor_pane = workspace
+            .read_with(cx, |workspace, _| workspace.active_pane().clone())
+            .unwrap();
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                let item = cx.new(|cx| workspace::item::test::TestItem::new(cx));
+                workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let editor_tab = pane::DraggedTab {
+            pane: editor_pane.clone(),
+            item: editor_pane
+                .read_with(cx, |pane, _| {
+                    pane.item_for_index(0).map(|item| item.boxed_clone())
+                })
+                .expect("the item just added"),
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+        let agent_tab = pane::DraggedTab {
+            pane: agent_pane.clone(),
+            item: agent_pane
+                .read_with(cx, |pane, _| {
+                    pane.item_for_index(0).map(|item| item.boxed_clone())
+                })
+                .expect("the agent just shown"),
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+
+        let accepts = |tab: &pane::DraggedTab, cx: &mut gpui::VisualTestContext| {
+            let predicate = agent_pane
+                .read_with(cx, |pane, _| pane.can_drop_predicate())
+                .expect("the agent pane must carry a drop predicate at all");
+            cx.update(|window, cx| predicate(tab as &dyn std::any::Any, window, cx))
+        };
+
+        assert!(
+            !accepts(&editor_tab, cx),
+            "an editor tab dropped on the agent column's tab bar must be refused"
+        );
+        assert!(
+            accepts(&agent_tab, cx),
+            "and an agent tab must still be accepted, or the guard has closed the door on \
+             rearranging agents too"
+        );
+    }
+
+    /// Zoom is local to the column, and reversible.
+    ///
+    /// Routed through the dock's zoom it would key on `DockPosition`, which this
+    /// column shares with the tool dock beside it — so the git panel would
+    /// vanish along with the editor.
+    #[gpui::test]
+    async fn zooming_an_agent_claims_the_center_and_gives_it_back(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let fills = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| panel.read(cx).fills_the_center(window, cx))
+        };
+        assert!(
+            !fills(cx),
+            "an agent starts sharing the row with the editor"
+        );
+
+        let pane = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            fills(cx),
+            "zoomed, the column has to claim the centre or the button does nothing — \
+             which is exactly what it did while ZoomIn fell through to the catch-all arm"
+        );
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!fills(cx), "and unzooming has to give it back");
     }
 
     fn agent_view_count(panel: &AgentPanel, cx: &App) -> usize {

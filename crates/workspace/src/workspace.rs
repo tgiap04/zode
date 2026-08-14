@@ -7754,8 +7754,27 @@ impl Workspace {
         // under the coordinates the pane tests click at. With no agent there is
         // no column to place, so there is no reason to pay that.
         let side = self.agent_column_position(cx);
-        if self.agent_dock.read(cx).visible_panel().is_none() {
+        let Some(agent) = self.agent_dock.read(cx).visible_panel().cloned() else {
             return centre;
+        };
+
+        // Zoomed, the column takes the editor's space as well as its own. The
+        // docks stay: this is the centre giving way, not a window-wide overlay.
+        // Nothing about the column's stored width is touched, so unzooming needs
+        // no memory of what it was — it simply stops asking for the rest.
+        if agent.fills_the_center(window, cx) {
+            return self
+                .render_dock(side, &self.agent_dock, window, cx)
+                .map(|column| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_1()
+                        .self_stretch()
+                        .child(column.flex_1())
+                        .into_any_element()
+                })
+                .unwrap_or(centre);
         }
         let Some(column) = self.render_dock(side, &self.agent_dock, window, cx) else {
             return centre;

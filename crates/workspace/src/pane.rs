@@ -864,6 +864,17 @@ impl Pane {
         self.split_for_drop = split_for_drop;
     }
 
+    /// The predicate that decides what may be dropped on this pane's tab bar.
+    ///
+    /// Exposed so a panel that restricts what it accepts can be tested at the
+    /// predicate, rather than by staging a real drag.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn can_drop_predicate(
+        &self,
+    ) -> Option<Arc<dyn Fn(&dyn Any, &mut Window, &mut App) -> bool>> {
+        self.can_drop_predicate.clone()
+    }
+
     pub fn set_can_split(
         &mut self,
         can_split_predicate: Option<
