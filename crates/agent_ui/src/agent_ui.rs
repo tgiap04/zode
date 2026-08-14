@@ -35,12 +35,15 @@ pub use model_selector::ModelSelector;
 
 use gpui::App;
 use workspace::Workspace;
-use zed_actions::agent::OpenAgent;
+use zed_actions::agent::{NewAgent, OpenAgent};
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|workspace, action: &OpenAgent, window, cx| {
             AgentView::open(workspace, action.agent.as_str(), action.mode, window, cx);
+        });
+        workspace.register_action(|workspace, action: &NewAgent, window, cx| {
+            AgentView::open_new(workspace, action.agent.as_str(), action.mode, window, cx);
         });
     })
     .detach();

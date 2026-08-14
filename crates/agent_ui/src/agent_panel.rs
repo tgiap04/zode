@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use gpui::Action as _;
 use gpui::{
-    AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Subscription, WeakEntity,
-    Window,
+    Anchor, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
+    WeakEntity, Window,
 };
 use project::{AgentId, Project};
 use ui::prelude::*;
+use ui::{ContextMenu, PopoverMenu, Tooltip};
 use workspace::{
     Pane, SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
     dock::{DockPosition, Panel, PanelEvent},
@@ -90,6 +91,23 @@ impl AgentPanel {
             return;
         }
 
+        self.show_new(agent, mode, window, cx);
+    }
+
+    /// Starts another session of `agent` beside the ones already running.
+    ///
+    /// Same shape as `show`, minus the step that hands back the existing view.
+    /// Two sessions of one agent are two conversations, each with its own
+    /// process — which is why this is reached only from the deliberate `+`
+    /// menu, never from a rail click that someone may have meant as "come back
+    /// to what I had".
+    pub fn show_new(
+        &mut self,
+        agent: AgentId,
+        mode: AgentViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let view = cx.new(|cx| {
             AgentView::new(
                 agent,
@@ -193,6 +211,7 @@ impl AgentPanel {
             pane.display_nav_history_buttons(None);
             pane.set_should_display_tab_bar(|_, _| true);
             pane.set_zoom_out_on_close(false);
+            Self::apply_tab_bar_buttons(&mut pane, cx);
 
             // Only agents belong in here. An editor tab dragged over this dock is
             // refused at the predicate rather than being talked out of it later,
@@ -237,6 +256,98 @@ impl AgentPanel {
             })));
             pane
         })
+    }
+
+    /// Replaces the editor pane's "New…" menu with one made of agents.
+    ///
+    /// The default offers New File, Open File, Search Project, Search Symbols
+    /// and two kinds of terminal — every one of which opens something into the
+    /// *centre* group, not into this column, so the menu named actions that
+    /// could not land where it was drawn. What belongs on a `+` here is another
+    /// agent, and this is the only place a second session of an agent already
+    /// running can be started.
+    ///
+    /// Built from `BUILTIN_AGENTS` rather than naming Claude and Codex, so a
+    /// third agent appears here the day it is added.
+    fn apply_tab_bar_buttons(pane: &mut Pane, cx: &mut Context<Pane>) {
+        pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
+            if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
+                return (None, None);
+            }
+            let can_split = pane.items_len() > 1;
+            let right_children = h_flex()
+                .gap(DynamicSpacing::Base04.rems(cx))
+                .child(
+                    PopoverMenu::new("agent-pane-tab-bar-new")
+                        .trigger_with_tooltip(
+                            IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+                            Tooltip::text("New Agent"),
+                        )
+                        .anchor(Anchor::TopRight)
+                        .with_handle(pane.new_item_context_menu_handle.clone())
+                        .menu(move |window, cx| {
+                            Some(ContextMenu::build(window, cx, |menu, _, _| {
+                                project::BUILTIN_AGENTS.iter().fold(menu, |menu, agent| {
+                                    menu.action(
+                                        format!("New {}", agent.display_name),
+                                        zed_actions::agent::NewAgent {
+                                            agent: agent.id.to_string(),
+                                            mode: None,
+                                        }
+                                        .boxed_clone(),
+                                    )
+                                })
+                            }))
+                        }),
+                )
+                .child(
+                    PopoverMenu::new("agent-pane-tab-bar-split")
+                        .trigger_with_tooltip(
+                            IconButton::new("split", IconName::Split)
+                                .icon_size(IconSize::Small)
+                                .disabled(!can_split),
+                            Tooltip::text("Split Pane"),
+                        )
+                        .anchor(Anchor::TopRight)
+                        .with_handle(pane.split_item_context_menu_handle.clone())
+                        .menu(move |window, cx| {
+                            // `MovePane` only: a cloned agent would be a second
+                            // live process pretending to be the same session,
+                            // which is what `handle_pane_event` already refuses.
+                            let mode = pane::SplitMode::MovePane;
+                            ContextMenu::build(window, cx, |menu, _, _| {
+                                menu.action(
+                                    "Split Right",
+                                    workspace::SplitRight { mode }.boxed_clone(),
+                                )
+                                .action("Split Left", workspace::SplitLeft { mode }.boxed_clone())
+                                .action("Split Up", workspace::SplitUp { mode }.boxed_clone())
+                                .action("Split Down", workspace::SplitDown { mode }.boxed_clone())
+                            })
+                            .into()
+                        }),
+                )
+                .child({
+                    let zoomed = pane.is_zoomed();
+                    IconButton::new("toggle_zoom", IconName::Maximize)
+                        .icon_size(IconSize::Small)
+                        .toggle_state(zoomed)
+                        .selected_icon(IconName::Minimize)
+                        .on_click(cx.listener(|pane, _, window, cx| {
+                            pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+                        }))
+                        .tooltip(move |_window, cx| {
+                            Tooltip::for_action(
+                                if zoomed { "Zoom Out" } else { "Zoom In" },
+                                &workspace::ToggleZoom,
+                                cx,
+                            )
+                        })
+                })
+                .into_any_element()
+                .into();
+            (None, right_children)
+        });
     }
 
     fn handle_pane_event(
@@ -814,6 +925,73 @@ mod tests {
             dock_is_open(&panel, cx),
             "and the dock has to be open, or the agent is running where nobody can see it"
         );
+    }
+
+    /// Two sessions of one agent stand side by side; a rail click still returns
+    /// to the first.
+    ///
+    /// These pull in opposite directions and both matter: `show` deduplicates so
+    /// a stray rail click never spends another CLI process, and `show_new` — the
+    /// `+` menu's path — must not inherit that, or a second Claude Code is
+    /// impossible to ask for.
+    #[gpui::test]
+    async fn a_second_session_of_one_agent_stands_beside_the_first(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        let claude = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(claude.clone(), AgentViewMode::Terminal, window, cx);
+        });
+        cx.run_until_parked();
+
+        let first_pane = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+
+        // The gesture the rail makes: come back to what is already running.
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(claude.clone(), AgentViewMode::Terminal, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| agent_view_count(panel, cx)),
+            1,
+            "a rail click on a running agent must return to it, not start a second one"
+        );
+
+        // The gesture the `+` menu makes: another one, deliberately.
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show_new(claude.clone(), AgentViewMode::Terminal, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| agent_view_count(panel, cx)),
+            2,
+            "the + menu must be able to start a second session of an agent already open"
+        );
+        assert_ne!(
+            panel.read_with(cx, |panel, _| panel.active_pane.clone()),
+            first_pane,
+            "and it should arrive as its own section, the way a second agent does"
+        );
+    }
+
+    fn agent_view_count(panel: &AgentPanel, cx: &App) -> usize {
+        panel
+            .center
+            .panes()
+            .iter()
+            .map(|pane| {
+                pane.read(cx)
+                    .items()
+                    .filter_map(|item| item.downcast::<AgentView>())
+                    .count()
+            })
+            .sum()
     }
 
     /// And the same rule read from the other end: the section is worth its width

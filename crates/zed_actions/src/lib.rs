@@ -510,6 +510,23 @@ pub mod agent {
         pub mode: Option<AgentViewMode>,
     }
 
+    /// Starts a second, independent session of an agent that may already be open.
+    ///
+    /// Separate from `OpenAgent` rather than a flag on it, because the two answer
+    /// to different gestures: clicking the rail means "show me the one that is
+    /// running", and only a deliberate choice should spend another CLI process.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct NewAgent {
+        /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
+        pub agent: String,
+        /// Which mode to open in, or `None` for the mode this agent was last
+        /// used in.
+        #[serde(default)]
+        pub mode: Option<AgentViewMode>,
+    }
+
     actions!(
         agent,
         [

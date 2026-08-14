@@ -89,6 +89,32 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        Self::open_inner(workspace, agent, mode, false, window, cx);
+    }
+
+    /// Same, but always starts a fresh session even if one is already running.
+    ///
+    /// The `+` menu in the agent column is the only caller: opening a second
+    /// session is a deliberate act, so nothing that could be a stray click
+    /// reaches it.
+    pub fn open_new(
+        workspace: &mut Workspace,
+        agent: &str,
+        mode: Option<AgentViewMode>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::open_inner(workspace, agent, mode, true, window, cx);
+    }
+
+    fn open_inner(
+        workspace: &mut Workspace,
+        agent: &str,
+        mode: Option<AgentViewMode>,
+        always_new: bool,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         let agent_id = AgentId::new(agent.to_string());
         let Some(panel) = workspace.panel::<crate::agent_panel::AgentPanel>(cx) else {
             return;
@@ -117,7 +143,11 @@ impl AgentView {
                         remember_mode(&agent_id, mode, cx);
                     }
 
-                    panel.show(agent_id, mode, window, cx);
+                    if always_new {
+                        panel.show_new(agent_id, mode, window, cx);
+                    } else {
+                        panel.show(agent_id, mode, window, cx);
+                    }
                 })
                 .log_err();
 
