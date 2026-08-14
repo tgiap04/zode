@@ -18,6 +18,8 @@ pub const DEFAULT_THREAD_TITLE: &str = "New Agent Thread";
 actions!(
     agent,
     [
+        /// Renames the agent tab, so two sessions of one agent can be told apart.
+        RenameAgent,
         /// Toggles the menu to create new agent threads.
         ToggleNewThreadMenu,
         /// Toggles the options menu for agent settings and preferences.

@@ -1,6 +1,8 @@
+use crate::RenameAgent;
+use editor::Editor;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task, WeakEntity,
-    Window,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    Task, WeakEntity, Window,
 };
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
@@ -26,11 +28,18 @@ pub fn agent_icon(agent: &str) -> IconName {
 pub struct AgentView {
     agent: AgentId,
     display_name: SharedString,
+    /// What the user called this session, if they named it. Two Claude Code tabs
+    /// are otherwise the same word twice, which is no help in telling apart the
+    /// two conversations the `+` menu exists to let you run.
+    custom_name: Option<SharedString>,
+    rename_editor: Option<Entity<Editor>>,
+    _rename_subscription: Option<Subscription>,
     mode: AgentViewMode,
     state: State,
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
+    self_handle: WeakEntity<Self>,
     _startup: Option<Task<()>>,
 }
 
@@ -239,15 +248,83 @@ impl AgentView {
         let mut view = Self {
             display_name: display_name(&agent),
             agent,
+            custom_name: None,
+            rename_editor: None,
+            _rename_subscription: None,
             mode,
             state: State::Starting,
             project,
             workspace,
             focus_handle: cx.focus_handle(),
+            self_handle: cx.entity().downgrade(),
             _startup: None,
         };
         view.start(window, cx);
         view
+    }
+
+    /// What the tab shows: the name the user gave this session, or the agent's.
+    fn tab_label(&self) -> SharedString {
+        self.custom_name
+            .clone()
+            .unwrap_or_else(|| self.display_name.clone())
+    }
+
+    /// Opens the inline editor over the tab's label.
+    ///
+    /// Same shape as `TerminalView::rename_terminal`, deliberately: a rename that
+    /// behaves differently from the one two tabs over is worse than a duplicated
+    /// forty lines. Sharing it would mean a widget owning an editor, a blur
+    /// subscription and an `Item` integration — larger than the feature.
+    fn start_renaming(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = cx.new(|cx| Editor::single_line(window, cx));
+        let subscription = cx.subscribe_in(&editor, window, {
+            let editor = editor.clone();
+            move |_this, _, event, window, cx| {
+                if let editor::EditorEvent::Blurred = event {
+                    // Deferred so a double-click that lands inside the editor does
+                    // not cancel the rename it just opened.
+                    let editor = editor.clone();
+                    cx.defer_in(window, move |this, window, cx| {
+                        let still_open = this
+                            .rename_editor
+                            .as_ref()
+                            .is_some_and(|current| current == &editor);
+                        if still_open && !editor.focus_handle(cx).is_focused(window) {
+                            this.finish_renaming(false, window, cx);
+                        }
+                    });
+                }
+            }
+        });
+
+        let current = self.tab_label();
+        self.rename_editor = Some(editor.clone());
+        self._rename_subscription = Some(subscription);
+        editor.update(cx, |editor, cx| {
+            editor.set_text(current, window, cx);
+            editor.select_all(&editor::actions::SelectAll, window, cx);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn finish_renaming(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.rename_editor.take() else {
+            return;
+        };
+        self._rename_subscription = None;
+        if save {
+            let typed = editor.read(cx).text(cx).trim().to_string();
+            // Blank, or unchanged from the agent's own name, means "no name of its
+            // own" rather than a name that happens to match — so clearing the box
+            // is how a session goes back to being called Claude Code.
+            self.custom_name = (!typed.is_empty() && typed != self.display_name.as_ref())
+                .then(|| SharedString::from(typed));
+            cx.emit(AgentViewEvent::UpdateTab);
+        }
+        cx.notify();
+        self.focus_handle.focus(window, cx);
     }
 
     /// Moves this view to the other mode, restarting the agent.
@@ -554,7 +631,79 @@ impl workspace::item::Item for AgentView {
     }
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        self.display_name.clone()
+        self.tab_label()
+    }
+
+    /// The label, with the rename editor laid over it while one is open.
+    ///
+    /// Over rather than instead of: swapping the two resizes the tab as the
+    /// editor appears, which moves the tab the user just clicked out from under
+    /// the pointer. The label stays, drawn transparent, and holds the width.
+    fn tab_content(
+        &self,
+        params: workspace::item::TabContentParams,
+        _window: &Window,
+        _cx: &App,
+    ) -> AnyElement {
+        let handle = self.self_handle.clone();
+        h_flex()
+            .gap_1()
+            .when(!params.selected, |this| {
+                this.track_focus(&self.focus_handle)
+            })
+            .on_action({
+                let handle = handle.clone();
+                move |_: &RenameAgent, window, cx| {
+                    handle
+                        .update(cx, |this, cx| this.start_renaming(window, cx))
+                        .ok();
+                }
+            })
+            .child(Icon::new(agent_icon(self.agent.as_ref())))
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        Label::new(self.tab_label())
+                            .color(params.text_color())
+                            .when(self.rename_editor.is_some(), |this| this.alpha(0.)),
+                    )
+                    .when_some(self.rename_editor.clone(), |this, editor| {
+                        let confirm = handle.clone();
+                        let cancel = handle.clone();
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .child(editor)
+                                .on_action(move |_: &menu::Confirm, window, cx| {
+                                    confirm
+                                        .update(cx, |this, cx| {
+                                            this.finish_renaming(true, window, cx)
+                                        })
+                                        .ok();
+                                })
+                                .on_action(move |_: &menu::Cancel, window, cx| {
+                                    cancel
+                                        .update(cx, |this, cx| {
+                                            this.finish_renaming(false, window, cx)
+                                        })
+                                        .ok();
+                                }),
+                        )
+                    }),
+            )
+            .into_any()
+    }
+
+    fn tab_extra_context_menu_actions(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Vec<(SharedString, Box<dyn gpui::Action>)> {
+        vec![("Rename".into(), Box::new(RenameAgent))]
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
@@ -724,11 +873,15 @@ mod tests {
         let agent_view = cx.new_window_entity(|_window, cx| AgentView {
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
+            custom_name: None,
+            rename_editor: None,
+            _rename_subscription: None,
             mode: AgentViewMode::Terminal,
             state: State::Terminal(terminal_view.clone()),
             project: project.clone(),
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
+            self_handle: cx.entity().downgrade(),
             _startup: None,
         });
 
