@@ -3,7 +3,7 @@ use crate::project_list::ListEntry;
 use gpui::{AnyElement, App, Context, SharedString, Window, px};
 use settings::Settings as _;
 use ui::{Tooltip, prelude::*};
-use workspace::{SidebarSide, WorkspaceSettings};
+use workspace::{SidebarSide, WorkspaceSettings, pane_group::SURFACE_ROUNDING};
 
 /// The edge the whole sidebar column stands against. Every part of the column
 /// that has a side -- the order of rail and panel, the rail's own separator, the
@@ -98,13 +98,22 @@ impl Sidebar {
             .w(RAIL_WIDTH)
             .flex_shrink_0()
             .bg(colors.title_bar_background)
+            // A rule across the top, so the rail starts on the same line the
+            // panels beside it do rather than running up into the title bar.
+            .border_t_1()
             // The separator belongs on the edge facing the rest of the window,
             // which flips with the column. Drawn on the fixed right it would sit
             // against the window frame on a right-docked rail and leave the seam
             // that matters -- rail against panel -- with nothing on it.
+            //
+            // The corner rounds on that same inward edge, and only there: the
+            // outward edge is flush against the window frame, where a radius
+            // would open a notch onto the frame rather than a seam. Same radius
+            // as the docks, which the rail now stands beside as a card of the
+            // same layout.
             .map(|el| match side {
-                SidebarSide::Left => el.border_r_1(),
-                SidebarSide::Right => el.border_l_1(),
+                SidebarSide::Left => el.border_r_1().rounded_tr(SURFACE_ROUNDING),
+                SidebarSide::Right => el.border_l_1().rounded_tl(SURFACE_ROUNDING),
             })
             .border_color(colors.border)
             .child(
