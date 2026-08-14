@@ -80,6 +80,22 @@ Kiểm chứng ngược: cho `apply_stack_state` chỉ khôi phục panel đầu
 
 214 workspace · 44 agent_ui · 97 project_panel · 86 git_ui · 58 terminal_view · 18 sidebar. clippy sạch, `cargo check --workspace --all-targets` sạch, build ok.
 
+### Abort lúc khởi động — và lý do test không bắt được (`ccd151f`)
+
+Lần chạy đầu sau khi ship: **abort ngay lúc mở app**.
+
+```
+cannot read workspace::Workspace while it is already being updated
+```
+
+`restore_state` của tôi gọi `self.workspace.read_with(...)` để lấy bản ghi từ KVP. Nhưng `restore_state` chạy từ `Dock::add_panel`, mà cái đó chạy **bên trong một update của `Workspace`** — đọc lại workspace qua handle ở đó là tái nhập, và GPUI abort cả process chứ không phải trả lỗi.
+
+Sửa đúng theo cơ chế đã có sẵn cho chính vấn đề này: workspace **đưa** bản ghi cho dock (`serialized_stack`), y như nó vốn đưa `serialized_dock`. Dock không với ra ngoài.
+
+**Vì sao 214 test xanh mà app vẫn chết** — đây mới là phần đáng ghi nhớ: `restore_state` return ngay ở dòng đầu nếu `serialized_dock` là `None`, và **không test nào set nó**. Toàn bộ đường restore chưa từng được chạy, trong khi nhìn thì như đã phủ. Lỗi kiểu này chỉ hiện ra ở lần khởi động **thứ hai** của người dùng — sau khi có gì đó được ghi xuống.
+
+Test mới `restoring_a_dock_does_not_read_the_workspace_it_is_inside` set `serialized_dock` rồi thêm panel. Kiểm chứng ngược: trả lại đoạn `read_with` cũ → đỏ với **đúng chuỗi và đúng vị trí** người dùng gặp (`entity_map.rs:164:32`).
+
 ## Sau phase này
 
 Món nợ song sinh đáng làm liền tay: `AgentPanel` cũng chưa serialize tab/split bên trong nó ([rail-agents phase-08](../260812-0008-rail-agents-claude-code-codex/phase-08-agents-share-a-pane-group.md) → "Còn nợ"). Hai chỗ cùng một hình dạng — lưu layout của một nhóm co giãn — nên làm gần nhau thì tái dùng được cách làm, nhưng **không gộp**: một cái nằm ở `dock.rs` dùng chung, một cái ở `agent_ui`.
