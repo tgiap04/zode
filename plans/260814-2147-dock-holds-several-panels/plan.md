@@ -1,6 +1,6 @@
 # Dock giữ được nhiều panel cùng lúc
 
-**Status:** planned · **Priority:** P2 · **Branch:** (chưa tạo)
+**Status:** ✅ done (2026-08-14) · **Priority:** P2 · **Branch:** feat/rail-agents-claude-code-codex
 **Bắt nguồn từ:** [rail-agents phase-08](../260812-0008-rail-agents-claude-code-codex/phase-08-agents-share-a-pane-group.md) — mục "Còn nợ"
 
 ## Vấn đề
@@ -27,7 +27,7 @@ Người dùng muốn xếp chồng chúng thành hai section trong cùng một 
 | 01 | [Dock giữ một *tập* panel đang hiện](phase-01-a-dock-holds-a-set-of-visible-panels.md) — refactor thuần, hành vi không đổi | ✅ done | — |
 | 02 | [Xếp chồng + resize](phase-02-stack-them-with-resize-handles.md) | ✅ done | 01 |
 | 03 | [Nút rail/status bar thành toggle từng panel](phase-03-buttons-become-per-panel-toggles.md) | ✅ done | 01 |
-| 04 | [Nhớ trạng thái xếp chồng](phase-04-remember-the-stack.md) — migration DB | planned | 02, 03 |
+| 04 | [Nhớ trạng thái xếp chồng](phase-04-remember-the-stack.md) — qua KVP, **không** migration DB | ✅ done | 02, 03 |
 
 Phase 01 cố tình **không đổi gì người dùng thấy**: nó chỉ đổi mô hình dữ liệu từ "một index" sang "một tập", giữ bất biến "tập luôn có đúng một phần tử". Mọi rủi ro của 02–04 đứng sau một bước đã xanh.
 
@@ -47,7 +47,7 @@ Phase 01 cố tình **không đổi gì người dùng thấy**: nó chỉ đổ
 ## Rủi ro nền
 
 - **Đây là code dùng chung với upstream Zed.** Mọi thay đổi trong `dock.rs` làm việc merge upstream về sau khó hơn. Đổi lại phải xứng đáng — nên phase 01 giữ diff nhỏ và có hình dạng dễ đọc.
-- `DockData` đọc từ sqlite **theo vị trí cột** (`persistence/model.rs:202`). Thêm cột phải là migration append-only, và hàng cũ vẫn phải load được. Xem phase 04.
+- ~~`DockData` đọc từ sqlite theo vị trí cột~~ — **tránh được hoàn toàn**: phase 04 lưu qua key-value store như `persist_panel_size_state` vốn đã làm, nên không có cột mới và không có migration.
 - `Panel::set_active` hiện có nghĩa "anh là cái đang hiện". `AgentPanel::set_active` đang móc `close_if_empty` vào đó (luật "panel rỗng thì tự đóng"). Đổi ngữ nghĩa mà không xem lại chỗ này là âm thầm phá luật vừa ship.
 
 ## Định nghĩa xong

@@ -517,6 +517,77 @@ mod tests {
         );
     }
 
+    /// An agent stacked with another panel comes back stacked after a restart.
+    ///
+    /// This lives here rather than in `workspace` because a stack is recorded
+    /// by `Panel::persistent_name`, which is a *static* method naming a panel
+    /// type — so proving a stack of two survives needs two real panel types,
+    /// and `workspace`'s test support has only one.
+    #[gpui::test]
+    async fn an_agent_stacked_with_a_panel_comes_back_stacked(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, _cx| {
+                let mut agent_settings = store.get::<AgentSettings>(None).clone();
+                agent_settings.sidebar_side = SidebarDockPosition::Left;
+                store.override_global(agent_settings);
+            });
+        });
+        cx.run_until_parked();
+
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx);
+                let other =
+                    cx.new(|cx| workspace::dock::test::TestPanel::new(DockPosition::Left, 1, cx));
+                workspace.add_panel(other, window, cx);
+                workspace.left_dock().update(cx, |dock, cx| {
+                    for ix in 0..dock.panels_len() {
+                        dock.show_panel(ix, window, cx);
+                    }
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let saved = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.left_dock().read(cx).stack_state()
+            })
+            .unwrap();
+        assert_eq!(
+            saved.showing.len(),
+            2,
+            "the agent and the panel beside it should both be recorded"
+        );
+
+        // Collapse to one, the shape a fresh process restores into, then hand
+        // back the record.
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.left_dock().update(cx, |dock, cx| {
+                    dock.activate_panel(0, window, cx);
+                    assert_eq!(dock.visible_panels().count(), 1);
+                    assert!(dock.apply_stack_state(&saved, window, cx));
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace
+                .read_with(cx, |workspace, cx| workspace
+                    .left_dock()
+                    .read(cx)
+                    .visible_panels()
+                    .count())
+                .unwrap(),
+            2,
+            "the recorded stack should come back whole"
+        );
+    }
+
     /// Opening an agent must not put away a panel docked on the other side.
     ///
     /// A dock shows one panel at a time, so the agent and a tool panel can only

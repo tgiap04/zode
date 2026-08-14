@@ -1,7 +1,7 @@
 # Phase 04 — Nhớ trạng thái xếp chồng
 
 **Context:** [plan.md](plan.md) · [phase-02](phase-02-stack-them-with-resize-handles.md) · [phase-03](phase-03-buttons-become-per-panel-toggles.md)
-**Priority:** P2 · **Status:** planned · **Blocked by:** 02, 03
+**Priority:** P2 · **Status:** ✅ done (2026-08-14) · **Blocked by:** 02, 03
 
 Dựng được chồng mà mở lại app về một panel thì mỗi phiên làm việc lại phải dựng tay — đúng món nợ `AgentPanel` đang mang (layout tab/split trong panel chưa serialize).
 
@@ -35,6 +35,50 @@ pub struct DockData { visible: bool, active_panel: Option<String>, zoom: bool }
 ## Rủi ro
 
 `WorkspaceDb` là DB thật của người dùng — migration sai không rollback được bằng cách sửa code. Xem `zode_sqlez_fk_test_db_trap` trong memory khi viết test: Domain có FOREIGN KEY phải mở DB của domain cha cùng tên trước.
+
+---
+
+## Xong (2026-08-14)
+
+### Không đụng schema sqlite — plan sai chỗ này
+
+Plan bắt thêm cột vào `workspaces` + migration append-only. **Không làm vậy**, vì lúc đọc code thấy codebase đã có sẵn cơ chế tốt hơn cho đúng loại dữ liệu này: `persist_panel_size_state` / `load_persisted_size_state` lưu state theo workspace vào **key-value store**, khoá `{workspace_id}:{panel_key}`, không dính gì tới bảng `workspaces`.
+
+Dùng lại y vậy (`DOCK_STACK_KEY`, khoá `{workspace_id}:{dock_label}`) được toàn bộ thứ plan muốn mà **không phải chạm schema**:
+
+| | thêm cột (plan) | KVP (đã làm) |
+|---|---|---|
+| Migration trên DB thật | có, không hoàn tác được | **không có** |
+| Sửa SELECT/INSERT | ~9 chỗ, sai thứ tự là lệch trường im lặng | 0 |
+| Install cũ | phải test hàng cũ | khoá vắng → rơi về `active_panel`, đúng hành vi cần |
+
+Rủi ro lớn nhất của phase này biến mất cùng với cột.
+
+### Ghi ở đâu
+
+- `show_panel` / `hide_panel_by_id` / `activate_panel` → `persist_stack` (defer, vì đang ở giữa update của chính dock)
+- Kéo tay chia tỉ lệ: `pane_axis::compute_resize` chỉ gọi `workspace.serialize_workspace`, **không** báo cho dock — nên `serialize_workspace_internal` cũng ghi stack của cả ba dock. Đó là chỗ duy nhất nghe được cú kéo.
+
+### `persistent_name` là **static**, và điều đó định hình cả phase
+
+`Panel::persistent_name()` không nhận `&self` — nó đặt tên cho một **kiểu** panel, không phải một thực thể. Hệ quả:
+
+1. Bản ghi chỉ phân biệt được các panel **khác kiểu**. Đúng với thực tế (mỗi kiểu đăng ký một lần trong một dock), và cũng là giả định `restore_state` vốn đã dựa vào.
+2. Test đầu tiên tôi viết dùng **hai `TestPanel`** — cùng tên → `indices` thành `[0, 0]` → chỉ một panel hiện. Test **bắt được ngay** ("left: 1, right: 2").
+
+Đã sửa cả hai đầu: `apply_stack_state` **khử trùng lặp** index (bản ghi đến từ đĩa, tên lặp không được biến thành hai section rồi lệch với `flexes`), và test round-trip chuyển sang `agent_ui` — nơi có **hai kiểu panel thật** (`AgentPanel` + `TestPanel`), đúng luôn kịch bản người dùng.
+
+### Ba đường lùi an toàn, đều có test
+
+- Bản ghi rỗng (install cũ) → **từ chối**, giữ nguyên cái đang hiện
+- Bản ghi chỉ gọi tên panel build này không có → **từ chối**
+- `flexes` không khớp số section vừa resolve → rơi về chia đều (`pane_axis` có `debug_assert` so hai cái này, lệch là panic lúc vẽ)
+
+Kiểm chứng ngược: cho `apply_stack_state` chỉ khôi phục panel đầu → đỏ "left: 1, right: 2".
+
+### Gates
+
+214 workspace · 44 agent_ui · 97 project_panel · 86 git_ui · 58 terminal_view · 18 sidebar. clippy sạch, `cargo check --workspace --all-targets` sạch, build ok.
 
 ## Sau phase này
 

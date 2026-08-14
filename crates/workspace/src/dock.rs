@@ -320,7 +320,9 @@ impl Into<settings::DockPosition> for DockPosition {
 }
 
 impl DockPosition {
-    fn label(&self) -> &'static str {
+    /// Also the key a dock's stack is recorded under, so these strings are
+    /// persisted: renaming one orphans what users had open.
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Left => "Left",
             Self::Bottom => "Bottom",
@@ -367,6 +369,27 @@ pub struct PanelButtons {
 }
 
 pub(crate) const PANEL_SIZE_STATE_KEY: &str = "dock_panel_size";
+
+/// Which panels a dock was showing, and how they divided it.
+///
+/// Kept in the key-value store beside the panel sizes rather than in a column
+/// on `workspaces`: that table is read positionally (`impl Column for
+/// DockData`), so a new column has to be threaded through every SELECT in the
+/// right place or every field after it shifts, silently, on real user data. A
+/// key that is simply absent on an older install reads as "no stack recorded"
+/// and falls back to the single active panel — which is the behaviour wanted
+/// anyway.
+pub(crate) const DOCK_STACK_KEY: &str = "dock_stack";
+
+/// Panels are recorded by `persistent_name`, the same handle the serialized
+/// `active_panel` uses, so one that has since been removed from the app is
+/// skipped on the way back in rather than shifting everything after it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DockStackState {
+    pub showing: Vec<String>,
+    #[serde(default)]
+    pub flexes: Vec<f32>,
+}
 
 fn panel_uses_flexible_width(
     position: DockPosition,
@@ -774,6 +797,22 @@ impl Dock {
                 self.activate_panel(idx, window, cx);
             }
 
+            // Layered over the single active panel rather than replacing it: an
+            // install from before stacks has no record here, and one whose
+            // recorded panels have all been removed must still come back to the
+            // panel above rather than to nothing.
+            if serialized.visible
+                && let Some(stack) = self
+                    .workspace
+                    .read_with(cx, |workspace, cx| {
+                        workspace.load_persisted_dock_stack(self.position, cx)
+                    })
+                    .ok()
+                    .flatten()
+            {
+                self.apply_stack_state(&stack, window, cx);
+            }
+
             if serialized.zoom
                 && let Some(panel) = self.active_panel()
             {
@@ -857,6 +896,7 @@ impl Dock {
                 active_panel.panel.set_active(true, window, cx);
             }
 
+            self.persist_stack(cx);
             cx.notify();
         }
     }
@@ -923,6 +963,7 @@ impl Dock {
             entry.panel.set_active(true, window, cx);
         }
         self.set_open(true, window, cx);
+        self.persist_stack(cx);
         cx.notify();
     }
 
@@ -966,6 +1007,7 @@ impl Dock {
         if remaining.is_none() {
             self.set_open(false, window, cx);
         }
+        self.persist_stack(cx);
         cx.notify();
     }
 
@@ -975,6 +1017,93 @@ impl Dock {
     fn reset_stack_flexes(&mut self) {
         let showing = self.panel_entries.iter().filter(|e| e.visible).count();
         *self.stack_flexes.lock() = vec![1.; showing];
+    }
+
+    /// Writes the stack down so a restart comes back to it.
+    ///
+    /// Deferred rather than written inline: this runs from the middle of the
+    /// dock's own update, and the workspace is what holds the key-value store.
+    /// `resize_active_panel` persists the other axis the same way.
+    fn persist_stack(&self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let position = self.position;
+        let state = self.stack_state();
+        cx.defer(move |cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.persist_dock_stack(position, state, cx);
+                });
+            }
+        });
+    }
+
+    /// What this dock is showing, in a form that survives a restart.
+    pub fn stack_state(&self) -> DockStackState {
+        DockStackState {
+            showing: self
+                .panel_entries
+                .iter()
+                .filter(|entry| entry.visible)
+                .map(|entry| entry.panel.persistent_name().to_string())
+                .collect(),
+            flexes: self.stack_flexes.lock().clone(),
+        }
+    }
+
+    /// Puts back a stack recorded by `stack_state`.
+    ///
+    /// Panels named in the record but no longer in this dock are skipped, and a
+    /// record naming none of them leaves the dock untouched for `restore_state`
+    /// to handle the old way — an install that predates stacks, or a dock whose
+    /// panels have all been removed, must not end up showing nothing.
+    pub fn apply_stack_state(
+        &mut self,
+        state: &DockStackState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // `persistent_name` names a panel *type*, so a record can only ever
+        // resolve to distinct entries — but it arrives from disk, and a
+        // repeated name would otherwise yield an index twice and leave the
+        // proportions describing more sections than there are.
+        let mut indices: Vec<usize> = Vec::with_capacity(state.showing.len());
+        for name in &state.showing {
+            if let Some(ix) = self
+                .panel_entries
+                .iter()
+                .position(|entry| entry.panel.persistent_name() == name)
+                && !indices.contains(&ix)
+            {
+                indices.push(ix);
+            }
+        }
+        if indices.is_empty() {
+            return false;
+        }
+
+        for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
+            entry.visible = indices.contains(&ix);
+        }
+        self.active_panel_index = indices.first().copied();
+
+        // Only honour recorded proportions that still describe this many
+        // sections; `pane_axis` asserts the two agree, so a stale record has to
+        // fall back to an even share rather than reach layout.
+        if state.flexes.len() == indices.len()
+            && (state.flexes.iter().sum::<f32>() - indices.len() as f32).abs() < 0.001
+        {
+            *self.stack_flexes.lock() = state.flexes.clone();
+        } else {
+            self.reset_stack_flexes();
+        }
+
+        for ix in &indices {
+            if let Some(entry) = self.panel_entries.get(*ix) {
+                entry.panel.set_active(true, window, cx);
+            }
+        }
+        cx.notify();
+        true
     }
 
     pub fn zoomed_panel(&self, window: &Window, cx: &App) -> Option<Arc<dyn PanelHandle>> {

@@ -2352,6 +2352,57 @@ impl Workspace {
         .detach_and_log_err(cx);
     }
 
+    /// Records which panels a dock is showing and how they divide it.
+    ///
+    /// Beside the panel sizes in the key-value store rather than in a column on
+    /// `workspaces`: see `dock::DOCK_STACK_KEY` for why that table is the wrong
+    /// place for it.
+    pub fn persist_dock_stack(
+        &self,
+        position: DockPosition,
+        state: dock::DockStackState,
+        cx: &mut App,
+    ) {
+        let Some(workspace_id) = self
+            .database_id()
+            .map(|id| i64::from(id).to_string())
+            .or(self.session_id())
+        else {
+            return;
+        };
+
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let dock_key = position.label().to_string();
+        cx.background_spawn(async move {
+            let scope = kvp.scoped(dock::DOCK_STACK_KEY);
+            scope
+                .write(
+                    format!("{workspace_id}:{dock_key}"),
+                    serde_json::to_string(&state)?,
+                )
+                .await
+        })
+        .detach_and_log_err(cx);
+    }
+
+    pub fn load_persisted_dock_stack(
+        &self,
+        position: DockPosition,
+        cx: &App,
+    ) -> Option<dock::DockStackState> {
+        let workspace_id = self
+            .database_id()
+            .map(|id| i64::from(id).to_string())
+            .or(self.session_id())?;
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let scope = kvp.scoped(dock::DOCK_STACK_KEY);
+        scope
+            .read(&format!("{workspace_id}:{}", position.label()))
+            .log_err()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<dock::DockStackState>(&json).log_err())
+    }
+
     pub fn set_panel_size_state<T: Panel>(
         &mut self,
         size_state: dock::PanelSizeState,
@@ -6653,6 +6704,19 @@ impl Workspace {
     }
 
     fn serialize_workspace_internal(&self, window: &mut Window, cx: &mut App) -> Task<()> {
+        // Dragging a divider inside a dock's stack mutates its proportions
+        // through `pane_axis`, which reports the change by calling
+        // `serialize_workspace` and nothing else — so this is the only place
+        // that hears about a resize. The dock records its own stack when panels
+        // come and go; this is what catches them being resized.
+        for dock in self.all_docks() {
+            let (position, state) = {
+                let dock = dock.read(cx);
+                (dock.position(), dock.stack_state())
+            };
+            self.persist_dock_stack(position, state, cx);
+        }
+
         let Some(database_id) = self.database_id() else {
             return Task::ready(());
         };
@@ -13433,6 +13497,125 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(shown(cx), 0, "a dock with no panels left shows nothing");
+    }
+
+    /// A stack has to survive a restart, and an install that never had one has
+    /// to survive meeting the code that reads them.
+    #[gpui::test]
+    async fn a_dock_stack_round_trips_and_tolerates_having_none(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            for priority in [100, 101] {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, priority, cx));
+                workspace.add_panel(panel, window, cx);
+            }
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let saved = workspace.read_with(cx, |workspace, cx| {
+            workspace.left_dock().read(cx).stack_state()
+        });
+        assert_eq!(
+            saved.showing.len(),
+            2,
+            "both panels should be recorded as showing"
+        );
+        assert_eq!(
+            saved.flexes.len(),
+            2,
+            "a proportion per section, or the layout would assert on the way back"
+        );
+
+        // Restoring a stack of *distinct* panels is exercised in `agent_ui`,
+        // where an agent panel and a test panel share a dock. It cannot be
+        // shown here: `Panel::persistent_name` is a static method naming a
+        // panel type, so the two `TestPanel`s above are one name as far as a
+        // record is concerned — which is also why a repeated name has to
+        // resolve to one section rather than two.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                assert!(dock.apply_stack_state(&saved, window, cx));
+                assert_eq!(
+                    dock.visible_panels().count(),
+                    1,
+                    "one name is one panel, however many times it was recorded"
+                );
+                assert_eq!(
+                    dock.stack_state().flexes.len(),
+                    1,
+                    "and the proportions must describe that one section, not two"
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        // Back to two showing for the checks below.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // An install from before stacks has no record at all, and one whose
+        // panels were removed names only strangers. Neither may blank the dock.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                let none = dock.apply_stack_state(&dock::DockStackState::default(), window, cx);
+                assert!(!none, "an empty record must be declined, not applied");
+                let strangers = dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: vec!["A Panel This Build Does Not Have".into()],
+                        flexes: vec![1.],
+                    },
+                    window,
+                    cx,
+                );
+                assert!(!strangers, "a record naming no panel here must be declined");
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            2,
+            "declining a record must leave what was showing alone"
+        );
+
+        // Proportions recorded for a different number of sections are stale;
+        // pane_axis asserts they match, so they must never reach it.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: saved.showing.clone(),
+                        flexes: vec![1., 1., 1.],
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    dock.stack_state().flexes.len(),
+                    1,
+                    "a proportion list that does not describe the sections the \
+                     record resolved to must fall back to an even share of them"
+                );
+            });
+        });
     }
 
     /// Two panels showing at once must actually divide the dock between them.
