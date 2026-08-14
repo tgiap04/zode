@@ -90,6 +90,13 @@ impl Sidebar {
                 // it. Driven through the dock entity rather than an action
                 // because there is no action naming a single panel, and the
                 // closure holds no borrow of the sidebar.
+                //
+                // Safe here, and equally safe in the branch below: what the
+                // comment there warns about is running *inside*
+                // `Sidebar::update` while building the element, and a click
+                // handler runs long after that. The show branch dispatches
+                // because an action already names the panel it wants, not
+                // because reaching the dock from here would be a problem.
                 let dock = dock.clone();
                 let panel_id = panel.panel_id();
                 button

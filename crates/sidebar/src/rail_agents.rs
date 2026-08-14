@@ -63,11 +63,12 @@ impl Sidebar {
             // holding it happens to be the one on screen: two agents can be
             // open side by side, so there is no single "the active one" to
             // point at the way a dock's own panel switcher would.
-            let is_active = panel.as_ref().is_some_and(|panel| {
-                panel
-                    .read(cx)
-                    .has_agent(&AgentId::new(agent.to_string()), cx)
-            });
+            // `AgentId::new(*agent)` rather than `.to_string()`: these ids are
+            // `&'static str`, so a `SharedString` borrows them outright, while
+            // going through `String` allocated once per button per frame.
+            let is_active = panel
+                .as_ref()
+                .is_some_and(|panel| panel.read(cx).has_agent(&AgentId::new(*agent), cx));
 
             IconButton::new(*agent, *icon)
                 .icon_size(RAIL_ICON_SIZE)

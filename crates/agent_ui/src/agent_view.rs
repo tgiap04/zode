@@ -141,7 +141,7 @@ impl AgentView {
 
             panel
                 .update_in(cx, |panel, window, cx| {
-                    let (stored_mode, _) = remembered;
+                    let stored_mode = remembered;
                     // A choice is what gets remembered; a plain click never
                     // overwrites the very preference it just read.
                     let chosen = mode;
@@ -946,11 +946,11 @@ mod tests {
 
         assert_eq!(
             db.preferences("claude-acp".into()).unwrap(),
-            Some((Some("terminal".into()), None)),
+            Some(Some("terminal".into())),
         );
         assert_eq!(
             db.preferences("codex-acp".into()).unwrap(),
-            Some((Some("chat".into()), None)),
+            Some(Some("chat".into())),
             "one agent's choice must not stand for the other's"
         );
 
@@ -959,7 +959,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             db.preferences("claude-acp".into()).unwrap(),
-            Some((Some("chat".into()), None)),
+            Some(Some("chat".into())),
             "a second choice replaces the first"
         );
     }
@@ -1040,19 +1040,20 @@ mod persistence {
     db::static_connection!(AgentViewDb, [WorkspaceDb]);
 
     impl AgentViewDb {
-        /// The mode and width this agent was last left at, if it ever has been.
+        /// The mode this agent was last left in, if it ever has been.
         ///
-        /// Both columns are nullable and read as a pair: someone can have chosen a
-        /// mode without ever having dragged the divider, and the two are written by
-        /// different gestures.
-        pub fn preferences(
-            &self,
-            agent: String,
-        ) -> anyhow::Result<Option<(Option<String>, Option<f64>)>> {
+        /// Nullable: someone can have opened an agent without ever choosing a
+        /// mode for it.
+        ///
+        /// The row still carries a `width`, which nothing reads or writes any
+        /// more — the dock owns the column's width now. The column stays
+        /// because these migrations are append-only and a past one may not be
+        /// edited without orphaning every install that already ran it.
+        pub fn preferences(&self, agent: String) -> anyhow::Result<Option<Option<String>>> {
             let sql_stmt = sql!(
-                SELECT mode, width FROM agent_preferences WHERE agent = ?
+                SELECT mode FROM agent_preferences WHERE agent = ?
             );
-            self.select_row_bound::<String, (Option<String>, Option<f64>)>(sql_stmt)?(agent)
+            self.select_row_bound::<String, Option<String>>(sql_stmt)?(agent)
         }
 
         pub async fn save_mode(&self, agent: String, mode: String) -> anyhow::Result<()> {
