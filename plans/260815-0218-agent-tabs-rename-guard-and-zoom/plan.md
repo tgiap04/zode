@@ -74,6 +74,25 @@ Nút phóng to trước đây **không làm gì** vì `pane::Event::ZoomIn` rơi
 - Trả `can_drop_predicate` về `None` → đỏ ở dòng khẳng định tab editor bị từ chối
 - Cho `ZoomIn` rơi lại vào catch-all → đỏ ở dòng "zoomed, the column has to claim the centre"
 
+### Phóng to ship ra vẫn hỏng, và test của tôi không thể bắt được — `de80a4e`
+
+Người dùng báo ngay: bấm phóng to thì **mất luôn center mà cột agent cũng không hiện**.
+
+Nguyên nhân: `PaneGroup::render` vẽ pane được truyền vào thành **div rỗng** (`pane_group.rs:576`) — quy ước là lớp phủ tuyệt đối của workspace sẽ vẽ nó. `AgentPanel` **không có** lớp phủ đó. Truyền `zoomed_pane` vào group là bảo "ai đó khác vẽ hộ", mà không ai vẽ. Cột nở hết cỡ rồi vẽ một mặt phẳng trống, trong khi `fills_the_center` đã cho center đứng xuống.
+
+Sửa: phóng to ở đây nghĩa là "chỉ cái này, tại chỗ" → **group đứng ra**, pane được vẽ thẳng.
+
+**Test cũ vô dụng, và đó mới là bài học.** Nó khẳng định cờ `fills_the_center` bật/tắt — đúng, nhưng chưa bao giờ hỏi có gì được vẽ không. Tệ hơn: nó **không mở dock** (thiếu `focus_panel`), nên mọi `debug_bounds` đều `None` vì lý do chẳng liên quan gì tới zoom. Lần sửa đầu tôi suýt nhận là xong dựa trên một test không chạm nổi vào code đang sửa.
+
+Probe mới nói thẳng sự thật:
+
+| | dock-panel | surface | agent-view |
+|---|---|---|---|
+| Trước sửa | 1920×1073 | 1912×1065 | **None** |
+| Sau sửa | 1920×1073 | 1912×1065 | 1912×1037 |
+
+Cột đã chiếm center đúng — chỉ là rỗng. Đúng cái người dùng thấy.
+
 ### Nợ đã ghi
 
 Đổi tên là **bản sao thứ hai** của cách làm trong `TerminalView` (`custom_title`/`rename_editor`/subscription blur). Dùng chung sẽ phải bọc editor + subscription + tích hợp `Item` — lớn hơn chính tính năng, nên chưa tách. Bản thứ **ba** thì phải tách.
