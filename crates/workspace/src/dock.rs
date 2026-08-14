@@ -279,6 +279,12 @@ pub struct Dock {
     /// `Workspace` update, so reading the workspace back through its handle
     /// there aborts the process.
     pub(crate) serialized_stack: Option<DockStackState>,
+    /// Whether this is the agent's column rather than one of the three docks.
+    ///
+    /// Only `stack_key` reads it, and only to keep the two apart in storage:
+    /// the agent column carries a `DockPosition` of its own so resizing knows
+    /// which way it grows, and that position is shared with a real dock.
+    is_agent_column: bool,
     /// How the panels showing at once divide the dock's *length*.
     ///
     /// A second axis from `PanelEntry::size_state`, which measures the dock's
@@ -454,6 +460,7 @@ impl Dock {
                 panel_entries: Default::default(),
                 active_panel_index: None,
                 serialized_stack: None,
+                is_agent_column: false,
                 stack_flexes: Default::default(),
                 stack_bounding_boxes: Default::default(),
                 is_open: false,
@@ -1028,15 +1035,36 @@ impl Dock {
     /// `resize_active_panel` persists the other axis the same way.
     fn persist_stack(&self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let position = self.position;
+        let key = self.stack_key();
         let state = self.stack_state();
         cx.defer(move |cx| {
             if let Some(workspace) = workspace.upgrade() {
                 workspace.update(cx, |workspace, cx| {
-                    workspace.persist_dock_stack(position, state, cx);
+                    workspace.persist_dock_stack(key, state, cx);
                 });
             }
         });
+    }
+
+    /// Marks this dock as the agent's column.
+    ///
+    /// Set once, at construction, by the workspace that owns it.
+    pub fn mark_as_agent_column(&mut self) {
+        self.is_agent_column = true;
+    }
+
+    /// What this dock's stack is recorded under.
+    ///
+    /// NOT the position: the agent column shares a `DockPosition` with whichever
+    /// side dock it stands next to, so keying by position would have the two
+    /// writing over each other -- the agent column, usually empty, blanking the
+    /// record of a dock that had panels in it.
+    pub fn stack_key(&self) -> &'static str {
+        if self.is_agent_column {
+            "agent"
+        } else {
+            self.position.label()
+        }
     }
 
     /// What this dock is showing, in a form that survives a restart.

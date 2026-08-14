@@ -1711,6 +1711,7 @@ impl Workspace {
             window,
             cx,
         );
+        agent_dock.update(cx, |dock, _cx| dock.mark_as_agent_column());
         let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
         let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
         let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
@@ -2178,8 +2179,19 @@ impl Workspace {
         &self.right_dock
     }
 
-    pub fn all_docks(&self) -> [&Entity<Dock>; 3] {
-        [&self.left_dock, &self.bottom_dock, &self.right_dock]
+    /// Every dock a panel may be looked up in, the agent's column included.
+    ///
+    /// Lookup only — routing still goes through `dock_at_position`, which never
+    /// returns the agent column. So `panel::<T>()`, `focus_panel` and
+    /// `close_panel` reach an agent standing in its own column, while nothing
+    /// else can be placed there by position.
+    pub fn all_docks(&self) -> [&Entity<Dock>; 4] {
+        [
+            &self.left_dock,
+            &self.bottom_dock,
+            &self.right_dock,
+            &self.agent_dock,
+        ]
     }
 
     pub fn capture_dock_state(&self, _window: &Window, cx: &App) -> DockStructure {
@@ -2310,6 +2322,15 @@ impl Workspace {
             .collect()
     }
 
+    /// The agent's own column, beside the centre.
+    ///
+    /// Reached by name rather than by position: it shares a `DockPosition` with
+    /// whichever side dock it stands next to, so `dock_at_position` can never
+    /// return it.
+    pub fn agent_dock(&self) -> &Entity<Dock> {
+        &self.agent_dock
+    }
+
     pub fn dock_at_position(&self, position: DockPosition) -> &Entity<Dock> {
         match position {
             DockPosition::Left => &self.left_dock,
@@ -2374,12 +2395,7 @@ impl Workspace {
     /// Beside the panel sizes in the key-value store rather than in a column on
     /// `workspaces`: see `dock::DOCK_STACK_KEY` for why that table is the wrong
     /// place for it.
-    pub fn persist_dock_stack(
-        &self,
-        position: DockPosition,
-        state: dock::DockStackState,
-        cx: &mut App,
-    ) {
+    pub fn persist_dock_stack(&self, key: &'static str, state: dock::DockStackState, cx: &mut App) {
         let Some(workspace_id) = self
             .database_id()
             .map(|id| i64::from(id).to_string())
@@ -2389,12 +2405,11 @@ impl Workspace {
         };
 
         let kvp = db::kvp::KeyValueStore::global(cx);
-        let dock_key = position.label().to_string();
         cx.background_spawn(async move {
             let scope = kvp.scoped(dock::DOCK_STACK_KEY);
             scope
                 .write(
-                    format!("{workspace_id}:{dock_key}"),
+                    format!("{workspace_id}:{key}"),
                     serde_json::to_string(&state)?,
                 )
                 .await
@@ -2402,11 +2417,7 @@ impl Workspace {
         .detach_and_log_err(cx);
     }
 
-    pub fn load_persisted_dock_stack(
-        &self,
-        position: DockPosition,
-        cx: &App,
-    ) -> Option<dock::DockStackState> {
+    pub fn load_persisted_dock_stack(&self, key: &str, cx: &App) -> Option<dock::DockStackState> {
         let workspace_id = self
             .database_id()
             .map(|id| i64::from(id).to_string())
@@ -2414,7 +2425,7 @@ impl Workspace {
         let kvp = db::kvp::KeyValueStore::global(cx);
         let scope = kvp.scoped(dock::DOCK_STACK_KEY);
         scope
-            .read(&format!("{workspace_id}:{}", position.label()))
+            .read(&format!("{workspace_id}:{key}"))
             .log_err()
             .flatten()
             .and_then(|json| serde_json::from_str::<dock::DockStackState>(&json).log_err())
@@ -2580,7 +2591,13 @@ impl Workspace {
             .detach();
 
         let dock_position = panel.position(window, cx);
-        let dock = self.dock_at_position(dock_position);
+        // The agent asks for a column of its own rather than a place in a dock
+        // shared with the tool panels; see `render_centre_with_agent`.
+        let dock = if panel.is_agent_panel(cx) {
+            &self.agent_dock
+        } else {
+            self.dock_at_position(dock_position)
+        };
         let any_panel = panel.to_any();
         let persisted_size_state =
             self.persisted_panel_size_state(T::panel_key(), cx)
@@ -6727,11 +6744,11 @@ impl Workspace {
         // that hears about a resize. The dock records its own stack when panels
         // come and go; this is what catches them being resized.
         for dock in self.all_docks() {
-            let (position, state) = {
+            let (key, state) = {
                 let dock = dock.read(cx);
-                (dock.position(), dock.stack_state())
+                (dock.stack_key(), dock.stack_state())
             };
-            self.persist_dock_stack(position, state, cx);
+            self.persist_dock_stack(key, state, cx);
         }
 
         let Some(database_id) = self.database_id() else {
@@ -7033,9 +7050,9 @@ impl Workspace {
                 // dock — a dock reaching back through the workspace handle from
                 // `restore_state` reads it mid-update and aborts.
                 let stacks = [
-                    workspace.load_persisted_dock_stack(DockPosition::Right, cx),
-                    workspace.load_persisted_dock_stack(DockPosition::Left, cx),
-                    workspace.load_persisted_dock_stack(DockPosition::Bottom, cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Right.label(), cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Left.label(), cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Bottom.label(), cx),
                 ];
 
                 for ((dock, serialized_dock), stack) in [
@@ -7732,8 +7749,22 @@ impl Workspace {
             _ => (None, Some(column)),
         };
 
-        h_flex()
+        // `div().flex().flex_row()`, not `h_flex()`: the latter also sets
+        // `items_center`, and a dock sizes itself with `self_stretch`, which
+        // came out zero-height under it. This is the same container the three
+        // docks are already laid out in a few lines below.
+        // `self_stretch` because the arm wrapping this is an `h_flex`, which
+        // centres its children — without it this row is sized to its content
+        // and the column inside draws full width at zero height. The centre
+        // group carries the same call for the same reason.
+        //
+        // `div().flex().flex_row()` rather than `h_flex()` so this row does not
+        // in turn centre the docks inside it.
+        div()
+            .flex()
+            .flex_row()
             .flex_1()
+            .self_stretch()
             .children(before)
             .child(centre)
             .children(after)

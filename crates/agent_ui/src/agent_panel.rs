@@ -424,6 +424,15 @@ impl Panel for AgentPanel {
         Some(self.active_pane.clone())
     }
 
+    /// Claims the workspace's agent column rather than a place in a side dock.
+    ///
+    /// A dock is one column, so sharing one with the git or project panel means
+    /// either taking turns with it or being stacked into its width. The agent
+    /// is a working surface, so it stands beside the editor instead.
+    fn is_agent_panel(&self) -> bool {
+        true
+    }
+
     /// Closed until asked for: opening it starts a process.
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
         false
@@ -475,21 +484,18 @@ mod tests {
         (panel, cx)
     }
 
-    /// Whether the dock this panel lives in is taking a section of the window.
+    /// Whether the agent's column is taking a section of the window.
+    ///
+    /// Always the agent column, never a side dock: that is where `add_panel`
+    /// routes an agent, so looking it up by `Panel::position` would find a dock
+    /// the agent is not in.
     fn dock_is_open(panel: &Entity<AgentPanel>, cx: &mut gpui::VisualTestContext) -> bool {
-        cx.update(|window, cx| {
-            let position = panel.read(cx).position(window, cx);
+        cx.update(|_window, cx| {
             panel
                 .read(cx)
                 .workspace
                 .read_with(cx, |workspace, cx| {
-                    match position {
-                        DockPosition::Left => workspace.left_dock(),
-                        DockPosition::Right => workspace.right_dock(),
-                        DockPosition::Bottom => workspace.bottom_dock(),
-                    }
-                    .read(cx)
-                    .is_open()
+                    workspace.agent_dock().read(cx).is_open()
                 })
                 .unwrap_or(false)
         })
@@ -517,75 +523,66 @@ mod tests {
         );
     }
 
-    /// An agent stacked with another panel comes back stacked after a restart.
+    /// The agent column records what it was showing, so a restart comes back
+    /// to it rather than to an empty column.
     ///
-    /// This lives here rather than in `workspace` because a stack is recorded
-    /// by `Panel::persistent_name`, which is a *static* method naming a panel
-    /// type — so proving a stack of two survives needs two real panel types,
-    /// and `workspace`'s test support has only one.
+    /// This used to stack the agent with a test panel to prove a two-panel
+    /// stack round-trips. It cannot any more, and that is the point of the
+    /// change: the agent has a column to itself, and `add_panel` will not route
+    /// anything else into it. A stack of two distinct panel types is now only
+    /// reachable in the three ordinary docks — see `workspace`'s own
+    /// `a_dock_stack_round_trips_and_tolerates_having_none` for the mechanism,
+    /// and the gap noted in phase 02 of the plan for what is left uncovered.
     #[gpui::test]
-    async fn an_agent_stacked_with_a_panel_comes_back_stacked(cx: &mut TestAppContext) {
+    async fn the_agent_column_records_what_it_was_showing(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |store, _cx| {
-                let mut agent_settings = store.get::<AgentSettings>(None).clone();
-                agent_settings.sidebar_side = SidebarDockPosition::Left;
-                store.override_global(agent_settings);
-            });
-        });
-        cx.run_until_parked();
-
         let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
         workspace
             .update_in(cx, |workspace, window, cx| {
                 workspace.add_panel(panel.clone(), window, cx);
-                let other =
-                    cx.new(|cx| workspace::dock::test::TestPanel::new(DockPosition::Left, 1, cx));
-                workspace.add_panel(other, window, cx);
-                workspace.left_dock().update(cx, |dock, cx| {
-                    for ix in 0..dock.panels_len() {
-                        dock.show_panel(ix, window, cx);
-                    }
-                });
+                workspace.focus_panel::<AgentPanel>(window, cx);
             })
             .unwrap();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
         cx.run_until_parked();
 
         let saved = workspace
             .read_with(cx, |workspace, cx| {
-                workspace.left_dock().read(cx).stack_state()
+                workspace.agent_dock().read(cx).stack_state()
             })
             .unwrap();
         assert_eq!(
-            saved.showing.len(),
-            2,
-            "the agent and the panel beside it should both be recorded"
+            saved.showing,
+            vec![AgentPanel::persistent_name().to_string()],
+            "the agent column should record the agent panel standing in it"
         );
 
-        // Collapse to one, the shape a fresh process restores into, then hand
-        // back the record.
+        // Emptied and handed the record back, the shape a fresh process is in.
         workspace
             .update_in(cx, |workspace, window, cx| {
-                workspace.left_dock().update(cx, |dock, cx| {
-                    dock.activate_panel(0, window, cx);
-                    assert_eq!(dock.visible_panels().count(), 1);
+                workspace.agent_dock().update(cx, |dock, cx| {
+                    dock.hide_panel_by_id(panel.entity_id(), window, cx);
+                    assert_eq!(dock.visible_panels().count(), 0);
                     assert!(dock.apply_stack_state(&saved, window, cx));
+                    // Opened afterwards, the order `restore_state` uses: the
+                    // record says which panels, the serialized dock says
+                    // whether the column was up at all.
+                    dock.set_open(true, window, cx);
+                    assert_eq!(
+                        dock.visible_panels().count(),
+                        1,
+                        "the agent should come back to its column"
+                    );
                 });
             })
             .unwrap();
-        cx.run_until_parked();
-
-        assert_eq!(
-            workspace
-                .read_with(cx, |workspace, cx| workspace
-                    .left_dock()
-                    .read(cx)
-                    .visible_panels()
-                    .count())
-                .unwrap(),
-            2,
-            "the recorded stack should come back whole"
-        );
     }
 
     /// Opening an agent must not put away a panel docked on the other side.
@@ -630,18 +627,18 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let (left, right) = workspace
+        let (panel_dock, agent_column) = workspace
             .read_with(cx, |workspace, cx| {
                 (
                     workspace.left_dock().read(cx).is_open(),
-                    workspace.right_dock().read(cx).is_open(),
+                    workspace.agent_dock().read(cx).is_open(),
                 )
             })
             .unwrap();
-        assert!(left, "the panel docked left should be open");
+        assert!(panel_dock, "the panel docked left should be open");
         assert!(
-            right,
-            "and the agent docked right should still be open beside it"
+            agent_column,
+            "and the agent should still be up in its own column beside it"
         );
     }
 
