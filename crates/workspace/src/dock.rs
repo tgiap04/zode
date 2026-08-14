@@ -653,6 +653,17 @@ impl Dock {
                 let panel = panel.clone();
 
                 move |this, window, cx| {
+                    // The agent column is the panel's home at either rail side:
+                    // the column itself moves (`set_agent_column_position`), so
+                    // there is no dock to migrate to. Without this the panel is
+                    // hauled into a tool dock the moment the rail flips —
+                    // exactly where the agent appeared before it had a column —
+                    // and whether that happens comes down to which of the two
+                    // settings observers fires first.
+                    if this.is_agent_column {
+                        return;
+                    }
+
                     let new_position = panel.read(cx).position(window, cx);
                     if new_position == this.position {
                         return;

@@ -13344,6 +13344,56 @@ mod tests {
         });
     }
 
+    /// `Dock::add_panel` watches the settings and hauls a panel into
+    /// `left_dock`/`right_dock` when its `position()` changes. The agent's
+    /// position changes on every rail flip, and that mapping has no arm for the
+    /// column — so this pins that the panel stays where it belongs.
+    #[gpui::test]
+    async fn flipping_the_rail_leaves_the_agent_in_its_own_column(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
+            workspace.add_panel(agent, window, cx);
+            workspace.agent_dock.update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+        });
+
+        for side in [SidebarSide::Right, SidebarSide::Left] {
+            cx.update(|_window, cx| {
+                SettingsStore::update_global(cx, |settings, cx| {
+                    settings.update_user_settings(cx, |settings| {
+                        settings
+                            .workspace
+                            .multi_project
+                            .get_or_insert_default()
+                            .sidebar_side = Some(side);
+                    });
+                });
+            });
+            cx.run_until_parked();
+
+            workspace.read_with(cx, |workspace, cx| {
+                assert!(
+                    workspace.agent_dock.read(cx).panel::<TestPanel>().is_some(),
+                    "the agent must still be in its column after the rail moved to {side:?}"
+                );
+                assert!(
+                    workspace.left_dock.read(cx).panel::<TestPanel>().is_none()
+                        && workspace.right_dock.read(cx).panel::<TestPanel>().is_none(),
+                    "and must not have been hauled into a tool dock"
+                );
+            });
+        }
+    }
+
     #[gpui::test]
     async fn test_panel_size_state_persistence(cx: &mut gpui::TestAppContext) {
         init_test(cx);
