@@ -1348,6 +1348,13 @@ pub struct Workspace {
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
+    /// The agent's own column, drawn beside the centre on the rail's side.
+    ///
+    /// A `Dock` rather than a bespoke column so it inherits the width, the
+    /// resize handle and the panel stack the other three already have — but
+    /// deliberately NOT one of `all_docks`, which is the set a panel may be
+    /// routed into by position. Nothing lands here except by asking for it.
+    agent_dock: Entity<Dock>,
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
     active_pane: Entity<Pane>,
@@ -1695,6 +1702,15 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
+        let agent_dock = Dock::new(
+            match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
+                SidebarSide::Left => DockPosition::Left,
+                SidebarSide::Right => DockPosition::Right,
+            },
+            modal_layer.clone(),
+            window,
+            cx,
+        );
         let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
         let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
         let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
@@ -1798,6 +1814,7 @@ impl Workspace {
             left_dock,
             bottom_dock,
             right_dock,
+            agent_dock,
             _panels_task: None,
             project: project.clone(),
             follower_states: Default::default(),
@@ -7666,6 +7683,63 @@ impl Workspace {
             )
     }
 
+    /// Which side of the editor the agent's column stands on.
+    ///
+    /// The rail's side, not a setting of its own: the agent belongs beside the
+    /// column of buttons that opens it, so the two never end up at opposite
+    /// edges of the screen.
+    pub fn agent_column_position(&self, cx: &App) -> DockPosition {
+        match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
+            SidebarSide::Left => DockPosition::Left,
+            SidebarSide::Right => DockPosition::Right,
+        }
+    }
+
+    /// The editor, with the agent's column beside it.
+    ///
+    /// One helper rather than an edit in each of the four `BottomDockLayout`
+    /// arms, which wrapped the centre identically — the agent column is added
+    /// once, and the four cannot drift apart over it.
+    ///
+    /// The agent stands here rather than in a side dock because a dock is one
+    /// column: sharing one with the git or project panel means either taking
+    /// turns with it or being stacked into its width, and the agent is a
+    /// working surface rather than a tool panel.
+    fn render_centre_with_agent(
+        &self,
+        pane_render_context: &PaneRenderContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let centre = self
+            .center
+            .render(self.zoomed.as_ref(), pane_render_context, window, cx);
+
+        // Handed back untouched while no agent is up — and that is load-bearing,
+        // not an optimisation. Wrapping the centre in one more flex level moves
+        // it by a few pixels, which is enough to slide the tab bar out from
+        // under the coordinates the pane tests click at. With no agent there is
+        // no column to place, so there is no reason to pay that.
+        let side = self.agent_column_position(cx);
+        if self.agent_dock.read(cx).visible_panel().is_none() {
+            return centre;
+        }
+        let Some(column) = self.render_dock(side, &self.agent_dock, window, cx) else {
+            return centre;
+        };
+        let (before, after) = match side {
+            DockPosition::Left => (Some(column), None),
+            _ => (None, Some(column)),
+        };
+
+        h_flex()
+            .flex_1()
+            .children(before)
+            .child(centre)
+            .children(after)
+            .into_any_element()
+    }
+
     fn render_dock(
         &self,
         position: DockPosition,
@@ -8504,12 +8578,7 @@ impl Render for Workspace {
                                                                 .when_some(paddings.0, |this, p| {
                                                                     this.child(p.border_r_1())
                                                                 })
-                                                                .child(self.center.render(
-                                                                    self.zoomed.as_ref(),
-                                                                    &pane_render_context,
-                                                                    window,
-                                                                    cx,
-                                                                ))
+                                                                .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                                 .when_some(
                                                                     paddings.1,
                                                                     |this, p| {
@@ -8570,12 +8639,7 @@ impl Render for Workspace {
                                                                                 )
                                                                             },
                                                                         )
-                                                                        .child(self.center.render(
-                                                                            self.zoomed.as_ref(),
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
+                                                                        .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                                         .when_some(
                                                                             paddings.1,
                                                                             |this, p| {
@@ -8638,12 +8702,7 @@ impl Render for Workspace {
                                                                                 )
                                                                             },
                                                                         )
-                                                                        .child(self.center.render(
-                                                                            self.zoomed.as_ref(),
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
+                                                                        .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                                         .when_some(
                                                                             paddings.1,
                                                                             |this, p| {
@@ -8690,12 +8749,7 @@ impl Render for Workspace {
                                                         .when_some(paddings.0, |this, p| {
                                                             this.child(p.border_r_1())
                                                         })
-                                                        .child(self.center.render(
-                                                            self.zoomed.as_ref(),
-                                                            &pane_render_context,
-                                                            window,
-                                                            cx,
-                                                        ))
+                                                        .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                         .when_some(paddings.1, |this, p| {
                                                             this.child(p.border_l_1())
                                                         }),
