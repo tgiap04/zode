@@ -1,15 +1,16 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::Action as _;
 use gpui::{
-    Anchor, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
-    WeakEntity, Window,
+    Anchor, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    Subscription, WeakEntity, Window,
 };
 use project::{AgentId, Project};
 use ui::prelude::*;
 use ui::{ContextMenu, PopoverMenu, Tooltip};
 use workspace::{
-    Pane, SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
+    AppState, Pane, SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
     dock::{DockPosition, Panel, PanelEvent},
     pane,
     pane_group::PaneGroup,
@@ -35,13 +36,34 @@ pub struct AgentPanel {
     center: PaneGroup,
     project: Entity<Project>,
     workspace: WeakEntity<Workspace>,
+    /// Held rather than read back off the workspace, so `render` needs nothing
+    /// from it. See the comment there.
+    app_state: Arc<AppState>,
     focus_handle: FocusHandle,
     /// The pane asking for the editor's space, if one is. Held here rather than
     /// on the workspace so zooming an agent cannot take the tool dock sharing
     /// this column's `DockPosition` down with it.
+    ///
+    /// Cleared wherever a pane stops being drawable — not only on `ZoomOut`.
+    /// A stale handle here reads as "still zoomed" to `fills_the_center`, and
+    /// the workspace stands the editor down for a pane nobody can see.
     zoomed_pane: Option<WeakEntity<Pane>>,
-    _subscriptions: Vec<Subscription>,
+    /// Keyed by pane, so a pane's subscription leaves with the pane.
+    ///
+    /// A `Vec` grew one entry per split for the life of the window: `add_pane`
+    /// pushed, and the `Remove` arm below dropped the pane from the group
+    /// without ever dropping the subscription that watched it.
+    _subscriptions: HashMap<EntityId, Subscription>,
 }
+
+/// How many agents may stand side by side in the column before the next one
+/// arrives as a tab instead.
+///
+/// The column is 480px by default and a conversation needs room to be read;
+/// splitting without limit turns the fourth agent into a sliver too narrow to
+/// use, and the one after that into a sliver of a sliver. A tab is the graceful
+/// end of that sequence, and dragging it back out is how someone overrules it.
+const MAX_SIDE_BY_SIDE_AGENTS: usize = 3;
 
 impl AgentPanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -51,12 +73,13 @@ impl AgentPanel {
 
         Self {
             center: PaneGroup::new(pane.clone()),
+            _subscriptions: HashMap::from([(pane.entity_id(), subscription)]),
             active_pane: pane,
             project,
             workspace: workspace.weak_handle(),
+            app_state: workspace.app_state().clone(),
             focus_handle: cx.focus_handle(),
             zoomed_pane: None,
-            _subscriptions: vec![subscription],
         }
     }
 
@@ -124,7 +147,11 @@ impl AgentPanel {
             )
         });
 
-        if self.active_pane.read(cx).items_len() > 0 {
+        // Past the cap the agent joins the active pane as a tab rather than
+        // taking a share of a column that has none left to give.
+        if self.active_pane.read(cx).items_len() > 0
+            && self.center.panes().len() < MAX_SIDE_BY_SIDE_AGENTS
+        {
             let new_pane = self.add_pane(window, cx);
             self.center
                 .split(&self.active_pane, &new_pane, SplitDirection::Right, cx);
@@ -140,9 +167,27 @@ impl AgentPanel {
 
     fn add_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
         let pane = Self::new_pane(self.workspace.clone(), self.project.clone(), window, cx);
-        self._subscriptions
-            .push(cx.subscribe_in(&pane, window, Self::handle_pane_event));
+        self._subscriptions.insert(
+            pane.entity_id(),
+            cx.subscribe_in(&pane, window, Self::handle_pane_event),
+        );
         pane
+    }
+
+    /// Lets go of a pane that is no longer drawn.
+    ///
+    /// Both halves matter. The subscription is what made `_subscriptions` grow
+    /// for the life of the window, and the zoom handle is what left the
+    /// workspace hiding the editor for a pane that no longer exists.
+    fn forget_pane(&mut self, pane: &Entity<Pane>) {
+        self._subscriptions.remove(&pane.entity_id());
+        if self
+            .zoomed_pane
+            .as_ref()
+            .is_some_and(|zoomed| zoomed.entity_id() == pane.entity_id())
+        {
+            self.zoomed_pane = None;
+        }
     }
 
     fn is_empty(&self, cx: &App) -> bool {
@@ -163,9 +208,18 @@ impl AgentPanel {
     /// The same holds after the last agent is closed, which is why this is a rule
     /// about the panel's contents rather than a patch on the restore path.
     fn close_if_empty(&mut self, cx: &mut Context<Self>) {
-        if self.is_empty(cx) {
-            cx.emit(PanelEvent::Close);
+        if !self.is_empty(cx) {
+            return;
         }
+        // Zoom does not outlive the agents it was zooming. Left standing, the
+        // next agent opened comes straight back filling the centre, and the
+        // editor disappears for someone who never asked for it — the pane is
+        // still alive here, so `fills_the_center` cannot tell on its own that
+        // there is nothing left to fill it with.
+        if let Some(pane) = self.zoomed_pane.take().and_then(|pane| pane.upgrade()) {
+            pane.update(cx, |pane, cx| pane.set_zoomed(false, cx));
+        }
+        cx.emit(PanelEvent::Close);
     }
 
     /// Whether `agent` currently has an open pane in this panel.
@@ -404,6 +458,7 @@ impl AgentPanel {
                 if self.center.panes().len() > 1
                     && let Ok(_) = self.center.remove(pane, cx)
                 {
+                    self.forget_pane(pane);
                     self.active_pane = self.center.first_pane();
                     window.focus(&self.active_pane.focus_handle(cx), cx);
                 }
@@ -469,24 +524,30 @@ impl Render for AgentPanel {
                 );
         }
 
-        let center = self
-            .workspace
-            .update(cx, |workspace, cx| {
-                self.center.render(
-                    None,
-                    &workspace::PaneRenderContext {
-                        follower_states: &Default::default(),
-                        active_call: workspace.active_call(),
-                        active_pane: &self.active_pane,
-                        app_state: workspace.app_state(),
-                        project: workspace.project(),
-                        workspace: &workspace.weak_handle(),
-                    },
-                    window,
-                    cx,
-                )
-            })
-            .ok();
+        // Nothing is read back off the workspace here. This runs from element
+        // layout, after `Workspace::render` has returned, so leasing it did not
+        // abort — but this crate has paid for that shape twice (`ccd151f`), and
+        // the `.ok()` that used to trail the call guarded nothing: a `WeakEntity`
+        // update returns `Err` only for a dropped entity, while a live lease
+        // aborts the process.
+        //
+        // `active_call` is `None` rather than the workspace's: it is reached
+        // only after `follower_states` yields a match (`pane_group.rs`,
+        // `PaneLeaderDecorator::decorate`), and an agent pane has no followers
+        // to match. `app_state` is held on the panel instead.
+        let center = self.center.render(
+            None,
+            &workspace::PaneRenderContext {
+                follower_states: &Default::default(),
+                active_call: None,
+                active_pane: &self.active_pane,
+                app_state: &self.app_state,
+                project: &self.project,
+                workspace: &self.workspace,
+            },
+            window,
+            cx,
+        );
 
         // The gap and the corner belong to `Dock::render`, which draws them for
         // every panel it holds — this one used to carry its own copy of that
@@ -505,7 +566,7 @@ impl Render for AgentPanel {
                     .size_full()
                     .overflow_hidden()
                     .bg(cx.theme().colors().editor_background)
-                    .children(center),
+                    .child(center),
             )
     }
 }
@@ -521,8 +582,13 @@ impl Panel for AgentPanel {
     /// down. Not routed through `PanelEvent::ZoomIn`, which would put the dock
     /// machinery in charge: that keys on `DockPosition`, which this column
     /// shares with the tool dock beside it.
+    /// Upgraded rather than merely checked for `Some`: a pane can be removed
+    /// while the handle to it stays, and answering yes for a pane that no longer
+    /// exists stands the editor down in favour of nothing at all.
     fn fills_the_center(&self, _window: &Window, _cx: &App) -> bool {
-        self.zoomed_pane.is_some()
+        self.zoomed_pane
+            .as_ref()
+            .is_some_and(|pane| pane.upgrade().is_some())
     }
 
     fn panel_key() -> &'static str {
@@ -1200,6 +1266,181 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(!fills(cx), "and unzooming has to give it back");
+    }
+
+    /// Zoom must not outlive the agent it was zooming.
+    ///
+    /// `zoomed_pane` was cleared only on `ZoomOut`, and `fills_the_center` asked
+    /// nothing more of it than `is_some()`. Closing the last agent left the
+    /// handle standing, so the *next* agent opened came back filling the centre
+    /// and the editor vanished for someone who never pressed the button.
+    /// Measured before the fix: `after close: fills=true`,
+    /// `after reopen: dock_open=true fills=true`.
+    #[gpui::test]
+    async fn closing_a_zoomed_agent_does_not_leave_the_next_one_zoomed(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+
+        let open = |cx: &mut gpui::VisualTestContext| {
+            let agent = agent.clone();
+            panel.update_in(cx, |panel, window, cx| {
+                panel.show(agent, AgentViewMode::Terminal, window, cx);
+            });
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.focus_panel::<AgentPanel>(window, cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let fills = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| panel.read(cx).fills_the_center(window, cx))
+        };
+
+        open(cx);
+        let pane = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(fills(cx), "precondition: the column is zoomed");
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.close_active_item(
+                &pane::CloseActiveItem {
+                    save_intent: Some(SaveIntent::Skip),
+                    close_pinned: true,
+                },
+                window,
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            !fills(cx),
+            "an empty column cannot be filling the centre — there is nothing in it to fill with"
+        );
+        assert!(
+            !pane.read_with(cx, |pane, _| pane.is_zoomed()),
+            "and the maximise button must not still read as zoomed"
+        );
+
+        open(cx);
+        assert!(
+            !fills(cx),
+            "reopening an agent must not come back hiding the editor"
+        );
+    }
+
+    /// A pane's subscription has to leave with the pane.
+    ///
+    /// `_subscriptions` was a `Vec` that only ever grew: `add_pane` pushed, and
+    /// the `Remove` arm dropped the pane from the group without dropping what
+    /// watched it. Every split-then-close cycle left an entry behind for the
+    /// life of the window.
+    #[gpui::test]
+    async fn closing_a_split_agent_drops_what_was_watching_it(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        for agent in [project::CLAUDE_CODE_AGENT_ID, project::CODEX_AGENT_ID] {
+            panel.update_in(cx, |panel, window, cx| {
+                panel.show(
+                    AgentId::new(agent.to_string()),
+                    AgentViewMode::Terminal,
+                    window,
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+
+        let (panes, watched) = panel.read_with(cx, |panel, _| {
+            (panel.center.panes().len(), panel._subscriptions.len())
+        });
+        assert_eq!(panes, 2, "two agents should stand in two panes");
+        assert_eq!(watched, 2, "one subscription per pane");
+
+        let second = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        second
+            .update_in(cx, |pane, window, cx| {
+                pane.close_active_item(
+                    &pane::CloseActiveItem {
+                        save_intent: Some(SaveIntent::Skip),
+                        close_pinned: true,
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.center.panes().len(), 1, "one pane left");
+            assert_eq!(
+                panel._subscriptions.len(),
+                1,
+                "and one subscription — the closed pane's must have gone with it"
+            );
+        });
+    }
+
+    /// The column stops splitting before a section is too narrow to read.
+    #[gpui::test]
+    async fn agents_past_the_cap_arrive_as_tabs_rather_than_slivers(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        let opened = MAX_SIDE_BY_SIDE_AGENTS + 2;
+        for _ in 0..opened {
+            panel.update_in(cx, |panel, window, cx| {
+                panel.show_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    window,
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.center.panes().len(),
+                MAX_SIDE_BY_SIDE_AGENTS,
+                "the column must stop splitting at the cap"
+            );
+            let items: usize = panel
+                .center
+                .panes()
+                .iter()
+                .map(|pane| pane.read(cx).items_len())
+                .sum();
+            assert_eq!(
+                items, opened,
+                "and every agent asked for is still open, as a tab where there was no room to split"
+            );
+        });
     }
 
     /// Rename has to reach the view, not just the tab.
