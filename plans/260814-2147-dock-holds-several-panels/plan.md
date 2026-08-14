@@ -26,7 +26,7 @@ Người dùng muốn xếp chồng chúng thành hai section trong cùng một 
 |---|---|---|---|
 | 01 | [Dock giữ một *tập* panel đang hiện](phase-01-a-dock-holds-a-set-of-visible-panels.md) — refactor thuần, hành vi không đổi | ✅ done | — |
 | 02 | [Xếp chồng + resize](phase-02-stack-them-with-resize-handles.md) | ✅ done | 01 |
-| 03 | [Nút rail/status bar thành toggle từng panel](phase-03-buttons-become-per-panel-toggles.md) | planned | 01 |
+| 03 | [Nút rail/status bar thành toggle từng panel](phase-03-buttons-become-per-panel-toggles.md) | ✅ done | 01 |
 | 04 | [Nhớ trạng thái xếp chồng](phase-04-remember-the-stack.md) — migration DB | planned | 02, 03 |
 
 Phase 01 cố tình **không đổi gì người dùng thấy**: nó chỉ đổi mô hình dữ liệu từ "một index" sang "một tập", giữ bất biến "tập luôn có đúng một phần tử". Mọi rủi ro của 02–04 đứng sau một bước đã xanh.

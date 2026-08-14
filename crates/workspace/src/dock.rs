@@ -910,13 +910,16 @@ impl Dock {
         let Some(entry) = self.panel_entries.get_mut(panel_ix) else {
             return;
         };
-        if entry.visible {
-            return;
-        }
+        // The flag outlives a closed dock, so a panel can be marked showing
+        // while nothing is drawn. Asking for it again then means "open the dock
+        // back onto it", not "nothing to do".
+        let was_showing = entry.visible;
         entry.visible = true;
-        self.reset_stack_flexes();
+        if !was_showing {
+            self.reset_stack_flexes();
+        }
         self.active_panel_index = Some(panel_ix);
-        if let Some(entry) = self.panel_entries.get(panel_ix) {
+        if !was_showing && let Some(entry) = self.panel_entries.get(panel_ix) {
             entry.panel.set_active(true, window, cx);
         }
         self.set_open(true, window, cx);
@@ -1505,7 +1508,6 @@ pub fn rail_draws_panel(
 impl Render for PanelButtons {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dock = self.dock.read(cx);
-        let active_index = dock.active_panel_index;
         let is_open = dock.is_open;
         let dock_position = dock.position;
 
@@ -1519,8 +1521,7 @@ impl Render for PanelButtons {
         let mut buttons: Vec<_> = dock
             .panel_entries
             .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| {
+            .filter_map(|entry| {
                 // Skip only what the rail is already drawing: clearing the whole
                 // dock would take the project panel's button with it, and that one
                 // belongs here whichever edge it is docked to.
@@ -1542,7 +1543,12 @@ impl Render for PanelButtons {
                 let dock_for_menu = dock_entity.clone();
                 let workspace_for_menu = workspace.clone();
 
-                let is_active_button = Some(i) == active_index && is_open;
+                // Lit per panel rather than per dock: several can be up at
+                // once, so several buttons can be lit at once. The action for
+                // one that is up still closes the dock — this button has no way
+                // to name a single panel, and `Panel::toggle_action` respects
+                // `close_panel_on_toggle`, so it cannot be relied on to hide.
+                let is_active_button = is_open && entry.visible;
                 let (action, tooltip) = if is_active_button {
                     let action = dock.toggle_action();
 

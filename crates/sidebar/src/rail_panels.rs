@@ -63,49 +63,54 @@ impl Sidebar {
             return None;
         }
 
-        let (is_open, active_index, close_dock) = {
-            let dock = self.rail_dock(cx)?;
-            let dock = dock.read(cx);
-            (
-                dock.is_open(),
-                dock.active_panel_index(),
-                dock.toggle_action(),
-            )
-        };
+        let dock = self.rail_dock(cx)?;
 
         let mut buttons = Vec::with_capacity(panels.len());
-        for (index, panel) in panels.iter().enumerate() {
+        for panel in panels.iter() {
             let Some(icon) = panel.icon(window, cx) else {
                 continue;
             };
-            let is_active = is_open && Some(index) == active_index;
+            // Whether *this* panel is up, not whether it is the one the dock
+            // calls active — several can be showing at once, so several
+            // buttons can be lit at once.
+            let is_showing = dock.read(cx).is_panel_visible(panel.panel_id());
 
-            // Clicking the panel already on screen closes the dock, the way VS
-            // Code does; clicking any other one brings it forward.
-            let (action, tooltip) = if is_active {
-                (close_dock.boxed_clone(), "Hide Panel")
-            } else {
-                let Some(tooltip) = panel.icon_tooltip(window, cx) else {
-                    continue;
-                };
-                (panel.toggle_action(window, cx), tooltip)
+            let Some(name) = panel.icon_tooltip(window, cx) else {
+                continue;
             };
+            let tooltip = if is_showing { "Hide Panel" } else { name };
 
-            buttons.push(
-                IconButton::new(panel.persistent_name(), icon)
-                    .icon_size(RAIL_ICON_SIZE)
-                    .toggle_state(is_active)
+            let button = IconButton::new(panel.persistent_name(), icon)
+                .icon_size(RAIL_ICON_SIZE)
+                .toggle_state(is_showing);
+
+            buttons.push(if is_showing {
+                // Takes this panel out of the stack and leaves the rest —
+                // the dock's own toggle action would take them all down with
+                // it. Driven through the dock entity rather than an action
+                // because there is no action naming a single panel, and the
+                // closure holds no borrow of the sidebar.
+                let dock = dock.clone();
+                let panel_id = panel.panel_id();
+                button
+                    .tooltip(move |_window, cx| Tooltip::simple(tooltip, cx))
+                    .on_click(move |_, window, cx| {
+                        dock.update(cx, |dock, cx| {
+                            dock.hide_panel_by_id(panel_id, window, cx);
+                        });
+                    })
+            } else {
+                let action = panel.toggle_action(window, cx);
+                button
                     .tooltip({
                         let action = action.boxed_clone();
                         move |_window, cx| Tooltip::for_action(tooltip, &*action, cx)
                     })
                     // Dispatch rather than driving the dock directly: this body
-                    // runs inside `Sidebar::update`, and toggling a panel reaches
+                    // runs inside `Sidebar::update`, and showing a panel reaches
                     // back into the workspace. See `render_rail_footer`.
-                    .on_click(move |_, window, cx| {
-                        window.dispatch_action(action.boxed_clone(), cx)
-                    }),
-            );
+                    .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
+            });
         }
 
         if buttons.is_empty() {
@@ -137,6 +142,50 @@ mod tests {
     use workspace::SidebarSide;
     use workspace::dock::DockPosition;
     use workspace::dock::test::TestPanel;
+
+    /// The rail lights a button per panel that is up, so two stacked panels
+    /// light two buttons — the single-active-index reading it used before could
+    /// only ever light one.
+    #[gpui::test]
+    async fn the_rail_lights_every_panel_that_is_showing(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            for priority in [100, 101] {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, priority, cx));
+                workspace.add_panel(panel, window, cx);
+            }
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            let mw_entity = cx.entity();
+            let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+            mw.register_sidebar(sidebar, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let lit = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            dock.panels()
+                .filter(|panel| dock.is_panel_visible(panel.panel_id()))
+                .count()
+        });
+        assert_eq!(
+            lit, 2,
+            "both stacked panels should read as showing, so both rail buttons light"
+        );
+    }
 
     /// The rail toggles the dock it stands beside, so the same set of panels has
     /// to yield different buttons depending on which edge it is parked at. A

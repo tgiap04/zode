@@ -4308,7 +4308,10 @@ impl Workspace {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 let mut focus_center = false;
                 let panel = dock.update(cx, |dock, cx| {
-                    dock.activate_panel(panel_index, window, cx);
+                    // Joins whatever is already up rather than replacing it —
+                    // a dock is a stack now, so bringing one panel forward is
+                    // no longer a reason to put another away.
+                    dock.show_panel(panel_index, window, cx);
 
                     let panel = dock.active_panel().cloned();
                     if let Some(panel) = panel.as_ref() {
@@ -4346,8 +4349,7 @@ impl Workspace {
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 dock.update(cx, |dock, cx| {
-                    dock.activate_panel(panel_index, window, cx);
-                    dock.set_open(true, window, cx);
+                    dock.show_panel(panel_index, window, cx);
                 });
             }
         }
@@ -4364,11 +4366,16 @@ impl Workspace {
         self.open_panel::<T>(window, cx);
     }
 
+    /// Takes this panel off screen, leaving anything stacked with it alone.
+    ///
+    /// The dock itself closes only when this was the last panel it was showing
+    /// — putting one section away is no longer a reason to take the others with
+    /// it.
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
-                if dock.panel::<T>().is_some() {
-                    dock.set_open(false, window, cx)
+                if let Some(panel) = dock.panel::<T>() {
+                    dock.hide_panel_by_id(panel.entity_id(), window, cx);
                 }
             })
         }
@@ -13337,16 +13344,17 @@ mod tests {
         }
     }
 
-    /// A dock shows exactly one panel, and that is now carried by a `visible`
-    /// flag on each entry rather than a single index. Nothing may set two of
-    /// them while that is still the rule — a second one showing would be a
-    /// panel drawn on top of another, not a stack, because nothing lays them
-    /// out yet.
+    /// Bringing a panel up joins whatever is already there instead of putting
+    /// it away, and taking one down leaves the rest standing.
     ///
-    /// Every public way to move a dock is driven here rather than just the
-    /// happy path, since the flag is set in one place and cleared in several.
+    /// This test began life asserting the opposite — that a dock never shows
+    /// more than one panel — which was true while the stack had no layout to
+    /// draw itself with. That is the invariant this change exists to lift, so
+    /// the test asserts the new rule rather than being deleted: the flag is
+    /// still set in one place and cleared in several, and every public way to
+    /// move a dock is still driven here rather than just the happy path.
     #[gpui::test]
-    async fn a_dock_shows_no_more_than_one_panel(cx: &mut gpui::TestAppContext) {
+    async fn a_dock_stacks_panels_instead_of_swapping_them(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -13370,34 +13378,50 @@ mod tests {
 
         assert_eq!(shown(cx), 0, "a dock nobody has opened shows nothing");
 
-        for (step, act) in [
-            ("opening the dock", 0usize),
-            ("focusing the first panel", 1),
-            ("focusing the second panel", 2),
-            ("toggling focus back to the centre", 3),
-            ("closing the dock", 4),
-            ("reopening it", 5),
-        ] {
-            workspace.update_in(cx, |workspace, window, cx| match act {
-                0 => workspace.toggle_dock(DockPosition::Left, window, cx),
-                1 => {
-                    workspace.focus_panel::<TestPanel>(window, cx);
-                }
-                2 => workspace.left_dock().update(cx, |dock, cx| {
-                    dock.activate_panel(1, window, cx);
-                }),
-                3 => {
-                    workspace.toggle_panel_focus::<TestPanel>(window, cx);
-                }
-                _ => workspace.toggle_dock(DockPosition::Left, window, cx),
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
             });
-            cx.run_until_parked();
-            assert!(
-                shown(cx) <= 1,
-                "{step} left {} panels showing at once",
-                shown(cx)
-            );
-        }
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 1, "the panel asked for should be showing");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            shown(cx),
+            2,
+            "the second panel should have joined the first, not replaced it"
+        );
+
+        // Closing the dock hides the stack without forgetting it, so reopening
+        // brings back what was up rather than a single panel.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 0, "a closed dock shows nothing");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 2, "reopening restores the whole stack");
+
+        // `activate_panel` stays exclusive — it is what a caller reaches for to
+        // show one panel *instead of* the others, and the stack must not have
+        // quietly turned it into another way to add one.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 1, "activate_panel shows one panel and no more");
 
         // Removing whichever panel is up must not leave its flag behind on an
         // entry that is gone, nor strand the other one as showing-but-closed.
