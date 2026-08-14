@@ -2337,8 +2337,13 @@
   "agent": {
     // Whether agents are available at all.
     "enabled": true,
-    // Which side the threads sidebar sits on inside the agent view. 'left' or 'right'.
-    "sidebar_side": "left",
+    // Which side the agent docks to. 'left' or 'right'.
+    //
+    // Deliberately NOT the side `project_panel` docks to: a dock shows one
+    // panel at a time, and the project panel is the only one shipped with
+    // `starts_open: true`. Sharing its side means a first click on an agent
+    // puts the project panel away.
+    "sidebar_side": "right",
     // Whether to cap the conversation's content width for readability, centering
     // it when the pane is wider than the cap.
     "limit_content_width": true,

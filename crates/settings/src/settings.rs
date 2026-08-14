@@ -278,6 +278,47 @@ mod tests {
         );
     }
 
+    // A dock shows one panel at a time, and `project_panel` is the only panel
+    // shipped already open. Docking the agent on its side therefore means the
+    // very first click on an agent puts the project panel away -- which is
+    // what the defaults did, and what got reported as "I cannot have both".
+    //
+    // The Rust `#[default]` is asserted alongside because it is NOT what a
+    // running app resolves -- this file is -- and the two silently drifting
+    // apart is how the wrong one gets reasoned from.
+    #[test]
+    fn the_agent_does_not_dock_beside_the_panel_that_starts_open() {
+        let defaults: serde_json::Value =
+            crate::parse_json_with_comments(crate::default_settings().as_ref())
+                .expect("default settings must parse as jsonc");
+
+        assert_eq!(
+            defaults["project_panel"]["starts_open"], true,
+            "this test only earns its keep while the project panel is the one \
+             that starts open; if that changes, re-derive which side is free"
+        );
+
+        let agent_side = defaults["agent"]["sidebar_side"]
+            .as_str()
+            .expect("agent.sidebar_side must be set");
+        assert_ne!(
+            agent_side, defaults["project_panel"]["dock"],
+            "the agent must not share a dock with the panel that starts open, \
+             or opening an agent closes it"
+        );
+
+        let rust_default = match crate::SidebarDockPosition::default() {
+            crate::SidebarDockPosition::Left => "left",
+            crate::SidebarDockPosition::Right => "right",
+        };
+        assert_eq!(
+            agent_side, rust_default,
+            "assets/settings/default.json and SidebarDockPosition's #[default] \
+             disagree; the shipped JSON wins at runtime, so the Rust default is \
+             a trap for anyone reading it to decide where the agent docks"
+        );
+    }
+
     // The seed is not just read, it is EDITED: the first setting a user changes
     // is written into this exact text. An empty object with a comment header is
     // the shape the jsonc editor handles worst, and a mangled header is invisible

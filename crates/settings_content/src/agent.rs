@@ -49,9 +49,12 @@ pub enum NewThreadLocation {
 #[serde(rename_all = "snake_case")]
 pub enum SidebarDockPosition {
     /// Always show the sidebar on the left side.
-    #[default]
     Left,
     /// Always show the sidebar on the right side.
+    ///
+    /// Kept in step with `assets/settings/default.json`, which is what a
+    /// running app actually resolves — see the reasoning recorded there.
+    #[default]
     Right,
 }
 
@@ -95,7 +98,7 @@ pub struct AgentSettingsContent {
     pub enabled: Option<bool>,
     /// Where to position the threads sidebar.
     ///
-    /// Default: left
+    /// Default: right
     pub sidebar_side: Option<SidebarDockPosition>,
     /// Whether to limit the content width in the agent panel. When enabled,
     /// content will be constrained to `max_content_width` and centered when

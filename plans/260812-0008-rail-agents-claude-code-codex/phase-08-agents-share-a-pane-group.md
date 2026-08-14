@@ -119,6 +119,30 @@ Chẩn đoán trên đúng hướng (git panel + agent chung dock) nhưng tôi t
 
 Bài học ghi vào memory: khi debug một fork đổi tên (zed → zode), đừng suy luận đường dẫn config từ tên thư mục quen thuộc — tra `paths.rs`/`config_dir()` trước khi đọc bất kỳ file settings nào.
 
+### Agent tranh dock với project panel (2026-08-14)
+
+Người dùng báo "không mở được agent và git/outline cùng lúc". **Không phải bug code** — test `an_agent_and_a_panel_on_the_other_side_stay_open_together` chứng minh agent (phải) + panel (trái) mở đồng thời hoàn toàn bình thường, không có đường code nào đóng cái này khi mở cái kia.
+
+Bản chất: **một dock chỉ hiện một panel**. Nên agent và một panel chỉ sống chung được khi ở hai bên khác nhau.
+
+Nguyên nhân thật của báo cáo: trước khi thêm `sidebar_side: right` vào settings của họ, agent rơi về default `left` — đúng bên họ để git + outline. Ba thứ tranh một dock.
+
+Nhưng đối chiếu default shipped mới thấy defect chung, không riêng họ:
+
+| | trái | phải |
+|---|---|---|
+| shipped | project_panel (**starts_open: true**) + **agent** | rail, git, outline (đều đóng sẵn) |
+
+Agent bị ghép đúng với panel **duy nhất** mở sẵn. Người dùng mới cài, bấm agent lần đầu là project panel biến mất.
+
+Đã đổi default `agent.sidebar_side` → `right` ở **cả hai chỗ**: `assets/settings/default.json` (cái app thật đọc) và `#[default]` trong `settings_content`. Test `the_agent_does_not_dock_beside_the_panel_that_starts_open` chốt hai điều, cả hai đều đã kiểm chứng ngược:
+- agent không chung dock với panel `starts_open`
+- JSON và `#[default]` **phải khớp nhau** — chính cái bẫy suýt làm tôi suy luận từ nhầm nguồn ở lượt trước
+
+### Còn nợ: hai panel cạnh nhau trong CÙNG một dock
+
+Người dùng muốn project panel và agent nằm cạnh nhau như hai section trong cùng một bên, không phải thay phiên. `Dock::render` chỉ vẽ `visible_entry()` — **đúng một** panel. Cho nhiều panel cùng hiện là tính năng thật: dock phải giữ một tập panel đang hiện thay vì một index, xếp chồng theo trục dọc kèm resize handle, serialize trạng thái đó, và rail phải bật/tắt từng panel một. Chạm code dùng chung của mọi dock/panel — chưa làm, cần plan riêng.
+
 ### Default mode: CLI trước, Chat sau (2026-08-14)
 
 Người dùng muốn bấm agent lần đầu (chưa có preference lưu) phải vào **Terminal/CLI**, không phải Chat. `AgentViewMode`'s `#[default]` (phase 04 để là `Chat`) đổi sang `Terminal` tại `crates/zed_actions/src/lib.rs`. Test `a_first_click_opens_the_cli_rather_than_chat` chốt giá trị này trực tiếp trên enum, không qua mô phỏng UI.
