@@ -1,6 +1,8 @@
 use crate::Sidebar;
 use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE};
-use gpui::{AnyElement, Context, Window};
+use agent_ui::AgentPanel;
+use gpui::{AnyElement, App, Context, Entity, Window};
+use project::AgentId;
 use ui::{Tooltip, prelude::*};
 use zed_actions::agent::{AgentViewMode, OpenAgent};
 
@@ -20,6 +22,18 @@ const RAIL_AGENTS: &[(&str, IconName, &str)] = &[
 ];
 
 impl Sidebar {
+    /// The workspace's agent dock, if one has been added yet.
+    ///
+    /// Read-only and independent of `rail_dock`: the agent panel draws no
+    /// button of its own on the panel rail (`Panel::icon` returns `None`), so
+    /// this exists purely to answer "does this agent have a pane open" for
+    /// the buttons below.
+    fn agent_panel(&self, cx: &App) -> Option<Entity<AgentPanel>> {
+        let multi_workspace = self.multi_workspace.upgrade()?;
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.read(cx).panel::<AgentPanel>(cx)
+    }
+
     /// Buttons that open an agent beside the editor.
     ///
     /// These stand for a pane item rather than a dock panel, so unlike
@@ -30,6 +44,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let panel = self.agent_panel(cx);
         let buttons = RAIL_AGENTS.iter().map(|(agent, icon, label)| {
             // One click reopens the agent the way it was last used — the mode is a
             // choice someone already made, and asking them to make it again every
@@ -44,8 +59,19 @@ impl Sidebar {
                 mode: Some(AgentViewMode::Terminal),
             };
 
+            // Lit whether or not its pane currently has focus, or the dock
+            // holding it happens to be the one on screen: two agents can be
+            // open side by side, so there is no single "the active one" to
+            // point at the way a dock's own panel switcher would.
+            let is_active = panel.as_ref().is_some_and(|panel| {
+                panel
+                    .read(cx)
+                    .has_agent(&AgentId::new(agent.to_string()), cx)
+            });
+
             IconButton::new(*agent, *icon)
                 .icon_size(RAIL_ICON_SIZE)
+                .toggle_state(is_active)
                 // A right-click is the only way to open straight into the terminal,
                 // and a gesture with nothing naming it is a gesture nobody finds.
                 .tooltip({
@@ -87,9 +113,12 @@ impl Sidebar {
 mod tests {
     use crate::Sidebar;
     use crate::sidebar_tests::init_test;
+    use agent_ui::AgentPanel;
     use fs::FakeFs;
     use gpui::{AppContext as _, TestAppContext};
-    use project::Project;
+    use project::{AgentId, Project};
+    use zed_actions::agent::AgentViewMode;
+
     use workspace::MultiWorkspace;
 
     /// Reading the workspace from inside `Sidebar::render` is the re-entrancy trap
@@ -103,6 +132,44 @@ mod tests {
         let project = Project::test(fs, [], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            let mw_entity = cx.entity();
+            let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+            mw.register_sidebar(sidebar, cx);
+        });
+
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// The button reads `is_active` through `Sidebar::agent_panel` on every
+    /// draw, so this exercises the one path the plain draw above never
+    /// touches: a real `AgentPanel` in the workspace, with an agent actually
+    /// open in it, at the moment the rail paints.
+    #[gpui::test]
+    async fn rail_draws_with_an_agent_already_open(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
 
         multi_workspace.update_in(cx, |mw, window, cx| {
             let mw_entity = cx.entity();

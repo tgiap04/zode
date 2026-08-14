@@ -97,6 +97,18 @@ let item = if is_current_pane { pane.item_for_index(tab.ix) }
 
 Dùng tham số `pane` đã mượn sẵn khi tab đến từ chính pane đó. Đã sửa y vậy. Cùng lớp rủi ro: `focus_handle` của tôi đọc pane rồi lần vào active item — rút về `self.active_pane.focus_handle(cx)` như `TerminalPanel`, ít bề mặt hơn trên một đường mà workspace gọi liên tục.
 
+### Active-icon trên rail, và một vụ đi lạc theo default dock (2026-08-14)
+
+Yêu cầu: bấm agent nào thì icon đó phải sáng lên trên rail — cùng ngôn ngữ hiệu ứng với `render_rail_panels` (`toggle_state`), chứ rail agent hiện tại chỉ là nút trơn.
+
+Thêm `AgentPanel::has_agent(&AgentId, cx)` (đọc `view_for`), và `Sidebar::agent_panel(cx)` để rail gọi vào — kéo theo `sidebar` phải phụ thuộc `agent_ui` (chiều mới, không vòng, cùng kiểu `sidebar` đã phụ thuộc `recent_projects`). `render_rail_agents` giờ tính `is_active` mỗi agent độc lập — **không** phải kiểu "chỉ một active_index" như `render_rail_panels`, vì hai agent có thể đứng cạnh nhau cùng lúc, nên cả hai icon có thể sáng cùng lúc.
+
+**Đi lạc giữa đường:** cùng lúc đó, người dùng báo "bấm Claude/Codex ra section trống" và "muốn mở git panel + agent cùng lúc" — tôi đọc `SidebarDockPosition::default() = Left` trong `settings_content/src/agent.rs`, thấy git panel/project panel cũng "Default: left" trong doc comment, và **suýt đổi default sang Right** dựa trên đó. Sai: doc comment không phải giá trị thật — `assets/settings/default.json` mới là default thật sự app dùng, và nó đã ghi đè: `git_panel.dock = "right"`, `outline_panel.dock = "right"`, chỉ `project_panel.dock = "left"`. Đổi sang Right sẽ đâm thẳng vào git+outline, tệ hơn nguyên trạng. Đã revert cả hai file trước khi commit.
+
+Đọc tiếp `~/.config/zed/settings.json` của người dùng mới ra đầu mối thật: họ có `"git_panel": {"dock": "left"}` (override cá nhân) và `"agent": {"dock": "left", ...}` — nhưng field đúng của agent trong fork này là `sidebar_side`, không phải `dock`. Key `dock` bị bỏ qua lặng lẽ (schema không nhận field lạ), agent rơi về default thật (`left`) — đúng ngay chỗ họ đã dời git panel tới. Đây là **setting cá nhân lệch schema**, không phải bug trong repo — không sửa trong lần này, đã báo lại cho người dùng để họ tự đổi `sidebar_side` hoặc dời git panel.
+
+Bài học: khi một field có tài liệu "Default: X" ở nhiều struct, luôn tra `assets/settings/default.json` trước khi suy ra có va nhau hay không — doc comment có thể lệch với giá trị ship thật.
+
 **Chưa tái hiện được bằng test.** Ba lần thử (show → docked+focused → có vẽ) đều pass; đường drag cần `DraggedTab` thật và máy kéo-thả đứng sau nó. Test `showing_an_agent_in_a_docked_panel_draws` chỉ phủ đường thêm-và-vẽ, và tên nó nói đúng chừng đó — không nhận vơ phủ luôn drag.
 
 ### Section rỗng lúc khởi động (2026-08-14)

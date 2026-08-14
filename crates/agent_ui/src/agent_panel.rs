@@ -147,6 +147,17 @@ impl AgentPanel {
         }
     }
 
+    /// Whether `agent` currently has an open pane in this panel.
+    ///
+    /// The rail's icon uses this to show itself as active — a running agent
+    /// stays lit whether or not its pane happens to have focus, or the dock
+    /// happens to be the one on screen right now. Two agents can be open at
+    /// once, so this is a per-agent signal rather than a single "the active
+    /// one" index.
+    pub fn has_agent(&self, agent: &AgentId, cx: &App) -> bool {
+        self.view_for(agent, cx).is_some()
+    }
+
     fn view_for(&self, agent: &AgentId, cx: &App) -> Option<(Entity<Pane>, Entity<AgentView>)> {
         self.center.panes().into_iter().find_map(|pane| {
             let view = pane
@@ -488,6 +499,57 @@ mod tests {
         assert!(
             !dock_is_open(&panel, cx),
             "a panel with no agent in it must not take a section of the window"
+        );
+    }
+
+    /// The rail's active-icon effect reads this directly, so it has to track
+    /// an agent's pane through the whole lifecycle the rail cares about: not
+    /// open, open, and closed again — not just the middle state.
+    #[gpui::test]
+    async fn has_agent_tracks_a_pane_through_its_lifecycle(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let claude = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let codex = AgentId::new(project::CODEX_AGENT_ID.to_string());
+
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel.has_agent(&claude, cx)),
+            "nobody has opened either agent yet"
+        );
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(claude.clone(), AgentViewMode::Terminal, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            panel.read_with(cx, |panel, cx| panel.has_agent(&claude, cx)),
+            "claude has a pane now, so the rail's claude icon must light up"
+        );
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel.has_agent(&codex, cx)),
+            "opening claude must not light up codex's icon too"
+        );
+
+        let (pane, item) = panel.read_with(cx, |panel, cx| {
+            let pane = panel.active_pane.clone();
+            let item = pane
+                .read(cx)
+                .items()
+                .next()
+                .expect("claude's item")
+                .item_id();
+            (pane, item)
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(item, SaveIntent::Skip, window, cx)
+        })
+        .await
+        .expect("closing claude");
+        cx.run_until_parked();
+
+        assert!(
+            !panel.read_with(cx, |panel, cx| panel.has_agent(&claude, cx)),
+            "claude's pane is gone, so the rail must stop showing it as active"
         );
     }
 
