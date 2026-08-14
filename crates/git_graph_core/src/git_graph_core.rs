@@ -778,14 +778,18 @@ mod tests {
             "the fixture has to actually branch for this to test anything"
         );
         assert!(
-            data.commits.iter().any(|commit| commit.lanes < data.max_lanes),
+            data.commits
+                .iter()
+                .any(|commit| commit.lanes < data.max_lanes),
             "some row must be narrower than the deepest one, or per-row lanes buys nothing \
              over max_lanes: {:?} against max {}",
             data.commits.iter().map(|c| c.lanes).collect::<Vec<_>>(),
             data.max_lanes
         );
         assert!(
-            data.commits.iter().all(|commit| commit.lanes <= data.max_lanes),
+            data.commits
+                .iter()
+                .all(|commit| commit.lanes <= data.max_lanes),
             "and none may exceed it"
         );
     }
