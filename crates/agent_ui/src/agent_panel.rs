@@ -444,14 +444,36 @@ impl EventEmitter<PanelEvent> for AgentPanel {}
 
 impl Render for AgentPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A zoomed pane is drawn *in place of* the group, never handed to it.
+        // `PaneGroup::render` renders the pane it is given as an empty div, on
+        // the understanding that the workspace's absolute overlay draws it
+        // instead (`workspace.rs`, `.children(self.zoomed…)`). This panel has no
+        // such overlay, so handing it over left the column drawing a blank
+        // surface at full width — measured: dock 1920px, surface 1912x1065,
+        // agent view absent. Here zoom means "only this one, in place", so it is
+        // the group that steps aside.
+        if let Some(pane) = self.zoomed_pane.as_ref().and_then(|pane| pane.upgrade()) {
+            return div()
+                .id("agent-panel-root")
+                .debug_selector(|| "agent-panel-root".into())
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .child(
+                    div()
+                        .id("agent-panel-surface")
+                        .debug_selector(|| "agent-panel-surface".into())
+                        .size_full()
+                        .overflow_hidden()
+                        .bg(cx.theme().colors().editor_background)
+                        .child(pane),
+                );
+        }
+
         let center = self
             .workspace
             .update(cx, |workspace, cx| {
                 self.center.render(
-                    self.zoomed_pane
-                        .as_ref()
-                        .map(|pane| pane.clone().into())
-                        .as_ref(),
+                    None,
                     &workspace::PaneRenderContext {
                         follower_states: &Default::default(),
                         active_call: workspace.active_call(),
@@ -1128,6 +1150,14 @@ mod tests {
                 cx,
             );
         });
+        // Docked and focused, or the column is never drawn and every bounds
+        // assertion below reads `None` for a reason that has nothing to do with
+        // zoom — which is exactly how this test first passed a broken fix.
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
         cx.run_until_parked();
 
         let fills = |cx: &mut gpui::VisualTestContext| {
@@ -1147,6 +1177,22 @@ mod tests {
             fills(cx),
             "zoomed, the column has to claim the centre or the button does nothing — \
              which is exactly what it did while ZoomIn fell through to the catch-all arm"
+        );
+
+        // Claiming the centre is worth nothing if the column then draws an empty
+        // box, which is what happened when the zoomed pane was handed to
+        // `PaneGroup::render`: that renders it as an empty div, on the
+        // understanding that the workspace's absolute overlay is drawing it —
+        // and this panel has no overlay. Both halves of the screen went blank
+        // while every state assertion above still passed.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let agent = cx
+            .debug_bounds("agent-view")
+            .expect("the zoomed agent must still be drawn");
+        assert!(
+            agent.size.width > px(0.) && agent.size.height > px(0.),
+            "the zoomed agent drew with no area: {agent:?}"
         );
 
         pane.update_in(cx, |pane, window, cx| {
