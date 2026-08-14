@@ -50,13 +50,17 @@
   },
   "stats": {
     "fps": "120 FPS",
-    "fpsLabel": "Render trực tiếp qua GPU Metal/Vulkan",
+    "fpsLabel": "Tăng tốc GPU qua nhân GPUI thuần túy",
+    "fpsTag": "120 Hz Chuẩn nét",
     "startup": "< 5 ms",
     "startupLabel": "Thời gian khởi động lạnh tức thì",
+    "startupTag": "Khởi động < 5ms",
     "memory": "68 MB",
-    "memoryLabel": "RAM khi mở 3 Repos + Kết nối DB + Docker",
+    "memoryLabel": "RAM cho 3 Repo + DB + Docker đang chạy",
+    "memoryTag": "Không Electron",
     "latency": "0.9 ms",
-    "latencyLabel": "Độ trễ gõ phím đến điểm ảnh hiển thị"
+    "latencyLabel": "Phản hồi gõ phím đến điểm ảnh màn hình",
+    "latencyTag": "Độ trễ tức thì"
   },
   "idePreview": {
     "eyebrow": "Xem trước All-In-One Studio",

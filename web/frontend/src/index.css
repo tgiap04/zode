@@ -1235,47 +1235,139 @@ html, body {
   transform: translateX(3px);
 }
 
-/* Stats Row Section */
-.stats-row-section {
-  padding: var(--spacing-section-lg) 0;
+/* Telemetry Benchmark Strip (Authentic Swiss-Editorial Engineering Dock) */
+.telemetry-strip-section {
+  padding: var(--spacing-section-sm) 0;
   background: transparent;
-  border-top: 1px solid var(--color-hairline);
-  border-bottom: 1px solid var(--color-hairline);
 }
 
-.stats-grid {
+.telemetry-strip-dock {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 32px;
-  text-align: center;
+  grid-template-columns: repeat(4, 1fr);
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
 }
 
-.stat-cell {
+[data-theme="dark"] .telemetry-strip-dock {
+  background: #090D15;
+  border-color: #1E293B;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.telemetry-cell {
+  padding: 32px 28px;
+  border-right: 1px solid #E2E8F0;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 0 16px;
-  border-right: 1px solid var(--color-hairline-soft);
-  min-width: 0;
+  align-items: flex-start;
+  transition: background-color 180ms ease;
+  position: relative;
 }
 
-.stat-cell:last-child {
+[data-theme="dark"] .telemetry-cell {
+  border-right-color: #1E293B;
+}
+
+.telemetry-cell:last-child {
   border-right: none;
 }
 
-.stat-number {
-  font-size: clamp(36px, 4.5vw, 52px);
-  font-weight: 700;
-  line-height: 1.1;
-  letter-spacing: -1.5px;
-  color: var(--color-ink-strong);
+.telemetry-cell:hover {
+  background: rgba(37, 99, 235, 0.03);
+}
+
+[data-theme="dark"] .telemetry-cell:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.telemetry-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin-bottom: 8px;
 }
 
-.stat-label {
-  font-size: 14px;
+.telemetry-number {
+  font-family: var(--font-mono);
+  font-size: clamp(34px, 3.6vw, 46px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -1.5px;
+  color: var(--color-ink-strong);
+}
+
+.telemetry-unit {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--brand-blue-700);
+  letter-spacing: -0.2px;
+}
+
+[data-theme="dark"] .telemetry-unit {
+  color: #60A5FA;
+}
+
+.telemetry-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
   color: var(--color-steel);
-  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+[data-theme="dark"] .telemetry-title {
+  color: #94A3B8;
+}
+
+.telemetry-desc {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-slate);
+  font-weight: 450;
+}
+
+[data-theme="dark"] .telemetry-desc {
+  color: #64748B;
+}
+
+@media (max-width: 992px) {
+  .telemetry-strip-dock {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .telemetry-cell:nth-child(2) {
+    border-right: none;
+  }
+  .telemetry-cell:nth-child(1),
+  .telemetry-cell:nth-child(2) {
+    border-bottom: 1px solid #E2E8F0;
+  }
+  [data-theme="dark"] .telemetry-cell:nth-child(1),
+  [data-theme="dark"] .telemetry-cell:nth-child(2) {
+    border-bottom-color: #1E293B;
+  }
+}
+
+@media (max-width: 576px) {
+  .telemetry-strip-dock {
+    grid-template-columns: 1fr;
+  }
+  .telemetry-cell {
+    border-right: none !important;
+    border-bottom: 1px solid #E2E8F0;
+    padding: 24px 20px;
+  }
+  .telemetry-cell:last-child {
+    border-bottom: none;
+  }
+  [data-theme="dark"] .telemetry-cell {
+    border-bottom-color: #1E293B;
+  }
 }
 
 /* IDE Interactive Preview Showcase */

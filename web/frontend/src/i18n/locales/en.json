@@ -51,12 +51,16 @@
   "stats": {
     "fps": "120 FPS",
     "fpsLabel": "GPU-Accelerated Native GPUI Rendering",
+    "fpsTag": "120 Hz Native",
     "startup": "< 5 ms",
     "startupLabel": "Instant Cold Launch Time",
+    "startupTag": "Sub-5ms Startup",
     "memory": "68 MB",
     "memoryLabel": "RAM for 3 Repos + Active DB + Docker",
+    "memoryTag": "Zero Electron",
     "latency": "0.9 ms",
-    "latencyLabel": "Keystroke-to-Pixel Response"
+    "latencyLabel": "Keystroke-to-Pixel Response",
+    "latencyTag": "Real-time"
   },
   "idePreview": {
     "eyebrow": "Interactive All-In-One Studio",
