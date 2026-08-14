@@ -517,6 +517,63 @@ mod tests {
         );
     }
 
+    /// Opening an agent must not put away a panel docked on the other side.
+    ///
+    /// A dock shows one panel at a time, so the agent and a tool panel can only
+    /// coexist by standing on opposite edges — this pins that they then really
+    /// do, rather than one closing the other through some shared path.
+    #[gpui::test]
+    async fn an_agent_and_a_panel_on_the_other_side_stay_open_together(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |store, _cx| {
+                let mut agent_settings = store.get::<AgentSettings>(None).clone();
+                agent_settings.sidebar_side = SidebarDockPosition::Right;
+                store.override_global(agent_settings);
+            });
+        });
+        cx.run_until_parked();
+
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        let other = cx.new(|cx| workspace::dock::test::TestPanel::new(DockPosition::Left, 1, cx));
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx);
+                workspace.add_panel(other.clone(), window, cx);
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+                workspace.focus_panel::<workspace::dock::test::TestPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let (left, right) = workspace
+            .read_with(cx, |workspace, cx| {
+                (
+                    workspace.left_dock().read(cx).is_open(),
+                    workspace.right_dock().read(cx).is_open(),
+                )
+            })
+            .unwrap();
+        assert!(left, "the panel docked left should be open");
+        assert!(
+            right,
+            "and the agent docked right should still be open beside it"
+        );
+    }
+
     /// The dock draws its surface, but the agent inside it draws nothing —
     /// the reported symptom. Drawing is the only way to catch it: every
     /// state assertion (`has_agent`, `items_len`, dock open) passes while
