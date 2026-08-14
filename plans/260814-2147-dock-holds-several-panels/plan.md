@@ -24,7 +24,7 @@ Người dùng muốn xếp chồng chúng thành hai section trong cùng một 
 
 | # | Việc | Trạng thái | Chặn bởi |
 |---|---|---|---|
-| 01 | [Dock giữ một *tập* panel đang hiện](phase-01-a-dock-holds-a-set-of-visible-panels.md) — refactor thuần, hành vi không đổi | planned | — |
+| 01 | [Dock giữ một *tập* panel đang hiện](phase-01-a-dock-holds-a-set-of-visible-panels.md) — refactor thuần, hành vi không đổi | ✅ done | — |
 | 02 | [Xếp chồng + resize](phase-02-stack-them-with-resize-handles.md) | planned | 01 |
 | 03 | [Nút rail/status bar thành toggle từng panel](phase-03-buttons-become-per-panel-toggles.md) | planned | 01 |
 | 04 | [Nhớ trạng thái xếp chồng](phase-04-remember-the-stack.md) — migration DB | planned | 02, 03 |

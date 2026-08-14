@@ -330,6 +330,18 @@ pub struct PanelSizeState {
 struct PanelEntry {
     panel: Arc<dyn PanelHandle>,
     size_state: PanelSizeState,
+    /// Whether this panel is one of the ones the dock is showing.
+    ///
+    /// A dock shows exactly one at a time today, so exactly one entry carries
+    /// this while the dock is open — a stack of several is what this flag is
+    /// here to make possible.
+    ///
+    /// Deliberately a flag on the entry rather than a set of indices held by
+    /// the dock: `add_panel` and `remove_panel` shift entry indices, and the
+    /// fiddly `+= 1` / `-= 1` fixups that already exist for `active_panel_index`
+    /// are exactly the bug this would multiply. A flag moves with the entry it
+    /// belongs to and cannot go stale.
+    visible: bool,
     _subscriptions: [Subscription; 3],
 }
 
@@ -718,6 +730,9 @@ impl Dock {
             PanelEntry {
                 panel: Arc::new(panel.clone()),
                 size_state,
+                // Added put away: `restore_state` and `starts_open` below are
+                // what decide to show it, exactly as before.
+                visible: false,
                 _subscriptions: subscriptions,
             },
         );
@@ -802,6 +817,11 @@ impl Dock {
             .any(|entry| entry.panel.is_agent_panel(cx))
     }
 
+    /// Shows `panel_ix` and puts every other panel in this dock away.
+    ///
+    /// One panel at a time is what a dock does today, and this is the single
+    /// place that decides it — so it is also the single place a stack would
+    /// later stop being exclusive.
     pub fn activate_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if Some(panel_ix) != self.active_panel_index {
             if let Some(active_panel) = self.active_panel_entry() {
@@ -809,6 +829,10 @@ impl Dock {
             }
 
             self.active_panel_index = Some(panel_ix);
+            for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
+                entry.visible = ix == panel_ix;
+            }
+
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(true, window, cx);
             }
@@ -827,12 +851,31 @@ impl Dock {
         Some(&panel_entry.panel)
     }
 
+    /// The panel the dock is drawing, if it is drawing one.
+    ///
+    /// Reads the entries' own `visible` flags rather than `active_panel_index`,
+    /// so what renders and what is marked visible cannot disagree. While a dock
+    /// shows one panel the two answers are the same panel; when a stack becomes
+    /// possible this is the first of them, and callers wanting all of them want
+    /// `visible_entries`.
     fn visible_entry(&self) -> Option<&PanelEntry> {
-        if self.is_open {
-            self.active_panel_entry()
-        } else {
-            None
-        }
+        self.visible_entries().next()
+    }
+
+    fn visible_entries(&self) -> impl Iterator<Item = &PanelEntry> {
+        let is_open = self.is_open;
+        self.panel_entries
+            .iter()
+            .filter(move |entry| is_open && entry.visible)
+    }
+
+    /// Every panel the dock is showing, in the order they are drawn.
+    ///
+    /// Yields at most one while a dock shows a single panel — the point of it
+    /// is that asking "is this panel up?" does not have to go through
+    /// `active_panel_index`, which answers a different question.
+    pub fn visible_panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.visible_entries().map(|entry| &entry.panel)
     }
 
     pub fn zoomed_panel(&self, window: &Window, cx: &App) -> Option<Arc<dyn PanelHandle>> {

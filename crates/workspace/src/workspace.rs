@@ -13337,6 +13337,80 @@ mod tests {
         }
     }
 
+    /// A dock shows exactly one panel, and that is now carried by a `visible`
+    /// flag on each entry rather than a single index. Nothing may set two of
+    /// them while that is still the rule — a second one showing would be a
+    /// panel drawn on top of another, not a stack, because nothing lays them
+    /// out yet.
+    ///
+    /// Every public way to move a dock is driven here rather than just the
+    /// happy path, since the flag is set in one place and cleared in several.
+    #[gpui::test]
+    async fn a_dock_shows_no_more_than_one_panel(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let (first, second) = workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first.clone(), window, cx);
+            workspace.add_panel(second.clone(), window, cx);
+            (first, second)
+        });
+
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.left_dock().read(cx).visible_panels().count()
+            })
+        };
+
+        assert_eq!(shown(cx), 0, "a dock nobody has opened shows nothing");
+
+        for (step, act) in [
+            ("opening the dock", 0usize),
+            ("focusing the first panel", 1),
+            ("focusing the second panel", 2),
+            ("toggling focus back to the centre", 3),
+            ("closing the dock", 4),
+            ("reopening it", 5),
+        ] {
+            workspace.update_in(cx, |workspace, window, cx| match act {
+                0 => workspace.toggle_dock(DockPosition::Left, window, cx),
+                1 => {
+                    workspace.focus_panel::<TestPanel>(window, cx);
+                }
+                2 => workspace.left_dock().update(cx, |dock, cx| {
+                    dock.activate_panel(1, window, cx);
+                }),
+                3 => {
+                    workspace.toggle_panel_focus::<TestPanel>(window, cx);
+                }
+                _ => workspace.toggle_dock(DockPosition::Left, window, cx),
+            });
+            cx.run_until_parked();
+            assert!(
+                shown(cx) <= 1,
+                "{step} left {} panels showing at once",
+                shown(cx)
+            );
+        }
+
+        // Removing whichever panel is up must not leave its flag behind on an
+        // entry that is gone, nor strand the other one as showing-but-closed.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.remove_panel(&second, window, cx);
+                dock.remove_panel(&first, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 0, "a dock with no panels left shows nothing");
+    }
+
     #[gpui::test]
     async fn test_panels(cx: &mut gpui::TestAppContext) {
         init_test(cx);
