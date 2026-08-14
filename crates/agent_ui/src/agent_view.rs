@@ -645,6 +645,11 @@ impl workspace::item::Item for AgentView {
     /// Over rather than instead of: swapping the two resizes the tab as the
     /// editor appears, which moves the tab the user just clicked out from under
     /// the pointer. The label stays, drawn transparent, and holds the width.
+    ///
+    /// The label only — no icon. The pane draws that from `tab_icon` below, and
+    /// sizes and mutes it to match every other tab; drawing one here as well put
+    /// two agent glyphs on the tab. `TerminalView`, which this is modelled on,
+    /// gets away with its own icon because it implements no `tab_icon` at all.
     fn tab_content(
         &self,
         params: workspace::item::TabContentParams,
@@ -665,7 +670,6 @@ impl workspace::item::Item for AgentView {
                         .ok();
                 }
             })
-            .child(Icon::new(agent_icon(self.agent.as_ref())))
             .child(
                 div()
                     .relative()
