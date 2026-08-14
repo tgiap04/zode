@@ -771,6 +771,16 @@ mod tests {
         }
     }
 
+    /// A plain click carries no chosen mode and, the first time an agent is
+    /// opened, finds no stored preference either — `AgentView::open` falls
+    /// all the way through to this default. The CLI is what most people
+    /// already have installed and know how to drive; the chat view is the
+    /// one extra hop through an npx adapter.
+    #[gpui::test]
+    async fn a_first_click_opens_the_cli_rather_than_chat(_cx: &mut TestAppContext) {
+        assert_eq!(AgentViewMode::default(), AgentViewMode::Terminal);
+    }
+
     #[gpui::test]
     async fn every_built_in_agent_has_its_own_glyph(_cx: &mut TestAppContext) {
         let claude = agent_icon(project::CLAUDE_CODE_AGENT_ID);

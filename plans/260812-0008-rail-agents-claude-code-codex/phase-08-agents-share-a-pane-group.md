@@ -109,6 +109,20 @@ Thêm `AgentPanel::has_agent(&AgentId, cx)` (đọc `view_for`), và `Sidebar::a
 
 Bài học: khi một field có tài liệu "Default: X" ở nhiều struct, luôn tra `assets/settings/default.json` trước khi suy ra có va nhau hay không — doc comment có thể lệch với giá trị ship thật.
 
+### Sửa nhầm file settings — zode không đọc config của zed gốc (2026-08-14)
+
+Chẩn đoán trên đúng hướng (git panel + agent chung dock) nhưng tôi tra **sai file**: `~/.config/zed/settings.json` — đó là config của Zed gốc. `crates/paths/src/paths.rs:87-105` (`config_dir()`) cho biết zode dùng thư mục riêng: `~/.config/zode/`. Người dùng nghe theo hướng dẫn sai, sửa file zode không hề đọc, nên bug vẫn còn nguyên — và quay lại báo "bấm Claude không hiện gì" ở lượt sau, tưởng là bug mới.
+
+Đọc đúng file (`~/.config/zode/settings.json`) mới lộ ra: không có key `"agent"` nào — không phải "field sai tên" như tôi đoán lần trước, đơn giản là **chưa override**, nên rơi thẳng về default gốc (`left`), trùng với `git_panel.dock: "left"` họ đã tự đặt. Đã thêm `"agent": {"sidebar_side": "right"}` vào đúng file.
+
+Đánh đổi cần nói rõ với người dùng: `project_panel` của họ đang ở phải và `starts_open: true` — đưa agent sang phải giải quyết đúng xung đột họ báo (git + agent), nhưng đổi sang xung đột khác ít nghiêm trọng hơn (agent + project panel, project panel chỉ mở sẵn lúc khởi động, không phải lúc đang làm việc).
+
+Bài học ghi vào memory: khi debug một fork đổi tên (zed → zode), đừng suy luận đường dẫn config từ tên thư mục quen thuộc — tra `paths.rs`/`config_dir()` trước khi đọc bất kỳ file settings nào.
+
+### Default mode: CLI trước, Chat sau (2026-08-14)
+
+Người dùng muốn bấm agent lần đầu (chưa có preference lưu) phải vào **Terminal/CLI**, không phải Chat. `AgentViewMode`'s `#[default]` (phase 04 để là `Chat`) đổi sang `Terminal` tại `crates/zed_actions/src/lib.rs`. Test `a_first_click_opens_the_cli_rather_than_chat` chốt giá trị này trực tiếp trên enum, không qua mô phỏng UI.
+
 **Chưa tái hiện được bằng test.** Ba lần thử (show → docked+focused → có vẽ) đều pass; đường drag cần `DraggedTab` thật và máy kéo-thả đứng sau nó. Test `showing_an_agent_in_a_docked_panel_draws` chỉ phủ đường thêm-và-vẽ, và tên nó nói đúng chừng đó — không nhận vơ phủ luôn drag.
 
 ### Section rỗng lúc khởi động (2026-08-14)

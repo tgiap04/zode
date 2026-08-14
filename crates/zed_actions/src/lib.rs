@@ -483,12 +483,12 @@ pub mod agent {
     #[serde(rename_all = "snake_case")]
     pub enum AgentViewMode {
         /// The agent's own terminal UI, running the CLI the user installed.
-        Terminal,
-        /// The native conversation view, driven over ACP.
         ///
         /// The default is what an agent opens in before it has ever been opened —
         /// after that, whichever mode it was last used in wins.
         #[default]
+        Terminal,
+        /// The native conversation view, driven over ACP.
         Chat,
     }
 
