@@ -78,6 +78,20 @@ Không hardcode "Claude Code"/"Codex". Thêm agent thứ ba vào `BUILTIN_AGENTS
 - **Đọc code để chắc, không phải test:** `request_connection` trả **chung một connection cho mỗi agent**, còn mỗi `ConversationView` tự gọi `new_session` — nên hai Claude là hai *session* trên một connection, đúng mô hình ACP. Đường terminal thì `create_terminal_task` không gộp theo `TaskId`, mỗi view một process.
 - **Không kiểm được:** việc bỏ chrome. `cx.debug_bounds` đo hộp, không đo màu. Đây là thay đổi phải nhìn bằng mắt — nói thẳng thay vì dựng test lặp lại chính cờ vừa đặt.
 
+### Nối tiếp: git/project panel cũng bo góc — `452c9ef`
+
+Người dùng nêu tiếp sau khi thấy cột agent. Đúng: agent bo góc mà git/project vuông thì đọc như hai loại thứ khác nhau.
+
+**Không** đi thêm bo góc vào từng panel. Chuyển hẳn công thức mặt phẳng lên `Dock::render` — một chỗ quyết định, mọi panel thừa hưởng, và **cái ngoại lệ `is_agent_column` vừa thêm ở `ad1ef85` biến mất**. `AgentPanel` bỏ bản sao công thức của nó, chỉ còn giữ phần tô nền `editor_background` (agent đọc như buffer, không như tool panel).
+
+`overflow_hidden` trên hộp bo góc là **load-bearing**: panel tự tô nền vuông bên trong, không cắt thì góc vuông đè thẳng lên bán kính.
+
+### Test đo đúng cái cần đo — sau khi tôi suýt để nó rỗng
+
+Bỏ padding khỏi `AgentPanel` làm `surface.size == root.size`, và assertion cũ (`surface >= root - SURFACE_MARGIN*2`) **vẫn xanh** — nhưng giờ nó không còn chứng minh gì về khe người dùng đòi. Thêm `debug_selector` lên hộp dock và đo khe thật:
+
+Kiểm chứng ngược (bỏ `.p(SURFACE_MARGIN)` ở dock): đỏ với `column 480px → root 478px` — tức chỉ còn 1px border, không có khe. Có fix: 480 → 472.
+
 ### Còn nợ
 
 `remember_mode` lưu theo agent id, nên hai bản Claude dùng chung mode đã nhớ. Chấp nhận: đó là **giá trị mặc định lúc mở**, không phải trạng thái của phiên đang chạy — đổi mode ở bản này không kéo bản kia theo.
