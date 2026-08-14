@@ -6759,10 +6759,19 @@ impl Workspace {
         // `serialize_workspace` and nothing else — so this is the only place
         // that hears about a resize. The dock records its own stack when panels
         // come and go; this is what catches them being resized.
-        for dock in self.all_docks() {
-            let (key, state) = {
-                let dock = dock.read(cx);
-                (dock.stack_key(), dock.stack_state())
+        //
+        // The agent column is left out. Its stack was being written on every
+        // tick and read back by nobody: the restore below covers the three docks
+        // that have a `DockData` row, and the column has none — `restore_state`
+        // returns before it ever looks at a stack. Restoring it would in any
+        // case put "the agent panel is showing" back onto a panel holding no
+        // agents, which `close_if_empty` closes again on the spot.
+        for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
+            let Some((key, state)) = dock.update(cx, |dock, _cx| {
+                dock.stack_state_if_changed()
+                    .map(|state| (dock.stack_key(), state))
+            }) else {
+                continue;
             };
             self.persist_dock_stack(key, state, cx);
         }
@@ -7744,10 +7753,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let centre = self
-            .center
-            .render(self.zoomed.as_ref(), pane_render_context, window, cx);
-
         // Handed back untouched while no agent is up — and that is load-bearing,
         // not an optimisation. Wrapping the centre in one more flex level moves
         // it by a few pixels, which is enough to slide the tab bar out from
@@ -7755,27 +7760,34 @@ impl Workspace {
         // no column to place, so there is no reason to pay that.
         let side = self.agent_column_position(cx);
         let Some(agent) = self.agent_dock.read(cx).visible_panel().cloned() else {
-            return centre;
+            return self
+                .center
+                .render(self.zoomed.as_ref(), pane_render_context, window, cx);
         };
 
         // Zoomed, the column takes the editor's space as well as its own. The
         // docks stay: this is the centre giving way, not a window-wide overlay.
         // Nothing about the column's stored width is touched, so unzooming needs
         // no memory of what it was — it simply stops asking for the rest.
-        if agent.fills_the_center(window, cx) {
-            return self
-                .render_dock(side, &self.agent_dock, window, cx)
-                .map(|column| {
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .self_stretch()
-                        .child(column.flex_1())
-                        .into_any_element()
-                })
-                .unwrap_or(centre);
+        //
+        // Asked *before* the centre is built. Rendering it first and discarding
+        // it in this branch cost a full pane-group element tree every frame the
+        // column was zoomed — for a centre nobody would see.
+        if agent.fills_the_center(window, cx)
+            && let Some(column) = self.render_dock(side, &self.agent_dock, window, cx)
+        {
+            return div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .self_stretch()
+                .child(column.flex_1())
+                .into_any_element();
         }
+
+        let centre = self
+            .center
+            .render(self.zoomed.as_ref(), pane_render_context, window, cx);
         let Some(column) = self.render_dock(side, &self.agent_dock, window, cx) else {
             return centre;
         };
@@ -13994,6 +14006,189 @@ mod tests {
                     1,
                     "a proportion list that does not describe the sections the \
                      record resolved to must fall back to an even share of them"
+                );
+            });
+        });
+    }
+
+    /// Hiding a panel while the dock is shut must not forget the rest of the stack.
+    ///
+    /// The scan for what was left folded `self.is_open` into its predicate, so a
+    /// closed dock reported nothing remaining however many panels were still
+    /// flagged — clearing `active_panel_index` outright. `Workspace::close_panel`
+    /// reaches `hide_panel_by_id` whether or not the dock is open, so this is the
+    /// ordinary path, not a corner of one.
+    #[gpui::test]
+    async fn hiding_a_panel_in_a_closed_dock_leaves_the_rest_of_the_stack(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let first = workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first.clone(), window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+                // Shut, but still remembering both — which is exactly the state
+                // reopening is supposed to come back to.
+                dock.set_open(false, window, cx);
+            });
+            first
+        });
+        cx.run_until_parked();
+
+        let first_id = first.panel_id();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.hide_panel_by_id(first_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                assert!(
+                    dock.active_panel_index().is_some(),
+                    "the panel still in the stack has to remain the active one"
+                );
+                dock.set_open(true, window, cx);
+                assert_eq!(
+                    dock.visible_panels().count(),
+                    1,
+                    "and reopening comes back to it"
+                );
+            });
+        });
+    }
+
+    /// A stack proportion the workspace never wrote must not reach layout.
+    ///
+    /// The record arrives from the key-value store, and the guard checked only
+    /// the section count and the sum — which `[3.0, -1.0]` satisfies exactly
+    /// while asking `pane_axis` for a negative share.
+    #[gpui::test]
+    async fn a_recorded_proportion_that_is_not_a_proportion_is_declined(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        // Two distinct *types*: a record names panels by `persistent_name`, so
+        // two `TestPanel`s resolve to one section and the length check alone
+        // would reject every case below without the sign check ever running.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let showing = workspace.read_with(cx, |workspace, cx| {
+            workspace.left_dock().read(cx).stack_state().showing
+        });
+        assert_eq!(
+            showing.len(),
+            2,
+            "the fixture has to resolve to two sections or this tests nothing"
+        );
+
+        for flexes in [vec![3., -1.], vec![f32::NAN, f32::NAN], vec![0., 2.]] {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.left_dock().update(cx, |dock, cx| {
+                    dock.apply_stack_state(
+                        &dock::DockStackState {
+                            showing: showing.clone(),
+                            flexes: flexes.clone(),
+                        },
+                        window,
+                        cx,
+                    );
+                    assert!(
+                        dock.stack_state()
+                            .flexes
+                            .iter()
+                            .all(|f| f.is_finite() && *f > 0.),
+                        "{flexes:?} reached layout as {:?}",
+                        dock.stack_state().flexes
+                    );
+                });
+            });
+        }
+    }
+
+    /// A stack nobody moved must not be written again.
+    ///
+    /// `serialize_workspace` fires on a 200ms throttle for every kind of change,
+    /// including all through a divider drag. Writing unconditionally cost a JSON
+    /// encode and an `INSERT OR REPLACE` per dock per tick regardless.
+    #[gpui::test]
+    async fn an_unchanged_stack_is_not_written_a_second_time(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                // Two sections, or there is no proportion to move: one section
+                // can only ever hold the whole dock.
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // `show_panel` records the stack on its way through, so by the time the
+        // serialize pass asks there is nothing new to say — and that is the case
+        // this exists for, since the pass runs on a timer rather than on a change.
+        workspace.update(cx, |workspace, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                assert!(
+                    dock.stack_state_if_changed().is_none(),
+                    "a stack already written down must not be written again"
+                );
+                assert!(
+                    dock.stack_state_if_changed().is_none(),
+                    "however many times the pass comes round"
+                );
+            });
+        });
+
+        // A divider drag is the one change that reaches nothing but the serialize
+        // pass, so a stack that really did move still has to come back. Moved
+        // through the handle `pane_axis` itself writes into, which is what a drag
+        // does and what nothing else records.
+        workspace.update(cx, |workspace, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                *dock.stack_flexes().lock() = vec![1.5, 0.5];
+                assert!(
+                    dock.stack_state_if_changed().is_some(),
+                    "a stack that actually moved has to be written"
+                );
+                assert!(
+                    dock.stack_state_if_changed().is_none(),
+                    "and then settle again"
                 );
             });
         });

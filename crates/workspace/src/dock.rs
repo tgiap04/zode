@@ -311,6 +311,13 @@ pub struct Dock {
     /// the dock instead.
     stack_flexes: Arc<Mutex<Vec<f32>>>,
     stack_bounding_boxes: Arc<Mutex<Vec<Option<Bounds<Pixels>>>>>,
+    /// The stack as last written down, so an unchanged one is not written again.
+    ///
+    /// `serialize_workspace` fires on every kind of workspace change, throttled
+    /// to 200ms — including all through a divider drag. Without this each of
+    /// those ticks cost a JSON encode and an `INSERT OR REPLACE` per dock,
+    /// whether or not that dock's stack had moved at all.
+    last_persisted_stack: Option<DockStackState>,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
     _subscriptions: [Subscription; 2],
@@ -350,6 +357,10 @@ impl Into<settings::DockPosition> for DockPosition {
 }
 
 impl DockPosition {
+    /// How many positions there are, so a fourth dock can take an id space
+    /// past all of them rather than sharing one. See `stack_element_basis`.
+    const COUNT: usize = 3;
+
     /// Also the key a dock's stack is recorded under, so these strings are
     /// persisted: renaming one orphans what users had open.
     pub fn label(&self) -> &'static str {
@@ -480,6 +491,7 @@ impl Dock {
                 is_agent_column: false,
                 stack_flexes: Default::default(),
                 stack_bounding_boxes: Default::default(),
+                last_persisted_stack: None,
                 is_open: false,
                 focus_handle: focus_handle.clone(),
                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
@@ -1050,10 +1062,13 @@ impl Dock {
 
         // Whatever is left takes over as the focused one; nothing left means
         // the dock has no reason to hold width.
-        let remaining = self
-            .panel_entries
-            .iter()
-            .position(|entry| entry.visible && self.is_open);
+        //
+        // Asked of the stack alone. Folding `is_open` into the predicate — as
+        // this did — makes a closed dock report nothing remaining however many
+        // panels are still flagged, so hiding one through `close_panel` cleared
+        // `active_panel_index` outright and the dock reopened onto a stack with
+        // no active panel in it.
+        let remaining = self.panel_entries.iter().position(|entry| entry.visible);
         self.active_panel_index = remaining;
         if remaining.is_none() {
             self.set_open(false, window, cx);
@@ -1075,10 +1090,12 @@ impl Dock {
     /// Deferred rather than written inline: this runs from the middle of the
     /// dock's own update, and the workspace is what holds the key-value store.
     /// `resize_active_panel` persists the other axis the same way.
-    fn persist_stack(&self, cx: &mut Context<Self>) {
+    fn persist_stack(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.stack_state_if_changed() else {
+            return;
+        };
         let workspace = self.workspace.clone();
         let key = self.stack_key();
-        let state = self.stack_state();
         cx.defer(move |cx| {
             if let Some(workspace) = workspace.upgrade() {
                 workspace.update(cx, |workspace, cx| {
@@ -1095,6 +1112,22 @@ impl Dock {
         self.is_agent_column = true;
     }
 
+    /// Where this dock's stack puts its element ids.
+    ///
+    /// Keyed the same way `stack_key` is, and for the same reason: the agent
+    /// column shares a `DockPosition` with the dock beside it, so a basis of
+    /// `BASIS + position` had the two drawing their handles into one id space.
+    /// Out of reach today — the column holds a single panel, so it never draws
+    /// a stack — but the collision would land silently the day it holds two.
+    fn stack_element_basis(&self) -> usize {
+        let offset = if self.is_agent_column {
+            DockPosition::COUNT
+        } else {
+            self.position as usize
+        };
+        STACK_ELEMENT_BASIS + offset
+    }
+
     /// What this dock's stack is recorded under.
     ///
     /// NOT the position: the agent column shares a `DockPosition` with whichever
@@ -1107,6 +1140,31 @@ impl Dock {
         } else {
             self.position.label()
         }
+    }
+
+    /// The proportions the stack's dividers write into.
+    ///
+    /// The very handle `render_stack` gives `pane_axis`, so a test can move a
+    /// divider the way a drag does. That matters because a drag is the one
+    /// change that reaches nothing but the serialize pass — every other one
+    /// goes through `persist_stack` on its way past.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stack_flexes(&self) -> Arc<Mutex<Vec<f32>>> {
+        self.stack_flexes.clone()
+    }
+
+    /// The stack, but only if it differs from the one last written down.
+    ///
+    /// Both writers go through here — the dock itself when panels come and go,
+    /// and `serialize_workspace` when a divider moves — so neither can rewrite
+    /// what the other has just stored.
+    pub fn stack_state_if_changed(&mut self) -> Option<DockStackState> {
+        let state = self.stack_state();
+        if self.last_persisted_stack.as_ref() == Some(&state) {
+            return None;
+        }
+        self.last_persisted_stack = Some(state.clone());
+        Some(state)
     }
 
     /// What this dock is showing, in a form that survives a restart.
@@ -1161,7 +1219,16 @@ impl Dock {
         // Only honour recorded proportions that still describe this many
         // sections; `pane_axis` asserts the two agree, so a stale record has to
         // fall back to an even share rather than reach layout.
+        //
+        // Each share is checked as well as the sum: these arrive from the
+        // key-value store, and `[3.0, -1.0]` sums to exactly the section count
+        // while asking layout for a negative height. The sum alone says nothing
+        // about the parts.
         if state.flexes.len() == indices.len()
+            && state
+                .flexes
+                .iter()
+                .all(|flex| flex.is_finite() && *flex > 0.)
             && (state.flexes.iter().sum::<f32>() - indices.len() as f32).abs() < 0.001
         {
             *self.stack_flexes.lock() = state.flexes.clone();
@@ -1400,13 +1467,26 @@ impl Dock {
     /// element — so the case every dock is in most of the time pays nothing
     /// for the case that is new.
     fn render_showing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let showing: Vec<Arc<dyn PanelHandle>> = self.visible_panels().cloned().collect();
-        let [only] = showing.as_slice() else {
-            return self.render_stack(showing, window, cx);
+        // Counted before collecting, so the one-panel case — which is every
+        // dock nearly all of the time — really does pay nothing for the case
+        // that is new. Collecting first meant a `Vec` and an `Arc` clone per
+        // dock per frame to reach a branch that wanted neither.
+        let (first, has_more) = {
+            let mut showing = self.visible_panels();
+            let first = showing.next().cloned();
+            (first, showing.next().is_some())
         };
-        only.to_any()
-            .cached(StyleRefinement::default().v_flex().size_full())
-            .into_any_element()
+        match first {
+            Some(only) if !has_more => only
+                .to_any()
+                .cached(StyleRefinement::default().v_flex().size_full())
+                .into_any_element(),
+            Some(_) => {
+                let showing: Vec<Arc<dyn PanelHandle>> = self.visible_panels().cloned().collect();
+                self.render_stack(showing, window, cx)
+            }
+            None => div().into_any_element(),
+        }
     }
 
     fn render_stack(
@@ -1434,7 +1514,7 @@ impl Dock {
 
         pane_axis(
             axis,
-            STACK_ELEMENT_BASIS + self.position as usize,
+            self.stack_element_basis(),
             self.stack_flexes.clone(),
             self.stack_bounding_boxes.clone(),
             self.workspace.clone(),
@@ -1995,6 +2075,82 @@ pub mod test {
     impl Render for TestPanel {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().id("test").track_focus(&self.focus_handle(cx))
+        }
+    }
+
+    /// A second panel *type*, so a test can build a stack of two sections.
+    ///
+    /// `Panel::persistent_name` is a static method naming a type, so any number
+    /// of `TestPanel`s resolve to one name in a record — which is why every
+    /// stack test above collapses to a single section, and why the guard on
+    /// stale proportions had nothing exercising it. Two sections need two types.
+    pub struct OtherTestPanel(pub TestPanel);
+
+    impl OtherTestPanel {
+        pub fn new(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self(TestPanel::new(position, activation_priority, cx))
+        }
+    }
+
+    impl EventEmitter<PanelEvent> for OtherTestPanel {}
+
+    impl Render for OtherTestPanel {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().id("other-test-panel")
+        }
+    }
+
+    impl Focusable for OtherTestPanel {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.0.focus_handle.clone()
+        }
+    }
+
+    impl Panel for OtherTestPanel {
+        fn persistent_name() -> &'static str {
+            "OtherTestPanel"
+        }
+
+        fn panel_key() -> &'static str {
+            "OtherTestPanel"
+        }
+
+        fn position(&self, _window: &Window, _: &App) -> DockPosition {
+            self.0.position
+        }
+
+        fn position_is_valid(&self, _: DockPosition) -> bool {
+            true
+        }
+
+        fn set_position(&mut self, position: DockPosition, _: &mut Window, _: &mut Context<Self>) {
+            self.0.position = position;
+        }
+
+        fn default_size(&self, _window: &Window, _: &App) -> Pixels {
+            self.0.default_size
+        }
+
+        fn toggle_action(&self) -> Box<dyn Action> {
+            ToggleTestPanel.boxed_clone()
+        }
+
+        /// `None`, like `TestPanel`'s default: a panel with no icon draws no
+        /// dock button, which keeps this out of the button-list assertions.
+        fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
+            None
+        }
+
+        fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
+            None
+        }
+
+        fn set_active(&mut self, active: bool, _window: &mut Window, _cx: &mut Context<Self>) {
+            self.0.active = active;
+        }
+
+        fn activation_priority(&self) -> u32 {
+            self.0.activation_priority
         }
     }
 
