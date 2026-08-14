@@ -1010,6 +1010,19 @@ mod persistence {
         const NAME: &str = stringify!(AgentViewDb);
 
         const MIGRATIONS: &[&str] = &[
+            // Nothing reads or writes this table.
+            //
+            // It backed `SerializableItem for AgentView` while the agent lived
+            // among the editor's tabs. `c056596` moved it into a dock, where the
+            // workspace's item-restore machinery does not reach, and took the
+            // impl with it — so no agent tab has survived a restart since, the
+            // custom name a session is given least of all.
+            //
+            // Left standing because these migrations are append-only: editing a
+            // past one orphans every install that has already run it. Restoring
+            // tabs again is a decision rather than a repair — it would start an
+            // agent process at launch that nobody asked for, against the rule
+            // `AgentPanel::load` states in as many words.
             sql!(
                 CREATE TABLE agent_views(
                     workspace_id INTEGER,
@@ -1023,9 +1036,9 @@ mod persistence {
                     ON DELETE CASCADE
                 ) STRICT;
             ),
-            // Deliberately without a workspace: `agent_views` restores the tabs a
-            // project had open, while this is how the person likes to work with an
-            // agent, and that travels with them from project to project.
+            // Deliberately without a workspace: this is how the person likes to
+            // work with an agent, and that travels with them from project to
+            // project rather than belonging to one.
             sql!(
                 CREATE TABLE agent_preferences(
                     agent TEXT PRIMARY KEY,
