@@ -93,6 +93,18 @@ Probe mới nói thẳng sự thật:
 
 Cột đã chiếm center đúng — chỉ là rỗng. Đúng cái người dùng thấy.
 
+### Rename cũng ship ra hỏng: handler đặt sai chỗ — `c097be4`
+
+Chuột phải → Rename không mở được ô sửa, cũng không báo lỗi gì.
+
+Cả **hai** đường vào rename — mục menu chuột phải và **double-click** (`pane.rs:2918`, upstream vốn đã tìm nhãn `"Rename"` trong `tab_extra_context_menu_actions`) — đều `dispatch_action` qua **focus handle của item**, tức phân giải theo `AgentView::render`. Tôi lại đặt `.on_action` **chỉ** trên `tab_content`, mà phần tử đó nằm trong đường dispatch **chỉ khi tab không được chọn** — không bao giờ là tab người ta bấm để đổi tên.
+
+`TerminalView` chạy được vì nó có handler ở **cả hai** chỗ: `tab_content` *và* `terminal_view.rs:1243` trên chính view. Tôi chép nửa dưới của mẫu và bỏ nửa trên.
+
+Đặt handler lên view là double-click cũng chạy luôn — không phải thêm gì.
+
+Test dispatch đúng qua focus handle của item, tức **đúng đường cả hai lối đi**; nó không bấm chuột thật (phần đó là code upstream, đã có test riêng).
+
 ### Nợ đã ghi
 
 Đổi tên là **bản sao thứ hai** của cách làm trong `TerminalView` (`custom_title`/`rename_editor`/subscription blur). Dùng chung sẽ phải bọc editor + subscription + tích hợp `Item` — lớn hơn chính tính năng, nên chưa tách. Bản thứ **ba** thì phải tách.
