@@ -1514,13 +1514,20 @@ impl Render for Dock {
             .then(|| self.render_showing(window, cx));
         if let Some(showing) = showing {
             let position = self.position;
+            let agent_column = self.is_agent_column;
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
-                    .on_drag(DraggedDock(position), |dock, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.new(|_| dock.clone())
-                    })
+                    .on_drag(
+                        DraggedDock {
+                            position,
+                            agent_column,
+                        },
+                        |dock, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.new(|_| *dock)
+                        },
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -1898,6 +1905,7 @@ pub mod test {
         pub focus_handle: FocusHandle,
         pub default_size: Pixels,
         pub flexible: bool,
+        pub agent_column: bool,
         pub activation_priority: u32,
         /// Defaults to `None`, matching a panel that contributes no dock button.
         /// Set it when a test needs the panel to appear in an icon list.
@@ -1916,6 +1924,7 @@ pub mod test {
                 focus_handle: cx.focus_handle(),
                 default_size: px(300.),
                 flexible: false,
+                agent_column: false,
                 activation_priority,
                 icon: None,
             }
@@ -1928,6 +1937,15 @@ pub mod test {
         ) -> Self {
             Self {
                 flexible: true,
+                ..Self::new(position, activation_priority, cx)
+            }
+        }
+
+        /// A panel the workspace routes into the agent column rather than the
+        /// dock named by `position`.
+        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self {
+                agent_column: true,
                 ..Self::new(position, activation_priority, cx)
             }
         }
@@ -2015,6 +2033,10 @@ pub mod test {
 
         fn activation_priority(&self) -> u32 {
             self.activation_priority
+        }
+
+        fn is_agent_panel(&self) -> bool {
+            self.agent_column
         }
     }
 

@@ -1385,6 +1385,10 @@ pub struct Workspace {
     _schedule_serialize_ssh_paths: Option<Task<()>>,
     pane_history_timestamp: Arc<AtomicUsize>,
     bounds: Bounds<Pixels>,
+    /// Where the agent column last drew. Unlike the three docks it is not flush
+    /// against a window edge, so `bounds` cannot be used to turn a pointer
+    /// position into its width.
+    agent_column_bounds: Option<Bounds<Pixels>>,
     pub centered_layout: bool,
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
@@ -1849,6 +1853,7 @@ impl Workspace {
             workspace_actions: Default::default(),
             // This data will be incorrect, but it will be overwritten by the time it needs to be used.
             bounds: Default::default(),
+            agent_column_bounds: None,
             centered_layout: false,
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
@@ -7755,6 +7760,24 @@ impl Workspace {
         let Some(column) = self.render_dock(side, &self.agent_dock, window, cx) else {
             return centre;
         };
+        // Absolute, so it measures the column without taking part in its layout
+        // — the same trick the workspace uses to learn its own bounds. Dragging
+        // the handle needs the column's own edge: it sits between a dock and the
+        // centre, so no window edge stands in for it.
+        let column = {
+            let this = self.weak_self.clone();
+            column.relative().child(
+                canvas(
+                    move |bounds, _window, cx| {
+                        this.update(cx, |this, _cx| this.agent_column_bounds = Some(bounds))
+                            .ok();
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+        };
         let (before, after) = match side {
             DockPosition::Left => (Some(column), None),
             _ => (None, Some(column)),
@@ -7979,6 +8002,65 @@ impl Workspace {
             } else {
                 right_dock.resize_active_panel(Some(size), flex_grow, window, cx);
             }
+        });
+    }
+
+    /// Routes a resize-handle drag to the column it belongs to.
+    ///
+    /// `position` alone is not enough to pick one: the agent column shares its
+    /// side with a tool dock, so `agent_column` decides between them first.
+    fn drag_dock_edge(
+        &mut self,
+        dragged: DraggedDock,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.previous_dock_drag_coordinates == Some(pointer) {
+            return;
+        }
+        self.previous_dock_drag_coordinates = Some(pointer);
+
+        if dragged.agent_column {
+            self.resize_agent_column(pointer, window, cx);
+        } else {
+            match dragged.position {
+                DockPosition::Left => {
+                    self.resize_left_dock(pointer.x - self.bounds.left(), window, cx);
+                }
+                DockPosition::Right => {
+                    self.resize_right_dock(self.bounds.right() - pointer.x, window, cx);
+                }
+                DockPosition::Bottom => {
+                    self.resize_bottom_dock(self.bounds.bottom() - pointer.y, window, cx);
+                }
+            }
+        }
+        self.serialize_workspace(window, cx);
+    }
+
+    /// Widens or narrows the agent column to follow a pointer on its handle.
+    ///
+    /// Taken from the column's own bounds rather than the window's: it is the
+    /// one column that touches no window edge. The edge the handle hangs off is
+    /// the one that moves, so the opposite edge is the fixed reference and
+    /// stays put for the whole drag.
+    fn resize_agent_column(
+        &mut self,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.agent_column_bounds else {
+            return;
+        };
+        let new_size = match self.agent_column_position(cx) {
+            DockPosition::Left => pointer.x - bounds.left(),
+            DockPosition::Right | DockPosition::Bottom => bounds.right() - pointer.x,
+        };
+        let new_size = new_size.min(self.bounds.size.width - RESIZE_HANDLE_SIZE);
+        self.agent_dock.update(cx, |dock, cx| {
+            dock.resize_active_panel(Some(new_size), None, window, cx);
         });
     }
 
@@ -8411,8 +8493,14 @@ impl Focusable for Workspace {
     }
 }
 
-#[derive(Clone)]
-struct DraggedDock(DockPosition);
+#[derive(Clone, Copy)]
+struct DraggedDock {
+    position: DockPosition,
+    /// The agent column carries the same `DockPosition` as the tool dock on its
+    /// side, so the position alone cannot say which of the two is under the
+    /// pointer. Without this the agent's handle drives its neighbour.
+    agent_column: bool,
+}
 
 impl Render for DraggedDock {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -8553,40 +8641,13 @@ impl Render for Workspace {
                             .when(self.zoomed.is_none(), |this| {
                                 this.on_drag_move(cx.listener(
                                     move |workspace, e: &DragMoveEvent<DraggedDock>, window, cx| {
-                                        if workspace.previous_dock_drag_coordinates
-                                            != Some(e.event.position)
-                                        {
-                                            workspace.previous_dock_drag_coordinates =
-                                                Some(e.event.position);
-
-                                            match e.drag(cx).0 {
-                                                DockPosition::Left => {
-                                                    workspace.resize_left_dock(
-                                                        e.event.position.x
-                                                            - workspace.bounds.left(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                                DockPosition::Right => {
-                                                    workspace.resize_right_dock(
-                                                        workspace.bounds.right()
-                                                            - e.event.position.x,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                                DockPosition::Bottom => {
-                                                    workspace.resize_bottom_dock(
-                                                        workspace.bounds.bottom()
-                                                            - e.event.position.y,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                            };
-                                            workspace.serialize_workspace(window, cx);
-                                        }
+                                        let dragged = *e.drag(cx);
+                                        workspace.drag_dock_edge(
+                                            dragged,
+                                            e.event.position,
+                                            window,
+                                            cx,
+                                        );
                                     },
                                 ))
                             })
@@ -13185,6 +13246,101 @@ mod tests {
 
             let dock = workspace.right_dock().read(cx);
             assert_eq!(workspace.dock_size(&dock, window, cx).unwrap(), px(800.));
+        });
+    }
+
+    /// The agent column and the tool dock beside it carry the same
+    /// `DockPosition`, so a drag payload holding only that position sends the
+    /// column's own handle to its neighbour — which is what shipped, and why the
+    /// column could not be widened at all.
+    #[gpui::test]
+    async fn dragging_the_agent_columns_handle_resizes_the_agent_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |settings, cx| {
+                settings.update_user_settings(cx, |settings| {
+                    settings
+                        .workspace
+                        .multi_project
+                        .get_or_insert_default()
+                        .sidebar_side = Some(SidebarSide::Left);
+                });
+            });
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_random_database_id();
+
+            let tool = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(tool, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+
+            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
+            workspace.add_panel(agent, window, cx);
+            workspace.agent_dock.update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // Not the window's edge: the tool dock stands between the two, so the
+        // column's own left edge is the only thing a pointer can be measured
+        // against.
+        let column_left = workspace
+            .read_with(cx, |workspace, _| workspace.agent_column_bounds)
+            .expect("the column must record where it drew, or a drag has no reference edge")
+            .left();
+        assert!(
+            column_left > px(0.),
+            "the tool dock should sit between the window edge and the column, \
+             leaving it to start further in"
+        );
+
+        let tool_dock_width = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.drag_dock_edge(
+                DraggedDock {
+                    position: DockPosition::Left,
+                    agent_column: true,
+                },
+                point(column_left + px(460.), px(400.)),
+                window,
+                cx,
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                workspace
+                    .agent_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx),
+                Some(px(460.)),
+                "the column should reach from its own left edge to the pointer"
+            );
+            assert_eq!(
+                workspace
+                    .left_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx),
+                tool_dock_width,
+                "and the tool dock sharing its side must not have moved"
+            );
         });
     }
 
