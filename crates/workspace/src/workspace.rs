@@ -1712,6 +1712,16 @@ impl Workspace {
             cx,
         );
         agent_dock.update(cx, |dock, _cx| dock.mark_as_agent_column());
+        // The column stands on the rail's side, so it has to move when the rail
+        // does — its side decides which edge carries the border and the resize
+        // handle, not just where it is drawn.
+        let agent_dock_follows_rail = cx.observe_global::<SettingsStore>({
+            let agent_dock = agent_dock.clone();
+            move |workspace: &mut Workspace, cx| {
+                let side = workspace.agent_column_position(cx);
+                agent_dock.update(cx, |dock, cx| dock.set_agent_column_position(side, cx));
+            }
+        });
         let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
         let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
         let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
@@ -1751,6 +1761,7 @@ impl Workspace {
         });
 
         let subscriptions = vec![
+            agent_dock_follows_rail,
             cx.observe_window_activation(window, Self::on_window_activation_changed),
             cx.observe_window_bounds(window, move |this, window, cx| {
                 if this.bounds_save_task_queued.is_some() {

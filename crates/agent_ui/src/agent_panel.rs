@@ -1,16 +1,14 @@
 use std::sync::Arc;
 
-use agent_settings::AgentSettings;
 use gpui::Action as _;
 use gpui::{
     AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Subscription, WeakEntity,
     Window,
 };
 use project::{AgentId, Project};
-use settings::SidebarDockPosition;
 use ui::prelude::*;
 use workspace::{
-    Pane, SidebarSide, SplitDirection, Workspace,
+    Pane, SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
     dock::{DockPosition, Panel, PanelEvent},
     pane,
     pane_group::{PaneGroup, SURFACE_MARGIN, SURFACE_ROUNDING},
@@ -368,8 +366,18 @@ impl Panel for AgentPanel {
         "AgentPanel"
     }
 
+    /// The side of the editor the agent column stands on — the rail's side.
+    ///
+    /// Not `agent.sidebar_side`: the agent belongs beside the buttons that open
+    /// it, and a setting of its own only let the two drift to opposite edges.
+    /// Asked of the workspace so this cannot disagree with the column it is
+    /// drawn in.
+    /// Reads the setting rather than asking the workspace, which computes the
+    /// same answer: `Workspace::add_panel` calls this from inside its own
+    /// update, so reaching back through the workspace handle here aborts the
+    /// process — the trap `ccd151f` already paid for once.
     fn position(&self, _window: &Window, cx: &App) -> DockPosition {
-        match AgentSettings::get_global(cx).sidebar_side() {
+        match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
             SidebarSide::Left => DockPosition::Left,
             SidebarSide::Right => DockPosition::Right,
         }
@@ -379,20 +387,16 @@ impl Panel for AgentPanel {
         matches!(position, DockPosition::Left | DockPosition::Right)
     }
 
+    /// Ignored: the column follows the rail, so there is nothing to set here.
+    ///
+    /// Dragging it across would move the agent away from the buttons that open
+    /// it. Moving the rail moves both.
     fn set_position(
         &mut self,
-        position: DockPosition,
+        _position: DockPosition,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
-        let side = match position {
-            DockPosition::Left => SidebarDockPosition::Left,
-            _ => SidebarDockPosition::Right,
-        };
-        let fs = self.project.read(cx).fs().clone();
-        settings::update_settings_file(fs, cx, move |settings, _| {
-            settings.agent.get_or_insert_default().sidebar_side = Some(side)
-        });
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
@@ -593,11 +597,17 @@ mod tests {
     #[gpui::test]
     async fn an_agent_and_a_panel_on_the_other_side_stay_open_together(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
+        // The rail's side, which is what puts the agent column on the right —
+        // `agent.sidebar_side` no longer decides this.
         cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |store, _cx| {
-                let mut agent_settings = store.get::<AgentSettings>(None).clone();
-                agent_settings.sidebar_side = SidebarDockPosition::Right;
-                store.override_global(agent_settings);
+            SettingsStore::update_global(cx, |settings, cx| {
+                settings.update_user_settings(cx, |settings| {
+                    settings
+                        .workspace
+                        .multi_project
+                        .get_or_insert_default()
+                        .sidebar_side = Some(SidebarSide::Right);
+                });
             });
         });
         cx.run_until_parked();
@@ -860,21 +870,29 @@ mod tests {
         );
     }
 
-    /// The panel docks where its setting says, and dragging it across writes that
-    /// setting back — so the two directions have to agree.
+    /// The column stands on the rail's side, and moves when the rail moves.
+    ///
+    /// This used to assert it followed `agent.sidebar_side`, a setting of its
+    /// own — which is exactly how the agent and the buttons that open it could
+    /// end up at opposite edges. That setting no longer decides this.
     #[gpui::test]
-    async fn the_panel_docks_on_the_side_the_setting_names(cx: &mut TestAppContext) {
+    async fn the_column_stands_on_the_rails_side(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
 
-        for (side, expected) in [
-            (SidebarDockPosition::Left, DockPosition::Left),
-            (SidebarDockPosition::Right, DockPosition::Right),
+        for (rail, expected) in [
+            (SidebarSide::Left, DockPosition::Left),
+            (SidebarSide::Right, DockPosition::Right),
         ] {
             cx.update(|_window, cx| {
-                SettingsStore::update_global(cx, |store, _cx| {
-                    let mut agent_settings = store.get::<AgentSettings>(None).clone();
-                    agent_settings.sidebar_side = side;
-                    store.override_global(agent_settings);
+                SettingsStore::update_global(cx, |settings, cx| {
+                    settings.update_user_settings(cx, |settings| {
+                        settings
+                            .workspace
+                            .multi_project
+                            .get_or_insert_default()
+                            .sidebar_side = Some(rail);
+                    });
                 });
             });
             cx.run_until_parked();
@@ -882,7 +900,18 @@ mod tests {
             assert_eq!(
                 cx.update(|window, cx| panel.read(cx).position(window, cx)),
                 expected,
-                "the panel must dock where `sidebar_side` says"
+                "the agent column must stand on the rail's side"
+            );
+            assert_eq!(
+                workspace
+                    .read_with(cx, |workspace, cx| workspace
+                        .agent_dock()
+                        .read(cx)
+                        .position())
+                    .unwrap(),
+                expected,
+                "and the column itself must move, or its border and resize handle \
+                 stay on the edge it left"
             );
         }
     }

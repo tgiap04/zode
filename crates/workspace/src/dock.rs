@@ -521,6 +521,20 @@ impl Dock {
         self.position
     }
 
+    /// Moves the agent column to the other side of the editor.
+    ///
+    /// Only the agent column moves this way — the three ordinary docks are
+    /// defined by their side and never change it, while this one follows the
+    /// rail. The side decides which edge carries the border and the resize
+    /// handle, so it has to change with it rather than only at construction.
+    pub fn set_agent_column_position(&mut self, position: DockPosition, cx: &mut Context<Self>) {
+        if !self.is_agent_column || self.position == position {
+            return;
+        }
+        self.position = position;
+        cx.notify();
+    }
+
     pub fn is_open(&self) -> bool {
         self.is_open
     }
