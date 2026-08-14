@@ -7012,15 +7012,26 @@ impl Workspace {
 
                 let docks = serialized_workspace.docks;
 
-                for (dock, serialized_dock) in [
+                // Read here, where the workspace is in hand, and handed to each
+                // dock — a dock reaching back through the workspace handle from
+                // `restore_state` reads it mid-update and aborts.
+                let stacks = [
+                    workspace.load_persisted_dock_stack(DockPosition::Right, cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Left, cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Bottom, cx),
+                ];
+
+                for ((dock, serialized_dock), stack) in [
                     (&mut workspace.right_dock, docks.right),
                     (&mut workspace.left_dock, docks.left),
                     (&mut workspace.bottom_dock, docks.bottom),
                 ]
                 .iter_mut()
+                .zip(stacks)
                 {
                     dock.update(cx, |dock, cx| {
                         dock.serialized_dock = Some(serialized_dock.clone());
+                        dock.serialized_stack = stack;
                         dock.restore_state(window, cx);
                     });
                 }
@@ -13497,6 +13508,55 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(shown(cx), 0, "a dock with no panels left shows nothing");
+    }
+
+    /// Restoring a dock runs from `add_panel`, which runs inside a `Workspace`
+    /// update — so anything in `restore_state` that reads the workspace back
+    /// through its handle aborts the process on the next launch.
+    ///
+    /// No test reached this before: `restore_state` returns immediately unless
+    /// `serialized_dock` is set, and nothing set it, so the whole restore path
+    /// was unexercised while looking covered.
+    #[gpui::test]
+    async fn restoring_a_dock_does_not_read_the_workspace_it_is_inside(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: true,
+                    active_panel: Some("TestPanel".into()),
+                    zoom: false,
+                });
+                dock.serialized_stack = Some(dock::DockStackState {
+                    showing: vec!["TestPanel".into()],
+                    flexes: vec![1.],
+                });
+            });
+
+            // Adding a panel re-runs `restore_state` from inside this very
+            // update. Before the fix this aborted rather than failed.
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            1,
+            "the recorded panel should be showing after the restore"
+        );
     }
 
     /// A stack has to survive a restart, and an install that never had one has

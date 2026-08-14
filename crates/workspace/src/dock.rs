@@ -272,6 +272,13 @@ pub struct Dock {
     focus_handle: FocusHandle,
     focus_follows_mouse: FocusFollowsMouse,
     pub(crate) serialized_dock: Option<DockData>,
+    /// The stack recorded for this dock, pushed in by the workspace.
+    ///
+    /// Handed over rather than fetched, for the same reason `serialized_dock`
+    /// is: `restore_state` runs from `add_panel`, which itself runs inside a
+    /// `Workspace` update, so reading the workspace back through its handle
+    /// there aborts the process.
+    pub(crate) serialized_stack: Option<DockStackState>,
     /// How the panels showing at once divide the dock's *length*.
     ///
     /// A second axis from `PanelEntry::size_state`, which measures the dock's
@@ -446,6 +453,7 @@ impl Dock {
                 workspace: workspace.downgrade(),
                 panel_entries: Default::default(),
                 active_panel_index: None,
+                serialized_stack: None,
                 stack_flexes: Default::default(),
                 stack_bounding_boxes: Default::default(),
                 is_open: false,
@@ -802,13 +810,7 @@ impl Dock {
             // recorded panels have all been removed must still come back to the
             // panel above rather than to nothing.
             if serialized.visible
-                && let Some(stack) = self
-                    .workspace
-                    .read_with(cx, |workspace, cx| {
-                        workspace.load_persisted_dock_stack(self.position, cx)
-                    })
-                    .ok()
-                    .flatten()
+                && let Some(stack) = self.serialized_stack.clone()
             {
                 self.apply_stack_state(&stack, window, cx);
             }
