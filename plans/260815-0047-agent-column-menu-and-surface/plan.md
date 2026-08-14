@@ -92,6 +92,14 @@ Bỏ padding khỏi `AgentPanel` làm `surface.size == root.size`, và assertion
 
 Kiểm chứng ngược (bỏ `.p(SURFACE_MARGIN)` ở dock): đỏ với `column 480px → root 478px` — tức chỉ còn 1px border, không có khe. Có fix: 480 → 472.
 
+### Nối tiếp: rail cũng thành thẻ, và cột nhánh git bỏ phụ thuộc dữ liệu — `2add453`, `fb16423`
+
+**Rail** (`fb16423`): docks quanh nó thành thẻ bo góc rồi, nên rail chạy vuông liền mạch lên title bar đọc như loại khác. Bo góc **chỉ ở mép hướng vào trong** — mép ngoài áp khung cửa sổ, bo ở đó là khoét một khe hở ra khung chứ không phải tạo seam. Cùng `SURFACE_ROUNDING` với dock.
+
+**Cột nhánh git** (`2add453`): `lane_column_width` tính từ `graph_data.max_lanes` → **một commit rối ở bất kỳ đâu trong log đẩy mọi subject sang phải**. Đọc được bao nhiêu chữ của message phụ thuộc vào repo phân nhánh thế nào. Cố định 5 làn (92px).
+
+Không viết test cho chỗ này. Test kiểu "hằng số bằng chính nó" là tiếng ồn — thay vào đó `lane_column_width()` là **hàm không nhận tham số**: phụ thuộc vào `max_lanes` chính là khuyết tật, và một chữ ký không có gì để đọc nó là rào chắn mạnh hơn test, do compiler giữ.
+
 ### Còn nợ
 
 `remember_mode` lưu theo agent id, nên hai bản Claude dùng chung mode đã nhớ. Chấp nhận: đó là **giá trị mặc định lúc mở**, không phải trạng thái của phiên đang chạy — đổi mode ở bản này không kéo bản kia theo.
