@@ -17,8 +17,11 @@ use workspace::{
 };
 use zed_actions::agent::AgentViewMode;
 
-use crate::agent_view::AgentView;
+use crate::agent_view::{
+    AGENT_COLUMN_KEY, AgentColumnState, AgentView, AgentViewEvent, mode_from_name,
+};
 use settings::Settings as _;
+use util::ResultExt as _;
 
 /// The dock section the agents live in.
 ///
@@ -48,12 +51,23 @@ pub struct AgentPanel {
     /// A stale handle here reads as "still zoomed" to `fills_the_center`, and
     /// the workspace stands the editor down for a pane nobody can see.
     zoomed_pane: Option<WeakEntity<Pane>>,
+    /// Held down while the column is being put back, so the replay does not
+    /// write its own half-built state over the record it is reading.
+    restoring: bool,
     /// Keyed by pane, so a pane's subscription leaves with the pane.
     ///
     /// A `Vec` grew one entry per split for the life of the window: `add_pane`
     /// pushed, and the `Remove` arm below dropped the pane from the group
     /// without ever dropping the subscription that watched it.
-    _subscriptions: HashMap<EntityId, Subscription>,
+    _pane_subscriptions: HashMap<EntityId, Subscription>,
+    /// The same, for the agents themselves — a rename or a mode switch has to be
+    /// written down, and neither reaches the pane as a structural event.
+    ///
+    /// Kept apart from the panes rather than sharing one map: the two are let go
+    /// of at different moments (a pane when it is removed from the group, a view
+    /// when its tab closes), and one map would need both removals to remember
+    /// which kind of thing each key was.
+    _view_subscriptions: HashMap<EntityId, Subscription>,
 }
 
 /// How many agents may stand side by side in the column before the next one
@@ -73,13 +87,15 @@ impl AgentPanel {
 
         Self {
             center: PaneGroup::new(pane.clone()),
-            _subscriptions: HashMap::from([(pane.entity_id(), subscription)]),
+            _pane_subscriptions: HashMap::from([(pane.entity_id(), subscription)]),
+            _view_subscriptions: HashMap::default(),
             active_pane: pane,
             project,
             workspace: workspace.weak_handle(),
             app_state: workspace.app_state().clone(),
             focus_handle: cx.focus_handle(),
             zoomed_pane: None,
+            restoring: false,
         }
     }
 
@@ -135,7 +151,7 @@ impl AgentPanel {
         mode: AgentViewMode,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Entity<AgentView> {
         let view = cx.new(|cx| {
             AgentView::new(
                 agent,
@@ -146,6 +162,14 @@ impl AgentPanel {
                 cx,
             )
         });
+        // A rename or a mode switch changes what has to be written down, and
+        // neither reaches the pane as a structural event.
+        self._view_subscriptions.insert(
+            view.entity_id(),
+            cx.subscribe(&view, |panel, _view, _event: &AgentViewEvent, cx| {
+                panel.persist_tabs(cx);
+            }),
+        );
 
         // Past the cap the agent joins the active pane as a tab rather than
         // taking a share of a column that has none left to give.
@@ -159,19 +183,114 @@ impl AgentPanel {
         }
 
         self.active_pane.update(cx, |pane, cx| {
-            pane.add_item(Box::new(view), true, true, None, window, cx);
+            pane.add_item(Box::new(view.clone()), true, true, None, window, cx);
         });
         window.focus(&self.active_pane.focus_handle(cx), cx);
         cx.notify();
+        view
     }
 
     fn add_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Pane> {
         let pane = Self::new_pane(self.workspace.clone(), self.project.clone(), window, cx);
-        self._subscriptions.insert(
+        self._pane_subscriptions.insert(
             pane.entity_id(),
             cx.subscribe_in(&pane, window, Self::handle_pane_event),
         );
         pane
+    }
+
+    /// Writes down which agents are open, so the next launch comes back to them.
+    ///
+    /// Order is what carries the layout: replaying it through `show_new` splits
+    /// until the cap and tabs after, so the same sequence lands the same way.
+    /// A tab someone dragged to a different pane is the one thing this cannot
+    /// reproduce — it records what is open, not where it was put.
+    fn persist_tabs(&self, cx: &mut Context<Self>) {
+        if self.restoring {
+            return;
+        }
+        let tabs = self
+            .center
+            .panes()
+            .iter()
+            .flat_map(|pane| {
+                pane.read(cx)
+                    .items()
+                    .filter_map(|item| item.downcast::<AgentView>())
+                    .map(|view| view.read(cx).tab_state())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let state = AgentColumnState { tabs };
+
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.persist_workspace_state(AGENT_COLUMN_KEY, "tabs", &state, cx);
+            })
+            .log_err();
+    }
+
+    /// Reopens the agents this workspace had running, and starts them.
+    ///
+    /// Called from `initialize_panels` after the panel is in the workspace, not
+    /// from `load`: opening the column reaches back through the workspace, which
+    /// does not hold this panel yet while `load` is still resolving.
+    ///
+    /// Starting them is the point rather than a side effect — a restored tab
+    /// that will not answer until it is clicked is a picture of an agent, not an
+    /// agent. The conversation itself does not come back: that is the agent's
+    /// own state, reachable through its CLI's resume.
+    pub fn restore_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self
+            .workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.load_workspace_state::<AgentColumnState>(AGENT_COLUMN_KEY, "tabs", cx)
+            })
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if state.tabs.is_empty() {
+            return;
+        }
+
+        // Held down for the whole replay: every `show_new` below would otherwise
+        // write the half-built column back over the record it is reading.
+        self.restoring = true;
+        for tab in &state.tabs {
+            let view = self.show_new(
+                AgentId::new(tab.agent.clone()),
+                mode_from_name(&tab.mode),
+                window,
+                cx,
+            );
+            if let Some(name) = tab.name.clone() {
+                view.update(cx, |view, cx| {
+                    view.restore_custom_name(Some(name.into()), cx);
+                });
+            }
+        }
+        self.restoring = false;
+
+        self.persist_tabs(cx);
+
+        // Opened rather than focused: the column coming back is not a reason to
+        // take the cursor out of the editor at launch.
+        //
+        // And deferred, because opening it runs `Panel::set_active` back through
+        // this very panel — which this method is holding. Called inline it
+        // aborts the process on the first launch after an agent was left open,
+        // which is the trap `ccd151f` already paid for once.
+        //
+        // `window.defer` rather than `cx.defer_in`: the latter hands the closure
+        // a `&mut Self`, so it takes the very lease this is deferring to escape.
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.open_panel::<Self>(window, cx);
+                })
+                .log_err();
+        });
     }
 
     /// Lets go of a pane that is no longer drawn.
@@ -180,7 +299,7 @@ impl AgentPanel {
     /// for the life of the window, and the zoom handle is what left the
     /// workspace hiding the editor for a pane that no longer exists.
     fn forget_pane(&mut self, pane: &Entity<Pane>) {
-        self._subscriptions.remove(&pane.entity_id());
+        self._pane_subscriptions.remove(&pane.entity_id());
         if self
             .zoomed_pane
             .as_ref()
@@ -451,6 +570,16 @@ impl AgentPanel {
             }
             pane::Event::Focus => {
                 self.active_pane = pane.clone();
+            }
+            // A closed tab takes its own subscription with it, for the same
+            // reason a removed pane does — and the record has to be brought up
+            // to date, since one fewer agent is open than a moment ago.
+            pane::Event::RemovedItem { item } => {
+                self._view_subscriptions.remove(&item.item_id());
+                self.persist_tabs(cx);
+            }
+            pane::Event::AddItem { .. } => {
+                self.persist_tabs(cx);
             }
             pane::Event::Remove { .. } => {
                 // The last pane stays: an empty dock with no pane has nowhere to
@@ -1368,11 +1497,16 @@ mod tests {
         }
         cx.run_until_parked();
 
-        let (panes, watched) = panel.read_with(cx, |panel, _| {
-            (panel.center.panes().len(), panel._subscriptions.len())
+        let (panes, watched, views) = panel.read_with(cx, |panel, _| {
+            (
+                panel.center.panes().len(),
+                panel._pane_subscriptions.len(),
+                panel._view_subscriptions.len(),
+            )
         });
         assert_eq!(panes, 2, "two agents should stand in two panes");
         assert_eq!(watched, 2, "one subscription per pane");
+        assert_eq!(views, 2, "and one per agent view");
 
         let second = panel.read_with(cx, |panel, _| panel.active_pane.clone());
         second
@@ -1393,11 +1527,220 @@ mod tests {
         panel.read_with(cx, |panel, _| {
             assert_eq!(panel.center.panes().len(), 1, "one pane left");
             assert_eq!(
-                panel._subscriptions.len(),
+                panel._pane_subscriptions.len(),
                 1,
                 "and one subscription — the closed pane's must have gone with it"
             );
+            assert_eq!(
+                panel._view_subscriptions.len(),
+                1,
+                "and the closed agent's view subscription must have gone too"
+            );
         });
+    }
+
+    /// The agents a workspace had open come back, named as they were named.
+    ///
+    /// Nothing restored an agent tab between `c056596` — which moved the agent
+    /// into a dock and dropped `SerializableItem` with it — and this. The name
+    /// especially: two Claude Code tabs are the same word twice, which is the
+    /// whole reason for being able to rename one.
+    ///
+    /// Driven through the panel's own record rather than a second window,
+    /// because a second `MultiWorkspace` in one test process shares the
+    /// key-value store but not the workspace id, and it is the id that keys it.
+    #[gpui::test]
+    async fn the_column_comes_back_to_the_agents_it_had_open(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_random_database_id();
+                workspace.add_panel(panel.clone(), window, cx);
+            })
+            .unwrap();
+
+        let named = panel.update_in(cx, |panel, window, cx| {
+            panel.show_new(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+            panel.show_new(
+                AgentId::new(project::CODEX_AGENT_ID.to_string()),
+                AgentViewMode::Chat,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let read_record = |cx: &mut gpui::VisualTestContext| {
+            workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace.load_workspace_state::<crate::agent_view::AgentColumnState>(
+                        crate::agent_view::AGENT_COLUMN_KEY,
+                        "tabs",
+                        cx,
+                    )
+                })
+                .unwrap()
+        };
+
+        // Checked here, before the rename below. Asserting only after it would
+        // pass on the rename's own write alone and prove nothing about opening
+        // an agent — which is the case almost every session is.
+        assert_eq!(
+            read_record(cx)
+                .expect("opening two agents should be enough to write them down")
+                .tabs
+                .iter()
+                .map(|tab| (tab.agent.as_str(), tab.mode.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (project::CLAUDE_CODE_AGENT_ID, "terminal"),
+                (project::CODEX_AGENT_ID, "chat"),
+            ],
+            "each agent, in the mode it was opened in"
+        );
+
+        // Docked and drawn first: a rename dispatches through the item's focus
+        // handle, and a view in a column nobody has opened is not in the tree
+        // that handle resolves against.
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Renamed the way a user does — dispatch, type, Enter — so the record
+        // is proved against the real path rather than a field poked in a test.
+        cx.update(|window, cx| {
+            named
+                .read(cx)
+                .focus_handle(cx)
+                .dispatch_action(&crate::RenameAgent, window, cx);
+        });
+        cx.run_until_parked();
+        let editor = named
+            .read_with(cx, |view, _| view.rename_editor().cloned())
+            .expect("Rename must open the editor");
+        editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("the refactor", window, cx);
+        });
+        cx.update(|window, cx| {
+            editor
+                .read(cx)
+                .focus_handle(cx)
+                .dispatch_action(&menu::Confirm, window, cx);
+        });
+        cx.run_until_parked();
+
+        let recorded = read_record(cx).expect("two agents open should have been written down");
+
+        assert_eq!(
+            recorded
+                .tabs
+                .iter()
+                .map(|tab| (tab.agent.as_str(), tab.mode.as_str(), tab.name.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                (project::CLAUDE_CODE_AGENT_ID, "terminal", None),
+                (project::CODEX_AGENT_ID, "chat", Some("the refactor")),
+            ],
+            "each agent, in the mode it was in, under the name it was given"
+        );
+
+        // A relaunch, as far as anything keyed by the workspace id is concerned:
+        // the old column is taken out and a fresh one built in its place. Not a
+        // second workspace — two `MultiWorkspace`s in one test process register
+        // the same proto handlers twice and abort. Not a second panel alongside
+        // the first either, which collides on activation priority.
+        let restored = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace
+                    .agent_dock()
+                    .clone()
+                    .update(cx, |dock, cx| dock.remove_panel(&panel, window, cx));
+                let restored = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+                workspace.add_panel(restored.clone(), window, cx);
+                restored
+            })
+            .unwrap();
+        restored.update_in(cx, |panel, window, cx| panel.restore_tabs(window, cx));
+        cx.run_until_parked();
+
+        restored.read_with(cx, |panel, cx| {
+            let labels: Vec<_> = panel
+                .center
+                .panes()
+                .iter()
+                .flat_map(|pane| {
+                    pane.read(cx)
+                        .items()
+                        .filter_map(|item| item.downcast::<AgentView>())
+                        .map(|view| view.read(cx).tab_label().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(
+                labels,
+                vec!["Claude Code".to_string(), "the refactor".to_string()],
+                "both agents back, and the renamed one still carrying its name"
+            );
+        });
+        assert!(
+            dock_is_open(&restored, cx),
+            "and the column has to be showing, or the tabs are back where nobody can see them"
+        );
+
+        // Closing one has to shrink the record, or an agent someone deliberately
+        // shut comes back on the next launch. This is the one write no other
+        // path covers: opening an agent is also recorded when its own startup
+        // emits `UpdateTab`, but nothing emits anything when a tab is closed.
+        let closing = restored.read_with(cx, |panel, _| panel.active_pane.clone());
+        closing
+            .update_in(cx, |pane, window, cx| {
+                pane.close_active_item(
+                    &pane::CloseActiveItem {
+                        save_intent: Some(SaveIntent::Skip),
+                        close_pinned: true,
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            read_record(cx).map(|state| state.tabs.len()),
+            Some(1),
+            "one agent closed, one left standing in the record"
+        );
+    }
+
+    /// A workspace that had no agents open must not come back with a column.
+    #[gpui::test]
+    async fn a_workspace_with_no_agents_comes_back_without_a_column(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_random_database_id();
+                workspace.add_panel(panel.clone(), window, cx);
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| panel.restore_tabs(window, cx));
+        cx.run_until_parked();
+
+        assert!(
+            !dock_is_open(&panel, cx),
+            "nothing was open, so nothing should be taking width from the editor"
+        );
     }
 
     /// The column stops splitting before a section is too narrow to read.

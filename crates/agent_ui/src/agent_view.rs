@@ -59,6 +59,33 @@ pub enum AgentViewEvent {
     UpdateTab,
 }
 
+/// One agent tab, in a form that survives a restart.
+///
+/// `mode` is stored by name rather than as the enum so the record stays
+/// readable by a build that has since gained a third mode — `mode_from_name`
+/// falls back rather than failing to parse the whole column.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentTabState {
+    pub agent: String,
+    pub mode: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// The agents the column had open, in the order they were opened.
+///
+/// Replayed in that order on the way back, which reproduces the layout as a
+/// consequence rather than by recording it: `AgentPanel::show_new` splits until
+/// it hits its cap and tabs after that, so the same sequence lands the same way.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentColumnState {
+    #[serde(default)]
+    pub tabs: Vec<AgentTabState>,
+}
+
+/// The key-value namespace the column's tabs are recorded under.
+pub(crate) const AGENT_COLUMN_KEY: &str = "agent_column";
+
 impl AgentView {
     /// The conversation this view is showing, if it is showing one.
     ///
@@ -274,6 +301,32 @@ impl AgentView {
         self.custom_name
             .clone()
             .unwrap_or_else(|| self.display_name.clone())
+    }
+
+    /// Everything about this tab that outlives the session behind it.
+    ///
+    /// The conversation itself is the agent's, reachable through its own CLI's
+    /// resume; what the column can put back is which agent, in which mode, under
+    /// what name.
+    pub(crate) fn tab_state(&self) -> AgentTabState {
+        AgentTabState {
+            agent: self.agent.to_string(),
+            mode: mode_name(self.mode).to_string(),
+            name: self.custom_name.as_ref().map(|name| name.to_string()),
+        }
+    }
+
+    /// Puts back the name a restored tab was given, without announcing a change.
+    ///
+    /// Restoring is not renaming: emitting `UpdateTab` here would have the panel
+    /// write down the very state it is in the middle of reading.
+    pub(crate) fn restore_custom_name(
+        &mut self,
+        name: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.custom_name = name;
+        cx.notify();
     }
 
     /// Opens the inline editor over the tab's label.
@@ -517,14 +570,14 @@ fn display_name(agent: &AgentId) -> SharedString {
         .unwrap_or_else(|| agent.0.clone())
 }
 
-fn mode_name(mode: AgentViewMode) -> &'static str {
+pub(crate) fn mode_name(mode: AgentViewMode) -> &'static str {
     match mode {
         AgentViewMode::Terminal => "terminal",
         AgentViewMode::Chat => "chat",
     }
 }
 
-fn mode_from_name(name: &str) -> AgentViewMode {
+pub(crate) fn mode_from_name(name: &str) -> AgentViewMode {
     match name {
         "terminal" => AgentViewMode::Terminal,
         _ => AgentViewMode::Chat,

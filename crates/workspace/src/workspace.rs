@@ -2406,45 +2406,71 @@ impl Workspace {
         .detach_and_log_err(cx);
     }
 
-    /// Records which panels a dock is showing and how they divide it.
+    /// Writes some state down against this workspace, under `namespace`.
     ///
-    /// Beside the panel sizes in the key-value store rather than in a column on
-    /// `workspaces`: see `dock::DOCK_STACK_KEY` for why that table is the wrong
-    /// place for it.
-    pub fn persist_dock_stack(&self, key: &'static str, state: dock::DockStackState, cx: &mut App) {
-        let Some(workspace_id) = self
-            .database_id()
-            .map(|id| i64::from(id).to_string())
-            .or(self.session_id())
-        else {
+    /// The key-value store rather than a column on `workspaces`: that table is
+    /// read positionally, so a new column has to be threaded through every
+    /// SELECT in the right place or every field after it shifts, silently, on
+    /// real user data. A namespace that is simply absent on an older install
+    /// reads as "nothing recorded" — which is the behaviour wanted anyway. See
+    /// `dock::DOCK_STACK_KEY`, the first caller, for the long version.
+    pub fn persist_workspace_state<T: serde::Serialize>(
+        &self,
+        namespace: &'static str,
+        key: &str,
+        state: &T,
+        cx: &mut App,
+    ) {
+        let Some(workspace_id) = self.persisted_state_prefix() else {
             return;
         };
+        let json = match serde_json::to_string(state) {
+            Ok(json) => json,
+            Err(error) => {
+                log::error!("could not record {namespace} state for this workspace: {error}");
+                return;
+            }
+        };
 
+        let key = format!("{workspace_id}:{key}");
         let kvp = db::kvp::KeyValueStore::global(cx);
-        cx.background_spawn(async move {
-            let scope = kvp.scoped(dock::DOCK_STACK_KEY);
-            scope
-                .write(
-                    format!("{workspace_id}:{key}"),
-                    serde_json::to_string(&state)?,
-                )
-                .await
-        })
-        .detach_and_log_err(cx);
+        cx.background_spawn(async move { kvp.scoped(namespace).write(key, json).await })
+            .detach_and_log_err(cx);
     }
 
-    pub fn load_persisted_dock_stack(&self, key: &str, cx: &App) -> Option<dock::DockStackState> {
-        let workspace_id = self
-            .database_id()
-            .map(|id| i64::from(id).to_string())
-            .or(self.session_id())?;
-        let kvp = db::kvp::KeyValueStore::global(cx);
-        let scope = kvp.scoped(dock::DOCK_STACK_KEY);
-        scope
+    pub fn load_workspace_state<T: serde::de::DeserializeOwned>(
+        &self,
+        namespace: &str,
+        key: &str,
+        cx: &App,
+    ) -> Option<T> {
+        let workspace_id = self.persisted_state_prefix()?;
+        db::kvp::KeyValueStore::global(cx)
+            .scoped(namespace)
             .read(&format!("{workspace_id}:{key}"))
             .log_err()
             .flatten()
-            .and_then(|json| serde_json::from_str::<dock::DockStackState>(&json).log_err())
+            .and_then(|json| serde_json::from_str::<T>(&json).log_err())
+    }
+
+    /// What names this workspace in the key-value store.
+    ///
+    /// The session id stands in before a workspace has been written to the
+    /// database, so a window that has never been saved still keeps its state
+    /// for as long as it is open.
+    fn persisted_state_prefix(&self) -> Option<String> {
+        self.database_id()
+            .map(|id| i64::from(id).to_string())
+            .or(self.session_id())
+    }
+
+    /// Records which panels a dock is showing and how they divide it.
+    pub fn persist_dock_stack(&self, key: &'static str, state: dock::DockStackState, cx: &mut App) {
+        self.persist_workspace_state(dock::DOCK_STACK_KEY, key, &state, cx);
+    }
+
+    pub fn load_persisted_dock_stack(&self, key: &str, cx: &App) -> Option<dock::DockStackState> {
+        self.load_workspace_state(dock::DOCK_STACK_KEY, key, cx)
     }
 
     pub fn set_panel_size_state<T: Panel>(
@@ -6624,8 +6650,11 @@ impl Workspace {
         self.database_id
     }
 
+    /// Public so a test outside this crate can stand a second workspace on the
+    /// same id — which is what a relaunch amounts to for anything keyed by it,
+    /// such as the agent column's record of what it had open.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_database_id(&mut self, id: WorkspaceId) {
+    pub fn set_database_id(&mut self, id: WorkspaceId) {
         self.database_id = Some(id);
     }
 
