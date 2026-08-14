@@ -1,5 +1,6 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::pane_group::element::pane_axis;
+use crate::pane_group::{SURFACE_MARGIN, SURFACE_ROUNDING};
 use crate::persistence::model::DockData;
 use crate::{
     DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, SidebarSide, WorkspaceSettings,
@@ -1593,6 +1594,7 @@ impl Render for Dock {
 
             div()
                 .id("dock-panel")
+                .debug_selector(|| "dock-panel".into())
                 .key_context(dispatch_context)
                 .track_focus(&self.focus_handle(cx))
                 .focus_follows_mouse(self.focus_follows_mouse, cx)
@@ -1604,28 +1606,35 @@ impl Render for Dock {
                     Axis::Horizontal => this.w_full().h_full().flex_row(),
                     Axis::Vertical => this.h_full().w_full().flex_col(),
                 })
-                // The agent column is a top-level surface, not a tool dock: the
-                // panel inside draws its own gap and corner the way the centre
-                // group does. Painting this background behind it fills that gap
-                // with the very colour of the dock next door — so the seam
-                // vanishes — and leaves the corner nothing to round against.
-                // Both of those read to the user as "no radius, no spacing".
-                .when(!self.is_agent_column, |this| {
-                    this.bg(cx.theme().colors().panel_background)
-                        .border_color(cx.theme().colors().border)
-                        .map(|this| match self.position() {
-                            DockPosition::Left => this.border_r_1(),
-                            DockPosition::Right => this.border_l_1(),
-                            DockPosition::Bottom => this.border_t_1(),
-                        })
-                })
+                // Every dock is a card, the way the centre group is: inset by
+                // the same margin, rounded by the same radius. Drawn here
+                // rather than in each panel so no panel can be the one that
+                // forgets — and so the agent column, which used to carry this
+                // recipe itself, no longer needs to be an exception.
+                //
+                // The inset is padding on a `size_full` box, not a margin: a
+                // 100% box plus a margin exceeds its parent and the parent
+                // clips the overflow, silently eating the very seam the margin
+                // exists to create. A percentage resolves against the content
+                // box, so the padding *is* the gap.
+                //
+                // `overflow_hidden` on the rounded box is load-bearing: panels
+                // paint their own square backgrounds inside it, and without the
+                // clip those corners paint straight over the radius.
                 .child(
                     div()
-                        .map(|this| match self.position().axis() {
-                            Axis::Horizontal => this.w_full().h_full(),
-                            Axis::Vertical => this.h_full().w_full(),
-                        })
-                        .child(showing),
+                        .size_full()
+                        .p(SURFACE_MARGIN)
+                        .child(
+                            div()
+                                .size_full()
+                                .rounded(SURFACE_ROUNDING)
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .bg(cx.theme().colors().panel_background)
+                                .overflow_hidden()
+                                .child(showing),
+                        ),
                 )
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())

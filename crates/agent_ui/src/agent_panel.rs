@@ -12,7 +12,7 @@ use workspace::{
     Pane, SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
     dock::{DockPosition, Panel, PanelEvent},
     pane,
-    pane_group::{PaneGroup, SURFACE_MARGIN, SURFACE_ROUNDING},
+    pane_group::PaneGroup,
 };
 use zed_actions::agent::AgentViewMode;
 
@@ -432,35 +432,21 @@ impl Render for AgentPanel {
             })
             .ok();
 
-        // The same surface the centre group draws for itself: `PaneGroup::render`
-        // applies it only to the centre, on the reasoning that everything it
-        // touches is flush — but this dock is a section of its own, so it carries
-        // its own gap and corner rather than sitting flush against the editor.
-        //
-        // The inset is padding here, and the surface `size_full`, rather than the
-        // centre's `flex_1().self_stretch()` plus a margin. Copied literally, that
-        // pattern drew this panel 473px wide and **zero** high: the width came from
-        // `flex_1` growing along the main axis, and nothing ever gave it a height.
-        // The centre gets away with it because its parent is `h_flex()`, which sets
-        // `align_items: center` for `self_stretch` to override; this panel's parent
-        // is a bare `div()`, and there the stretch yields nothing. Measured, with
-        // the margin ruled out separately — it was innocent.
-        //
-        // Padding also sidesteps the trap the centre's own comment records: a 100%
-        // box plus a margin overflows its parent and the seam gets clipped. A
-        // percentage resolves against the content box, so the padding *is* the gap.
+        // The gap and the corner belong to `Dock::render`, which draws them for
+        // every panel it holds — this one used to carry its own copy of that
+        // recipe and was the reason the dock had to make an exception for it.
+        // What is left here is the fill: agents are read like a buffer, not like
+        // a tool panel, so the surface takes the editor's background.
         div()
             .id("agent-panel-root")
             .debug_selector(|| "agent-panel-root".into())
             .size_full()
-            .p(SURFACE_MARGIN)
             .track_focus(&self.focus_handle)
             .child(
                 div()
                     .id("agent-panel-surface")
                     .debug_selector(|| "agent-panel-surface".into())
                     .size_full()
-                    .rounded(SURFACE_ROUNDING)
                     .overflow_hidden()
                     .bg(cx.theme().colors().editor_background)
                     .children(center),
@@ -577,7 +563,7 @@ mod tests {
     use serde_json::json;
     use settings::SettingsStore;
     use util::path;
-    use workspace::{MultiWorkspace, pane::SaveIntent};
+    use workspace::{MultiWorkspace, pane::SaveIntent, pane_group::SURFACE_MARGIN};
 
     async fn panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
@@ -832,10 +818,26 @@ mod tests {
              the row carrying its name, which is itself part of showing an agent. \
              Got {tab_bar:?} of {surface:?}"
         );
-        assert!(
-            surface.size.height >= root.size.height - SURFACE_MARGIN * 2.,
-            "the surface should span the panel apart from its inset, \
+        // Exactly, not "apart from an inset": the gap and corner moved up to
+        // `Dock::render`, so what this panel is handed is already inset and
+        // everything it draws should fill it.
+        assert_eq!(
+            surface.size, root.size,
+            "the surface should fill the panel it was handed, \
              surface {surface:?} in root {root:?}"
+        );
+
+        // And that the inset is real. Without this the assertion above would
+        // hold just as well if the dock had stopped insetting anything at all —
+        // panel filling panel proves nothing about the gap the user asked for.
+        let column = cx
+            .debug_bounds("dock-panel")
+            .expect("the column holding the panel should be drawn");
+        assert!(
+            column.size.width - root.size.width >= SURFACE_MARGIN * 2.,
+            "the dock should hold its panel inset on both sides, leaving the gap \
+             that separates this column from the one beside it — \
+             column {column:?} around root {root:?}"
         );
     }
 
