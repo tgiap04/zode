@@ -1,4 +1,5 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
+use crate::pane_group::element::pane_axis;
 use crate::persistence::model::DockData;
 use crate::{
     DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, SidebarSide, WorkspaceSettings,
@@ -14,6 +15,8 @@ use gpui::{
     Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
     px,
 };
+use gpui::{Bounds, Pixels};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::sync::Arc;
@@ -24,6 +27,10 @@ use ui::{
 use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
+
+/// Element-id space for a dock's stack, kept clear of the centre pane group's
+/// bases (which start at 0 and grow by `(basis + ix) * 10` as it nests).
+const STACK_ELEMENT_BASIS: usize = 1_000_000;
 
 pub enum PanelEvent {
     ZoomIn,
@@ -265,6 +272,15 @@ pub struct Dock {
     focus_handle: FocusHandle,
     focus_follows_mouse: FocusFollowsMouse,
     pub(crate) serialized_dock: Option<DockData>,
+    /// How the panels showing at once divide the dock's *length*.
+    ///
+    /// A second axis from `PanelEntry::size_state`, which measures the dock's
+    /// *width* (one value for the whole dock, dragged at its outer edge). This
+    /// one splits what is left between stacked panels — never confuse the two:
+    /// writing a stack proportion through `resize_active_panel` would resize
+    /// the dock instead.
+    stack_flexes: Arc<Mutex<Vec<f32>>>,
+    stack_bounding_boxes: Arc<Mutex<Vec<Option<Bounds<Pixels>>>>>,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
     _subscriptions: [Subscription; 2],
@@ -407,6 +423,8 @@ impl Dock {
                 workspace: workspace.downgrade(),
                 panel_entries: Default::default(),
                 active_panel_index: None,
+                stack_flexes: Default::default(),
+                stack_bounding_boxes: Default::default(),
                 is_open: false,
                 focus_handle: focus_handle.clone(),
                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
@@ -792,6 +810,7 @@ impl Dock {
             }
 
             self.panel_entries.remove(panel_ix);
+            self.reset_stack_flexes();
             cx.notify();
 
             true
@@ -832,6 +851,7 @@ impl Dock {
             for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
                 entry.visible = ix == panel_ix;
             }
+            self.reset_stack_flexes();
 
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(true, window, cx);
@@ -871,11 +891,87 @@ impl Dock {
 
     /// Every panel the dock is showing, in the order they are drawn.
     ///
-    /// Yields at most one while a dock shows a single panel — the point of it
-    /// is that asking "is this panel up?" does not have to go through
-    /// `active_panel_index`, which answers a different question.
+    /// The point of it is that asking "is this panel up?" does not have to go
+    /// through `active_panel_index`, which answers a different question.
     pub fn visible_panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
         self.visible_entries().map(|entry| &entry.panel)
+    }
+
+    pub fn is_panel_visible(&self, panel_id: EntityId) -> bool {
+        self.visible_panels()
+            .any(|panel| panel.panel_id() == panel_id)
+    }
+
+    /// Adds a panel to what the dock is showing, keeping the rest up.
+    ///
+    /// The counterpart to `activate_panel`, which is exclusive. This is the one
+    /// that builds a stack.
+    pub fn show_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.panel_entries.get_mut(panel_ix) else {
+            return;
+        };
+        if entry.visible {
+            return;
+        }
+        entry.visible = true;
+        self.reset_stack_flexes();
+        self.active_panel_index = Some(panel_ix);
+        if let Some(entry) = self.panel_entries.get(panel_ix) {
+            entry.panel.set_active(true, window, cx);
+        }
+        self.set_open(true, window, cx);
+        cx.notify();
+    }
+
+    /// Takes a panel out of the stack, closing the dock if it was the last.
+    ///
+    /// Keyed by id rather than index because indices shift under `add_panel`
+    /// and `remove_panel`, and this is reached from a click on a header drawn
+    /// some frames earlier.
+    pub fn hide_panel_by_id(
+        &mut self,
+        panel_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel_ix) = self
+            .panel_entries
+            .iter()
+            .position(|entry| entry.panel.panel_id() == panel_id)
+        else {
+            return;
+        };
+        let Some(entry) = self.panel_entries.get_mut(panel_ix) else {
+            return;
+        };
+        if !entry.visible {
+            return;
+        }
+        entry.visible = false;
+        self.reset_stack_flexes();
+        if let Some(entry) = self.panel_entries.get(panel_ix) {
+            entry.panel.set_active(false, window, cx);
+        }
+
+        // Whatever is left takes over as the focused one; nothing left means
+        // the dock has no reason to hold width.
+        let remaining = self
+            .panel_entries
+            .iter()
+            .position(|entry| entry.visible && self.is_open);
+        self.active_panel_index = remaining;
+        if remaining.is_none() {
+            self.set_open(false, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Shares the dock's length evenly whenever the stack gains or loses a
+    /// panel. `PaneAxis::insert_pane` does the same on a split — a stack that
+    /// silently kept a departed panel's share would leave a gap.
+    fn reset_stack_flexes(&mut self) {
+        let showing = self.panel_entries.iter().filter(|e| e.visible).count();
+        *self.stack_flexes.lock() = vec![1.; showing];
     }
 
     pub fn zoomed_panel(&self, window: &Window, cx: &App) -> Option<Arc<dyn PanelHandle>> {
@@ -1094,6 +1190,123 @@ impl Dock {
         }
     }
 
+    /// Draws whatever the dock is showing: one panel, or a stack of them.
+    ///
+    /// A single panel is drawn exactly as it always was — no header, no axis
+    /// element — so the case every dock is in most of the time pays nothing
+    /// for the case that is new.
+    fn render_showing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let showing: Vec<Arc<dyn PanelHandle>> = self.visible_panels().cloned().collect();
+        let [only] = showing.as_slice() else {
+            return self.render_stack(showing, window, cx);
+        };
+        only.to_any()
+            .cached(StyleRefinement::default().v_flex().size_full())
+            .into_any_element()
+    }
+
+    fn render_stack(
+        &mut self,
+        showing: Vec<Arc<dyn PanelHandle>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if showing.is_empty() {
+            return div().into_any_element();
+        }
+
+        // Panels stack across the dock's own extent: a side dock is a column,
+        // the bottom dock a row.
+        let axis = match self.position.axis() {
+            Axis::Horizontal => Axis::Vertical,
+            Axis::Vertical => Axis::Horizontal,
+        };
+
+        let children: Vec<AnyElement> = showing
+            .iter()
+            .enumerate()
+            .map(|(ix, panel)| self.render_stacked_panel(ix, panel, window, cx))
+            .collect();
+
+        pane_axis(
+            axis,
+            STACK_ELEMENT_BASIS + self.position as usize,
+            self.stack_flexes.clone(),
+            self.stack_bounding_boxes.clone(),
+            self.workspace.clone(),
+        )
+        // Every child reports as not-a-leaf-pane, which is what switches off
+        // the inactive-pane dimming and the active-pane border. Those speak
+        // about editor panes; fading whichever panel is unfocused would be a
+        // surprise nobody asked this dock for.
+        .with_is_leaf_pane_mask(vec![false; children.len()])
+        .children(children)
+        .into_any_element()
+    }
+
+    /// One panel in a stack: a header naming it, then the panel.
+    ///
+    /// The header exists only here. A dock showing one panel has the rail or
+    /// the status bar to say which it is, but a stack has to name its own
+    /// sections and give each a way out.
+    fn render_stacked_panel(
+        &self,
+        ix: usize,
+        panel: &Arc<dyn PanelHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let panel_id = panel.panel_id();
+        let name = SharedString::from(panel.persistent_name());
+        let icon = panel.icon(window, cx);
+        let colors = cx.theme().colors();
+
+        v_flex()
+            .id(("dock-stacked-panel", panel_id))
+            // Keyed by position in the stack rather than by name: two panels of
+            // one kind can stack, and a test asserting how they divide the dock
+            // is asking about first and second, not about which is which.
+            .debug_selector(move || format!("dock-stacked-panel:{ix}"))
+            .size_full()
+            .bg(colors.panel_background)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .children(icon.map(|icon| {
+                                Icon::new(icon).size(IconSize::Small).color(Color::Muted)
+                            }))
+                            .child(Label::new(name).size(LabelSize::Small)),
+                    )
+                    .child(
+                        IconButton::new(("hide-stacked-panel", panel_id), IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(move |_window, cx| Tooltip::simple("Hide Panel", cx))
+                            .on_click(cx.listener(move |dock, _, window, cx| {
+                                dock.hide_panel_by_id(panel_id, window, cx);
+                            })),
+                    ),
+            )
+            // `flex_1` with a floor of zero in a column, so the panel sizes
+            // against a definite height instead of running past the header.
+            .child(
+                div().flex_1().min_h_0().child(
+                    panel
+                        .to_any()
+                        .cached(StyleRefinement::default().v_flex().size_full()),
+                ),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn load_persisted_size_state(
         workspace: &Workspace,
         panel_key: &'static str,
@@ -1114,9 +1327,16 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
-        if let Some(entry) = self.visible_entry() {
+        // Built before the resize-handle closure below, which borrows `self`
+        // and `cx` for as long as it lives; drawing the panels needs both
+        // mutably.
+        let showing = self
+            .visible_entry()
+            .is_some()
+            .then(|| self.render_showing(window, cx));
+        if let Some(showing) = showing {
             let position = self.position;
             let create_resize_handle = || {
                 let handle = div()
@@ -1203,12 +1423,7 @@ impl Render for Dock {
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),
                         })
-                        .child(
-                            entry
-                                .panel
-                                .to_any()
-                                .cached(StyleRefinement::default().v_flex().size_full()),
-                        ),
+                        .child(showing),
                 )
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())

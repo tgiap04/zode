@@ -1,7 +1,7 @@
 # Phase 02 — Xếp chồng và kéo được ranh giới
 
 **Context:** [plan.md](plan.md) · [phase-01](phase-01-a-dock-holds-a-set-of-visible-panels.md)
-**Priority:** P2 · **Status:** planned · **Blocked by:** 01
+**Priority:** P2 · **Status:** ✅ done (2026-08-14) · **Blocked by:** 01
 
 Từ đây mới có thứ nhìn thấy được: hai panel cùng một bên, có tay kéo giữa chúng.
 
@@ -46,3 +46,38 @@ Xếp chồng thì phải biết đâu là đâu, và phải đóng được t�
 ## Rủi ro
 
 Bề cao 13" (R4, đã ghi nợ từ phase 06 của plan rail-agents) quay lại và lần này gắt hơn: chồng 3 panel trên màn 13" thì mỗi cái còn rất ít. `min_size` phải chặn, và chặn *có thể nhìn thấy được* (panel bị đẩy ra khỏi chồng, chứ không co về 0 rồi biến mất im lặng).
+
+---
+
+## Xong (2026-08-14)
+
+`pane_axis` dùng lại được thật — đổi `pub(super)` → `pub(crate)` (và `mod element` theo cùng) là xong, **không viết một dòng layout co giãn nào**. Tay kéo, chia đều khi double-click, `min_size`, tự `serialize_workspace` khi kéo: có sẵn hết.
+
+### Một cái bẫy trong chính `pane_axis`
+
+`is_leaf_pane_mask` mặc định là **`true`** (`self.is_leaf_pane_mask.get(ix).copied().unwrap_or(true)`). Để nguyên thì panel nào không được focus sẽ bị **làm mờ** theo `active_pane_modifiers.inactive_opacity`, và panel đang focus mọc thêm viền — hai thứ nói về *editor pane*, không phải dock panel. Đã truyền `vec![false; n]` để tắt cả hai.
+
+### Hai trục, giữ tách bạch
+
+Thêm `stack_flexes` + `stack_bounding_boxes` vào `Dock`. Không đụng `PanelSizeState` (trục bề ngang dock) — comment tại field nói rõ ghi nhầm sang đường kia là *resize cả dock* chứ không phải chia chồng.
+
+`reset_stack_flexes()` gọi từ **mọi** chỗ đổi tập đang hiện (`activate_panel`, `show_panel`, `hide_panel_by_id`, `remove_panel`) — `pane_axis` có `debug_assert!(flexes.len() == children.len())`, lệch là panic lúc vẽ.
+
+### `show_panel` / `hide_panel_by_id`
+
+Giờ mới thêm (phase 01 cố tình hoãn — YAGNI). `hide` khoá theo **`EntityId` chứ không phải index**: index dịch chuyển dưới `add_panel`/`remove_panel`, mà nút đóng được bấm trên một header vẽ từ vài frame trước.
+
+### Đường một-panel không trả phí
+
+`render_showing` tách hai nhánh: một panel → **đúng element cũ**, không header, không `pane_axis`. 213 test `workspace` xanh trong đó 212 là test cũ không sửa dòng nào — đó là bằng chứng nhánh cũ không đổi.
+
+### Test
+
+`two_panels_in_one_dock_split_it_between_them` **đo bounds thật** (`debug_selector` theo vị trí trong chồng): cả hai có diện tích, cùng bề ngang, xếp trên–dưới không chồng lấn; ẩn một cái thì cái đó thôi được vẽ.
+
+Kiểm chứng ngược: cho stack dùng **sai trục** (`self.position.axis()` thay vì trục vuông góc) → đỏ với `150px × 1073px` cạnh nhau thay vì xếp chồng. Đúng loại lỗi mà smoke test "có vẽ, không panic" sẽ cho qua.
+
+### Còn nợ của phase này
+
+- Kéo lệch tỉ lệ rồi ẩn/hiện lại thì tỉ lệ **reset về đều**. `PaneAxis::insert_pane` cũng làm đúng vậy khi split, nên nhất quán với codebase — nhưng phase 04 lưu tỉ lệ thì nên xét giữ luôn.
+- Chưa kiểm 13" với chồng 3 panel (R4).

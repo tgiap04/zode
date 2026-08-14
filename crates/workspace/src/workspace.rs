@@ -13411,6 +13411,102 @@ mod tests {
         assert_eq!(shown(cx), 0, "a dock with no panels left shows nothing");
     }
 
+    /// Two panels showing at once must actually divide the dock between them.
+    ///
+    /// Measured rather than smoke-tested: the failure mode this guards is a
+    /// section that draws at full width and zero height, which every state
+    /// assertion in the world reports as fine.
+    #[gpui::test]
+    async fn two_panels_in_one_dock_split_it_between_them(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            2,
+            "both panels should be showing"
+        );
+
+        let top = cx
+            .debug_bounds("dock-stacked-panel:0")
+            .expect("the first section of the stack should be drawn");
+        let bottom = cx
+            .debug_bounds("dock-stacked-panel:1")
+            .expect("the second section of the stack should be drawn");
+
+        for (which, bounds) in [("first", top), ("second", bottom)] {
+            assert!(
+                bounds.size.width > px(0.) && bounds.size.height > px(0.),
+                "the {which} section drew with no area: {bounds:?}"
+            );
+        }
+        assert_eq!(
+            top.size.width, bottom.size.width,
+            "stacked panels share the dock's width"
+        );
+        assert!(
+            top.bottom() <= bottom.origin.y,
+            "the stack must read top-to-bottom without overlapping, \
+             got {top:?} then {bottom:?}"
+        );
+
+        // Taking one away hands the whole dock back to the other, rather than
+        // leaving the gap its share used to occupy.
+        let second_id = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .nth(1)
+                .map(|panel| panel.panel_id())
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.hide_panel_by_id(second_id.unwrap(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("dock-stacked-panel:1").is_none(),
+            "the hidden panel must stop being drawn"
+        );
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            1,
+            "one panel left showing"
+        );
+    }
+
     #[gpui::test]
     async fn test_panels(cx: &mut gpui::TestAppContext) {
         init_test(cx);
