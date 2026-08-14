@@ -1,6 +1,6 @@
 # Agent là một cột riêng, bám theo bên của rail
 
-**Status:** planned · **Priority:** P1 · **Branch:** feat/rail-agents-claude-code-codex
+**Status:** ✅ done (2026-08-15) · **Priority:** P1 · **Branch:** feat/rail-agents-claude-code-codex
 
 ## Vấn đề
 
@@ -42,9 +42,9 @@ Dùng lại được **toàn bộ**: width + resize + serialize + stack vừa x�
 
 | # | Việc | Người dùng thấy gì |
 |---|---|---|
-| 01 | `Workspace` có `agent_dock`, vẽ cạnh center theo bên rail, **rỗng** | **Không gì cả** — cố ý |
-| 02 | `AgentPanel` vào dock đó thay vì left/right | Agent thành cột riêng |
-| 03 | Đổi bên khi rail đổi bên + dọn `agent.sidebar_side` | Bám rail |
+| 01 ✅ | `Workspace` có `agent_dock`, vẽ cạnh center theo bên rail, **rỗng** | **Không gì cả** — cố ý |
+| 02 ✅ | `AgentPanel` vào dock đó thay vì left/right | Agent thành cột riêng |
+| 03 ✅ | Đổi bên khi rail đổi bên + dọn `agent.sidebar_side` | Bám rail |
 
 Phase 01 lại là bước vô hình: dock mới tồn tại, được vẽ, nhưng chưa ai vào — mọi rủi ro của 02/03 đứng sau một bước đã xanh.
 
@@ -59,3 +59,29 @@ Phase 01 lại là bước vô hình: dock mới tồn tại, được vẽ, nh�
 ## Định nghĩa xong
 
 Rail trái: `rail | git | AGENT | editor`. Bấm git → git hiện, agent **vẫn còn**. Đổi rail sang phải → agent nhảy sang phải editor. Đóng app mở lại: đúng layout đó, đúng agent đang mở.
+
+---
+
+## Xong (2026-08-15) — `323a856`, `a2cd72b`, `fed06a1`
+
+Rẻ hơn ước lượng đầu: `render_dock` đã lo width + tay kéo + serialize, nên agent chỉ cần **một `Dock` thứ tư**, không phải cột tự chế.
+
+Bốn nhánh `BottomDockLayout` bọc center **giống hệt nhau** → gom về một helper `render_centre_with_agent`, cột thêm ở **một** chỗ.
+
+### Ba lần layout cắn, cả ba do test bắt
+
+1. **Bọc center làm 2 test pane đỏ.** Thêm một tầng flex quanh center dịch thanh tab ra khỏi toạ độ test click. Đã `git stash` kiểm ở HEAD (215 xanh) để chắc là lỗi mình. Sửa: **trả center về nguyên vẹn** khi chưa có agent nào mở — load-bearing, không phải tối ưu.
+2. **`h_flex()` cho hàng chứa cột** → `items_center` → cột `473px × 0px`. Docks nằm trong `div().flex().flex_row()`, không phải `h_flex`.
+3. **Thiếu `self_stretch`** → vẫn 0px, vì nhánh bọc bên ngoài *là* `h_flex` và nó căn giữa con. Centre group mang đúng call đó vì đúng lý do đó.
+
+### Bẫy khoá persistence — đã chặn trước khi nổ
+
+Cột agent mang `DockPosition` dùng chung với dock cạnh nó, mà khoá lưu stack là `{workspace_id}:{position}` → cột (thường rỗng) sẽ **ghi đè bản ghi thật** của dock kia. Đã thêm `Dock::stack_key()` trả `"agent"` **cùng lúc** với việc đưa cột vào `all_docks()`, không tách ra.
+
+### Tái nhập Workspace — lần thứ hai
+
+`Panel::position` được gọi **từ trong** `Workspace::add_panel`. Cho nó `workspace.read_with(...)` là abort — đúng cái `ccd151f` đã trả giá. Lần này **test bắt được ngay** thay vì app chết lúc khởi động. Sửa: đọc thẳng setting, cùng một đáp số.
+
+### Còn hở
+
+Stack **hai kiểu panel khác nhau** giờ chỉ xảy ra ở ba dock thường (git/outline/project) — `agent_ui` không còn dựng được vì agent đã có cột riêng, và test-support chỉ có một `TestPanel`. Cơ chế `apply_stack_state` vẫn có test ở tầng `workspace` (khử trùng lặp, từ chối bản ghi rỗng/lạ, flexes cũ), nhưng đường "hai kiểu khác nhau khôi phục đủ" **không còn test**. Muốn lấp: thêm một kiểu panel thứ hai vào `workspace::dock::test`.
