@@ -98,3 +98,21 @@ let item = if is_current_pane { pane.item_for_index(tab.ix) }
 Dùng tham số `pane` đã mượn sẵn khi tab đến từ chính pane đó. Đã sửa y vậy. Cùng lớp rủi ro: `focus_handle` của tôi đọc pane rồi lần vào active item — rút về `self.active_pane.focus_handle(cx)` như `TerminalPanel`, ít bề mặt hơn trên một đường mà workspace gọi liên tục.
 
 **Chưa tái hiện được bằng test.** Ba lần thử (show → docked+focused → có vẽ) đều pass; đường drag cần `DraggedTab` thật và máy kéo-thả đứng sau nó. Test `showing_an_agent_in_a_docked_panel_draws` chỉ phủ đường thêm-và-vẽ, và tên nó nói đúng chừng đó — không nhận vơ phủ luôn drag.
+
+### Section rỗng lúc khởi động (2026-08-14)
+
+Mở app lên, chưa bấm Claude hay Codex, vẫn có một dải trống chiếm chỗ bên phải.
+
+Đây chính là **hệ quả trực tiếp của món nợ ghi ngay trên**: dock nhớ trạng thái mở qua các phiên (`Dock::restore_state` đọc `visible` từ DB), còn thứ đứng bên trong nó thì không được serialize. Phiên trước có Claude → lần sau dock mở lại, rỗng.
+
+Luật đã thêm: **panel rỗng thì tự đóng** (`close_if_empty` → `PanelEvent::Close`). Không vá riêng đường restore, mà đặt ở `Panel::set_active(true)` — chỗ duy nhất mọi đường dẫn tới một panel hiện hình đều đi qua: restore, `focus_panel`, và cả `ToggleRightDock` dạng chung. Cộng thêm ở nhánh `pane::Event::Remove`, cho trường hợp đóng agent cuối cùng.
+
+**Cái giá của luật đó, và nó không hiển nhiên:** `AgentView::open` trước đây gọi `focus_panel` **trước** rồi mới đọc DB và `show()` trong task. Với luật mới, dock mở ra lúc còn rỗng → tự đóng ngay → agent đi vào một section không ai thấy. Tức là bấm rail sẽ **hỏng hoàn toàn**. Đã đảo thứ tự: `show()` xong mới `focus_panel`.
+
+Ba test, mỗi test đều đã kiểm chứng ngược (tắt fix → đỏ đúng dòng assert đó):
+
+- `a_dock_shown_holding_nothing_closes_itself` — triệu chứng người dùng báo
+- `closing_the_last_agent_puts_the_dock_away` — cùng luật, đọc từ đầu kia
+- `a_rail_click_opens_the_dock_onto_its_agent` — canh đúng cái ordering vừa nói; đảo lại thứ tự cũ là nó đỏ
+
+Còn hở: nếu ai đó bấm `ToggleRightDock` khi panel rỗng, `set_active(true)` bắt được nên dock cũng đóng lại ngay — nhưng đó là "mở rồi đóng trong cùng một chu kỳ", chưa phải "không mở được". Chấp nhận, vì panel này không có icon nên không có nút nào dẫn tới đường đó.

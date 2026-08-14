@@ -93,11 +93,9 @@ impl AgentView {
         let Some(panel) = workspace.panel::<crate::agent_panel::AgentPanel>(cx) else {
             return;
         };
-        workspace.focus_panel::<crate::agent_panel::AgentPanel>(window, cx);
-
         let db = persistence::AgentViewDb::global(cx);
         let stored_agent = agent_id.to_string();
-        cx.spawn_in(window, async move |_workspace, cx| {
+        cx.spawn_in(window, async move |workspace, cx| {
             let remembered = cx
                 .background_executor()
                 .spawn(async move { db.preferences(stored_agent) })
@@ -120,6 +118,15 @@ impl AgentView {
                     }
 
                     panel.show(agent_id, mode, window, cx);
+                })
+                .log_err();
+
+            // Only now, and never before: a panel shown holding nothing closes
+            // itself, so the dock has to be opened onto an agent that is already
+            // standing in it.
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.focus_panel::<crate::agent_panel::AgentPanel>(window, cx);
                 })
                 .log_err();
         })

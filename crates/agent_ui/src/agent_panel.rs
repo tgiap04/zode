@@ -124,6 +124,29 @@ impl AgentPanel {
         pane
     }
 
+    fn is_empty(&self, cx: &App) -> bool {
+        self.center
+            .panes()
+            .iter()
+            .all(|pane| pane.read(cx).items_len() == 0)
+    }
+
+    /// Puts the dock away the moment the panel holds nothing.
+    ///
+    /// A dock remembers being open across restarts, but what stands inside this
+    /// one is not serialized — so a session that had Claude up comes back to a
+    /// section with nothing in it. Empty, it is worse than absent: it takes width
+    /// off the editor, draws a border around a void, and offers nothing to click,
+    /// since this panel deliberately has no icon of its own.
+    ///
+    /// The same holds after the last agent is closed, which is why this is a rule
+    /// about the panel's contents rather than a patch on the restore path.
+    fn close_if_empty(&mut self, cx: &mut Context<Self>) {
+        if self.is_empty(cx) {
+            cx.emit(PanelEvent::Close);
+        }
+    }
+
     fn view_for(&self, agent: &AgentId, cx: &App) -> Option<(Entity<Pane>, Entity<AgentView>)> {
         self.center.panes().into_iter().find_map(|pane| {
             let view = pane
@@ -247,6 +270,7 @@ impl AgentPanel {
                     self.active_pane = self.center.first_pane();
                     window.focus(&self.active_pane.focus_handle(cx), cx);
                 }
+                self.close_if_empty(cx);
                 cx.notify();
             }
             _ => {}
@@ -379,6 +403,17 @@ impl Panel for AgentPanel {
         false
     }
 
+    /// Shown holding nothing, it closes straight back — see `close_if_empty`.
+    ///
+    /// This is the one hook every path to a visible panel runs through: restoring
+    /// the dock from the last session, `focus_panel`, and the generic dock toggle
+    /// all reach `set_active(true)`.
+    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if active {
+            self.close_if_empty(cx);
+        }
+    }
+
     fn activation_priority(&self) -> u32 {
         9
     }
@@ -392,7 +427,7 @@ mod tests {
     use serde_json::json;
     use settings::SettingsStore;
     use util::path;
-    use workspace::MultiWorkspace;
+    use workspace::{MultiWorkspace, pane::SaveIntent};
 
     async fn panel(cx: &mut TestAppContext) -> (Entity<AgentPanel>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
@@ -412,6 +447,139 @@ mod tests {
             cx.new(|cx| AgentPanel::new(workspace, window, cx))
         });
         (panel, cx)
+    }
+
+    /// Whether the dock this panel lives in is taking a section of the window.
+    fn dock_is_open(panel: &Entity<AgentPanel>, cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            let position = panel.read(cx).position(window, cx);
+            panel
+                .read(cx)
+                .workspace
+                .read_with(cx, |workspace, cx| {
+                    match position {
+                        DockPosition::Left => workspace.left_dock(),
+                        DockPosition::Right => workspace.right_dock(),
+                        DockPosition::Bottom => workspace.bottom_dock(),
+                    }
+                    .read(cx)
+                    .is_open()
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// The dock remembers being open from the last session, but what stood inside
+    /// it does not — so the panel comes back holding nothing, and the window gets
+    /// a blank strip where an agent used to be.
+    #[gpui::test]
+    async fn a_dock_shown_holding_nothing_closes_itself(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+
+        panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx);
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            !dock_is_open(&panel, cx),
+            "a panel with no agent in it must not take a section of the window"
+        );
+    }
+
+    /// The rule above puts an ordering under the rail click, and backwards it
+    /// costs the whole feature: open the dock first and it shuts on the empty
+    /// panel, then the agent arrives into a section nobody can see.
+    #[gpui::test]
+    async fn a_rail_click_opens_the_dock_onto_its_agent(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                AgentView::open(
+                    workspace,
+                    project::CLAUDE_CODE_AGENT_ID,
+                    Some(AgentViewMode::Terminal),
+                    window,
+                    cx,
+                )
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len()),
+            1,
+            "the click should have put its agent in the panel"
+        );
+        assert!(
+            dock_is_open(&panel, cx),
+            "and the dock has to be open, or the agent is running where nobody can see it"
+        );
+    }
+
+    /// And the same rule read from the other end: the section is worth its width
+    /// only while an agent is standing in it.
+    #[gpui::test]
+    async fn closing_the_last_agent_puts_the_dock_away(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            dock_is_open(&panel, cx),
+            "an agent is open, so the dock must be showing it"
+        );
+
+        let (pane, agent) = panel.read_with(cx, |panel, cx| {
+            let pane = panel.active_pane.clone();
+            let agent = pane
+                .read(cx)
+                .items()
+                .next()
+                .expect("the agent just shown")
+                .item_id();
+            (pane, agent)
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(agent, SaveIntent::Skip, window, cx)
+        })
+        .await
+        .expect("closing an agent");
+        cx.run_until_parked();
+
+        assert!(
+            !dock_is_open(&panel, cx),
+            "the last agent is gone, so its section must go with it"
+        );
     }
 
     /// The panel docks where its setting says, and dragging it across writes that
