@@ -565,6 +565,8 @@ impl Render for AgentView {
         // editor and its own resize handle, which is exactly the seam this view
         // spent two attempts failing to build for itself from the inside.
         v_flex()
+            .id("agent-view")
+            .debug_selector(|| "agent-view".into())
             .size_full()
             .bg(colors.editor_background)
             .track_focus(&self.focus_handle)

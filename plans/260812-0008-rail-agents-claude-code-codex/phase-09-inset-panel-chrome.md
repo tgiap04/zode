@@ -72,6 +72,27 @@ Tức fork **đã thử** cho sidebar surface riêng và rút lại vì hai marg
 
 Riêng seam agent–editor giờ là 3px (centre) + 3px (agent) = 6px. Cần nhìn mới biết dày quá không.
 
+### Surface đó vẽ ra chiều cao 0 (2026-08-14)
+
+Người dùng báo: bấm Claude/Codex, dock mở ra nhưng **trống trơn** — không tab bar, không terminal, không cả nút Chat|Terminal. Icon trên rail vẫn sáng, tức `has_agent` = true, item có thật.
+
+Mọi assertion trạng thái đều xanh (dock mở, `items_len == 1`, `has_agent`) trong khi panel vẽ ra một cái hộp rỗng. Chỉ **đo bounds thật** mới bắt được:
+
+```
+root:    479px × 1073px
+surface: 473px ×    0px   ← đây
+```
+
+Full width, **zero height**. `flex_1` cho chiều ngang (trục chính), còn chiều dọc thì không ai cấp — `self_stretch` không sinh ra gì cả.
+
+Vì sao centre group dùng đúng pattern đó lại chạy: cha của nó là `h_flex()` = `.flex().flex_row().items_center()` (`ui/src/traits/styled_ext.rs:30`) — `self_stretch()` ở đó tồn tại để **ghi đè** `align_items: center`. Cha của panel này là `div()` trần (`align_items: None`), và ở đó stretch không ra gì. Đã tách riêng để loại trừ margin: bỏ margin đi vẫn `479 × 0`, nên **margin vô can** — thủ phạm là `self_stretch`.
+
+Sửa: đưa gap lên cha thành **padding**, con dùng `size_full`. Percentage resolve theo content box nên padding *chính là* khoảng cách — đồng thời né luôn cái bẫy `size_full` + margin tràn/bị clip mà comment của centre đã ghi. `TerminalPanel::render` là tiền lệ đã chạy: `size_full` trơn, không stretch.
+
+Test `a_shown_agent_actually_occupies_the_panel` đo bounds thật (`debug_selector` + `cx.debug_bounds` sau khi dock + `run_until_parked` vẽ window). Kiểm chứng ngược: trả lại `flex_1().self_stretch()` → đỏ đúng `473px × 0px`. Assertion không chỉ `> 0` mà còn: agent phủ hết chiều ngang surface, phần chiều cao duy nhất nó nhường là tab bar (< 1/4), và surface trải hết panel trừ inset — vì một assertion `> 0` sẽ pass trên một sợi chỉ 1px.
+
+Bài học đã ghi memory: smoke test "có vẽ không panic" **không chứng minh gì** về layout; phải đo.
+
 ### Chưa làm
 
 - **px/py giữa hai agent pane.** Surface đang áp cho cả group; muốn từng pane một tấm riêng thì phải luồn cờ qua `Member::render` (`pane_group.rs:561`), và đó là code dùng chung với centre — đáng một thay đổi riêng, review riêng.

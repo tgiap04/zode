@@ -328,19 +328,34 @@ impl Render for AgentPanel {
         // touches is flush — but this dock is a section of its own, so it carries
         // its own gap and corner rather than sitting flush against the editor.
         //
-        // `flex_1` and `self_stretch` rather than `size_full`, for the reason the
-        // centre records: a 100% box plus a margin overflows its parent, and the
-        // parent clips exactly the seam the margin exists to make.
-        div().size_full().track_focus(&self.focus_handle).child(
-            div()
-                .flex_1()
-                .self_stretch()
-                .m(SURFACE_MARGIN)
-                .rounded(SURFACE_ROUNDING)
-                .overflow_hidden()
-                .bg(cx.theme().colors().editor_background)
-                .children(center),
-        )
+        // The inset is padding here, and the surface `size_full`, rather than the
+        // centre's `flex_1().self_stretch()` plus a margin. Copied literally, that
+        // pattern drew this panel 473px wide and **zero** high: the width came from
+        // `flex_1` growing along the main axis, and nothing ever gave it a height.
+        // The centre gets away with it because its parent is `h_flex()`, which sets
+        // `align_items: center` for `self_stretch` to override; this panel's parent
+        // is a bare `div()`, and there the stretch yields nothing. Measured, with
+        // the margin ruled out separately — it was innocent.
+        //
+        // Padding also sidesteps the trap the centre's own comment records: a 100%
+        // box plus a margin overflows its parent and the seam gets clipped. A
+        // percentage resolves against the content box, so the padding *is* the gap.
+        div()
+            .id("agent-panel-root")
+            .debug_selector(|| "agent-panel-root".into())
+            .size_full()
+            .p(SURFACE_MARGIN)
+            .track_focus(&self.focus_handle)
+            .child(
+                div()
+                    .id("agent-panel-surface")
+                    .debug_selector(|| "agent-panel-surface".into())
+                    .size_full()
+                    .rounded(SURFACE_ROUNDING)
+                    .overflow_hidden()
+                    .bg(cx.theme().colors().editor_background)
+                    .children(center),
+            )
     }
 }
 
@@ -499,6 +514,82 @@ mod tests {
         assert!(
             !dock_is_open(&panel, cx),
             "a panel with no agent in it must not take a section of the window"
+        );
+    }
+
+    /// The dock draws its surface, but the agent inside it draws nothing —
+    /// the reported symptom. Drawing is the only way to catch it: every
+    /// state assertion (`has_agent`, `items_len`, dock open) passes while
+    /// the panel paints an empty box, so this measures real bounds.
+    #[gpui::test]
+    async fn a_shown_agent_actually_occupies_the_panel(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let root = cx
+            .debug_bounds("agent-panel-root")
+            .expect("the panel root should be drawn");
+        assert!(
+            root.size.height > px(0.),
+            "the panel root itself has no height, so nothing inside it can: {root:?}"
+        );
+
+        let surface = cx
+            .debug_bounds("agent-panel-surface")
+            .expect("the panel surface should be drawn");
+        assert!(
+            surface.size.width > px(0.) && surface.size.height > px(0.),
+            "the panel surface drew with no area: {surface:?} (root was {root:?})"
+        );
+
+        let agent = cx
+            .debug_bounds("agent-view")
+            .expect("an agent is open in the panel, so its view must be drawn");
+        assert!(
+            agent.size.width > px(0.) && agent.size.height > px(0.),
+            "the agent drew inside the surface but with no area: {agent:?}"
+        );
+
+        // Filling the surface, not merely present in it: the failure this
+        // guards against left the surface at full width and zero height, so
+        // a "greater than zero" bound alone would pass on a sliver.
+        assert_eq!(
+            agent.size.width, surface.size.width,
+            "the agent should span the surface it sits in"
+        );
+        let tab_bar = surface.size.height - agent.size.height;
+        assert!(
+            tab_bar > px(0.) && tab_bar < surface.size.height / 4.,
+            "the only height the agent should give up is the pane's tab bar — \
+             the row carrying its name, which is itself part of showing an agent. \
+             Got {tab_bar:?} of {surface:?}"
+        );
+        assert!(
+            surface.size.height >= root.size.height - SURFACE_MARGIN * 2.,
+            "the surface should span the panel apart from its inset, \
+             surface {surface:?} in root {root:?}"
         );
     }
 
