@@ -263,8 +263,14 @@ impl AgentView {
         view
     }
 
+    /// The open rename editor, if the tab is being renamed.
+    #[cfg(test)]
+    pub(crate) fn rename_editor(&self) -> Option<&Entity<Editor>> {
+        self.rename_editor.as_ref()
+    }
+
     /// What the tab shows: the name the user gave this session, or the agent's.
-    fn tab_label(&self) -> SharedString {
+    pub(crate) fn tab_label(&self) -> SharedString {
         self.custom_name
             .clone()
             .unwrap_or_else(|| self.display_name.clone())
@@ -749,6 +755,14 @@ impl Render for AgentView {
             .size_full()
             .bg(colors.editor_background)
             .track_focus(&self.focus_handle)
+            // Here, not only on the tab: both the context-menu entry and the
+            // double-click dispatch through the *item's* focus handle, which
+            // resolves against this element. The copy on `tab_content` is in
+            // that path only while the tab is unselected — never the tab someone
+            // clicks to rename it — so rename silently did nothing.
+            .on_action(cx.listener(|this: &mut Self, _: &RenameAgent, window, cx| {
+                this.start_renaming(window, cx);
+            }))
             .child(
                 h_flex()
                     .flex_none()

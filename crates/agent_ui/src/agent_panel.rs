@@ -1202,6 +1202,95 @@ mod tests {
         assert!(!fills(cx), "and unzooming has to give it back");
     }
 
+    /// Rename has to reach the view, not just the tab.
+    ///
+    /// Both ways in — the tab's context menu and a double-click on the tab —
+    /// dispatch through the *item's* focus handle (`Pane::render_tab`). A
+    /// handler registered only on the tab's own element is in that path just
+    /// while the tab is unselected, which is never the tab someone right-clicks
+    /// to rename. Nothing happened, and nothing errored either.
+    #[gpui::test]
+    async fn rename_reaches_the_agent_and_enter_commits_it(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
+            })
+            .unwrap();
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(
+                AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                AgentViewMode::Terminal,
+                window,
+                cx,
+            );
+        });
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let view = panel.read_with(cx, |panel, cx| {
+            panel
+                .active_pane
+                .read(cx)
+                .items()
+                .find_map(|item| item.downcast::<AgentView>())
+                .expect("the agent just shown")
+        });
+        assert_eq!(
+            view.read_with(cx, |view, _| view.tab_label()),
+            "Claude Code",
+            "the tab starts on the agent's own name"
+        );
+
+        // Exactly what `Pane::render_tab` does for both the menu entry and the
+        // double-click: dispatch through the item's focus handle.
+        cx.update(|window, cx| {
+            view.read(cx)
+                .focus_handle(cx)
+                .dispatch_action(&crate::RenameAgent, window, cx);
+        });
+        cx.run_until_parked();
+
+        let editor = view
+            .read_with(cx, |view, _| view.rename_editor().cloned())
+            .expect("dispatching Rename must open the editor, or the menu entry does nothing");
+        assert!(
+            cx.update(|window, cx| editor.focus_handle(cx).is_focused(window)),
+            "and the editor has to take focus, or there is nothing to type into"
+        );
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "Claude Code",
+            "opening it selects the current name, so typing replaces it"
+        );
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Refactor run", window, cx);
+        });
+        cx.update(|window, cx| {
+            editor
+                .focus_handle(cx)
+                .dispatch_action(&menu::Confirm, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.tab_label()),
+            "Refactor run",
+            "Enter must commit the new name"
+        );
+        assert!(
+            view.read_with(cx, |view, _| view.rename_editor().is_none()),
+            "and close the editor behind it"
+        );
+    }
+
     fn agent_view_count(panel: &AgentPanel, cx: &App) -> usize {
         panel
             .center
