@@ -82,6 +82,17 @@ Cột agent mang `DockPosition` dùng chung với dock cạnh nó, mà khoá lư
 
 `Panel::position` được gọi **từ trong** `Workspace::add_panel`. Cho nó `workspace.read_with(...)` là abort — đúng cái `ccd151f` đã trả giá. Lần này **test bắt được ngay** thay vì app chết lúc khởi động. Sửa: đọc thẳng setting, cùng một đáp số.
 
+### Hai chỗ sót, người dùng gặp ngay sau khi ship — `0f392f1`, `4112ef6`
+
+Cả hai cùng một gốc: **cột agent dùng chung `DockPosition` với dock cạnh nó**, mà đoạn code cũ lấy position làm định danh.
+
+1. **Không kéo được width.** `DraggedDock` chỉ mang `DockPosition`, nên tay kéo của cột agent chạy vào `resize_left_dock`/`resize_right_dock`. Có git panel mở → kéo nhầm sang nó; không mở gì → `resize_active_panel` không thấy panel nào, **không có gì nhúc nhích**. Đó là cái người dùng thấy. Sửa: payload mang thêm `agent_column`, và width tính từ **bounds của chính cột** (nó là cột duy nhất không chạm mép cửa sổ), ghi lại bằng `canvas` — đúng cách workspace tự đo mình.
+2. **Đổi bên rail là mất cột.** Observer settings trong `Dock::add_panel` map `position` → left/bottom/right dock, **không có nhánh nào cho cột agent**. Rail đổi bên → `AgentPanel::position()` đổi → agent bị lôi vào tool dock, đúng chỗ nó nằm trước khi có cột riêng. Xảy ra hay không phụ thuộc **observer nào chạy trước** — nên chặn ở dock: cột đã tự đi theo rail thì không có dock nào để di cư sang.
+
+Bug 2 không ai báo — tìm ra khi đọc `add_panel` để viết test cho bug 1, và test bắt đỏ ngay lần chạy đầu. Nó sẽ nổ đúng lần đầu người dùng đổi bên rail.
+
+`TestPanel::new_agent` thêm vào lúc này cũng **lấp một phần chỗ hở dưới đây**: `workspace::dock::test` giờ dựng được panel đi vào cột agent.
+
 ### Còn hở
 
 Stack **hai kiểu panel khác nhau** giờ chỉ xảy ra ở ba dock thường (git/outline/project) — `agent_ui` không còn dựng được vì agent đã có cột riêng, và test-support chỉ có một `TestPanel`. Cơ chế `apply_stack_state` vẫn có test ở tầng `workspace` (khử trùng lặp, từ chối bản ghi rỗng/lạ, flexes cũ), nhưng đường "hai kiểu khác nhau khôi phục đủ" **không còn test**. Muốn lấp: thêm một kiểu panel thứ hai vào `workspace::dock::test`.
