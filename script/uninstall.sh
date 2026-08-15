@@ -105,17 +105,17 @@ linux() {
 }
 
 macos() {
-    app="Zed.app"
+    app="Zode.app"
     db_suffix="stable"
     app_id="dev.zed.Zed"
     case "$channel" in
       nightly)
-        app="Zed Nightly.app"
+        app="Zode Nightly.app"
         db_suffix="nightly"
         app_id="dev.zed.Zed-Nightly"
         ;;
       preview)
-        app="Zed Preview.app"
+        app="Zode Preview.app"
         db_suffix="preview"
         app_id="dev.zed.Zed-Preview"
         ;;
