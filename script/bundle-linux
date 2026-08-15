@@ -83,7 +83,13 @@ if [[ "$(uname -m)" == "aarch64" ]]; then
 else
     export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
 fi
-cargo build --release --target "${target_triple}" --package zode --package cli
+database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql)
+
+# The database drivers are sidecars the app starts by name from beside its own
+# executable, so they are built and copied like `cli` -- nothing depends on them
+# at link time, and without these they would not be in the package at all.
+cargo build --release --target "${target_triple}" --package zode --package cli \
+    --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 if [[ "$remote_server_triple" == "$musl_triple" ]]; then
@@ -124,6 +130,9 @@ fi
 # doesn't understand CREL sections produced by newer LLVM.
 llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/zode"
 llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/cli"
+for driver in "${database_drivers[@]}"; do
+    llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/${driver}"
+done
 llvm-objcopy --strip-debug "${target_dir}/${remote_server_triple}/release/remote_server"
 
 # Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
@@ -149,6 +158,12 @@ zed_dir="${temp_dir}/zed$suffix.app"
 mkdir -p "${zed_dir}/bin" "${zed_dir}/libexec"
 cp "${target_dir}/${target_triple}/release/zode" "${zed_dir}/libexec/zed-editor"
 cp "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zed"
+# `libexec`, not `bin`: `driver_path` looks beside the app's own executable, and
+# that is `libexec/zed-editor` here. In `bin` they would be both unfound and on
+# the user's `PATH`, which is neither of the two things wanted.
+for driver in "${database_drivers[@]}"; do
+    cp "${target_dir}/${target_triple}/release/${driver}" "${zed_dir}/libexec/${driver}"
+done
 
 # Libs
 find_libs() {

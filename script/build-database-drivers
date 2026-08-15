@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Builds the database driver sidecars into the same directory as a development
+# build of Zode, which is where the app looks for them.
+#
+# They are not in `default-members`, so `cargo run` does not build them and a
+# fresh checkout has none -- every database connection then fails with "could
+# not start the driver". Run this once after a checkout, and again whenever a
+# driver changes.
+#
+#   script/build-database-drivers            # debug, beside `cargo run`
+#   script/build-database-drivers --release  # beside `cargo run --release`
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+cargo build "$@" \
+    --package zode-db-sqlite \
+    --package zode-db-postgres \
+    --package zode-db-mysql

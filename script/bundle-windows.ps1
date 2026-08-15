@@ -28,6 +28,10 @@ $Architecture = if ($Architecture) {
 
 $CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
 
+# Sidecars the app starts by name from beside its own executable. Nothing links
+# against them, so they are built and shipped explicitly or not at all.
+$databaseDrivers = @("zode-db-sqlite", "zode-db-postgres", "zode-db-mysql")
+
 function Get-VSArch {
     param(
         [string]$Arch
@@ -102,9 +106,17 @@ function GenerateLicenses {
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe and cli.exe. auto_update_helper is gone - this fork has no in-app updater.
-    cargo build --release --package zode --package cli --target $target
+    cargo build --release --package zode --package cli `
+        --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql `
+        --target $target
     Copy-Item -Path ".\$CargoOutDir\zode.exe" -Destination "$innoDir\Zode.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
+    # Beside Zode.exe, which is where `driver_path` looks. Unlike cli.exe these
+    # are not moved into `bin` later: they are started by the app, not typed by
+    # the user, and `bin` is on the user's PATH.
+    foreach ($driver in $databaseDrivers) {
+        Copy-Item -Path ".\$CargoOutDir\$driver.exe" -Destination "$innoDir\$driver.exe" -Force
+    }
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
@@ -203,6 +215,9 @@ function SignZedAndItsFriends {
     }
 
     $files = "$innoDir\Zode.exe,$innoDir\cli.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    foreach ($driver in $databaseDrivers) {
+        $files += ",$innoDir\$driver.exe"
+    }
     & "$innoDir\sign.ps1" $files
 }
 
