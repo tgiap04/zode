@@ -1,15 +1,15 @@
 ---
-title: Finding and Navigating Code - Zed
-description: Navigate your codebase in Zed with file finder, project search, go to definition, symbol search, and the command palette.
+title: Finding and Navigating Code - Zode
+description: Navigate your codebase in Zode with file finder, project search, go to definition, symbol search, and the command palette.
 ---
 
 # Finding & Navigating
 
-Zed provides several ways to move around your codebase quickly. Here's an overview of the main navigation tools.
+Zode provides several ways to move around your codebase quickly. Here's an overview of the main navigation tools.
 
 ## Command Palette
 
-The Command Palette ({#kb command_palette::Toggle}) is your gateway to almost everything in Zed. Type a few characters to filter commands, then press Enter to execute.
+The Command Palette ({#kb command_palette::Toggle}) is your gateway to almost everything in Zode. Type a few characters to filter commands, then press Enter to execute.
 
 [Learn more about the Command Palette →](./command-palette.md)
 

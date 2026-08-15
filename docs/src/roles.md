@@ -1,11 +1,11 @@
 ---
-title: Roles - Zed
-description: Understand Zed's organization roles and what each role can access, manage, and configure.
+title: Roles - Zode
+description: Understand Zode's organization roles and what each role can access, manage, and configure.
 ---
 
 # Roles
 
-Every member of a Zed organization is assigned a role that determines
+Every member of a Zode organization is assigned a role that determines
 what they can access and configure.
 
 ## Role Types {#roles}
@@ -26,8 +26,8 @@ An owner has full control over the organization, including:
 - Assign and change member roles
 - Manage billing, payment methods, and invoices
 - Configure data-sharing policies
-- Disable Zed's collaborative features
-- Control whether members can use Zed-hosted models and Zed's edit predictions
+- Disable Zode's collaborative features
+- Control whether members can use Zode-hosted models and Zode's edit predictions
 - Transfer ownership to another member
 
 ### Admin {#role-admin}
@@ -42,12 +42,12 @@ member access without needing visibility into payment details.
 
 ### Member {#role-member}
 
-Members have standard access to Zed. They cannot access billing or
+Members have standard access to Zode. They cannot access billing or
 organization settings.
 
 ## Managing User Roles {#managing-users}
 
-Owners and Admins can manage organization members from the Zed
+Owners and Admins can manage organization members from the Zode
 dashboard within the Members page.
 
 ### Inviting Members {#inviting-members}
@@ -68,4 +68,4 @@ dashboard within the Members page.
 1. On the Members page, find the member.
 2. Select **Remove** and confirm.
 
-Removing a member removes their access to organization settings and any organization-managed features. They can continue using Zed on their own.
+Removing a member removes their access to organization settings and any organization-managed features. They can continue using Zode on their own.

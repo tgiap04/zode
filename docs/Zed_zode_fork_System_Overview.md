@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Client** | Internal / Sun\* engineering team |
-| **System** | zode (a fork of the Zed code editor) |
+| **System** | Zode (a fork of the Zed code editor) |
 | **Version** | Documentation snapshot as of the source commit reflected in `docs/` |
 | **Date** | 2026-08-07 |
 | **Prepared by** | `/tkm:rebuild-spec --overview` (automated synthesis from the promoted `docs/` spec set) |
@@ -49,14 +49,14 @@ cost more in memory and battery than actually needs to.
 
 Zode is a native desktop application for writing and editing code — a lightweight, single-developer tool built for speed and focus rather than for the kind of shared, always-connected workspace that some code editors try to be. It runs directly on the user's machine (Mac, Linux, or Windows) with the responsiveness of a native application rather than a browser-based tool, and it always starts from what's on the user's own machine and files.
 
-**A deliberate choice: one developer, one machine, no shared backend.** Zode began as a fork of an editor called Zed, and it makes an explicit product decision: it removes the built-in real-time multiplayer/collaboration features (multiple people editing together live) and the built-in AI writing-assistant subsystem that the original product offered. In their place, the product keeps a single capability for working beyond one's own machine: the ability to connect over SSH to a project that lives on a different computer (for example, a remote server) and edit it as if it were local. This is a deliberate trade — rather than running a shared collaboration service that many developers connect to at once, zode is built to be a fast, private, single-user tool that can still reach out to remote environments a user personally controls, without depending on any always-on backend service or third-party AI service.
+**A deliberate choice: one developer, one machine, no shared backend.** Zode began as a fork of an editor called Zed, and it makes an explicit product decision: it removes the built-in real-time multiplayer/collaboration features (multiple people editing together live) and the built-in AI writing-assistant subsystem that the original product offered. In their place, the product keeps a single capability for working beyond one's own machine: the ability to connect over SSH to a project that lives on a different computer (for example, a remote server) and edit it as if it were local. This is a deliberate trade — rather than running a shared collaboration service that many developers connect to at once, Zode is built to be a fast, private, single-user tool that can still reach out to remote environments a user personally controls, without depending on any always-on backend service or third-party AI service.
 
 **The value this delivers:**
 - **Performance and responsiveness** — because the tool is a native application built specifically for text editing, it can render and respond to keystrokes with very low latency, even on large files and projects.
 - **Focus and simplicity** — by not carrying multiplayer or AI-agent complexity, the product surface stays centered on the core job: opening a project, editing code, running tools against it (like language checking, debugging, and version control), and moving between projects efficiently.
 - **Extensibility without added risk** — the editor can be extended with community or in-house add-ons (for new languages, themes, or tooling), and these run in a sandboxed, isolated environment so a faulty or misbehaving add-on cannot crash or compromise the main application.
 - **Built-in version control and debugging** — everyday developer workflows (viewing changes, staging and committing work, stepping through a debugger) are handled natively inside the editor rather than requiring separate tools.
-- **Safe handling of untrusted work** — when a user opens a folder they haven't worked with before, zode does not automatically run tooling against it; it asks for explicit trust first, protecting the user from accidentally running code-adjacent tools against something unfamiliar or unsafe.
+- **Safe handling of untrusted work** — when a user opens a folder they haven't worked with before, Zode does not automatically run tooling against it; it asks for explicit trust first, protecting the user from accidentally running code-adjacent tools against something unfamiliar or unsafe.
 - **Efficient multi-project work** — a user can keep several projects open at once without needing to worry about the ones they aren't currently using consuming unnecessary computer resources (more on this in the Business Flows & Lifecycle section below).
 
 ## 3. Actors & Roles
@@ -85,16 +85,16 @@ Only one business-level flow currently exists in the documented system: the life
 When a user works across multiple open projects at once — for example, switching between two or three codebases in the same window — only the project the user is actually looking at needs to stay fully active. Zode recognizes when a project has been sitting in the background, unused for a while, and automatically scales back the work it's doing on the user's behalf: it pauses the background process that watches files for changes, and it trims the memory used by that project's terminal history to something more efficient (while remembering the original size so nothing is lost, just condensed). This happens automatically, without the user needing to close anything or manage resources themselves.
 
 Two safeguards keep this automatic scaling-down from ever getting in the way of real work:
-- If a project has an active debugging session running, or has a file mid-autosave, zode holds off on scaling it down and tries again shortly after — it will not interrupt or discard work in progress.
+- If a project has an active debugging session running, or has a file mid-autosave, Zode holds off on scaling it down and tries again shortly after — it will not interrupt or discard work in progress.
 - The visual indicators the user relies on (like file change indicators in the sidebar) aren't simply removed when a project goes idle — they're shown in a dimmed state so the user can still see that information existed, even while it's temporarily unverified.
 
-**Coming back is seamless.** The moment a user clicks back into a project that had scaled itself down, zode immediately restores it: background file-watching resumes (prioritizing the files the user actually has open), the terminal's history returns to its normal size, and the project's version-control status is refreshed so everything the user sees is current again. From the user's point of view, returning to a project they stepped away from should feel instant and complete — nothing needs to be manually reactivated.
+**Coming back is seamless.** The moment a user clicks back into a project that had scaled itself down, Zode immediately restores it: background file-watching resumes (prioritizing the files the user actually has open), the terminal's history returns to its normal size, and the project's version-control status is refreshed so everything the user sees is current again. From the user's point of view, returning to a project they stepped away from should feel instant and complete — nothing needs to be manually reactivated.
 
 This lifecycle is a supporting efficiency feature — it exists so that keeping several projects open costs the user as little in system resources as possible — rather than a feature the user interacts with directly.
 
 ## 5. Detailed Function List
 
-*Note on structure: zode is a single-user native desktop application with no accounts, roles, or collaboration/multiplayer backend — the "who can do what" role split used for multi-tenant products doesn't apply here. Functions below are grouped instead by natural usage category: Everyday Editing, Code Intelligence & Quality, Project & Workspace Management, Version Control, Extensibility, and Behind the Scenes.*
+*Note on structure: Zode is a single-user native desktop application with no accounts, roles, or collaboration/multiplayer backend — the "who can do what" role split used for multi-tenant products doesn't apply here. Functions below are grouped instead by natural usage category: Everyday Editing, Code Intelligence & Quality, Project & Workspace Management, Version Control, Extensibility, and Behind the Scenes.*
 
 ### Everyday Editing
 
@@ -139,7 +139,7 @@ This lifecycle is a supporting efficiency feature — it exists so that keeping 
 
 ## 6. Screen List
 
-A formal screen or route inventory was not generated for zode — it is a native desktop application built on GPUI's panel/view model, not a routed web application, so there is no URL-addressable "screen list" to enumerate in the usual sense. What follows is a brief, honest description of the main areas of the interface, inferred from each feature's own screen documentation rather than presented as a formal Screen/Route/Type table.
+A formal screen or route inventory was not generated for Zode — it is a native desktop application built on GPUI's panel/view model, not a routed web application, so there is no URL-addressable "screen list" to enumerate in the usual sense. What follows is a brief, honest description of the main areas of the interface, inferred from each feature's own screen documentation rather than presented as a formal Screen/Route/Type table.
 
 - **Editor pane** — the core text-editing surface, including split-diff comparison views and status-bar encoding/line-ending indicators.
 - **Terminal panel** — a dockable panel hosting one or more live terminal tabs, plus an in-terminal search bar.
@@ -156,21 +156,21 @@ The best entry point for a reader new to the interface is the **editor pane** �
 
 ## 7. External Integrations
 
-zode connects to the outside world through a small, deliberate set of integrations — all of them local-first, none of them dependent on a cloud service the vendor operates.
+Zode connects to the outside world through a small, deliberate set of integrations — all of them local-first, none of them dependent on a cloud service the vendor operates.
 
 | Integration | What it gives the user |
 |---|---|
-| **Language servers** | Per-language intelligence — autocomplete, error/warning highlighting, "go to definition," and code actions — supplied by whichever language tooling is installed for the project (e.g. a Rust or TypeScript language service). zode runs its own client to talk to these servers; nothing is sent to a vendor-hosted service. |
+| **Language servers** | Per-language intelligence — autocomplete, error/warning highlighting, "go to definition," and code actions — supplied by whichever language tooling is installed for the project (e.g. a Rust or TypeScript language service). Zode runs its own client to talk to these servers; nothing is sent to a vendor-hosted service. |
 | **Debug adapters** | Debugging support (breakpoints, stepping through code, inspecting variables) via the industry-standard Debug Adapter Protocol, kept as a separate layer from the language-server integration above. |
 | **Git** | Built-in version control: viewing file changes/diffs, branch and commit history, staging, and commit creation, surfaced directly in the editor's Git panel and title bar. |
 | **Extensions** | A sandboxed plugin system that lets third-party add-ons contribute themes, additional language support, and other language servers or debug adapters — each extension runs in an isolated sandbox and can only do what it has explicitly declared it needs to do (see Configuration & Optional Features, below). |
-| **Remote (SSH) development** | The ability to open and edit a project that lives on a different machine, connecting over SSH and running the project/language/debugging tooling on that remote host while the familiar editor UI stays local. This is a single user working on their own remote machine — it is not a shared multi-user collaboration session, and zode has no always-on collaboration server. |
+| **Remote (SSH) development** | The ability to open and edit a project that lives on a different machine, connecting over SSH and running the project/language/debugging tooling on that remote host while the familiar editor UI stays local. This is a single user working on their own remote machine — it is not a shared multi-user collaboration session, and Zode has no always-on collaboration server. |
 
-There is no web-style API surface in this product — zode is a desktop application, not a service with HTTP endpoints — so integrations are limited to the categories above rather than a catalog of API routes.
+There is no web-style API surface in this product — Zode is a desktop application, not a service with HTTP endpoints — so integrations are limited to the categories above rather than a catalog of API routes.
 
 ## 8. Configuration & Optional Features
 
-zode's configurable behavior is best understood as a small set of trust and capability gates rather than user roles or an admin console — there is no multi-account permission system, since the product is used by one person on their own machine.
+Zode's configurable behavior is best understood as a small set of trust and capability gates rather than user roles or an admin console — there is no multi-account permission system, since the product is used by one person on their own machine.
 
 | Configurable behavior | What it controls |
 |---|---|
@@ -183,7 +183,7 @@ zode's configurable behavior is best understood as a small set of trust and capa
 
 ## 9. Technical Architecture & Infrastructure
 
-zode is a **native desktop application** — it installs and runs directly on the user's computer rather than in a browser or as a hosted web service.
+Zode is a **native desktop application** — it installs and runs directly on the user's computer rather than in a browser or as a hosted web service.
 
 - **Language:** Built in **Rust**, chosen for its combination of performance and memory safety, which matters for an application that must stay responsive while indexing large codebases and running many background processes (language servers, git operations, terminals).
 - **UI framework:** Powered by **GPUI**, a custom, in-house-built, GPU-accelerated user interface toolkit built specifically for this editor rather than adopting an existing off-the-shelf UI framework. This gives the editor tight control over rendering performance and a consistent interaction model across every part of the application.
@@ -195,7 +195,7 @@ This architecture reflects a deliberate "local-first" design principle: the core
 
 ## 10. Data Model (Summary)
 
-zode's core concepts describe the state of an editing session rather than records in a business database, since it is a desktop tool and not a data-driven web application. The main business nouns are:
+Zode's core concepts describe the state of an editing session rather than records in a business database, since it is a desktop tool and not a data-driven web application. The main business nouns are:
 
 **Workspace & window organization**
 - A **Workspace** represents one open project inside one window slot — it holds the panels, tabs, and layout the user sees, along with the single project it's currently showing.

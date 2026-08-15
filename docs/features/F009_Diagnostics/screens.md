@@ -1,6 +1,6 @@
 # Screens — F009_Diagnostics
 
-**Non-web adaptation note (`generic-source` profile):** zode has no route-list/screen-list —
+**Non-web adaptation note (`generic-source` profile):** Zode has no route-list/screen-list —
 this is a Rust/GPUI desktop app, not a web app. There is no `SCR###` catalog to bridge to; the
 surfaces below are panes/panels inside the single-window (or multi-window, multi-project)
 workspace, opened by dispatching actions rather than navigating to a URL.

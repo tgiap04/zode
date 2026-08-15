@@ -1,13 +1,13 @@
 ---
 title: Luau
-description: "Configure Luau language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Luau language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # Luau
 
 [Luau](https://luau.org/) is a fast, small, safe, gradually typed, embeddable scripting language derived from Lua. Luau was developed by Roblox and is available under the MIT license.
 
-Luau language support in Zed is provided by the community-maintained [Luau extension](https://github.com/4teapo/zed-luau).
+Luau language support in Zode is provided by the community-maintained [Luau extension](https://github.com/4teapo/zed-luau).
 Report issues to: [https://github.com/4teapo/zed-luau/issues](https://github.com/4teapo/zed-luau/issues)
 
 - Tree-sitter: [4teapo/tree-sitter-luau](https://github.com/4teapo/tree-sitter-luau)
@@ -15,7 +15,7 @@ Report issues to: [https://github.com/4teapo/zed-luau/issues](https://github.com
 
 ## Configuration
 
-Configuration instructions are available in the [Luau Zed Extension README](https://github.com/4teapo/zed-luau).
+Configuration instructions are available in the [Luau Zode Extension README](https://github.com/4teapo/zed-luau).
 
 ## Formatting
 

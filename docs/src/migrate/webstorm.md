@@ -1,15 +1,15 @@
 ---
-title: How to Migrate from WebStorm to Zed
-description: "Guide for migrating from WebStorm to Zed, including settings and keybindings."
+title: How to Migrate from WebStorm to Zode
+description: "Guide for migrating from WebStorm to Zode, including settings and keybindings."
 ---
 
-# How to Migrate from WebStorm to Zed
+# How to Migrate from WebStorm to Zode
 
-This guide covers how to set up Zed if you're coming from WebStorm, including keybindings, settings, and the differences you should expect as a JavaScript/TypeScript developer.
+This guide covers how to set up Zode if you're coming from WebStorm, including keybindings, settings, and the differences you should expect as a JavaScript/TypeScript developer.
 
-## Install Zed
+## Install Zode
 
-Zed is available on macOS, Windows, and Linux.
+Zode is available on macOS, Windows, and Linux.
 
 For macOS, you can download it from zed.dev/download, or install via Homebrew:
 
@@ -23,15 +23,15 @@ For Windows, download the installer from zed.dev/download, or install via winget
 winget install Zed.Zed
 ```
 
-For most Linux users, the easiest way to install Zed is through our installation script:
+For most Linux users, the easiest way to install Zode is through our installation script:
 
 ```sh
 curl -f https://zed.dev/install.sh | sh
 ```
 
-After installation, you can launch Zed from your Applications folder (macOS), Start menu (Windows), or directly from the terminal using:
+After installation, you can launch Zode from your Applications folder (macOS), Start menu (Windows), or directly from the terminal using:
 `zed .`
-This opens the current directory in Zed.
+This opens the current directory in Zode.
 
 ## Set Up the JetBrains Keymap
 
@@ -49,7 +49,7 @@ You can configure most settings in the Settings Editor ({#kb zed::OpenSettings})
 
 Settings WebStorm users typically configure first:
 
-| Zed Setting             | What it does                                                                    |
+| Zode Setting             | What it does                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------- |
 | `format_on_save`        | Auto-format when saving. Set to `"on"` to enable.                               |
 | `soft_wrap`             | Wrap long lines. Options: `"none"`, `"editor_width"`, `"preferred_line_length"` |
@@ -57,17 +57,17 @@ Settings WebStorm users typically configure first:
 | `inlay_hints`           | Show parameter names and type hints inline, like WebStorm's hints.              |
 | `relative_line_numbers` | Useful if you're coming from IdeaVim.                                           |
 
-Zed also supports per-project settings. Create a `.zed/settings.json` file in your project root to override global settings for that project, similar to how you might use `.idea` folders in WebStorm.
+Zode also supports per-project settings. Create a `.zed/settings.json` file in your project root to override global settings for that project, similar to how you might use `.idea` folders in WebStorm.
 
 > **Tip:** If you're joining an existing project, check `format_on_save` before making your first commit. Otherwise you might accidentally reformat an entire file when you only meant to change one line.
 
 ## Open or Create a Project
 
-After setup, use {#kb:jetbrains file_finder::Toggle} to open a folder. This becomes your workspace in Zed. Unlike WebStorm, there's no project configuration wizard, no framework selection dialog, and no project structure setup required.
+After setup, use {#kb:jetbrains file_finder::Toggle} to open a folder. This becomes your workspace in Zode. Unlike WebStorm, there's no project configuration wizard, no framework selection dialog, and no project structure setup required.
 
-To start a new project, create a directory using your terminal or file manager, then open it in Zed. The editor will treat that folder as the root of your project. For new projects, you'd typically run `npm init`, `pnpm create`, or your framework's CLI tool first, then open the resulting folder in Zed.
+To start a new project, create a directory using your terminal or file manager, then open it in Zode. The editor will treat that folder as the root of your project. For new projects, you'd typically run `npm init`, `pnpm create`, or your framework's CLI tool first, then open the resulting folder in Zode.
 
-You can also launch Zed from the terminal inside any folder with:
+You can also launch Zode from the terminal inside any folder with:
 `zed .`
 
 Once inside a project:
@@ -84,7 +84,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 
 ### Common Keybindings
 
-| Action                 | Zed Keybinding                                  |
+| Action                 | Zode Keybinding                                  |
 | ---------------------- | ----------------------------------------------- |
 | Command Palette        | {#kb:jetbrains command_palette::Toggle}         |
 | Go to File             | {#kb:jetbrains file_finder::Toggle}             |
@@ -108,7 +108,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 | Toggle Breakpoint      | {#kb:jetbrains editor::ToggleBreakpoint}        |
 | Navigate to Next Error | {#kb:jetbrains editor::GoToDiagnostic}          |
 
-### Unique to Zed
+### Unique to Zode
 
 | Action            | Keybinding                       | Notes                                                         |
 | ----------------- | -------------------------------- | ------------------------------------------------------------- |
@@ -122,7 +122,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 
 This opens a list of all available bindings. You can override individual shortcuts or remove conflicts.
 
-Zed also supports key sequences (multi-key shortcuts).
+Zode also supports key sequences (multi-key shortcuts).
 
 ## Differences in User Interfaces
 
@@ -130,9 +130,9 @@ Zed also supports key sequences (multi-key shortcuts).
 
 If you've used WebStorm on large projects, you know the wait. Opening a project with many dependencies can mean watching "Indexing..." for anywhere from 30 seconds to several minutes. WebStorm indexes your entire codebase and `node_modules` to power its code intelligence, and re-indexes when dependencies change.
 
-Zed doesn't index. You open a folder and start coding immediately—no progress bars, no "Indexing paused" banners. File search and navigation stay fast regardless of project size or how many `node_modules` dependencies you have.
+Zode doesn't index. You open a folder and start coding immediately—no progress bars, no "Indexing paused" banners. File search and navigation stay fast regardless of project size or how many `node_modules` dependencies you have.
 
-WebStorm's index enables features like finding all usages across your entire codebase, tracking import hierarchies, and flagging unused exports project-wide. Zed relies on language servers for this analysis, which may not cover as much ground.
+WebStorm's index enables features like finding all usages across your entire codebase, tracking import hierarchies, and flagging unused exports project-wide. Zode relies on language servers for this analysis, which may not cover as much ground.
 
 **How to adapt:**
 
@@ -145,7 +145,7 @@ WebStorm's index enables features like finding all usages across your entire cod
 
 WebStorm has its own JavaScript and TypeScript analysis engine built by JetBrains. This engine understands your code deeply: it resolves types, tracks data flow, knows about framework-specific patterns, and offers specialized refactorings.
 
-Zed uses the Language Server Protocol (LSP) for code intelligence. For JavaScript and TypeScript, Zed supports:
+Zode uses the Language Server Protocol (LSP) for code intelligence. For JavaScript and TypeScript, Zode supports:
 
 - **vtsls** (default) — Fast TypeScript language server with excellent performance
 - **typescript-language-server** — The standard TypeScript LSP implementation
@@ -171,13 +171,13 @@ Where you might notice differences:
 
 WebStorm manages projects through `.idea` folders containing XML configuration files, framework detection, and run configurations. This model lets WebStorm remember your project settings, manage npm scripts through the UI, and persist run/debug setups.
 
-Zed takes a different approach: a project is just a folder. There's no setup wizard, no framework detection dialog, no project structure to configure.
+Zode takes a different approach: a project is just a folder. There's no setup wizard, no framework detection dialog, no project structure to configure.
 
 What this means in practice:
 
 - Run configurations aren't a thing. Define reusable commands in `tasks.json` instead. Note that your existing `.idea/` configurations won't carry over—you'll set up the ones you need fresh.
 - npm scripts live in the terminal. Run `npm run dev`, `pnpm build`, or `yarn test` directly—there's no dedicated npm panel.
-- No framework detection. Zed treats React, Angular, Vue, and vanilla JS/TS the same way.
+- No framework detection. Zode treats React, Angular, Vue, and vanilla JS/TS the same way.
 
 **How to adapt:**
 
@@ -212,22 +212,22 @@ What this means in practice:
 
 WebStorm's value for web development comes largely from its framework integration. React components get special treatment. Angular has dedicated tooling. Vue single-file components are fully understood. The npm tool window shows all your scripts.
 
-Zed has none of this built-in. The TypeScript language server sees your code as TypeScript—it doesn't understand that a function is a React component or that a file is an Angular service.
+Zode has none of this built-in. The TypeScript language server sees your code as TypeScript—it doesn't understand that a function is a React component or that a file is an Angular service.
 
 **How to adapt:**
 
 - Use grep and file search liberally. {#kb pane::DeploySearch} with a regex can find component definitions, route configurations, or API endpoints.
 - Rely on your language server's "find references" ({#kb:jetbrains editor::FindAllReferences}) for navigation—it works, just without framework context
-- Consider using framework-specific CLI tools (`ng`, `next`, `vite`) from Zed's terminal
+- Consider using framework-specific CLI tools (`ng`, `next`, `vite`) from Zode's terminal
 - For React, JSX/TSX syntax and TypeScript types still provide good intelligence
 
-> **Tip:** For projects with complex configurations, keep your framework's documentation handy. Zed's speed comes with less hand-holding for framework-specific features.
+> **Tip:** For projects with complex configurations, keep your framework's documentation handy. Zode's speed comes with less hand-holding for framework-specific features.
 
 ### Tool Windows vs. Docks
 
-WebStorm organizes auxiliary views into numbered tool windows. Zed uses a similar concept called "docks":
+WebStorm organizes auxiliary views into numbered tool windows. Zode uses a similar concept called "docks":
 
-| WebStorm Tool Window | Zed Equivalent | Zed Keybinding                             |
+| WebStorm Tool Window | Zode Equivalent | Zode Keybinding                             |
 | -------------------- | -------------- | ------------------------------------------ |
 | Project              | Project Panel  | {#kb:jetbrains project_panel::ToggleFocus} |
 | Git                  | Git Panel      | {#kb:jetbrains git_panel::ToggleFocus}     |
@@ -236,21 +236,21 @@ WebStorm organizes auxiliary views into numbered tool windows. Zed uses a simila
 | Problems             | Diagnostics    | {#kb:jetbrains diagnostics::Deploy}        |
 | Debug                | Debug Panel    | {#kb:jetbrains debug_panel::ToggleFocus}   |
 
-Zed has three dock positions: left, bottom, and right. Panels can be moved between docks by dragging or through settings.
+Zode has three dock positions: left, bottom, and right. Panels can be moved between docks by dragging or through settings.
 
-Note that there's no dedicated npm tool window in Zed. Use the terminal or define tasks for your common npm scripts.
+Note that there's no dedicated npm tool window in Zode. Use the terminal or define tasks for your common npm scripts.
 
 ### Debugging
 
-Both WebStorm and Zed offer integrated debugging for JavaScript and TypeScript:
+Both WebStorm and Zode offer integrated debugging for JavaScript and TypeScript:
 
-- Zed uses `vscode-js-debug` (the same debug adapter that VS Code uses)
+- Zode uses `vscode-js-debug` (the same debug adapter that VS Code uses)
 - Set breakpoints with {#kb:jetbrains editor::ToggleBreakpoint}
 - Start debugging with {#kb:jetbrains debugger::Start}
 - Step through code with {#kb:jetbrains debugger::StepInto} (step into), {#kb:jetbrains debugger::StepOver} (step over), {#kb:jetbrains debugger::StepOut} (step out)
 - Continue execution with {#kb:jetbrains debugger::Continue}
 
-Zed can debug:
+Zode can debug:
 
 - Node.js applications and scripts
 - Chrome/browser JavaScript
@@ -282,17 +282,17 @@ For more control, create a `.zed/debug.json` file:
 ]
 ```
 
-Zed also recognizes `.vscode/launch.json` configurations, so existing VS Code debug setups often work out of the box.
+Zode also recognizes `.vscode/launch.json` configurations, so existing VS Code debug setups often work out of the box.
 
 ### Running Tests
 
-WebStorm has a dedicated test runner with a visual interface showing pass/fail status for each test. Zed provides test running through:
+WebStorm has a dedicated test runner with a visual interface showing pass/fail status for each test. Zode provides test running through:
 
 - **Gutter icons** — Click the play button next to test functions or describe blocks
 - **Tasks** — Define test commands in `tasks.json`
 - **Terminal** — Run `npm test`, `jest`, `vitest`, etc. directly
 
-Zed supports auto-detection for common test frameworks:
+Zode supports auto-detection for common test frameworks:
 
 - Jest
 - Mocha
@@ -307,13 +307,13 @@ The test output appears in the terminal panel. For Jest, use `--verbose` for det
 
 WebStorm has a plugin catalog covering additional language support, themes, and tool integrations.
 
-Zed's extension catalog is smaller and more focused:
+Zode's extension catalog is smaller and more focused:
 
 - Language support and syntax highlighting
 - Themes
 - Context servers
 
-Several features that require plugins in WebStorm are built into Zed:
+Several features that require plugins in WebStorm are built into Zode:
 
 - Real-time collaboration with voice chat
 - AI coding assistance
@@ -323,9 +323,9 @@ Several features that require plugins in WebStorm are built into Zed:
 - Prettier formatting
 - ESLint integration
 
-### What's Not in Zed
+### What's Not in Zode
 
-To set expectations clearly, here's what WebStorm offers that Zed doesn't have:
+To set expectations clearly, here's what WebStorm offers that Zode doesn't have:
 
 - **npm tool window** — Use the terminal or tasks instead
 - **HTTP Client** — Use tools like Postman, Insomnia, or curl
@@ -335,9 +335,9 @@ To set expectations clearly, here's what WebStorm offers that Zed doesn't have:
 - **Built-in REST client** — Use external tools or extensions
 - **Profiler integration** — Use Chrome DevTools or Node.js profiling tools
 
-## Collaboration in Zed vs. WebStorm
+## Collaboration in Zode vs. WebStorm
 
-WebStorm offers Code With Me as a separate feature for collaboration. Zed has collaboration built into the core experience.
+WebStorm offers Code With Me as a separate feature for collaboration. Zode has collaboration built into the core experience.
 
 - Open the Collab Panel in the left dock
 - Create a channel and [invite your collaborators](https://zed.dev/docs/collaboration#inviting-a-collaborator) to join
@@ -345,9 +345,9 @@ WebStorm offers Code With Me as a separate feature for collaboration. Zed has co
 
 Once connected, you'll see each other's cursors, selections, and edits in real time. Voice chat is included. There's no need for separate tools or third-party logins.
 
-## Using AI in Zed
+## Using AI in Zode
 
-If you're used to AI assistants in WebStorm (like GitHub Copilot, JetBrains AI Assistant, or Junie), Zed offers similar capabilities with more flexibility.
+If you're used to AI assistants in WebStorm (like GitHub Copilot, JetBrains AI Assistant, or Junie), Zode offers similar capabilities with more flexibility.
 
 ### Configuring GitHub Copilot
 
@@ -356,19 +356,19 @@ If you're used to AI assistants in WebStorm (like GitHub Copilot, JetBrains AI A
 3. Click **Configure** next to "Configure Providers"
 4. Under **GitHub Copilot**, click **Sign in to GitHub**
 
-Once signed in, just start typing. Zed will offer suggestions inline for you to accept.
+Once signed in, just start typing. Zode will offer suggestions inline for you to accept.
 
 ### Additional AI Options
 
-To use other AI models in Zed, you have several options:
+To use other AI models in Zode, you have several options:
 
-- Use Zed's hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
+- Use Zode's hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
 - Bring your own [API keys](https://zed.dev/docs/ai/llm-providers.html), no authentication needed
 - Use [external agents like Claude Agent](https://zed.dev/docs/ai/external-agents.html)
 
 ## Advanced Config and Productivity Tweaks
 
-Zed exposes advanced settings for power users who want to fine-tune their environment.
+Zode exposes advanced settings for power users who want to fine-tune their environment.
 
 Here are a few useful tweaks for JavaScript/TypeScript developers:
 
@@ -428,10 +428,10 @@ In your `tsconfig.json`, enable strict mode for better type checking:
 
 ## Next Steps
 
-Now that you're set up, here are some resources to help you get the most out of Zed:
+Now that you're set up, here are some resources to help you get the most out of Zode:
 
 - [All Settings](../reference/all-settings.md) — Customize settings, themes, and editor behavior
 - [Key Bindings](../key-bindings.md) — Learn how to customize and extend your keymap
 - [Tasks](../tasks.md) — Set up build and run commands for your projects
-- [JavaScript in Zed](../languages/javascript.md) — JavaScript-specific setup and configuration
-- [TypeScript in Zed](../languages/typescript.md) — TypeScript-specific setup and configuration
+- [JavaScript in Zode](../languages/javascript.md) — JavaScript-specific setup and configuration
+- [TypeScript in Zode](../languages/typescript.md) — TypeScript-specific setup and configuration

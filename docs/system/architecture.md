@@ -1,6 +1,6 @@
 # Architecture
 
-<!-- Stack: Rust workspace (generic-source profile), native GPUI desktop app ("zode", a Zed fork).
+<!-- Stack: Rust workspace (generic-source profile), native GPUI desktop app ("Zode", a Zed fork).
      Verified via root Cargo.toml (180 crate members + 4 extensions + 3 tooling crates, resolver "2"),
      and direct [dependencies] inspection of crates/zed, crates/workspace, crates/project, crates/editor,
      crates/extension_host, crates/git_ui, crates/sidebar, crates/title_bar, crates/client, crates/rpc,
@@ -13,7 +13,7 @@
      table with zero consuming crates (`grep -rn agent-client-protocol crates/*/Cargo.toml` = no
      matches) — vestigial from stripping that feature, not a live subsystem. Git log confirms an
      explicit `collab_ui` removal (commit ad901af "restore the title bar lost with the collab_ui
-     removal"). Treat any AI/Agent or Collaboration section from a generic Zed writeup as INVALID
+     removal"). Treat any AI/Agent or Collaboration section from a generic Zode writeup as INVALID
      for this repo. -->
 
 ## System Architecture

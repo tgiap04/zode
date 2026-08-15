@@ -1,13 +1,13 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # Job List
 
-**Project**: zode (Zed editor fork)
+**Project**: Zode (Zed editor fork)
 **Generated**: 2026-08-07
 **Analysis Scope**: Full codebase — every `behavior-logic.md` BL### entry whose Type is `scheduled-job`, `queue-worker`, or `custom-command` (164 total).
 
 **Code Format**: All codes follow `JOB###_NameSlug` format. File-global, sequential, never reset per type.
 
-**Scope**: One row/section per `behavior-logic.md` (`BL###`) entry whose `**Type**` is `scheduled-job`, `queue-worker`, or `custom-command`. This is a re-projection, not a re-detection — every JOB### traces back to exactly one BL###. This is a native GPUI desktop app: `custom-command` entries here are user-triggered keybinding/command-palette actions (Zed's `actions!()` dispatch mechanism), not traditional CLI batch jobs — documented as such per the shipped pipeline's type taxonomy, not re-classified.
+**Scope**: One row/section per `behavior-logic.md` (`BL###`) entry whose `**Type**` is `scheduled-job`, `queue-worker`, or `custom-command`. This is a re-projection, not a re-detection — every JOB### traces back to exactly one BL###. This is a native GPUI desktop app: `custom-command` entries here are user-triggered keybinding/command-palette actions (Zode's `actions!()` dispatch mechanism), not traditional CLI batch jobs — documented as such per the shipped pipeline's type taxonomy, not re-classified.
 
 **No `docs/jobs/` namespace**: single artifact (inventory + per-job detail in one file, per F13).
 
@@ -960,7 +960,7 @@ N/A — no retry policy found in source (synchronous UI action).
 
 ### Purpose
 
-Symlinks the Zed CLI auxiliary executable into `/usr/local/bin/zed`, skipping the operation if the existing symlink is already up to date.
+Symlinks the Zode CLI auxiliary executable into `/usr/local/bin/zed`, skipping the operation if the existing symlink is already up to date.
 
 ### Schedule / Trigger
 
@@ -4087,7 +4087,7 @@ Lets external edits to the active theme file take effect live by continuously wa
 
 ### Schedule / Trigger
 
-Dispatched and detached as a background loop from `watch_themes` (`crates/zed/src/main.rs:1543`) when Zed starts in an environment where the active theme file may change on disk; runs for the life of the application.
+Dispatched and detached as a background loop from `watch_themes` (`crates/zed/src/main.rs:1543`) when Zode starts in an environment where the active theme file may change on disk; runs for the life of the application.
 
 ### Data Touched
 

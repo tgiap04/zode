@@ -1,9 +1,9 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # Permissions Matrix
 
-**Project**: zode (Zed fork)
+**Project**: Zode (Zed fork)
 **Generated**: 2026-08-07
-**Analysis Scope**: Full monorepo, `generic-source` profile, no screen-list upstream. zode is a
+**Analysis Scope**: Full monorepo, `generic-source` profile, no screen-list upstream. Zode is a
 native Rust/GPUI desktop editor with no HTTP surface and — per this fork's architecture — no
 collaboration/multiplayer server. There is no traditional web-style RBAC (no admin/user/manager
 application roles). What this codebase calls "permissions" reduces to three independent
@@ -223,7 +223,7 @@ server-pushed change to staff status or flag values re-renders dependent views w
 
 | Role | Allow | Conditions |
 |------|-------|------------|
-| Zed staff account, flag has `enabled_for_staff() == true` (the default) | ✓ | Feature visible/active |
+| Zode staff account, flag has `enabled_for_staff() == true` (the default) | ✓ | Feature visible/active |
 | Non-staff account, flag has `enabled_for_all() == true` | ✓ | Feature visible/active for everyone |
 | Non-staff account, neither condition holds | ✗ | Feature hidden/inactive |
 | Staff account with `ZED_DISABLE_STAFF` env var set | ✗ (treated as non-staff) | Used to locally test the disabled-for-non-staff path |

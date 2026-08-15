@@ -1,13 +1,13 @@
 ---
-description: Zed is a text editor that supports lots of Git features
-title: Zed Editor Git integration documentation
+description: Zode is a text editor that supports lots of Git features
+title: Zode Editor Git integration documentation
 ---
 
 # Git
 
-Zed has built-in Git support that lets you manage version control without leaving the editor. The Git Panel shows your working tree state, staging area, and branch information. Changes you make on the command line are reflected immediately in Zed.
+Zode has built-in Git support that lets you manage version control without leaving the editor. The Git Panel shows your working tree state, staging area, and branch information. Changes you make on the command line are reflected immediately in Zode.
 
-For operations that Zed doesn't support natively, you can use the integrated terminal.
+For operations that Zode doesn't support natively, you can use the integrated terminal.
 
 ## Git Panel
 
@@ -17,7 +17,7 @@ You can open the Git Panel using {#action git_panel::ToggleFocus}, or by clickin
 
 In the panel you can see the state of your project at a glance: which repository and branch are active, what files have changed and the current staging state of each file.
 
-Zed monitors your repository so that changes you make on the command line are instantly reflected.
+Zode monitors your repository so that changes you make on the command line are instantly reflected.
 
 ### Configuration
 
@@ -36,7 +36,7 @@ The Git Panel shows a flat list of changed files by default. To see files organi
 
 #### Inline Blame
 
-Zed shows Git blame information on the current line. To turn this off or add a delay before it appears, go to **Version Control > Inline Git Blame**.
+Zode shows Git blame information on the current line. To turn this off or add a delay before it appears, go to **Version Control > Inline Git Blame**.
 
 #### Hiding the Gutter Indicators
 
@@ -44,7 +44,7 @@ The colored bars in the gutter that show added, modified, and deleted lines can 
 
 #### Commit Message Line Length
 
-Zed wraps commit messages at 72 characters (a Git convention). To change this, search for "Git Commit" in Settings and adjust **Preferred Line Length**.
+Zode wraps commit messages at 72 characters (a Git convention). To change this, search for "Git Commit" in Settings and adjust **Preferred Line Length**.
 
 ## Repositories
 
@@ -62,12 +62,12 @@ worktrees opened together. Like the other sections, you can collapse it from its
   **Initialize Repository** button.
 - The section shows up to five repositories before it scrolls.
 
-You can also switch the active repository from anywhere in Zed via the {#action git::SelectRepo}
+You can also switch the active repository from anywhere in Zode via the {#action git::SelectRepo}
 action in the Command Palette.
 
 ## Project Diff
 
-You can see all of the changes captured by Git in Zed by opening the Project Diff ({#kb git::Diff}), accessible via the {#action git::Diff} action in the Command Palette or the Git Panel.
+You can see all of the changes captured by Git in Zode by opening the Project Diff ({#kb git::Diff}), accessible via the {#action git::Diff} action in the Command Palette or the Git Panel.
 
 All of the changes displayed in the Project Diff behave exactly the same as any other multibuffer: they are all editable excerpts of files.
 
@@ -75,7 +75,7 @@ You can stage or unstage each hunk as well as a whole file by hitting the button
 
 ### Word Diff Highlighting
 
-By default, Zed highlights changed words within modified lines to make it easier to spot exactly what changed. To disable this globally, open the Settings Editor and go to **Languages & Tools > Miscellaneous**, then turn off **Word Diff Enabled**.
+By default, Zode highlights changed words within modified lines to make it easier to spot exactly what changed. To disable this globally, open the Settings Editor and go to **Languages & Tools > Miscellaneous**, then turn off **Word Diff Enabled**.
 
 To disable word diff for specific languages only, add this to your settings.json:
 
@@ -91,7 +91,7 @@ To disable word diff for specific languages only, add this to your settings.json
 
 ### Diff View Styles
 
-Zed displays diffs in two modes: **split** (side-by-side comparison) or **unified** (inline changes). Split view is the default.
+Zode displays diffs in two modes: **split** (side-by-side comparison) or **unified** (inline changes). Split view is the default.
 
 #### Changing the diff view
 
@@ -105,7 +105,7 @@ To change the default, add this to your `settings.json`:
 }
 ```
 
-See [Configuring Zed](./configuring-zed.md) for more about the Settings Editor.
+See [Configuring Zode](./configuring-zed.md) for more about the Settings Editor.
 
 #### Split vs unified
 
@@ -127,25 +127,25 @@ To view File History:
 
 ## Fetch, Push, and Pull
 
-Fetch, push, or pull from your Git repository in Zed via the buttons available on the Git Panel or via the Command Palette by looking at the respective actions: {#action git::Fetch}, {#action git::Push}, and {#action git::Pull}.
+Fetch, push, or pull from your Git repository in Zode via the buttons available on the Git Panel or via the Command Palette by looking at the respective actions: {#action git::Fetch}, {#action git::Push}, and {#action git::Pull}.
 
 ### Push Configuration
 
-Zed respects Git's push configuration. When pushing, Zed checks the following in order:
+Zode respects Git's push configuration. When pushing, Zode checks the following in order:
 
 1. `pushRemote` configured for the current branch
 2. `remote.pushDefault` in your Git config
 3. The branch's tracking remote
 
-This matches Git's standard behavior, so if you've configured `pushRemote` or `pushDefault` in your `.gitconfig` or via `git config`, Zed will use those settings.
+This matches Git's standard behavior, so if you've configured `pushRemote` or `pushDefault` in your `.gitconfig` or via `git config`, Zode will use those settings.
 
 ## Remotes
 
-When your repository has multiple remotes, Zed shows a remote selector in the Git Panel. Click the remote button next to push/pull to choose which remote to use for that operation.
+When your repository has multiple remotes, Zode shows a remote selector in the Git Panel. Click the remote button next to push/pull to choose which remote to use for that operation.
 
 ## Staging Workflow
 
-Zed has two primary staging workflows, using either the Project Diff or the panel directly.
+Zode has two primary staging workflows, using either the Project Diff or the panel directly.
 
 ### Using the Project Diff
 
@@ -165,20 +165,20 @@ Entries can be staged using each individual entry's checkbox. All changes can be
 
 ## Committing
 
-Zed offers two commit textareas:
+Zode offers two commit textareas:
 
 1. The first one is available at the top of the Git Panel, inside the **Changes** section, above the file list. Hitting {#kb git::Commit} immediately commits all of your staged changes.
 2. The second is available via the action {#action git::ExpandCommitEditor} or via hitting the {#kb git::ExpandCommitEditor} while focused in the Git Panel commit textarea.
 
 ### Undoing a Commit
 
-As soon as you commit in Zed, the Git Panel shows the commit's subject line below the commit textarea. Click it to open the commit's details, or hover it for a quick preview.
+As soon as you commit in Zode, the Git Panel shows the commit's subject line below the commit textarea. Click it to open the commit's details, or hover it for a quick preview.
 
 To undo the commit, open the overflow menu (**⋯**) on the **Changes** section header and choose "Uncommit", which performs the `git reset HEAD^ --soft` command.
 
 ### Configuring Commit Line Length
 
-By default, Zed sets the commit line length to `72` but it can be configured in your local `settings.json` file.
+By default, Zode sets the commit line length to `72` but it can be configured in your local `settings.json` file.
 
 Find more information about setting the `preferred-line-length` in the [Configuration](#configuration) section.
 
@@ -190,13 +190,13 @@ Create a new branch using {#action git::Branch} or switch to an existing branch 
 
 ### Deleting Branches
 
-To delete a branch, open the branch switcher with {#action git::Switch}, find the branch you want to delete, and use the delete option. Zed will confirm before deleting to prevent accidental data loss.
+To delete a branch, open the branch switcher with {#action git::Switch}, find the branch you want to delete, and use the delete option. Zode will confirm before deleting to prevent accidental data loss.
 
 > **Note:** You cannot delete the branch you currently have checked out. Switch to a different branch first.
 
 ## Merge Conflicts
 
-When you encounter merge conflicts after a merge, rebase, or pull, Zed highlights the conflicting regions in your files and displays resolution buttons above each conflict.
+When you encounter merge conflicts after a merge, rebase, or pull, Zode highlights the conflicting regions in your files and displays resolution buttons above each conflict.
 
 ### Viewing Conflicts
 
@@ -227,7 +227,7 @@ To stash all your current changes, use the {#action git::StashAll} action. This 
 
 ### Managing Stashes
 
-Zed provides a stash picker accessible via {#action git::ViewStash} or from the Git Panel's overflow menu. From the stash picker, you can:
+Zode provides a stash picker accessible via {#action git::ViewStash} or from the Git Panel's overflow menu. From the stash picker, you can:
 
 - **View stash list**: Browse all your saved stashes with their descriptions and timestamps
 - **Open diffs**: See exactly what changes are stored in each stash
@@ -237,7 +237,7 @@ Zed provides a stash picker accessible via {#action git::ViewStash} or from the 
 
 ### Quick Stash Operations
 
-For faster workflows, Zed provides direct actions to work with the most recent stash:
+For faster workflows, Zode provides direct actions to work with the most recent stash:
 
 - **Apply latest stash**: Use {#action git::StashApply} to apply the most recent stash without removing it
 - **Pop latest stash**: Use {#action git::StashPop} to apply and remove the most recent stash
@@ -254,9 +254,9 @@ To view a stash's contents, select it in the stash picker and press {#kb stash_p
 
 ## Git Integrations
 
-Zed integrates with popular Git hosting services to ensure that Git commit hashes and references to Issues, Pull Requests, and Merge Requests become clickable links.
+Zode integrates with popular Git hosting services to ensure that Git commit hashes and references to Issues, Pull Requests, and Merge Requests become clickable links.
 
-Zed currently supports links to the hosted versions of
+Zode currently supports links to the hosted versions of
 [GitHub](https://github.com),
 [GitLab](https://gitlab.com),
 [Bitbucket](https://bitbucket.org),
@@ -265,9 +265,9 @@ Zed currently supports links to the hosted versions of
 
 ### Self-Hosted Instances
 
-Zed automatically identifies Git hosting providers by checking for keywords in your Git remote URL. For example, if your self-hosted URL contains `gitlab`, `gitea`, or other recognized provider names, Zed will automatically register that hosting provider without any configuration needed.
+Zode automatically identifies Git hosting providers by checking for keywords in your Git remote URL. For example, if your self-hosted URL contains `gitlab`, `gitea`, or other recognized provider names, Zode will automatically register that hosting provider without any configuration needed.
 
-However, if your self-hosted Git instance URL doesn't contain identifying keywords, you can manually configure Zed to create clickable links to your instance by adding a `git_hosting_providers` setting so commit hashes and permalinks resolve to your domain:
+However, if your self-hosted Git instance URL doesn't contain identifying keywords, you can manually configure Zode to create clickable links to your instance by adding a `git_hosting_providers` setting so commit hashes and permalinks resolve to your domain:
 
 ```json [settings]
 {
@@ -287,7 +287,7 @@ You can configure multiple custom providers if you work with several self-hosted
 
 ### Permalinks
 
-Zed also has a Copy Permalink feature to create a permanent link to a code snippet on your Git hosting service.
+Zode also has a Copy Permalink feature to create a permanent link to a code snippet on your Git hosting service.
 These links are useful for sharing a specific line or range of lines in a file at a specific commit.
 Trigger this action via the [Command Palette](./getting-started.md#command-palette) (search for `permalink`),
 by creating a [custom key bindings](key-bindings.md#custom-key-bindings) to the
@@ -296,7 +296,7 @@ or by simply right clicking and selecting `Copy Permalink` with line(s) selected
 
 ## Diff Hunk Keyboard Shortcuts
 
-When viewing files with changes, Zed displays diff hunks that can be expanded or collapsed for detailed review:
+When viewing files with changes, Zode displays diff hunks that can be expanded or collapsed for detailed review:
 
 - **Expand all diff hunks**: {#action editor::ExpandAllDiffHunks} ({#kb editor::ExpandAllDiffHunks})
 - **Collapse all diff hunks**: Press `Escape` (bound to {#action editor::Cancel})
@@ -342,7 +342,7 @@ When viewing files with changes, Zed displays diff hunks that can be expanded or
 
 ## Git CLI Configuration
 
-If you would like to also use Zed for your [git commit message editor](https://git-scm.com/book/en/v2/Customizing-Git-Git-Configuration#_core_editor) when committing from the command line you can use `zed --wait`:
+If you would like to also use Zode for your [git commit message editor](https://git-scm.com/book/en/v2/Customizing-Git-Git-Configuration#_core_editor) when committing from the command line you can use `zed --wait`:
 
 ```sh
 git config --global core.editor "zed --wait"

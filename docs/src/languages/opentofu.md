@@ -1,6 +1,6 @@
 ---
 title: OpenTofu
-description: "Configure OpenTofu language support in Zed, including language servers, formatting, and debugging."
+description: "Configure OpenTofu language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # OpenTofu

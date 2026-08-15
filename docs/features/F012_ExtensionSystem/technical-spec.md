@@ -262,7 +262,7 @@ on_notification(method, callback):
 
 ### US029_ConnectToContextServerOverMcp — Connect to a context server over MCP (Priority: P2 - should)
 
-**What happens:** An external MCP client connects to zode's local per-session Unix socket; the listener accepts the connection and begins dispatching incoming JSON-RPC notifications to registered subscribers.
+**What happens:** An external MCP client connects to Zode's local per-session Unix socket; the listener accepts the connection and begins dispatching incoming JSON-RPC notifications to registered subscribers.
 **Why this priority:** Enables external MCP tooling integration; valuable but not core-editor-critical, hence `should`.
 **Independent Test:** With the context-server listener active, connect an MCP client to its Unix socket and confirm the connection is accepted and notifications dispatch.
 

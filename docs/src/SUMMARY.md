@@ -157,9 +157,9 @@
 - [Worktree Trust](./worktree-trust.md)
 - [Telemetry](./telemetry.md)
 
-# Developing Zed
+# Developing Zode
 
-- [Developing Zed](./development.md)
+- [Developing Zode](./development.md)
   - [macOS](./development/macos.md)
   - [Linux](./development/linux.md)
   - [Windows](./development/windows.md)

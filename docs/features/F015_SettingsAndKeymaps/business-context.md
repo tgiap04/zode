@@ -14,7 +14,7 @@ settings format changes during an update.
 - **Developers migrating from another editor** — they use the base keymap preset switcher to
   carry over muscle memory (e.g. VS Code or Sublime-style shortcuts) instead of relearning
   bindings from scratch.
-- **Zed staff** — see a small set of in-progress features enabled by default through the
+- **Zode staff** — see a small set of in-progress features enabled by default through the
   feature-flag mechanism this feature also owns, so they can dogfood upcoming work before it
   reaches everyone else.
 
@@ -26,10 +26,10 @@ settings format changes during an update.
    it — the new shortcut works right away, and the old one stops working.
 3. A developer switches the base keymap preset (for example, to a familiar layout from another
    editor) — that preset's shortcuts activate immediately across every open window.
-4. When Zed detects that a developer's saved settings or keymap file uses an older format, it
+4. When Zode detects that a developer's saved settings or keymap file uses an older format, it
    shows a notice offering to update the file. If the developer accepts:
-   - Zed first saves a backup copy of the file exactly as it was, so nothing is lost.
-   - Only after the backup is safely saved does Zed rewrite the live file in the new format.
+   - Zode first saves a backup copy of the file exactly as it was, so nothing is lost.
+   - Only after the backup is safely saved does Zode rewrite the live file in the new format.
 5. If anything goes wrong partway through, the developer's original file is never left in a
    half-updated state — the backup step must fully succeed before the live file is touched at all.
 

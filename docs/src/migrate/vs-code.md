@@ -1,31 +1,31 @@
 ---
-title: How to Migrate from VS Code to Zed
-description: "Guide for migrating from VS Code to Zed, including settings and keybindings."
+title: How to Migrate from VS Code to Zode
+description: "Guide for migrating from VS Code to Zode, including settings and keybindings."
 ---
 
-# How to Migrate from VS Code to Zed
+# How to Migrate from VS Code to Zode
 
-This guide explains how to move from VS Code to Zed without rebuilding your workflow.
+This guide explains how to move from VS Code to Zode without rebuilding your workflow.
 
 It covers which settings import automatically, which shortcuts map cleanly, and which behaviors differ so you can adjust quickly.
 
-## Install Zed
+## Install Zode
 
-Zed is available on macOS, Windows, and Linux.
+Zode is available on macOS, Windows, and Linux.
 
 For macOS, you can download it from zed.dev/download, or install via Homebrew:
 `brew install zed-editor/zed/zed`
 
-For most Linux users, the easiest way to install Zed is through our installation script:
+For most Linux users, the easiest way to install Zode is through our installation script:
 `curl -f https://zed.dev/install.sh | sh`
 
-After installation, you can launch Zed from your Applications folder (macOS) or directly from the terminal (Linux) using:
+After installation, you can launch Zode from your Applications folder (macOS) or directly from the terminal (Linux) using:
 `zed .`
-This opens the current directory in Zed.
+This opens the current directory in Zode.
 
 ## Import Settings from VS Code
 
-During setup, you have the option to import key settings from VS Code. Zed imports the following settings:
+During setup, you have the option to import key settings from VS Code. Zode imports the following settings:
 
 ### Settings Imported from VS Code
 
@@ -33,7 +33,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Editor**
 
-| VS Code Setting                             | Zed Setting                                    |
+| VS Code Setting                             | Zode Setting                                    |
 | ------------------------------------------- | ---------------------------------------------- |
 | `editor.fontFamily`                         | `buffer_font_family`                           |
 | `editor.fontSize`                           | `buffer_font_size`                             |
@@ -81,7 +81,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Files & Workspace**
 
-| VS Code Setting             | Zed Setting                    |
+| VS Code Setting             | Zode Setting                    |
 | --------------------------- | ------------------------------ |
 | `files.autoSave`            | `autosave`                     |
 | `files.autoSaveDelay`       | `autosave.milliseconds`        |
@@ -95,7 +95,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Terminal**
 
-| VS Code Setting                       | Zed Setting                         |
+| VS Code Setting                       | Zode Setting                         |
 | ------------------------------------- | ----------------------------------- |
 | `terminal.integrated.fontFamily`      | `terminal.font_family`              |
 | `terminal.integrated.fontSize`        | `terminal.font_size`                |
@@ -110,7 +110,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Tabs & Panels**
 
-| VS Code Setting                                    | Zed Setting                                        |
+| VS Code Setting                                    | Zode Setting                                        |
 | -------------------------------------------------- | -------------------------------------------------- |
 | `workbench.editor.showTabs`                        | `tab_bar.show`                                     |
 | `workbench.editor.showIcons`                       | `tabs.file_icons`                                  |
@@ -127,7 +127,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Project Panel (File Explorer)**
 
-| VS Code Setting                | Zed Setting                         |
+| VS Code Setting                | Zode Setting                         |
 | ------------------------------ | ----------------------------------- |
 | `explorer.compactFolders`      | `project_panel.auto_fold_dirs`      |
 | `explorer.autoReveal`          | `project_panel.auto_reveal_entries` |
@@ -137,7 +137,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Git**
 
-| VS Code Setting                      | Zed Setting                                    |
+| VS Code Setting                      | Zode Setting                                    |
 | ------------------------------------ | ---------------------------------------------- |
 | `git.enabled`                        | `git_panel.button`                             |
 | `git.defaultBranchName`              | `git_panel.fallback_branch_name`               |
@@ -146,7 +146,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Window & Behavior**
 
-| VS Code Setting                                  | Zed Setting                              |
+| VS Code Setting                                  | Zode Setting                              |
 | ------------------------------------------------ | ---------------------------------------- |
 | `window.confirmBeforeClose`                      | `confirm_quit`                           |
 | `window.nativeTabs`                              | `use_system_window_tabs`                 |
@@ -155,7 +155,7 @@ The following VS Code settings are automatically imported when you use **Import 
 
 **Other**
 
-| VS Code Setting            | Zed Setting                                              |
+| VS Code Setting            | Zode Setting                                              |
 | -------------------------- | -------------------------------------------------------- |
 | `http.proxy`               | `proxy`                                                  |
 | `npm.packageManager`       | `node.npm_path`                                          |
@@ -164,7 +164,7 @@ The following VS Code settings are automatically imported when you use **Import 
 | `chat.agent.enabled`       | `agent.enabled`                                          |
 | `mcp`                      | `context_servers`                                        |
 
-Zed doesn’t import extensions or keybindings, but this import gets core editor behavior close to your VS Code setup. If you skip that step during setup, you can still import settings manually later via the command palette:
+Zode doesn’t import extensions or keybindings, but this import gets core editor behavior close to your VS Code setup. If you skip that step during setup, you can still import settings manually later via the command palette:
 
 `Cmd+Shift+P → Zed: Import VS Code Settings`
 
@@ -173,24 +173,24 @@ Zed doesn’t import extensions or keybindings, but this import gets core editor
 You can configure most settings in the Settings Editor ({#kb zed::OpenSettings}). For advanced settings, run `zed: open settings file` from the Command Palette to edit your settings file directly.
 
 Here’s how common VS Code settings translate:
-| VS Code | Zed | Notes |
+| VS Code | Zode | Notes |
 | --- | --- | --- |
-| editor.fontFamily | buffer_font_family | Zed uses Zed Mono by default |
+| editor.fontFamily | buffer_font_family | Zode uses Zed Mono by default |
 | editor.fontSize | buffer_font_size | Set in pixels |
 | editor.tabSize | tab_size | Can override per language |
 | editor.insertSpaces | insert_spaces | Boolean |
 | editor.formatOnSave | format_on_save | Works with formatter enabled |
 | editor.wordWrap | soft_wrap | Supports optional wrap column |
 
-Zed also supports per-project settings. You can find these in the Settings Editor as well.
+Zode also supports per-project settings. You can find these in the Settings Editor as well.
 
 ## Open or Create a Project
 
-After setup, press `Cmd+O` (`Ctrl+O` on Linux) to open a folder. This becomes your workspace in Zed. There's no support for multi-root workspaces or `.code-workspace` files like in VS Code. Zed keeps it simple: one folder, one workspace.
+After setup, press `Cmd+O` (`Ctrl+O` on Linux) to open a folder. This becomes your workspace in Zode. There's no support for multi-root workspaces or `.code-workspace` files like in VS Code. Zode keeps it simple: one folder, one workspace.
 
-To start a new project, create a directory using your terminal or file manager, then open it in Zed. The editor will treat that folder as the root of your project.
+To start a new project, create a directory using your terminal or file manager, then open it in Zode. The editor will treat that folder as the root of your project.
 
-You can also launch Zed from the terminal inside any folder with:
+You can also launch Zode from the terminal inside any folder with:
 `zed .`
 
 Once inside a project, use `Cmd+P` to jump between files quickly. `Cmd+Shift+P` (`Ctrl+Shift+P` on Linux) opens the command palette for running actions / tasks, toggling settings, or starting a collaboration session.
@@ -202,7 +202,7 @@ Open buffers appear as tabs across the top. The Project Panel shows your file tr
 If you chose the VS Code keymap during onboarding, most shortcuts should already feel familiar.
 Here’s a quick reference for where keybindings match and where they differ.
 
-### Common Shared Keybindings (Zed <> VS Code)
+### Common Shared Keybindings (Zode <> VS Code)
 
 | Action                      | Shortcut               |
 | --------------------------- | ---------------------- |
@@ -223,16 +223,16 @@ Here’s a quick reference for where keybindings match and where they differ.
 | Navigate open tabs          | `Cmd + Opt + Arrow`    |
 | Syntactic fold / unfold     | `Cmd + Opt + {` or `}` |
 
-### Different Keybindings (Zed <> VS Code)
+### Different Keybindings (Zode <> VS Code)
 
-| Action              | VS Code               | Zed                    |
+| Action              | VS Code               | Zode                    |
 | ------------------- | --------------------- | ---------------------- |
 | Open recent project | `Ctrl + R`            | `Cmd + Opt + O`        |
 | Move lines up/down  | `Opt + Up/Down`       | `Cmd + Ctrl + Up/Down` |
 | Split panes         | `Cmd + \`             | `Cmd + K, Arrow Keys`  |
 | Expand Selection    | `Shift + Alt + Right` | `Opt + Up`             |
 
-### Unique to Zed
+### Unique to Zode
 
 | Action              | Shortcut                     | Notes                                            |
 | ------------------- | ---------------------------- | ------------------------------------------------ |
@@ -248,26 +248,26 @@ To edit your keybindings:
 
 This opens a list of all available bindings. You can override individual shortcuts, remove conflicts, or build a layout that works better for your setup.
 
-Zed also supports chords (multi-key sequences) like `Cmd+K Cmd+C`, like VS Code does.
+Zode also supports chords (multi-key sequences) like `Cmd+K Cmd+C`, like VS Code does.
 
 ## Differences in User Interfaces
 
 ### No Workspace
 
 VS Code uses a dedicated Workspace concept, with multi-root folders, `.code-workspace` files, and a clear distinction between “a window” and “a workspace.”
-Zed simplifies this model.
+Zode simplifies this model.
 
-In Zed:
+In Zode:
 
 - There is no workspace file format. Opening a folder is your project context.
 
-- Zed does not support multi-root workspaces. You can only open one folder at a time in a window.
+- Zode does not support multi-root workspaces. You can only open one folder at a time in a window.
 
 - Most project-level behavior is scoped to the folder you open. Search, Git integration, tasks, and environment detection all treat the opened directory as the project root.
 
-- Per-project settings are optional. You can add a `.zed/settings.json` file inside a project to override global settings, but Zed does not use `.code-workspace` files and won’t import them.
+- Per-project settings are optional. You can add a `.zed/settings.json` file inside a project to override global settings, but Zode does not use `.code-workspace` files and won’t import them.
 
-- You can start from a single file or an empty window. Zed doesn’t require you to open a folder to begin editing.
+- You can start from a single file or an empty window. Zode doesn’t require you to open a folder to begin editing.
 
 The result is a simpler model:
 Open a folder → work inside that folder → no additional workspace layer.
@@ -275,11 +275,11 @@ Open a folder → work inside that folder → no additional workspace layer.
 ### Navigating in a Project
 
 In VS Code, the standard entry point is opening a folder. From there, the left-hand panel is central to navigation.
-Zed takes a different approach:
+Zode takes a different approach:
 
 - You can still open folders, but you don’t need to. Opening a single file or even starting with an empty workspace is valid.
 - The Command Palette (`Cmd+Shift+P`) and File Finder (`Cmd+P`) are primary navigation tools. The File Finder searches files, symbols, and commands across the workspace.
-- Instead of a persistent panel, Zed encourages you to:
+- Instead of a persistent panel, Zode encourages you to:
   - Fuzzy-find files by name (`Cmd+P`)
   - Jump directly to symbols (`Cmd+Shift+O`)
   - Use split panes and tabs for context, rather than keeping a large file tree open (though you can do this with the Project Panel if you prefer).
@@ -288,9 +288,9 @@ The UI keeps auxiliary panels out of the way so navigation stays centered on cod
 
 ### Extensions vs. Marketplace
 
-Zed does not offer as many extensions as VS Code. The available extensions are focused on language support, themes, syntax highlighting, and other core editing enhancements.
+Zode does not offer as many extensions as VS Code. The available extensions are focused on language support, themes, syntax highlighting, and other core editing enhancements.
 
-Several features that typically require extensions in VS Code are built into Zed:
+Several features that typically require extensions in VS Code are built into Zode:
 
 - Real-time collaboration with voice and cursor sharing (no Live Share required)
 - AI coding assistance (no Copilot extension needed)
@@ -299,11 +299,11 @@ Several features that typically require extensions in VS Code are built into Zed
 - Task runner with JSON config
 - Inline diagnostics and code actions via LSP
 
-You won’t find one-to-one replacements for every VS Code extension, especially if you rely on tools for DevOps, containers, or test runners. Zed's extension catalog is still growing and remains smaller.
+You won’t find one-to-one replacements for every VS Code extension, especially if you rely on tools for DevOps, containers, or test runners. Zode's extension catalog is still growing and remains smaller.
 
-### Collaboration in Zed vs. VS Code
+### Collaboration in Zode vs. VS Code
 
-Unlike VS Code, Zed doesn’t require an extension to collaborate. It’s built into the core experience.
+Unlike VS Code, Zode doesn’t require an extension to collaborate. It’s built into the core experience.
 
 - Open the Collab Panel in the left dock.
 - Create a channel and [invite your collaborators](https://zed.dev/docs/collaboration#inviting-a-collaborator) to join.
@@ -311,11 +311,11 @@ Unlike VS Code, Zed doesn’t require an extension to collaborate. It’s built 
 
 Once connected, you’ll see each other's cursors, selections, and edits in real time. Voice chat is included, so you can talk as you work. There’s no need for separate tools or third-party logins.
 
-Learn how [Zed uses Zed](https://zed.dev/blog/zed-is-our-office) to plan work and collaborate.
+Learn how [Zode uses Zode](https://zed.dev/blog/zed-is-our-office) to plan work and collaborate.
 
-### Using AI in Zed
+### Using AI in Zode
 
-If you’re used to GitHub Copilot in VS Code, you can do the same in Zed. You can also explore other agents through Zed Pro, or bring your own keys and connect without authentication. You can disable AI features entirely if you prefer.
+If you’re used to GitHub Copilot in VS Code, you can do the same in Zode. You can also explore other agents through Zed Pro, or bring your own keys and connect without authentication. You can disable AI features entirely if you prefer.
 
 #### Configuring GitHub Copilot
 
@@ -324,19 +324,19 @@ If you’re used to GitHub Copilot in VS Code, you can do the same in Zed. You c
 3. Click **Configure** next to "Configure Providers"
 4. Under **GitHub Copilot**, click **Sign in to GitHub**
 
-Once signed in, just start typing. Zed will offer suggestions inline for you to accept.
+Once signed in, just start typing. Zode will offer suggestions inline for you to accept.
 
 #### Additional AI Options
 
-To use other AI models in Zed, you have several options:
+To use other AI models in Zode, you have several options:
 
-- Use Zed’s hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
+- Use Zode’s hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
 - Bring your own [API keys](https://zed.dev/docs/ai/llm-providers.html), no authentication needed
 - Use [external agents like Claude Agent](https://zed.dev/docs/ai/external-agents.html).
 
 ### Advanced Config and Productivity Tweaks
 
-Zed exposes advanced settings for power users who want to fine-tune their environment.
+Zode exposes advanced settings for power users who want to fine-tune their environment.
 
 Here are a few useful tweaks:
 
@@ -364,4 +364,4 @@ Here are a few useful tweaks:
 ```
 
 **Bring over custom snippets**
-Copy your VS Code snippet JSON directly into Zed's snippets folder (`zed: configure snippets`).
+Copy your VS Code snippet JSON directly into Zode's snippets folder (`zed: configure snippets`).

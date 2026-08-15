@@ -1,13 +1,13 @@
 ---
-title: REPL - Jupyter Kernels in Zed
-description: Run code interactively in Zed with built-in Jupyter kernel support. Execute Python, TypeScript, R, and more inline.
+title: REPL - Jupyter Kernels in Zode
+description: Run code interactively in Zode with built-in Jupyter kernel support. Execute Python, TypeScript, R, and more inline.
 ---
 
 # REPL
 
 ## Getting started
 
-Zed's built-in REPL uses [Jupyter kernels](https://docs.jupyter.org/en/latest/projects/kernels.html) so you can run code interactively in regular editor files.
+Zode's built-in REPL uses [Jupyter kernels](https://docs.jupyter.org/en/latest/projects/kernels.html) so you can run code interactively in regular editor files.
 
 <figure style="width: 100%; margin: 0; overflow: hidden; border-top-left-radius: 2px; border-top-right-radius: 2px;">
     <video loop controls playsinline>
@@ -28,7 +28,7 @@ Zed's built-in REPL uses [Jupyter kernels](https://docs.jupyter.org/en/latest/pr
 
 ## Installation
 
-Zed supports running code in multiple languages. To get started, you need to install a kernel for the language you want to use.
+Zode supports running code in multiple languages. To get started, you need to install a kernel for the language you want to use.
 
 **Currently supported languages:**
 
@@ -51,7 +51,7 @@ Outputs can be cleared with the `repl: clear outputs` command, or from the REPL 
 
 ### Cell mode
 
-Zed supports [notebooks as scripts](https://jupytext.readthedocs.io/en/latest/formats-scripts.html) using the `# %%` cell separator in Python and `// %%` in TypeScript. This allows you to write code in a single file and run it as if it were a notebook, cell by cell.
+Zode supports [notebooks as scripts](https://jupytext.readthedocs.io/en/latest/formats-scripts.html) using the `# %%` cell separator in Python and `// %%` in TypeScript. This allows you to write code in a single file and run it as if it were a notebook, cell by cell.
 
 The `repl: run` command will run each block of code between the `# %%` markers as a separate cell.
 
@@ -113,7 +113,7 @@ ark --install
 ### R (Xeus Kernel) {#r-xeus}
 
 - Install [Xeus-R](https://github.com/jupyter-xeus/xeus-r)
-- Install the R Extension for Zed (search for `R` in Zed Extensions)
+- Install the R Extension for Zode (search for `R` in Zode Extensions)
 
 <!--
 TBD: Improve R REPL (Ark Kernel) instructions
@@ -134,7 +134,7 @@ TBD: Improve R REPL (Ark Kernel) instructions
 ### Julia
 
 - Download and install Julia from the [official website](https://julialang.org/downloads/).
-- Install the Julia Extension for Zed (search for `Julia` in Zed Extensions)
+- Install the Julia Extension for Zode (search for `Julia` in Zode Extensions)
 
 <!--
 TBD: Improve Julia REPL instructions
@@ -151,7 +151,7 @@ TBD: Improve Julia REPL instructions
 
 ## Changing which kernel is used per language {#changing-kernels}
 
-Zed automatically detects available kernels and organizes them in the kernel picker:
+Zode automatically detects available kernels and organizes them in the kernel picker:
 
 - **Recommended**: The Python environment matching your active toolchain (if detected)
 - **Python Environments**: Virtual environments (venv, virtualenv, Poetry, Pipenv, Conda, uv, etc.)
@@ -160,15 +160,15 @@ Zed automatically detects available kernels and organizes them in the kernel pic
 
 ### Installing ipykernel
 
-Python environments appear in the picker even if ipykernel is not installed. Environments missing ipykernel are dimmed and labeled "ipykernel not installed." When you select one, Zed automatically runs `pip install ipykernel` in that environment and activates it once installation completes.
+Python environments appear in the picker even if ipykernel is not installed. Environments missing ipykernel are dimmed and labeled "ipykernel not installed." When you select one, Zode automatically runs `pip install ipykernel` in that environment and activates it once installation completes.
 
-### How Zed Recommends Kernels
+### How Zode Recommends Kernels
 
-When you run code, Zed selects a kernel automatically:
+When you run code, Zode selects a kernel automatically:
 
-1. **Active toolchain match**: If a Python environment matches your active toolchain and has ipykernel, Zed uses it
+1. **Active toolchain match**: If a Python environment matches your active toolchain and has ipykernel, Zode uses it
 2. **First available Python env**: Otherwise, the first Python environment with ipykernel
-3. **Language-based fallback**: If no Python envs are ready, Zed picks a Jupyter kernel matching the code block's language
+3. **Language-based fallback**: If no Python envs are ready, Zode picks a Jupyter kernel matching the code block's language
 
 You can override this by explicitly selecting a kernel from the picker.
 
@@ -217,4 +217,4 @@ Available kernels:
   rust                  /Users/z/Library/Jupyter/kernels/rust
 ```
 
-> Note: Zed makes best effort usage of `sys.prefix` and `CONDA_PREFIX` to find kernels in Python environments. If you want explicitly control run `python -m ipykernel install --user --name myenv --display-name "Python (myenv)"` to install the kernel directly while in the environment.
+> Note: Zode makes best effort usage of `sys.prefix` and `CONDA_PREFIX` to find kernels in Python environments. If you want explicitly control run `python -m ipykernel install --user --name myenv --display-name "Python (myenv)"` to install the kernel directly while in the environment.

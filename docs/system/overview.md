@@ -1,6 +1,6 @@
 # System Overview
 
-**Project**: Zed (zode fork)
+**Project**: Zode (Zed fork)
 **Generated**: 2026-08-07
 **Architecture Type**: Native multi-platform desktop application (GPUI-based). Local-first — no collaboration/multiplayer backend, no AI-agent subsystem (both removed in this fork; see Notes below).
 
@@ -12,7 +12,7 @@ Architecturally the system is organized as concentric layers rather than a clien
 
 Recent work on this fork has focused on window chrome and multi-project ergonomics: a restored/expanded `title_bar` (with `application_menu`, and a newly added search bar), a new `platform_title_bar` crate for OS-native tab/window-control integration, and a `sidebar` crate implementing an always-visible project rail alongside multi-project hibernation support in `workspace`/`project` (activity-state tracking distinct from actual resource teardown — see `crates/project`'s activity/hibernation logic).
 
-This is a desktop application, not a web app: there are no HTTP routes or "screens" in the routed-navigation sense (route-list/screen-list/screen-flow/api-map artifacts are out of scope for this project per the generic-source stack profile). The nearest analogues to "screens" are GPUI `Render`-implementing entities (`Editor`, `Workspace`, dock panels, `sidebar`), and the nearest analogue to a request-routing layer is Zed's `actions!()`/`#[derive(Action)]` dispatch mechanism (101+ files register custom-command-style actions per the scout's Background Logic inventory) combined with the `impl EventEmitter<...>` / `cx.subscribe` pub-sub pattern used for inter-entity communication.
+This is a desktop application, not a web app: there are no HTTP routes or "screens" in the routed-navigation sense (route-list/screen-list/screen-flow/api-map artifacts are out of scope for this project per the generic-source stack profile). The nearest analogues to "screens" are GPUI `Render`-implementing entities (`Editor`, `Workspace`, dock panels, `sidebar`), and the nearest analogue to a request-routing layer is Zode's `actions!()`/`#[derive(Action)]` dispatch mechanism (101+ files register custom-command-style actions per the scout's Background Logic inventory) combined with the `impl EventEmitter<...>` / `cx.subscribe` pub-sub pattern used for inter-entity communication.
 
 For per-subsystem crate detail and the full background-logic inventory, see [scout-report.md](scout-report.md).
 
@@ -130,7 +130,7 @@ This is the only "client/server" boundary in the system, and it is a single-user
 
 ### Decision 1: A first-party UI framework (GPUI) instead of an existing GUI toolkit
 
-**Context**: A code editor needs low-latency, GPU-accelerated text rendering and fine-grained control over layout, input, and cross-platform windowing that general-purpose Rust GUI crates did not offer at the performance/control level Zed's editor core requires.
+**Context**: A code editor needs low-latency, GPU-accelerated text rendering and fine-grained control over layout, input, and cross-platform windowing that general-purpose Rust GUI crates did not offer at the performance/control level Zode's editor core requires.
 
 **Decision**: Build and own GPUI (`crates/gpui`) as the foundation: an entity/context model (`Entity<T>`, `Context<T>`, `App`), Taffy-based flexbox layout, per-platform rendering backends (`gpui_macos`, `gpui_linux`, `gpui_windows`, `gpui_wgpu` shared renderer, experimental `gpui_web`), and its own async executor abstractions (`cx.spawn`, `cx.background_spawn`, `Task<T>`) rather than depending on Tokio directly (`gpui_tokio` is a bridge crate for the few dependencies, e.g. AWS SDK, that require Tokio).
 

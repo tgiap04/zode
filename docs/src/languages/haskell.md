@@ -1,6 +1,6 @@
 ---
 title: Haskell
-description: "Configure Haskell language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Haskell language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # Haskell
@@ -22,7 +22,7 @@ which haskell-language-server-wrapper
 
 ## Configuring HLS
 
-If you need to configure haskell-language-server (hls) you can add configuration options to your Zed settings.json:
+If you need to configure haskell-language-server (hls) you can add configuration options to your Zode settings.json:
 
 ```json [settings]
 {

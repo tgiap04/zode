@@ -22,7 +22,7 @@ N/A — `generic-source` profile, no screen-list/route surface for this native d
 
 ## User Journey
 
-1. Developer launches zode and lands on the Welcome screen, seeing a list of recently-opened projects.
+1. Developer launches Zode and lands on the Welcome screen, seeing a list of recently-opened projects.
 2. Developer clicks a recent project entry; a workspace opens showing that project's file tree in the Project panel and a new entry appears in the Project rail.
 3. Developer opens a second project; the Project rail now shows two entries, and the developer switches between them by clicking, or by cycling with a keyboard shortcut.
 4. Developer leaves the second project idle; after its idle timer elapses, its rail entry shows a small hibernated indicator.

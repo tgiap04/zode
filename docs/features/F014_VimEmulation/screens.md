@@ -1,6 +1,6 @@
 # Screens — F014_VimEmulation
 
-**Non-web adaptation note:** zode is a native GPUI desktop editor, not a web app — this `generic-source` profile has no route list or screen-list registry, so `SCR###` codes are omitted per session convention. The rows below describe the editor UI surfaces this feature touches instead of routed pages.
+**Non-web adaptation note:** Zode is a native GPUI desktop editor, not a web app — this `generic-source` profile has no route list or screen-list registry, so `SCR###` codes are omitted per session convention. The rows below describe the editor UI surfaces this feature touches instead of routed pages.
 
 ## Screen List
 

@@ -1,6 +1,6 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 <!-- Output path: docs/generated/entities.md -->
-<!-- SOURCE-SHAPE ADAPTATION: Zed/zode is a native GPUI desktop app (Rust structs held as
+<!-- SOURCE-SHAPE ADAPTATION: Zode/zode is a native GPUI desktop app (Rust structs held as
      `Entity<T>` in-process), not a web app with a DB schema. "Entity" here = architecturally
      central Rust struct/enum, not a persisted DB row. `Constraints` column repurposed for
      Rust-level invariants (ownership, uniqueness via typed ID, Option=nullable). No FK/PK in
@@ -10,7 +10,7 @@
 
 # Entities
 
-**Project**: zode (Zed Editor fork)
+**Project**: Zode (Zode Editor fork)
 **Generated**: 2026-08-07
 
 ## Entity Relationship Diagram
@@ -617,7 +617,7 @@ erDiagram
 
 **Source**: `crates/extension/src/extension_manifest.rs:82`
 
-**Description**: Deserialized `extension.toml` schema describing what a Zed extension provides (themes, languages, grammars, language servers, MCP context servers, agent servers, slash commands, debug adapters, LLM providers).
+**Description**: Deserialized `extension.toml` schema describing what a Zode extension provides (themes, languages, grammars, language servers, MCP context servers, agent servers, slash commands, debug adapters, LLM providers).
 
 | Attribute | Type | Constraints | Description |
 |-----------|------|-------------|-------------|
@@ -697,5 +697,5 @@ erDiagram
 - **Correction from the prior run of this artifact**: the previous `data-model.md` documented an AI "agent conversation" cluster (`Thread`, `Message`, `UserMessage`/`AgentMessage`, `LanguageModel` trait object) sourced to `crates/agent/src/thread.rs`. That crate does not exist in this repository — `crates/` has no `agent` member (confirmed against the current 179-crate workspace list and `grep -rl "acp::" crates` returning zero matches outside the unused `agent-client-protocol` dependency declaration in the root `Cargo.toml`). That entire entity cluster has been removed from this draft as unverifiable/stale; the only `Thread` struct that exists in source today is `crates/project/src/debugger/session.rs:122`, a DAP debug-session thread wrapping `dap::Thread` — an unrelated, much smaller type, and not significant enough to warrant its own MODEL### block (no distinguishing fields beyond stack frames).
 - ~1,760 source files exist; this document covers the ~18 most architecturally central types the scout report and cross-crate reference density point to, not an exhaustive struct inventory. Entities named in Relationships but not given their own full field breakdown include `LanguageRegistry`, `Language`, `LspStore`, `DapStore`, `TaskStore`, `ContextServerStore`, `AgentServerStore`, `RemoteClient`, `Dock`, `PaneGroup` — available on request.
 - Field lists for large structs (`Editor` has 130+ fields, `Workspace` has 45+, `Project` has 30+, `Pane` has 40+) are curated to the fields with real cross-entity or behavioral significance, not a full transcription of every private field.
-- This fork adds a multi-project hibernation lifecycle not present in upstream Zed (`Project.activity`, `MultiWorkspace.hibernate_timers`, `ProjectPanel.stale_diagnostic_paths`, `Terminal.pre_hibernate_scroll_history`, `Project.hibernate_retry`, `Worktree.scanning_paused`) and an always-visible project rail (`MultiWorkspace.sidebar`, `crates/sidebar`) — both called out explicitly above since they are the parts of this data model most likely to diverge from any upstream-Zed documentation a future reader might consult instead.
+- This fork adds a multi-project hibernation lifecycle not present in upstream Zed (`Project.activity`, `MultiWorkspace.hibernate_timers`, `ProjectPanel.stale_diagnostic_paths`, `Terminal.pre_hibernate_scroll_history`, `Project.hibernate_retry`, `Worktree.scanning_paused`) and an always-visible project rail (`MultiWorkspace.sidebar`, `crates/sidebar`) — both called out explicitly above since they are the parts of this data model most likely to diverge from any upstream-Zode documentation a future reader might consult instead.
 - `Project.activity` is a *label* only — per this repo's own working notes, the label can say `Hibernated` while the underlying LSP/worktree-scanner/terminal resource layer has not actually stopped yet (a deferred barrier). Any feature spec that branches on this field should account for that lag rather than treating the enum as a real-time resource-state oracle.

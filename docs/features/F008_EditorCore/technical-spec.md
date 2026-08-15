@@ -7,7 +7,7 @@
 
 ## Overview
 
-Editor Core is the text-editing surface every other panel in zode ultimately renders through: cursor/selection motions, multi-select, deletion, split-diff comparison, encoding/line-ending switching, inlay hints, and the `TextBuffer` → `Buffer` → `MultiBuffer` → `Editor` stack. It is triggered by keybindings (`keymap.json`) and command-palette invocations dispatched against a focused `Editor` entity, and its output feeds diagnostics, search, git-diff, and debugging panels that all reuse `MultiBuffer`/`Editor` to display text. `Editor` is a `Render`-implementing GPUI view (`crates/editor/src/editor.rs:1131`) owning exactly one `Entity<MultiBuffer>`.
+Editor Core is the text-editing surface every other panel in Zode ultimately renders through: cursor/selection motions, multi-select, deletion, split-diff comparison, encoding/line-ending switching, inlay hints, and the `TextBuffer` → `Buffer` → `MultiBuffer` → `Editor` stack. It is triggered by keybindings (`keymap.json`) and command-palette invocations dispatched against a focused `Editor` entity, and its output feeds diagnostics, search, git-diff, and debugging panels that all reuse `MultiBuffer`/`Editor` to display text. `Editor` is a `Render`-implementing GPUI view (`crates/editor/src/editor.rs:1131`) owning exactly one `Entity<MultiBuffer>`.
 
 ## Polymorphic Behavior
 

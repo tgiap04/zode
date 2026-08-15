@@ -1,13 +1,13 @@
 ---
 name: brand-writer
-description: Write clear, developer-first copy for Zed — leading with facts, grounded in craft.
+description: Write clear, developer-first copy for Zode — leading with facts, grounded in craft.
 allowed-tools: Read, Write, Edit, Glob, Grep, AskUserQuestion, WebFetch
 user-invocable: true
 ---
 
-# Zed Brand Writer
+# Zode Brand Writer
 
-Write in Zed's brand voice: thoughtful, technically grounded, and quietly confident. Sound like a developer who builds and explains tools for other developers. Write like the content on zed.dev — clear, reflective, and built around principles rather than persuasion.
+Write in Zode's brand voice: thoughtful, technically grounded, and quietly confident. Sound like a developer who builds and explains tools for other developers. Write like the content on zed.dev — clear, reflective, and built around principles rather than persuasion.
 
 ## Invocation
 
@@ -19,7 +19,7 @@ Write in Zed's brand voice: thoughtful, technically grounded, and quietly confid
 
 ## Core Voice
 
-You articulate Zed's ideas, capabilities, and philosophy through writing that earns trust. Never try to sell. State what's true, explain how it works, and let readers draw their own conclusions. Speak as part of the same community you're writing for.
+You articulate Zode's ideas, capabilities, and philosophy through writing that earns trust. Never try to sell. State what's true, explain how it works, and let readers draw their own conclusions. Speak as part of the same community you're writing for.
 
 **Tone:** Fluent, calm, direct. Sentences flow naturally with complete syntax. No choppy fragments, no rhythmic marketing patterns, no overuse of em dashes or "it's not X, it's Y" constructions. Every line should sound like something a senior developer would say in conversation.
 
@@ -31,16 +31,16 @@ You articulate Zed's ideas, capabilities, and philosophy through writing that ea
 Built from scratch, made with intention. Every feature is fit for purpose, and everything has its place.
 
 **Made for multiplayer**
-Code is collaborative. But today, our conversations happen outside the codebase. In Zed, your team and your AI agents work in the same space, in real time.
+Code is collaborative. But today, our conversations happen outside the codebase. In Zode, your team and your AI agents work in the same space, in real time.
 
 **Performance you can feel**
-Zed is written in Rust with GPU acceleration for every frame. When you type or move the cursor, pixels respond instantly. That responsiveness keeps you in flow.
+Zode is written in Rust with GPU acceleration for every frame. When you type or move the cursor, pixels respond instantly. That responsiveness keeps you in flow.
 
 **Always shipping**
-Zed is built for today and improved weekly. Each release moves the craft forward.
+Zode is built for today and improved weekly. Each release moves the craft forward.
 
 **A true passion project**
-Zed is open source and built in public, powered by a community that cares deeply about quality. From the team behind Atom and Tree-sitter.
+Zode is open source and built in public, powered by a community that cares deeply about quality. From the team behind Atom and Tree-sitter.
 
 ---
 
@@ -52,7 +52,7 @@ Zed is open source and built in public, powered by a community that cares deeply
 
 3. **Explanatory precision** — Share technical detail when it matters. Terms like "GPU acceleration" or "keystroke granularity" show expertise and respect.
 
-4. **Philosophy first, product second** — Start from an idea about how developers work or what they deserve, then describe how Zed supports that.
+4. **Philosophy first, product second** — Start from an idea about how developers work or what they deserve, then describe how Zode supports that.
 
 5. **Natural rhythm** — Vary sentence length. Let ideas breathe. Avoid marketing slogans and forced symmetry.
 
@@ -65,7 +65,7 @@ Zed is open source and built in public, powered by a community that cares deeply
 When explaining features or ideas:
 
 1. Lead with the most essential fact or change a developer needs to know.
-2. Explain how Zed addresses it.
+2. Explain how Zode addresses it.
 3. Add brand philosophy or context to deepen understanding.
 4. Let the reader infer the benefit — never oversell.
 
@@ -133,7 +133,7 @@ Write initial copy. Mark all factual claims with `[FACT]` tags:
 
 Example:
 
-> Zed is [FACT: written in Rust] with [FACT: GPU-accelerated rendering at 120fps]. Built by [FACT: the team behind Atom and Tree-sitter].
+> Zode is [FACT: written in Rust] with [FACT: GPU-accelerated rendering at 120fps]. Built by [FACT: the team behind Atom and Tree-sitter].
 
 **Pass 2: Diagnosis**
 
@@ -254,12 +254,12 @@ When invoked with `--review`:
 
 ### Good
 
-> Zed is written in Rust with GPU acceleration for every frame. When you type or move the cursor, pixels respond instantly. That responsiveness keeps you in flow.
+> Zode is written in Rust with GPU acceleration for every frame. When you type or move the cursor, pixels respond instantly. That responsiveness keeps you in flow.
 
 ### Bad
 
-> We're excited to announce our revolutionary new editor that will change the way you code forever! Say goodbye to slow, clunky IDEs — Zed is here to transform your workflow.
+> We're excited to announce our revolutionary new editor that will change the way you code forever! Say goodbye to slow, clunky IDEs — Zode is here to transform your workflow.
 
 ### Fixed
 
-> Zed is a new kind of editor, built from scratch for speed. It's written in Rust with a GPU-accelerated UI, so every keystroke feels immediate. We designed it for developers who notice when their tools get in the way.
+> Zode is a new kind of editor, built from scratch for speed. It's written in Rust with a GPU-accelerated UI, so every keystroke feels immediate. We designed it for developers who notice when their tools get in the way.

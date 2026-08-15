@@ -1,6 +1,6 @@
 ---
 title: Themes
-description: "Themes for Zed extensions."
+description: "Themes for Zode extensions."
 ---
 
 # Themes
@@ -13,9 +13,9 @@ See [this blog post](https://zed.dev/blog/user-themes-now-in-preview) for additi
 
 ## Theme JSON Structure
 
-The structure of a Zed theme is defined in the [Zed Theme JSON Schema](https://zed.dev/schema/themes/v0.2.0.json).
+The structure of a Zode theme is defined in the [Zode Theme JSON Schema](https://zed.dev/schema/themes/v0.2.0.json).
 
-A Zed theme consists of a Theme Family object including:
+A Zode theme consists of a Theme Family object including:
 
 - `name`: The name for the theme family
 - `author`: The name of the author of the theme family
@@ -57,7 +57,7 @@ The core components of a Theme object include:
 
 ## Designing Your Theme
 
-You can use [Zed's Theme Builder](https://zed.dev/theme-builder) to design your own custom theme based on an existing one.
+You can use [Zode's Theme Builder](https://zed.dev/theme-builder) to design your own custom theme based on an existing one.
 
-This tool lets you fine-tune and preview how surfaces in Zed will look.
-You can then export the JSON and publish it in Zed's extension store.
+This tool lets you fine-tune and preview how surfaces in Zode will look.
+You can then export the JSON and publish it in Zode's extension store.

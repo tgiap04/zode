@@ -7,7 +7,7 @@
 
 ## What Happened
 
-Completed the `tkm:rebuild-spec --overview` pass (waves OV.1 through OV.4) as the final step of a full-pipeline rebuild-spec session. This pass synthesizes a canonical 11-section System Overview deliverable from already-promoted `docs/` artifacts (never reading source code), targeting a client-facing audience with no technical jargon. The pass resolved the project name ("Zed (zode fork)" → sanitized to filesystem-safe `Zed_zode_fork` per the pass's own contract), dispatched four parallel doc-writer agents to draft eight of the eleven sections, validated against deterministic token-leak rules, underwent peer-review, caught a wording collision ("assistant" ambiguity), fixed it, and produced a styled `.docx` deliverable.
+Completed the `tkm:rebuild-spec --overview` pass (waves OV.1 through OV.4) as the final step of a full-pipeline rebuild-spec session. This pass synthesizes a canonical 11-section System Overview deliverable from already-promoted `docs/` artifacts (never reading source code), targeting a client-facing audience with no technical jargon. The pass resolved the project name ("Zode (Zed fork)" → sanitized to filesystem-safe `Zed_zode_fork` per the pass's own contract), dispatched four parallel doc-writer agents to draft eight of the eleven sections, validated against deterministic token-leak rules, underwent peer-review, caught a wording collision ("assistant" ambiguity), fixed it, and produced a styled `.docx` deliverable.
 
 **Output:** `docs/Zed_zode_fork_System_Overview.md` (markdown source, promoted to live docs), `docs/Zed_zode_fork_System_Overview.docx` (styled deliverable, 28,242 bytes), confidence-report sidecar.
 
@@ -19,7 +19,7 @@ Completed the `tkm:rebuild-spec --overview` pass (waves OV.1 through OV.4) as th
 
 ## The Brutal Truth
 
-The galling part: a single word collision between two semantically unrelated parts of the document nearly shipped a false impression. The hibernation feature section (§4 Business Flows & Lifecycle) described it as pausing "the assistant that is scanning files in the background" — perfectly accurate phrasing in isolation. But this document's §1 System Overview and §2 Purpose & Business Value *explicitly and repeatedly* state that zode has NO AI writing-assistant subsystem (removed from upstream Zed). A reader hitting "assistant" in §4 right after two firm "no AI" disclaimers would very plausibly misread it as a residual or incomplete removal of AI capability, even though "assistant" meant the worktree's background file-watcher (`Worktree::pause_scanning()`). The deterministic token-leak gate caught zero technical jargon (good — that gate works), but a careful human reviewer spotted the wording trap that no regex can catch: a word choice that's contextually correct but collides with the document's own repeated disclaimers.
+The galling part: a single word collision between two semantically unrelated parts of the document nearly shipped a false impression. The hibernation feature section (§4 Business Flows & Lifecycle) described it as pausing "the assistant that is scanning files in the background" — perfectly accurate phrasing in isolation. But this document's §1 System Overview and §2 Purpose & Business Value *explicitly and repeatedly* state that Zode has NO AI writing-assistant subsystem (removed from upstream Zed). A reader hitting "assistant" in §4 right after two firm "no AI" disclaimers would very plausibly misread it as a residual or incomplete removal of AI capability, even though "assistant" meant the worktree's background file-watcher (`Worktree::pause_scanning()`). The deterministic token-leak gate caught zero technical jargon (good — that gate works), but a careful human reviewer spotted the wording trap that no regex can catch: a word choice that's contextually correct but collides with the document's own repeated disclaimers.
 
 The second issue was mundane: the project-navigation section omitted one real UI element (the quick tab switcher) from its bullet list. Not a defect in derivation, just an incomplete enumeration when pulling from multiple `screens.md` files.
 
@@ -29,7 +29,7 @@ The second issue was mundane: the project-navigation section omitted one real UI
 
 Four parallel doc-writer agents, each drafting a cluster of the canonical 11-section structure:
 
-- **Cluster A (Sections 5–6):** Detailed Function List (regrouping the 11 features from `docs/generated/feature-list.md` into five functional pillars) + Screen List (honest prose description of main UI surfaces, synthesized from each feature's `screens.md` rather than a formal route/screen/type table, because zode has no `docs/generated/screen-list.md`).
+- **Cluster A (Sections 5–6):** Detailed Function List (regrouping the 11 features from `docs/generated/feature-list.md` into five functional pillars) + Screen List (honest prose description of main UI surfaces, synthesized from each feature's `screens.md` rather than a formal route/screen/type table, because Zode has no `docs/generated/screen-list.md`).
 
 - **Cluster B (Sections 2, 4):** Purpose & Business Value (value props extracted from `docs/system/overview.md` and each feature's own `business-context.md`) + Business Flows & Lifecycle (grounded in `docs/flows/project-activity-hibernation-cascade.md`, with explicit note that no screen-flow document exists and none should be expected for a native GPUI app).
 
@@ -37,13 +37,13 @@ Four parallel doc-writer agents, each drafting a cluster of the canonical 11-sec
 
 - **Cluster D (Section 11):** Open Questions & Known Issues (cross-referenced from `docs/system/known-issues.md` and issue tracker links).
 
-**§1 and §3 drafted directly by the orchestrator:** System Overview (subheading-level summary of what zode is) and Actors & Roles (primary user personas, small sections, in-process to maintain tight narrative voice).
+**§1 and §3 drafted directly by the orchestrator:** System Overview (subheading-level summary of what Zode is) and Actors & Roles (primary user personas, small sections, in-process to maintain tight narrative voice).
 
 ### Degradation Path (Three Missing Artifact Categories)
 
 The pass encountered three gaps where expected `docs/generated/` artifacts didn't exist:
 
-1. **§6 Screen List:** No `docs/generated/screen-list.md` (zode is a native GPUI desktop app; no route/screen taxonomy needed or possible). **Workaround:** Synthesized honest prose inventory of main UI surfaces (editor, project rail, sidebar, command palette, terminal) inferred from individual feature `screens.md` files. Added explicit note: "Note: This desktop application does not maintain a formal route/screen inventory; descriptions are synthesized from feature boundaries and UI layers."
+1. **§6 Screen List:** No `docs/generated/screen-list.md` (Zode is a native GPUI desktop app; no route/screen taxonomy needed or possible). **Workaround:** Synthesized honest prose inventory of main UI surfaces (editor, project rail, sidebar, command palette, terminal) inferred from individual feature `screens.md` files. Added explicit note: "Note: This desktop application does not maintain a formal route/screen inventory; descriptions are synthesized from feature boundaries and UI layers."
 
 2. **§4 Business Flows:** No `docs/generated/screen-flow.md` (no screen-to-screen navigation flows in a monolithic native UI). **Workaround:** Grounded in the one real flow document that exists (`docs/flows/project-activity-hibernation-cascade.md`), with explicit note: "Detailed behavioral flow documented only for multi-project hibernation state machine; comprehensive screen-flow documentation is not applicable to this desktop architecture."
 
@@ -77,7 +77,7 @@ Reviewer (`code-review-agent`) ran a detailed accuracy spot-check against the ma
 
 Quoted text from Wave OV.1 researcher (Cluster B, §4): "Multi-project hibernation pauses **the assistant** that is scanning files in the background for changes..."
 
-**Context collision:** §1 and §2 of the same document state explicitly: "This is Zed without the AI assistant subsystem" and "Note: zode removes the AI writing-assistant features from upstream Zed, keeping only the editor core." A reader following the narrative would hit "assistant" in §4 and plausibly misinterpret it as a residual AI capability.
+**Context collision:** §1 and §2 of the same document state explicitly: "This is Zode without the AI assistant subsystem" and "Note: Zode removes the AI writing-assistant features from upstream Zed, keeping only the editor core." A reader following the narrative would hit "assistant" in §4 and plausibly misinterpret it as a residual AI capability.
 
 **Actual meaning:** "The assistant" here meant the worktree's background file-watcher process (`Worktree::pause_scanning()` in the codebase). Accurate terminology in the feature's own technical context, but colliding with the document's own repeated "no AI" theme.
 
@@ -123,7 +123,7 @@ Markdown source was converted to styled `.docx` via the pass's bundled pandoc-ba
 
 ### Missing UI Element in Screen List
 
-The researchers were instructed to synthesize §6 from individual feature `screens.md` files. One feature's `screens.md` (F013) includes the quick tab switcher as a documented interaction, but when synthesizing prose descriptions from multiple feature docs, the detail got dropped in the regrouping. **Root:** No formal screen-list artifact exists (by design — zode is a monolithic native app), so the fallback is synthetic enumeration. Synthetic enumeration is lossy; some details slip through the cracks. Caught by a reviewer who cross-referenced against the source files.
+The researchers were instructed to synthesize §6 from individual feature `screens.md` files. One feature's `screens.md` (F013) includes the quick tab switcher as a documented interaction, but when synthesizing prose descriptions from multiple feature docs, the detail got dropped in the regrouping. **Root:** No formal screen-list artifact exists (by design — Zode is a monolithic native app), so the fallback is synthetic enumeration. Synthetic enumeration is lossy; some details slip through the cracks. Caught by a reviewer who cross-referenced against the source files.
 
 ### Missing Artifact Categories Handled Gracefully
 

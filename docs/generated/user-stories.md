@@ -1,7 +1,7 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # User Stories
 
-**Project**: zode (Zed fork)
+**Project**: Zode (Zed fork)
 **Generated**: 2026-08-07
 **Analysis Scope**: Full monorepo — native GPUI desktop editor (`generic-source` profile, `screen_source: none`)
 
@@ -25,7 +25,7 @@ this session.
 
 ## Adaptation Note (no ScreenList upstream, `screen_source: none`)
 
-zode is a native desktop app with no routed web surface — no `screen-list.md`/`screen-flow.md` exists upstream.
+Zode is a native desktop app with no routed web surface — no `screen-list.md`/`screen-flow.md` exists upstream.
 Per the IPE protocol's headless-profile rule (`references/user-stories-ipe-protocol.md` Step 3), interaction
 points are sourced from `behavior-logic.md`'s `custom-command` items (the app's keybinding/command-palette/
 context-menu action surface — the functional analogue of "screen interactions" for a `Render`-dispatch desktop
@@ -885,7 +885,7 @@ As a developer, I want to restart a context server (MCP) from its status UI so t
 **Feature Area**: Extensions
 
 ### User Story
-As a developer, I want an MCP client to be able to connect to zode's local context-server socket so that external MCP tooling can interact with my editor session.
+As a developer, I want an MCP client to be able to connect to Zode's local context-server socket so that external MCP tooling can interact with my editor session.
 
 ### Acceptance Criteria
 - [ ] A local Unix-socket MCP client connection is accepted by the context-server listener.

@@ -1,11 +1,11 @@
 ---
-title: Tasks - Run Commands in Zed
-description: Run and rerun shell commands from Zed with task definitions. Supports variables, templates, and language-specific tasks.
+title: Tasks - Run Commands in Zode
+description: Run and rerun shell commands from Zode with task definitions. Supports variables, templates, and language-specific tasks.
 ---
 
 # Tasks
 
-Zed supports ways to spawn (and rerun) commands using its integrated [terminal](./terminal.md) to output the results. These commands can read a limited subset of Zed state (such as a path to the file currently being edited or selected text).
+Zode supports ways to spawn (and rerun) commands using its integrated [terminal](./terminal.md) to output the results. These commands can read a limited subset of Zode state (such as a path to the file currently being edited or selected text).
 
 ```json [tasks]
 [
@@ -74,14 +74,14 @@ Keep `"use_new_terminal": false` and set `"allow_concurrent_runs": true` to allo
 
 Tasks can be defined:
 
-- in the global `tasks.json` file; such tasks are available in all Zed projects you work on. This file is usually located in `~/.config/zed/tasks.json`. You can edit them by using the `zed: open tasks` action.
+- in the global `tasks.json` file; such tasks are available in all Zode projects you work on. This file is usually located in `~/.config/zode/tasks.json`. You can edit them by using the `zed: open tasks` action.
 - in the worktree-specific (local) `.zed/tasks.json` file; such tasks are available only when working on a project with that worktree included. You can edit worktree-specific tasks by using the `zed: open project tasks` action.
 - on the fly with [oneshot tasks](#oneshot-tasks). These tasks are project-specific and do not persist across sessions.
 - by language extension.
 
 ## Variables
 
-Zed tasks act just like your shell; that also means that you can reference environmental variables via sh-esque `$VAR_NAME` syntax. A couple of additional environmental variables are set for your convenience.
+Zode tasks act just like your shell; that also means that you can reference environmental variables via sh-esque `$VAR_NAME` syntax. A couple of additional environmental variables are set for your convenience.
 These variables allow you to pull information from the current editor and use it in your tasks. The following variables are available:
 
 - `ZED_COLUMN`: current line column
@@ -231,7 +231,7 @@ This could be useful for launching a terminal application that you want to use i
 
 ## VS Code Task Format
 
-When importing VS Code tasks from `.vscode/tasks.json`, you can omit the `label` field. Zed automatically generates labels based on the task type:
+When importing VS Code tasks from `.vscode/tasks.json`, you can omit the `label` field. Zode automatically generates labels based on the task type:
 
 - **npm tasks**: `npm: <script>` (e.g., `npm: start`)
 - **gulp tasks**: `gulp: <task>` (e.g., `gulp: build`)
@@ -260,7 +260,7 @@ These tasks appear in the task picker as "npm: start" and "cargo build --release
 
 ## Binding runnable tags to task templates
 
-Zed supports overriding the default action for inline runnable indicators via workspace-local and global `tasks.json` file with the following precedence hierarchy:
+Zode supports overriding the default action for inline runnable indicators via workspace-local and global `tasks.json` file with the following precedence hierarchy:
 
 1. Workspace `tasks.json`
 2. Global `tasks.json`
@@ -284,7 +284,7 @@ When you have a task definition that is bound to the runnable, you can quickly r
 
 ## Running Bash Scripts
 
-You can run bash scripts directly from Zed. When you open a `.sh` or `.bash` file, Zed automatically detects the script as runnable and makes it available in the task picker.
+You can run bash scripts directly from Zode. When you open a `.sh` or `.bash` file, Zode automatically detects the script as runnable and makes it available in the task picker.
 
 To run a bash script:
 
@@ -309,7 +309,7 @@ If you need to pass arguments or customize the execution environment, add a task
 
 ## Shell Initialization
 
-When Zed runs a task, it launches the command in a login shell. This ensures your shell's initialization files (`.bash_profile`, `.zshrc`, etc.) are sourced before the task executes.
+When Zode runs a task, it launches the command in a login shell. This ensures your shell's initialization files (`.bash_profile`, `.zshrc`, etc.) are sourced before the task executes.
 
 This behavior gives tasks access to the same environment variables, aliases, and PATH modifications you've configured in your shell profile. If a task fails to find a command that works in your terminal, verify your shell configuration files are properly set up.
 

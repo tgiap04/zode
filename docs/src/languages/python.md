@@ -1,11 +1,11 @@
 ---
 title: Python
-description: "Configure Python language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Python language support in Zode, including language servers, formatting, and debugging."
 ---
 
-# How to Set Up Python in Zed
+# How to Set Up Python in Zode
 
-Python support is available natively in Zed.
+Python support is available natively in Zode.
 
 - Tree-sitter: [tree-sitter-python](https://github.com/zed-industries/tree-sitter-python)
 - Language Servers:
@@ -18,11 +18,11 @@ Python support is available natively in Zed.
 
 ## Install Python
 
-You'll need both Zed and Python installed before you can begin.
+You'll need both Zode and Python installed before you can begin.
 
 ### Step 1: Install Python
 
-Zed does not bundle a Python runtime, so you’ll need to install one yourself.
+Zode does not bundle a Python runtime, so you’ll need to install one yourself.
 Choose one of the following options:
 
 - uv (recommended)
@@ -51,28 +51,28 @@ python3 --version
 
 You should see an output like `Python 3.x.x`.
 
-## Open Your First Python Project in Zed
+## Open Your First Python Project in Zode
 
-Once Zed and Python are installed, open a folder containing Python code to start working.
+Once Zode and Python are installed, open a folder containing Python code to start working.
 
-### Step 1: Launch Zed with a Python Project
+### Step 1: Launch Zode with a Python Project
 
-Open Zed.
+Open Zode.
 From the menu bar, choose File > Open Folder, or launch from the terminal:
 
 ```bash
 zed path/to/your/project
 ```
 
-Zed will recognize `.py` files automatically using its native tree-sitter-python parser, with no plugins or manual setup required.
+Zode will recognize `.py` files automatically using its native tree-sitter-python parser, with no plugins or manual setup required.
 
 ### Step 2: Use the Integrated Terminal (Optional)
 
-Zed includes an integrated terminal, accessible from the bottom panel. If Zed detects that your project is using a [virtual environment](#virtual-environments), it will be activated automatically in newly-created terminals. You can configure this behavior with the [`detect_venv`](../reference/all-settings.md#terminal-detect_venv) setting.
+Zode includes an integrated terminal, accessible from the bottom panel. If Zode detects that your project is using a [virtual environment](#virtual-environments), it will be activated automatically in newly-created terminals. You can configure this behavior with the [`detect_venv`](../reference/all-settings.md#terminal-detect_venv) setting.
 
-## Configure Python Language Servers in Zed
+## Configure Python Language Servers in Zode
 
-Zed provides several Python language servers out of the box. By default, [basedpyright](https://github.com/DetachHead/basedpyright) is the primary language server, and [Ruff](https://github.com/astral-sh/ruff) is used for formatting and linting.
+Zode provides several Python language servers out of the box. By default, [basedpyright](https://github.com/DetachHead/basedpyright) is the primary language server, and [Ruff](https://github.com/astral-sh/ruff) is used for formatting and linting.
 
 Other built-in language servers are:
 
@@ -104,15 +104,15 @@ See: [Working with Language Servers](https://zed.dev/docs/configuring-languages#
 
 ### Basedpyright
 
-[basedpyright](https://docs.basedpyright.com/latest/) is the primary Python language server in Zed beginning with Zed v0.204.0. It provides core language server functionality like navigation (go to definition/find all references) and type checking. Compared to Pyright, it adds support for additional language server features (like inlay hints) and checking rules.
+[basedpyright](https://docs.basedpyright.com/latest/) is the primary Python language server in Zode beginning with Zode v0.204.0. It provides core language server functionality like navigation (go to definition/find all references) and type checking. Compared to Pyright, it adds support for additional language server features (like inlay hints) and checking rules.
 
-Note that while basedpyright in isolation defaults to the `recommended` [type-checking mode](https://docs.basedpyright.com/latest/benefits-over-pyright/better-defaults/#typecheckingmode), Zed configures it to use the less-strict `standard` mode by default, which matches the behavior of Pyright. You can set the type-checking mode for your project using the `typeCheckingMode` setting in `pyrightconfig.json` or `pyproject.toml`, which will override Zed's default. Read on more for more details about how to configure basedpyright.
+Note that while basedpyright in isolation defaults to the `recommended` [type-checking mode](https://docs.basedpyright.com/latest/benefits-over-pyright/better-defaults/#typecheckingmode), Zode configures it to use the less-strict `standard` mode by default, which matches the behavior of Pyright. You can set the type-checking mode for your project using the `typeCheckingMode` setting in `pyrightconfig.json` or `pyproject.toml`, which will override Zode's default. Read on more for more details about how to configure basedpyright.
 
 #### Basedpyright Configuration
 
 basedpyright reads configuration options from two different kinds of sources:
 
-- Language server settings ("workspace configuration"), which must be configured per-editor (using `settings.json` in Zed's case) but apply to all projects opened in that editor
+- Language server settings ("workspace configuration"), which must be configured per-editor (using `settings.json` in Zode's case) but apply to all projects opened in that editor
 - Configuration files (`pyrightconfig.json`, `pyproject.toml`), which are editor-independent but specific to the project where they are placed
 
 As a rule of thumb, options that are only relevant when using basedpyright from an editor must be set in language server settings, and options that are relevant even if you're running it [as a command-line tool](https://docs.basedpyright.com/latest/configuration/command-line/) must be set in configuration files. Settings related to inlay hints are examples of the first category, and the [diagnostic category](https://docs.basedpyright.com/latest/configuration/config-files/#diagnostic-categories) settings are examples of the second category.
@@ -121,7 +121,7 @@ Examples of both kinds of configuration are provided below. Refer to the basedpy
 
 ##### Language server settings
 
-Language server settings for basedpyright in Zed can be set in the `lsp` section of your `settings.json`.
+Language server settings for basedpyright in Zode can be set in the `lsp` section of your `settings.json`.
 
 For example, to:
 
@@ -168,9 +168,9 @@ See [Python Language Server Configuration](https://github.com/python-lsp/python-
 
 ## Virtual Environments
 
-[Virtual environments](https://docs.python.org/3/library/venv.html) are a useful tool for fixing a Python version and set of dependencies for a specific project, in a way that's isolated from other projects on the same machine. Zed has built-in support for discovering, configuring, and activating virtual environments, based on the language-agnostic concept of a [toolchain](../toolchains.md).
+[Virtual environments](https://docs.python.org/3/library/venv.html) are a useful tool for fixing a Python version and set of dependencies for a specific project, in a way that's isolated from other projects on the same machine. Zode has built-in support for discovering, configuring, and activating virtual environments, based on the language-agnostic concept of a [toolchain](../toolchains.md).
 
-Note that if you have a global Python installation, it is also counted as a toolchain for Zed's purposes.
+Note that if you have a global Python installation, it is also counted as a toolchain for Zode's purposes.
 
 ### Create a Virtual Environment
 
@@ -182,26 +182,26 @@ python3 -m venv .venv
 
 Alternatively, if you're using `uv`, running `uv sync` will create a virtual environment the first time you run it.
 
-### How Zed Uses Python Toolchains
+### How Zode Uses Python Toolchains
 
-Zed uses the selected Python toolchain for your project in the following ways:
+Zode uses the selected Python toolchain for your project in the following ways:
 
 - Built-in language servers will be automatically configured with the path to the toolchain's Python interpreter and, if applicable, virtual environment. This is important so that they can resolve dependencies. (Note that language servers provided by extensions can't be automatically configured like this currently.)
 - Python tasks (such as pytest tests) will be run using the toolchain's Python interpreter.
-- If the toolchain is a virtual environment, the environment's activation script will be run automatically when you launch a new shell in Zed's integrated terminal, giving you convenient access to the selected Python interpreter and dependency set.
-- If a built-in language server is installed in the active virtual environment, that binary will be used instead of Zed's private automatically-installed binary. This also applies to debugpy.
+- If the toolchain is a virtual environment, the environment's activation script will be run automatically when you launch a new shell in Zode's integrated terminal, giving you convenient access to the selected Python interpreter and dependency set.
+- If a built-in language server is installed in the active virtual environment, that binary will be used instead of Zode's private automatically-installed binary. This also applies to debugpy.
 
 ### Selecting a Toolchain
 
-For most projects, Zed will automatically select the right Python toolchain. In complex projects with multiple virtual environments, it might be necessary to override this selection. You can use the [toolchain selector](../toolchains.md#selecting-toolchains) to pick a toolchain from the list discovered by Zed, or [specify the path to a toolchain manually](../toolchains.md#adding-toolchains-manually) if it's not on the list.
+For most projects, Zode will automatically select the right Python toolchain. In complex projects with multiple virtual environments, it might be necessary to override this selection. You can use the [toolchain selector](../toolchains.md#selecting-toolchains) to pick a toolchain from the list discovered by Zode, or [specify the path to a toolchain manually](../toolchains.md#adding-toolchains-manually) if it's not on the list.
 
 ## Code Formatting & Linting
 
-Zed uses [Ruff](https://github.com/astral-sh/ruff) for formatting and linting Python code. Specifically, it runs Ruff as an LSP server using the `ruff server` subcommand.
+Zode uses [Ruff](https://github.com/astral-sh/ruff) for formatting and linting Python code. Specifically, it runs Ruff as an LSP server using the `ruff server` subcommand.
 
 ### Configuring Formatting
 
-Formatting in Zed follows a two-phase pipeline: first, code actions on format (`code_actions_on_format`) are executed, followed by the configured formatter.
+Formatting in Zode follows a two-phase pipeline: first, code actions on format (`code_actions_on_format`) are executed, followed by the configured formatter.
 
 Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > Python, or add to your settings file:
 
@@ -264,9 +264,9 @@ Configure in Settings ({#kb zed::OpenSettings}) under Languages > Python, or add
 
 ### Configuring Ruff
 
-Like basedpyright, Ruff reads options from both Zed's language server settings and configuration files (`ruff.toml`) when used in Zed. Unlike basedpyright, _all_ options can be configured in either of these locations, so the choice of where to put your Ruff configuration comes down to whether you want it to be shared between projects but specific to Zed (in which case you should use language server settings), or specific to one project but common to all Ruff invocations (in which case you should use `ruff.toml`).
+Like basedpyright, Ruff reads options from both Zode's language server settings and configuration files (`ruff.toml`) when used in Zode. Unlike basedpyright, _all_ options can be configured in either of these locations, so the choice of where to put your Ruff configuration comes down to whether you want it to be shared between projects but specific to Zode (in which case you should use language server settings), or specific to one project but common to all Ruff invocations (in which case you should use `ruff.toml`).
 
-Here's an example of using language server settings in Zed's `settings.json` to disable all Ruff lints in Zed (while still using Ruff as a formatter):
+Here's an example of using language server settings in Zode's `settings.json` to disable all Ruff lints in Zode (while still using Ruff as a formatter):
 
 ```json [settings]
 {
@@ -298,7 +298,7 @@ For more details, refer to the Ruff documentation about [configuration files](ht
 
 ### Embedded Language Highlighting
 
-Zed supports syntax highlighting for code embedded in Python strings by adding a comment with the language name.
+Zode supports syntax highlighting for code embedded in Python strings by adding a comment with the language name.
 
 ```python
 # sql
@@ -317,22 +317,22 @@ result = func( #sql
 
 ## Debugging
 
-Zed supports Python debugging through the `debugpy` adapter. You can start with no configuration or define custom launch profiles in `.zed/debug.json`.
+Zode supports Python debugging through the `debugpy` adapter. You can start with no configuration or define custom launch profiles in `.zed/debug.json`.
 
 ### Start Debugging with No Setup
 
-Zed can automatically detect debuggable Python entry points. Press F4 (or run debugger: start from the Command Palette) to see available options for your current project.
+Zode can automatically detect debuggable Python entry points. Press F4 (or run debugger: start from the Command Palette) to see available options for your current project.
 This works for:
 
 - Python scripts
 - Modules
 - pytest tests
 
-Zed uses `debugpy` under the hood, but no manual adapter configuration is required.
+Zode uses `debugpy` under the hood, but no manual adapter configuration is required.
 
 ### Define Custom Debug Configurations
 
-For reusable setups, create a `.zed/debug.json` file in your project root. This gives you more control over how Zed runs and debugs your code.
+For reusable setups, create a `.zed/debug.json` file in your project root. This gives you more control over how Zode runs and debugs your code.
 
 - [debugpy configuration documentation](https://github.com/microsoft/debugpy/wiki/Debug-configuration-settings#launchattach-settings)
 
@@ -431,17 +431,17 @@ my_django_project/
 
 ## Troubleshooting
 
-Issues with Python in Zed typically involve virtual environments, language servers, or tooling configuration.
+Issues with Python in Zode typically involve virtual environments, language servers, or tooling configuration.
 
 ### Resolve Language Server Startup Issues
 
 If a language server isn't responding or features like diagnostics or autocomplete aren't available:
 
-- Check your Zed log (using the {#action zed::OpenLog} action) for errors related to the language server you're trying to use. This is where you're likely to find useful information if the language server failed to start up at all.
+- Check your Zode log (using the {#action zed::OpenLog} action) for errors related to the language server you're trying to use. This is where you're likely to find useful information if the language server failed to start up at all.
 - Use the language server logs view to understand the lifecycle of the affected language server. You can access this view using the {#action dev::OpenLanguageServerLogs} action, or by clicking the lightning bolt icon in the status bar and selecting your language server. The most useful pieces of data in this view are:
   - "Server Logs", which shows any errors printed by the language server
   - "Server Info", which shows details about how the language server was started
 - Verify your `settings.json` or `pyrightconfig.json` is syntactically correct.
-- Restart Zed to reinitialize language server connections, or try restarting the language server using the {#action editor::RestartLanguageServer}
+- Restart Zode to reinitialize language server connections, or try restarting the language server using the {#action editor::RestartLanguageServer}
 
-If the language server is failing to resolve imports, and you're using a virtual environment, make sure that the right environment is chosen in the selector. You can use "Server Info" view to confirm which virtual environment Zed is sending to the language server&mdash;look for the `* Configuration` section at the end.
+If the language server is failing to resolve imports, and you're using a virtual environment, make sure that the right environment is chosen in the selector. You can use "Server Info" view to confirm which virtual environment Zode is sending to the language server&mdash;look for the `* Configuration` section at the end.

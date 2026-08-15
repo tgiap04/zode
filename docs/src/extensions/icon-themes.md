@@ -1,11 +1,11 @@
 ---
 title: Icon Themes
-description: "Icon Themes for Zed extensions."
+description: "Icon Themes for Zode extensions."
 ---
 
 # Icon Themes
 
-Extensions may provide icon themes to change the icons Zed uses for folders and files.
+Extensions may provide icon themes to change the icons Zode uses for folders and files.
 
 ## Example extension
 

@@ -77,7 +77,7 @@ sidebar cũ **còn sống trong cây và chưa có ai gọi**.
 **Bài học chung:** trước khi thiết kế lại một tính năng trong repo đã qua hard-fork, `git log -S` cái
 symbol thiếu. Cái đã bị xoá thường còn nguyên trong history, kèm test.
 
-## 2. Settings của Zed không có kiểu duration dạng chuỗi
+## 2. Settings của Zode không có kiểu duration dạng chuỗi
 
 Khuôn duy nhất có sẵn: `debounce_ms: Option<u64>` (`settings_content/src/workspace.rs:1024`) và
 `AfterDelay { milliseconds: DelayMs }` (`:541`). Bản đầu của plan viết `"hibernate_after": "5m"` —
