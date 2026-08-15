@@ -510,6 +510,21 @@ pub mod agent {
         pub mode: Option<AgentViewMode>,
     }
 
+    /// Shows an agent, or puts the agent column away when that agent is already
+    /// showing.
+    ///
+    /// Separate from `OpenAgent` rather than a flag on it: "open this" and
+    /// "toggle this" are different requests, and a command-palette `OpenAgent`
+    /// that sometimes closed things would be a surprise nobody asked for. The
+    /// rail button is a toggle, so the rail dispatches this.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct ToggleAgent {
+        /// Agent id as listed by `AgentServerStore` -- e.g. `claude-acp`.
+        pub agent: String,
+    }
+
     /// Starts a second, independent session of an agent that may already be open.
     ///
     /// Separate from `OpenAgent` rather than a flag on it, because the two answer
@@ -843,6 +858,35 @@ pub mod preview {
             ]
         );
     }
+}
+
+pub mod database {
+    use gpui::actions;
+
+    actions!(
+        database,
+        [
+            /// Shows or hides the database column.
+            ToggleDatabase,
+            /// Opens the dialog for adding a database connection.
+            AddConnection,
+            /// Gives the database column the whole window, or gives it back.
+            ToggleFullScreen,
+            /// Closes the connection under the cursor, stopping its driver.
+            Disconnect,
+            /// Runs the selected SQL, or the whole scratch buffer when nothing
+            /// is selected.
+            RunQuery,
+            /// Stops the query that is running.
+            CancelQuery,
+            /// Shows the next page of results.
+            NextPage,
+            /// Shows the previous page of results.
+            PreviousPage,
+            /// Copies the page on screen as CSV.
+            CopyResultsAsCsv,
+        ]
+    );
 }
 
 pub mod agents_sidebar {
