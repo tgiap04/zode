@@ -31,6 +31,7 @@ pub struct ExtensionHostProxy {
     snippet_proxy: RwLock<Option<Arc<dyn ExtensionSnippetProxy>>>,
     context_server_proxy: RwLock<Option<Arc<dyn ExtensionContextServerProxy>>>,
     debug_adapter_provider_proxy: RwLock<Option<Arc<dyn ExtensionDebugAdapterProviderProxy>>>,
+    database_driver_proxy: RwLock<Option<Arc<dyn ExtensionDatabaseDriverProxy>>>,
     language_model_provider_proxy: RwLock<Option<Arc<dyn ExtensionLanguageModelProviderProxy>>>,
 }
 
@@ -56,6 +57,7 @@ impl ExtensionHostProxy {
             snippet_proxy: RwLock::default(),
             context_server_proxy: RwLock::default(),
             debug_adapter_provider_proxy: RwLock::default(),
+            database_driver_proxy: RwLock::default(),
             language_model_provider_proxy: RwLock::default(),
         }
     }
@@ -88,6 +90,10 @@ impl ExtensionHostProxy {
         self.debug_adapter_provider_proxy
             .write()
             .replace(Arc::new(proxy));
+    }
+
+    pub fn register_database_driver_proxy(&self, proxy: impl ExtensionDatabaseDriverProxy) {
+        self.database_driver_proxy.write().replace(Arc::new(proxy));
     }
 
     pub fn register_language_model_provider_proxy(
@@ -430,6 +436,52 @@ impl ExtensionDebugAdapterProviderProxy for ExtensionHostProxy {
         };
 
         proxy.unregister_debug_locator(locator_name)
+    }
+}
+
+/// A database driver an extension ships, resolved down to what it takes to
+/// start the process.
+///
+/// Nothing else about the driver travels this way: which schemas it has, how it
+/// quotes an identifier and what it can be asked for are all answered by the
+/// driver itself over its protocol. A manifest that described those too would
+/// be a second source of truth, and the one that goes stale.
+#[derive(Clone, Debug)]
+pub struct ExtensionDatabaseDriver {
+    /// What connections name in settings. Stable across versions of the
+    /// extension, because a stored connection names its driver by this.
+    pub id: Arc<str>,
+    /// Shown when choosing an engine for a new connection.
+    pub name: String,
+    /// Absolute, and always inside the extension's own directory: the manifest
+    /// gives a relative path, so nothing else on the machine can answer to the
+    /// name a driver declares.
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+pub trait ExtensionDatabaseDriverProxy: Send + Sync + 'static {
+    fn register_database_driver(&self, driver: ExtensionDatabaseDriver, cx: &mut App);
+
+    fn unregister_database_driver(&self, driver_id: Arc<str>, cx: &mut App);
+}
+
+impl ExtensionDatabaseDriverProxy for ExtensionHostProxy {
+    fn register_database_driver(&self, driver: ExtensionDatabaseDriver, cx: &mut App) {
+        let Some(proxy) = self.database_driver_proxy.read().clone() else {
+            return;
+        };
+
+        proxy.register_database_driver(driver, cx)
+    }
+
+    fn unregister_database_driver(&self, driver_id: Arc<str>, cx: &mut App) {
+        let Some(proxy) = self.database_driver_proxy.read().clone() else {
+            return;
+        };
+
+        proxy.unregister_database_driver(driver_id, cx)
     }
 }
 

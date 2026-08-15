@@ -47,6 +47,7 @@ pub enum ExtensionProvides {
     IndexedDocsProviders,
     Snippets,
     DebugAdapters,
+    DatabaseDrivers,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]

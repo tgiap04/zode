@@ -15,9 +15,10 @@ use collections::{BTreeMap, BTreeSet, HashSet, btree_map};
 pub use extension::ExtensionManifest;
 use extension::extension_builder::{CompileExtensionOptions, ExtensionBuilder};
 use extension::{
-    ExtensionContextServerProxy, ExtensionDebugAdapterProviderProxy, ExtensionEvents,
-    ExtensionGrammarProxy, ExtensionHostProxy, ExtensionLanguageProxy,
-    ExtensionLanguageServerProxy, ExtensionSnippetProxy, ExtensionThemeProxy,
+    ExtensionContextServerProxy, ExtensionDatabaseDriver, ExtensionDatabaseDriverProxy,
+    ExtensionDebugAdapterProviderProxy, ExtensionEvents, ExtensionGrammarProxy, ExtensionHostProxy,
+    ExtensionLanguageProxy, ExtensionLanguageServerProxy, ExtensionSnippetProxy,
+    ExtensionThemeProxy,
 };
 use fs::{Fs, RemoveOptions};
 use futures::future::join_all;
@@ -1208,6 +1209,9 @@ impl ExtensionStore {
             for locator in extension.manifest.debug_locators.keys() {
                 self.proxy.unregister_debug_locator(locator.clone());
             }
+            for driver in extension.manifest.database_drivers.keys() {
+                self.proxy.unregister_database_driver(driver.clone(), cx);
+            }
         }
 
         self.wasm_extensions
@@ -1379,6 +1383,12 @@ impl ExtensionStore {
             })
             .await;
 
+            // Gathered before the loop below, which drops every extension
+            // without a wasm library: a database driver is a binary and a
+            // manifest entry, so an extension providing only drivers has no
+            // wasm at all and would never be seen down there.
+            let database_drivers = database_drivers_to_register(&extension_entries, &root_dir);
+
             let mut wasm_extensions = Vec::new();
             for extension in extension_entries {
                 if extension.manifest.lib.kind.is_none() {
@@ -1455,6 +1465,10 @@ impl ExtensionStore {
                         this.proxy
                             .register_debug_locator(extension.clone(), debug_adapter.clone());
                     }
+                }
+
+                for driver in database_drivers {
+                    this.proxy.register_database_driver(driver, cx);
                 }
 
                 this.wasm_extensions.extend(wasm_extensions);
@@ -1859,6 +1873,49 @@ impl ExtensionStore {
     }
 }
 
+/// Resolves the database drivers declared by a batch of extensions.
+///
+/// The path is joined onto the extension's own installed directory, so a driver
+/// is always a file that extension shipped -- resolving through `PATH` would let
+/// anything on the machine answer to the name a manifest declares.
+///
+/// Each still has to be granted `process:exec` by the same manifest, matched
+/// against the relative path as written there: the absolute one differs per
+/// machine, so it is not something an author could have listed. A driver
+/// without that grant is dropped rather than started, which means an extension
+/// cannot acquire the right to run a binary by calling it a database driver.
+fn database_drivers_to_register(
+    entries: &[ExtensionIndexEntry],
+    root_dir: &Path,
+) -> Vec<ExtensionDatabaseDriver> {
+    let mut drivers = Vec::new();
+    for entry in entries {
+        let manifest = &entry.manifest;
+        for (id, declared) in &manifest.database_drivers {
+            if let Err(error) = manifest.allow_exec(declared.path.as_unix_str(), &declared.args) {
+                log::warn!(
+                    "extension `{}` declares database driver `{id}` but may not run it: {error:#}",
+                    manifest.id
+                );
+                continue;
+            }
+
+            drivers.push(ExtensionDatabaseDriver {
+                id: id.clone(),
+                name: declared.name.clone(),
+                executable: root_dir.join(manifest.id.as_ref()).join(&declared.path),
+                args: declared.args.clone(),
+                env: declared
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            });
+        }
+    }
+    drivers
+}
+
 fn load_plugin_queries(root_path: &Path) -> LanguageQueries {
     let mut result = LanguageQueries::default();
     if let Some(entries) = std::fs::read_dir(root_path).log_err() {
@@ -1886,4 +1943,86 @@ fn load_plugin_queries(root_path: &Path) -> LanguageQueries {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod database_driver_tests {
+    use super::*;
+
+    fn entry(manifest: &str) -> ExtensionIndexEntry {
+        ExtensionIndexEntry {
+            manifest: Arc::new(toml::from_str(manifest).expect("the manifest should parse")),
+            dev: false,
+        }
+    }
+
+    const GRANTED: &str = r#"
+        id = "example.duckdb"
+        name = "DuckDB"
+        version = "1.0.0"
+        schema_version = 0
+
+        [[capabilities]]
+        kind = "process:exec"
+        command = "bin/zode-db-duckdb"
+        args = []
+
+        [database_drivers.duckdb]
+        name = "DuckDB"
+        path = "bin/zode-db-duckdb"
+    "#;
+
+    /// The path is joined onto the extension's own directory, so a driver is
+    /// always a file that extension shipped.
+    #[test]
+    fn a_granted_driver_resolves_inside_its_own_extension() {
+        let drivers = database_drivers_to_register(
+            &[entry(GRANTED)],
+            Path::new("/home/someone/extensions/installed"),
+        );
+
+        assert_eq!(drivers.len(), 1);
+        assert_eq!(drivers[0].id.as_ref(), "duckdb");
+        assert_eq!(
+            drivers[0].executable,
+            Path::new("/home/someone/extensions/installed/example.duckdb/bin/zode-db-duckdb"),
+        );
+    }
+
+    /// Otherwise an extension could acquire the right to run a binary simply by
+    /// calling it a database driver, which is the one thing the capability list
+    /// exists to stop.
+    #[test]
+    fn a_driver_without_the_exec_capability_is_never_started() {
+        let ungranted = r#"
+            id = "example.duckdb"
+            name = "DuckDB"
+            version = "1.0.0"
+            schema_version = 0
+
+            [database_drivers.duckdb]
+            name = "DuckDB"
+            path = "bin/zode-db-duckdb"
+        "#;
+
+        assert!(
+            database_drivers_to_register(&[entry(ungranted)], Path::new("/extensions")).is_empty()
+        );
+    }
+
+    /// The grant names the relative path, because that is the only string an
+    /// extension author could have written: the absolute one differs per
+    /// machine.
+    #[test]
+    fn the_grant_is_matched_against_the_path_as_written() {
+        let elsewhere = GRANTED.replace(
+            "command = \"bin/zode-db-duckdb\"",
+            "command = \"/usr/bin/zode-db-duckdb\"",
+        );
+
+        assert!(
+            database_drivers_to_register(&[entry(&elsewhere)], Path::new("/extensions")).is_empty(),
+            "a grant naming an absolute path must not cover the relative one declared"
+        );
+    }
 }
