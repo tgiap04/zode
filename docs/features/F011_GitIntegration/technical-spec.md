@@ -513,5 +513,5 @@ ProjectDiff / GitGraph (read) --/        |
 
 Note: the actual git-history mutations themselves (stage/unstage/commit/stash/checkout/branch
 create) write to the `.git` directory on disk via the external `git`/`libgit2` process, not to
-zode's own SQLite `workspace.db` — the two rows above are the only zode-owned DB writes this
+Zode's own SQLite `workspace.db` — the two rows above are the only zode-owned DB writes this
 feature performs (UI-tab restoration state).

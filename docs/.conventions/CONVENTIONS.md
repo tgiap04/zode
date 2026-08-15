@@ -1,6 +1,6 @@
-# Zed Documentation Conventions
+# Zode Documentation Conventions
 
-This document covers structural conventions for Zed documentation: what to document, how to organize it, and when to create new pages.
+This document covers structural conventions for Zode documentation: what to document, how to organize it, and when to create new pages.
 
 For voice, tone, and writing style, see the [brand-voice/](./brand-voice/) directory, which contains:
 
@@ -25,7 +25,7 @@ For voice, tone, and writing style, see the [brand-voice/](./brand-voice/) direc
 - **New UI panels or views** — Any new panel, sidebar, or view users interact with
 - **Public extension APIs** — For extension developers
 - **Breaking changes** — Even if the fix is simple, document what changed
-- **Version-specific behavior changes** — Include version callouts (e.g., "In Zed v0.224.0 and above...")
+- **Version-specific behavior changes** — Include version callouts (e.g., "In Zode v0.224.0 and above...")
 
 ### Skip
 
@@ -43,7 +43,7 @@ For voice, tone, and writing style, see the [brand-voice/](./brand-voice/) direc
 
 - Introducing a **major feature** with multiple sub-features (e.g., Git integration, Vim mode)
 - The topic requires **extensive configuration examples**
-- Users would search for it **by name** (e.g., "Zed terminal", "Zed snippets")
+- Users would search for it **by name** (e.g., "Zode terminal", "Zode snippets")
 - It's a **new category** (e.g., a new AI provider type)
 
 ### Add to an existing page when:
@@ -78,7 +78,7 @@ description: One sentence describing what this page covers. Used in search resul
 ---
 ```
 
-- `title`: Feature name, optionally with "- Zed" suffix for SEO
+- `title`: Feature name, optionally with "- Zode" suffix for SEO
 - `description`: Concise summary for search engines and link previews
 - Keep frontmatter values as simple single-line `key: value` entries (no
   multiline values, no quotes) for compatibility with the docs postprocessor
@@ -136,13 +136,13 @@ Use inline `code` for:
 - Setting names: `vim_mode`, `buffer_font_size`
 - Keybindings: `cmd-shift-p`, `ctrl-w h`
 - Commands: `:w`, `:q`
-- File paths: `~/.config/zed/settings.json`
+- File paths: `~/.config/zode/settings.json`
 - Action names: `git::Commit`
 - Values: `true`, `false`, `"eager"`
 
 ### Action and Keybinding References
 
-Use Zed's special syntax for dynamic rendering:
+Use Zode's special syntax for dynamic rendering:
 
 - `{#action git::Commit}` — Renders the action name
 - `{#kb git::Commit}` — Renders the keybinding for that action
@@ -274,7 +274,7 @@ Language docs in `src/languages/` follow a consistent structure:
 5. Language-specific settings
 6. Known limitations (if any)
 
-Keep language docs focused on Zed-specific configuration, not general language tutorials.
+Keep language docs focused on Zode-specific configuration, not general language tutorials.
 
 ---
 
@@ -309,12 +309,12 @@ For JSON-only settings (complex types without UI support), note this and link to
 
 ### Settings File Locations
 
-- **macOS/Linux:** `~/.config/zed/settings.json`
+- **macOS/Linux:** `~/.config/zode/settings.json`
 - **Windows:** `%AppData%\Zed\settings.json`
 
 ### Keymap File Locations
 
-- **macOS/Linux:** `~/.config/zed/keymap.json`
+- **macOS/Linux:** `~/.config/zode/keymap.json`
 - **Windows:** `%AppData%\Zed\keymap.json`
 
 ---

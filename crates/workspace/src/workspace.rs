@@ -1348,6 +1348,13 @@ pub struct Workspace {
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
+    /// The agent's own column, drawn beside the centre on the rail's side.
+    ///
+    /// A `Dock` rather than a bespoke column so it inherits the width, the
+    /// resize handle and the panel stack the other three already have — but
+    /// deliberately NOT one of `all_docks`, which is the set a panel may be
+    /// routed into by position. Nothing lands here except by asking for it.
+    agent_dock: Entity<Dock>,
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
     active_pane: Entity<Pane>,
@@ -1378,6 +1385,10 @@ pub struct Workspace {
     _schedule_serialize_ssh_paths: Option<Task<()>>,
     pane_history_timestamp: Arc<AtomicUsize>,
     bounds: Bounds<Pixels>,
+    /// Where the agent column last drew. Unlike the three docks it is not flush
+    /// against a window edge, so `bounds` cannot be used to turn a pointer
+    /// position into its width.
+    agent_column_bounds: Option<Bounds<Pixels>>,
     pub centered_layout: bool,
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
@@ -1695,6 +1706,26 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
+        let agent_dock = Dock::new(
+            match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
+                SidebarSide::Left => DockPosition::Left,
+                SidebarSide::Right => DockPosition::Right,
+            },
+            modal_layer.clone(),
+            window,
+            cx,
+        );
+        agent_dock.update(cx, |dock, _cx| dock.mark_as_agent_column());
+        // The column stands on the rail's side, so it has to move when the rail
+        // does — its side decides which edge carries the border and the resize
+        // handle, not just where it is drawn.
+        let agent_dock_follows_rail = cx.observe_global::<SettingsStore>({
+            let agent_dock = agent_dock.clone();
+            move |workspace: &mut Workspace, cx| {
+                let side = workspace.agent_column_position(cx);
+                agent_dock.update(cx, |dock, cx| dock.set_agent_column_position(side, cx));
+            }
+        });
         let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
         let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
         let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
@@ -1734,6 +1765,7 @@ impl Workspace {
         });
 
         let subscriptions = vec![
+            agent_dock_follows_rail,
             cx.observe_window_activation(window, Self::on_window_activation_changed),
             cx.observe_window_bounds(window, move |this, window, cx| {
                 if this.bounds_save_task_queued.is_some() {
@@ -1798,6 +1830,7 @@ impl Workspace {
             left_dock,
             bottom_dock,
             right_dock,
+            agent_dock,
             _panels_task: None,
             project: project.clone(),
             follower_states: Default::default(),
@@ -1820,6 +1853,7 @@ impl Workspace {
             workspace_actions: Default::default(),
             // This data will be incorrect, but it will be overwritten by the time it needs to be used.
             bounds: Default::default(),
+            agent_column_bounds: None,
             centered_layout: false,
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
@@ -2161,8 +2195,19 @@ impl Workspace {
         &self.right_dock
     }
 
-    pub fn all_docks(&self) -> [&Entity<Dock>; 3] {
-        [&self.left_dock, &self.bottom_dock, &self.right_dock]
+    /// Every dock a panel may be looked up in, the agent's column included.
+    ///
+    /// Lookup only — routing still goes through `dock_at_position`, which never
+    /// returns the agent column. So `panel::<T>()`, `focus_panel` and
+    /// `close_panel` reach an agent standing in its own column, while nothing
+    /// else can be placed there by position.
+    pub fn all_docks(&self) -> [&Entity<Dock>; 4] {
+        [
+            &self.left_dock,
+            &self.bottom_dock,
+            &self.right_dock,
+            &self.agent_dock,
+        ]
     }
 
     pub fn capture_dock_state(&self, _window: &Window, cx: &App) -> DockStructure {
@@ -2293,6 +2338,15 @@ impl Workspace {
             .collect()
     }
 
+    /// The agent's own column, beside the centre.
+    ///
+    /// Reached by name rather than by position: it shares a `DockPosition` with
+    /// whichever side dock it stands next to, so `dock_at_position` can never
+    /// return it.
+    pub fn agent_dock(&self) -> &Entity<Dock> {
+        &self.agent_dock
+    }
+
     pub fn dock_at_position(&self, position: DockPosition) -> &Entity<Dock> {
         match position {
             DockPosition::Left => &self.left_dock,
@@ -2350,6 +2404,73 @@ impl Workspace {
                 .await
         })
         .detach_and_log_err(cx);
+    }
+
+    /// Writes some state down against this workspace, under `namespace`.
+    ///
+    /// The key-value store rather than a column on `workspaces`: that table is
+    /// read positionally, so a new column has to be threaded through every
+    /// SELECT in the right place or every field after it shifts, silently, on
+    /// real user data. A namespace that is simply absent on an older install
+    /// reads as "nothing recorded" — which is the behaviour wanted anyway. See
+    /// `dock::DOCK_STACK_KEY`, the first caller, for the long version.
+    pub fn persist_workspace_state<T: serde::Serialize>(
+        &self,
+        namespace: &'static str,
+        key: &str,
+        state: &T,
+        cx: &mut App,
+    ) {
+        let Some(workspace_id) = self.persisted_state_prefix() else {
+            return;
+        };
+        let json = match serde_json::to_string(state) {
+            Ok(json) => json,
+            Err(error) => {
+                log::error!("could not record {namespace} state for this workspace: {error}");
+                return;
+            }
+        };
+
+        let key = format!("{workspace_id}:{key}");
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        cx.background_spawn(async move { kvp.scoped(namespace).write(key, json).await })
+            .detach_and_log_err(cx);
+    }
+
+    pub fn load_workspace_state<T: serde::de::DeserializeOwned>(
+        &self,
+        namespace: &str,
+        key: &str,
+        cx: &App,
+    ) -> Option<T> {
+        let workspace_id = self.persisted_state_prefix()?;
+        db::kvp::KeyValueStore::global(cx)
+            .scoped(namespace)
+            .read(&format!("{workspace_id}:{key}"))
+            .log_err()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<T>(&json).log_err())
+    }
+
+    /// What names this workspace in the key-value store.
+    ///
+    /// The session id stands in before a workspace has been written to the
+    /// database, so a window that has never been saved still keeps its state
+    /// for as long as it is open.
+    fn persisted_state_prefix(&self) -> Option<String> {
+        self.database_id()
+            .map(|id| i64::from(id).to_string())
+            .or(self.session_id())
+    }
+
+    /// Records which panels a dock is showing and how they divide it.
+    pub fn persist_dock_stack(&self, key: &'static str, state: dock::DockStackState, cx: &mut App) {
+        self.persist_workspace_state(dock::DOCK_STACK_KEY, key, &state, cx);
+    }
+
+    pub fn load_persisted_dock_stack(&self, key: &str, cx: &App) -> Option<dock::DockStackState> {
+        self.load_workspace_state(dock::DOCK_STACK_KEY, key, cx)
     }
 
     pub fn set_panel_size_state<T: Panel>(
@@ -2512,7 +2633,13 @@ impl Workspace {
             .detach();
 
         let dock_position = panel.position(window, cx);
-        let dock = self.dock_at_position(dock_position);
+        // The agent asks for a column of its own rather than a place in a dock
+        // shared with the tool panels; see `render_centre_with_agent`.
+        let dock = if panel.is_agent_panel(cx) {
+            &self.agent_dock
+        } else {
+            self.dock_at_position(dock_position)
+        };
         let any_panel = panel.to_any();
         let persisted_size_state =
             self.persisted_panel_size_state(T::panel_key(), cx)
@@ -4308,7 +4435,10 @@ impl Workspace {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 let mut focus_center = false;
                 let panel = dock.update(cx, |dock, cx| {
-                    dock.activate_panel(panel_index, window, cx);
+                    // Joins whatever is already up rather than replacing it —
+                    // a dock is a stack now, so bringing one panel forward is
+                    // no longer a reason to put another away.
+                    dock.show_panel(panel_index, window, cx);
 
                     let panel = dock.active_panel().cloned();
                     if let Some(panel) = panel.as_ref() {
@@ -4346,8 +4476,7 @@ impl Workspace {
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 dock.update(cx, |dock, cx| {
-                    dock.activate_panel(panel_index, window, cx);
-                    dock.set_open(true, window, cx);
+                    dock.show_panel(panel_index, window, cx);
                 });
             }
         }
@@ -4364,11 +4493,16 @@ impl Workspace {
         self.open_panel::<T>(window, cx);
     }
 
+    /// Takes this panel off screen, leaving anything stacked with it alone.
+    ///
+    /// The dock itself closes only when this was the last panel it was showing
+    /// — putting one section away is no longer a reason to take the others with
+    /// it.
     pub fn close_panel<T: Panel>(&self, window: &mut Window, cx: &mut Context<Self>) {
         for dock in self.all_docks().iter() {
             dock.update(cx, |dock, cx| {
-                if dock.panel::<T>().is_some() {
-                    dock.set_open(false, window, cx)
+                if let Some(panel) = dock.panel::<T>() {
+                    dock.hide_panel_by_id(panel.entity_id(), window, cx);
                 }
             })
         }
@@ -6516,8 +6650,11 @@ impl Workspace {
         self.database_id
     }
 
+    /// Public so a test outside this crate can stand a second workspace on the
+    /// same id — which is what a relaunch amounts to for anything keyed by it,
+    /// such as the agent column's record of what it had open.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_database_id(&mut self, id: WorkspaceId) {
+    pub fn set_database_id(&mut self, id: WorkspaceId) {
         self.database_id = Some(id);
     }
 
@@ -6646,6 +6783,28 @@ impl Workspace {
     }
 
     fn serialize_workspace_internal(&self, window: &mut Window, cx: &mut App) -> Task<()> {
+        // Dragging a divider inside a dock's stack mutates its proportions
+        // through `pane_axis`, which reports the change by calling
+        // `serialize_workspace` and nothing else — so this is the only place
+        // that hears about a resize. The dock records its own stack when panels
+        // come and go; this is what catches them being resized.
+        //
+        // The agent column is left out. Its stack was being written on every
+        // tick and read back by nobody: the restore below covers the three docks
+        // that have a `DockData` row, and the column has none — `restore_state`
+        // returns before it ever looks at a stack. Restoring it would in any
+        // case put "the agent panel is showing" back onto a panel holding no
+        // agents, which `close_if_empty` closes again on the spot.
+        for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
+            let Some((key, state)) = dock.update(cx, |dock, _cx| {
+                dock.stack_state_if_changed()
+                    .map(|state| (dock.stack_key(), state))
+            }) else {
+                continue;
+            };
+            self.persist_dock_stack(key, state, cx);
+        }
+
         let Some(database_id) = self.database_id() else {
             return Task::ready(());
         };
@@ -6941,15 +7100,26 @@ impl Workspace {
 
                 let docks = serialized_workspace.docks;
 
-                for (dock, serialized_dock) in [
+                // Read here, where the workspace is in hand, and handed to each
+                // dock — a dock reaching back through the workspace handle from
+                // `restore_state` reads it mid-update and aborts.
+                let stacks = [
+                    workspace.load_persisted_dock_stack(DockPosition::Right.label(), cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Left.label(), cx),
+                    workspace.load_persisted_dock_stack(DockPosition::Bottom.label(), cx),
+                ];
+
+                for ((dock, serialized_dock), stack) in [
                     (&mut workspace.right_dock, docks.right),
                     (&mut workspace.left_dock, docks.left),
                     (&mut workspace.bottom_dock, docks.bottom),
                 ]
                 .iter_mut()
+                .zip(stacks)
                 {
                     dock.update(cx, |dock, cx| {
                         dock.serialized_dock = Some(serialized_dock.clone());
+                        dock.serialized_stack = stack;
                         dock.restore_state(window, cx);
                     });
                 }
@@ -7584,6 +7754,117 @@ impl Workspace {
             )
     }
 
+    /// Which side of the editor the agent's column stands on.
+    ///
+    /// The rail's side, not a setting of its own: the agent belongs beside the
+    /// column of buttons that opens it, so the two never end up at opposite
+    /// edges of the screen.
+    pub fn agent_column_position(&self, cx: &App) -> DockPosition {
+        match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
+            SidebarSide::Left => DockPosition::Left,
+            SidebarSide::Right => DockPosition::Right,
+        }
+    }
+
+    /// The editor, with the agent's column beside it.
+    ///
+    /// One helper rather than an edit in each of the four `BottomDockLayout`
+    /// arms, which wrapped the centre identically — the agent column is added
+    /// once, and the four cannot drift apart over it.
+    ///
+    /// The agent stands here rather than in a side dock because a dock is one
+    /// column: sharing one with the git or project panel means either taking
+    /// turns with it or being stacked into its width, and the agent is a
+    /// working surface rather than a tool panel.
+    fn render_centre_with_agent(
+        &self,
+        pane_render_context: &PaneRenderContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        // Handed back untouched while no agent is up — and that is load-bearing,
+        // not an optimisation. Wrapping the centre in one more flex level moves
+        // it by a few pixels, which is enough to slide the tab bar out from
+        // under the coordinates the pane tests click at. With no agent there is
+        // no column to place, so there is no reason to pay that.
+        let side = self.agent_column_position(cx);
+        let Some(agent) = self.agent_dock.read(cx).visible_panel().cloned() else {
+            return self
+                .center
+                .render(self.zoomed.as_ref(), pane_render_context, window, cx);
+        };
+
+        // Zoomed, the column takes the editor's space as well as its own. The
+        // docks stay: this is the centre giving way, not a window-wide overlay.
+        // Nothing about the column's stored width is touched, so unzooming needs
+        // no memory of what it was — it simply stops asking for the rest.
+        //
+        // Asked *before* the centre is built. Rendering it first and discarding
+        // it in this branch cost a full pane-group element tree every frame the
+        // column was zoomed — for a centre nobody would see.
+        if agent.fills_the_center(window, cx)
+            && let Some(column) = self.render_dock(side, &self.agent_dock, window, cx)
+        {
+            return div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .self_stretch()
+                .child(column.flex_1())
+                .into_any_element();
+        }
+
+        let centre = self
+            .center
+            .render(self.zoomed.as_ref(), pane_render_context, window, cx);
+        let Some(column) = self.render_dock(side, &self.agent_dock, window, cx) else {
+            return centre;
+        };
+        // Absolute, so it measures the column without taking part in its layout
+        // — the same trick the workspace uses to learn its own bounds. Dragging
+        // the handle needs the column's own edge: it sits between a dock and the
+        // centre, so no window edge stands in for it.
+        let column = {
+            let this = self.weak_self.clone();
+            column.relative().child(
+                canvas(
+                    move |bounds, _window, cx| {
+                        this.update(cx, |this, _cx| this.agent_column_bounds = Some(bounds))
+                            .ok();
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+        };
+        let (before, after) = match side {
+            DockPosition::Left => (Some(column), None),
+            _ => (None, Some(column)),
+        };
+
+        // `div().flex().flex_row()`, not `h_flex()`: the latter also sets
+        // `items_center`, and a dock sizes itself with `self_stretch`, which
+        // came out zero-height under it. This is the same container the three
+        // docks are already laid out in a few lines below.
+        // `self_stretch` because the arm wrapping this is an `h_flex`, which
+        // centres its children — without it this row is sized to its content
+        // and the column inside draws full width at zero height. The centre
+        // group carries the same call for the same reason.
+        //
+        // `div().flex().flex_row()` rather than `h_flex()` so this row does not
+        // in turn centre the docks inside it.
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .self_stretch()
+            .children(before)
+            .child(centre)
+            .children(after)
+            .into_any_element()
+    }
+
     fn render_dock(
         &self,
         position: DockPosition,
@@ -7781,6 +8062,65 @@ impl Workspace {
             } else {
                 right_dock.resize_active_panel(Some(size), flex_grow, window, cx);
             }
+        });
+    }
+
+    /// Routes a resize-handle drag to the column it belongs to.
+    ///
+    /// `position` alone is not enough to pick one: the agent column shares its
+    /// side with a tool dock, so `agent_column` decides between them first.
+    fn drag_dock_edge(
+        &mut self,
+        dragged: DraggedDock,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.previous_dock_drag_coordinates == Some(pointer) {
+            return;
+        }
+        self.previous_dock_drag_coordinates = Some(pointer);
+
+        if dragged.agent_column {
+            self.resize_agent_column(pointer, window, cx);
+        } else {
+            match dragged.position {
+                DockPosition::Left => {
+                    self.resize_left_dock(pointer.x - self.bounds.left(), window, cx);
+                }
+                DockPosition::Right => {
+                    self.resize_right_dock(self.bounds.right() - pointer.x, window, cx);
+                }
+                DockPosition::Bottom => {
+                    self.resize_bottom_dock(self.bounds.bottom() - pointer.y, window, cx);
+                }
+            }
+        }
+        self.serialize_workspace(window, cx);
+    }
+
+    /// Widens or narrows the agent column to follow a pointer on its handle.
+    ///
+    /// Taken from the column's own bounds rather than the window's: it is the
+    /// one column that touches no window edge. The edge the handle hangs off is
+    /// the one that moves, so the opposite edge is the fixed reference and
+    /// stays put for the whole drag.
+    fn resize_agent_column(
+        &mut self,
+        pointer: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bounds) = self.agent_column_bounds else {
+            return;
+        };
+        let new_size = match self.agent_column_position(cx) {
+            DockPosition::Left => pointer.x - bounds.left(),
+            DockPosition::Right | DockPosition::Bottom => bounds.right() - pointer.x,
+        };
+        let new_size = new_size.min(self.bounds.size.width - RESIZE_HANDLE_SIZE);
+        self.agent_dock.update(cx, |dock, cx| {
+            dock.resize_active_panel(Some(new_size), None, window, cx);
         });
     }
 
@@ -8213,8 +8553,14 @@ impl Focusable for Workspace {
     }
 }
 
-#[derive(Clone)]
-struct DraggedDock(DockPosition);
+#[derive(Clone, Copy)]
+struct DraggedDock {
+    position: DockPosition,
+    /// The agent column carries the same `DockPosition` as the tool dock on its
+    /// side, so the position alone cannot say which of the two is under the
+    /// pointer. Without this the agent's handle drives its neighbour.
+    agent_column: bool,
+}
 
 impl Render for DraggedDock {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -8355,40 +8701,13 @@ impl Render for Workspace {
                             .when(self.zoomed.is_none(), |this| {
                                 this.on_drag_move(cx.listener(
                                     move |workspace, e: &DragMoveEvent<DraggedDock>, window, cx| {
-                                        if workspace.previous_dock_drag_coordinates
-                                            != Some(e.event.position)
-                                        {
-                                            workspace.previous_dock_drag_coordinates =
-                                                Some(e.event.position);
-
-                                            match e.drag(cx).0 {
-                                                DockPosition::Left => {
-                                                    workspace.resize_left_dock(
-                                                        e.event.position.x
-                                                            - workspace.bounds.left(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                                DockPosition::Right => {
-                                                    workspace.resize_right_dock(
-                                                        workspace.bounds.right()
-                                                            - e.event.position.x,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                                DockPosition::Bottom => {
-                                                    workspace.resize_bottom_dock(
-                                                        workspace.bounds.bottom()
-                                                            - e.event.position.y,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
-                                            };
-                                            workspace.serialize_workspace(window, cx);
-                                        }
+                                        let dragged = *e.drag(cx);
+                                        workspace.drag_dock_edge(
+                                            dragged,
+                                            e.event.position,
+                                            window,
+                                            cx,
+                                        );
                                     },
                                 ))
                             })
@@ -8422,12 +8741,7 @@ impl Render for Workspace {
                                                                 .when_some(paddings.0, |this, p| {
                                                                     this.child(p.border_r_1())
                                                                 })
-                                                                .child(self.center.render(
-                                                                    self.zoomed.as_ref(),
-                                                                    &pane_render_context,
-                                                                    window,
-                                                                    cx,
-                                                                ))
+                                                                .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                                 .when_some(
                                                                     paddings.1,
                                                                     |this, p| {
@@ -8488,12 +8802,7 @@ impl Render for Workspace {
                                                                                 )
                                                                             },
                                                                         )
-                                                                        .child(self.center.render(
-                                                                            self.zoomed.as_ref(),
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
+                                                                        .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                                         .when_some(
                                                                             paddings.1,
                                                                             |this, p| {
@@ -8556,12 +8865,7 @@ impl Render for Workspace {
                                                                                 )
                                                                             },
                                                                         )
-                                                                        .child(self.center.render(
-                                                                            self.zoomed.as_ref(),
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
+                                                                        .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                                         .when_some(
                                                                             paddings.1,
                                                                             |this, p| {
@@ -8608,12 +8912,7 @@ impl Render for Workspace {
                                                         .when_some(paddings.0, |this, p| {
                                                             this.child(p.border_r_1())
                                                         })
-                                                        .child(self.center.render(
-                                                            self.zoomed.as_ref(),
-                                                            &pane_render_context,
-                                                            window,
-                                                            cx,
-                                                        ))
+                                                        .child(self.render_centre_with_agent(&pane_render_context, window, cx))
                                                         .when_some(paddings.1, |this, p| {
                                                             this.child(p.border_l_1())
                                                         }),
@@ -13010,6 +13309,151 @@ mod tests {
         });
     }
 
+    /// The agent column and the tool dock beside it carry the same
+    /// `DockPosition`, so a drag payload holding only that position sends the
+    /// column's own handle to its neighbour — which is what shipped, and why the
+    /// column could not be widened at all.
+    #[gpui::test]
+    async fn dragging_the_agent_columns_handle_resizes_the_agent_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        cx.update(|_window, cx| {
+            SettingsStore::update_global(cx, |settings, cx| {
+                settings.update_user_settings(cx, |settings| {
+                    settings
+                        .workspace
+                        .multi_project
+                        .get_or_insert_default()
+                        .sidebar_side = Some(SidebarSide::Left);
+                });
+            });
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_random_database_id();
+
+            let tool = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(tool, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+
+            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
+            workspace.add_panel(agent, window, cx);
+            workspace.agent_dock.update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // Not the window's edge: the tool dock stands between the two, so the
+        // column's own left edge is the only thing a pointer can be measured
+        // against.
+        let column_left = workspace
+            .read_with(cx, |workspace, _| workspace.agent_column_bounds)
+            .expect("the column must record where it drew, or a drag has no reference edge")
+            .left();
+        assert!(
+            column_left > px(0.),
+            "the tool dock should sit between the window edge and the column, \
+             leaving it to start further in"
+        );
+
+        let tool_dock_width = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.drag_dock_edge(
+                DraggedDock {
+                    position: DockPosition::Left,
+                    agent_column: true,
+                },
+                point(column_left + px(460.), px(400.)),
+                window,
+                cx,
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                workspace
+                    .agent_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx),
+                Some(px(460.)),
+                "the column should reach from its own left edge to the pointer"
+            );
+            assert_eq!(
+                workspace
+                    .left_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx),
+                tool_dock_width,
+                "and the tool dock sharing its side must not have moved"
+            );
+        });
+    }
+
+    /// `Dock::add_panel` watches the settings and hauls a panel into
+    /// `left_dock`/`right_dock` when its `position()` changes. The agent's
+    /// position changes on every rail flip, and that mapping has no arm for the
+    /// column — so this pins that the panel stays where it belongs.
+    #[gpui::test]
+    async fn flipping_the_rail_leaves_the_agent_in_its_own_column(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
+            workspace.add_panel(agent, window, cx);
+            workspace.agent_dock.update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+        });
+
+        for side in [SidebarSide::Right, SidebarSide::Left] {
+            cx.update(|_window, cx| {
+                SettingsStore::update_global(cx, |settings, cx| {
+                    settings.update_user_settings(cx, |settings| {
+                        settings
+                            .workspace
+                            .multi_project
+                            .get_or_insert_default()
+                            .sidebar_side = Some(side);
+                    });
+                });
+            });
+            cx.run_until_parked();
+
+            workspace.read_with(cx, |workspace, cx| {
+                assert!(
+                    workspace.agent_dock.read(cx).panel::<TestPanel>().is_some(),
+                    "the agent must still be in its column after the rail moved to {side:?}"
+                );
+                assert!(
+                    workspace.left_dock.read(cx).panel::<TestPanel>().is_none()
+                        && workspace.right_dock.read(cx).panel::<TestPanel>().is_none(),
+                    "and must not have been hauled into a tool dock"
+                );
+            });
+        }
+    }
+
     #[gpui::test]
     async fn test_panel_size_state_persistence(cx: &mut gpui::TestAppContext) {
         init_test(cx);
@@ -13335,6 +13779,544 @@ mod tests {
         ) -> impl IntoElement {
             div().track_focus(&self.0)
         }
+    }
+
+    /// Bringing a panel up joins whatever is already there instead of putting
+    /// it away, and taking one down leaves the rest standing.
+    ///
+    /// This test began life asserting the opposite — that a dock never shows
+    /// more than one panel — which was true while the stack had no layout to
+    /// draw itself with. That is the invariant this change exists to lift, so
+    /// the test asserts the new rule rather than being deleted: the flag is
+    /// still set in one place and cleared in several, and every public way to
+    /// move a dock is still driven here rather than just the happy path.
+    #[gpui::test]
+    async fn a_dock_stacks_panels_instead_of_swapping_them(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let (first, second) = workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first.clone(), window, cx);
+            workspace.add_panel(second.clone(), window, cx);
+            (first, second)
+        });
+
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.left_dock().read(cx).visible_panels().count()
+            })
+        };
+
+        assert_eq!(shown(cx), 0, "a dock nobody has opened shows nothing");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 1, "the panel asked for should be showing");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            shown(cx),
+            2,
+            "the second panel should have joined the first, not replaced it"
+        );
+
+        // Closing the dock hides the stack without forgetting it, so reopening
+        // brings back what was up rather than a single panel.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 0, "a closed dock shows nothing");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 2, "reopening restores the whole stack");
+
+        // `activate_panel` stays exclusive — it is what a caller reaches for to
+        // show one panel *instead of* the others, and the stack must not have
+        // quietly turned it into another way to add one.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 1, "activate_panel shows one panel and no more");
+
+        // Removing whichever panel is up must not leave its flag behind on an
+        // entry that is gone, nor strand the other one as showing-but-closed.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.remove_panel(&second, window, cx);
+                dock.remove_panel(&first, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(shown(cx), 0, "a dock with no panels left shows nothing");
+    }
+
+    /// Restoring a dock runs from `add_panel`, which runs inside a `Workspace`
+    /// update — so anything in `restore_state` that reads the workspace back
+    /// through its handle aborts the process on the next launch.
+    ///
+    /// No test reached this before: `restore_state` returns immediately unless
+    /// `serialized_dock` is set, and nothing set it, so the whole restore path
+    /// was unexercised while looking covered.
+    #[gpui::test]
+    async fn restoring_a_dock_does_not_read_the_workspace_it_is_inside(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: true,
+                    active_panel: Some("TestPanel".into()),
+                    zoom: false,
+                });
+                dock.serialized_stack = Some(dock::DockStackState {
+                    showing: vec!["TestPanel".into()],
+                    flexes: vec![1.],
+                });
+            });
+
+            // Adding a panel re-runs `restore_state` from inside this very
+            // update. Before the fix this aborted rather than failed.
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            1,
+            "the recorded panel should be showing after the restore"
+        );
+    }
+
+    /// A stack has to survive a restart, and an install that never had one has
+    /// to survive meeting the code that reads them.
+    #[gpui::test]
+    async fn a_dock_stack_round_trips_and_tolerates_having_none(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            for priority in [100, 101] {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, priority, cx));
+                workspace.add_panel(panel, window, cx);
+            }
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let saved = workspace.read_with(cx, |workspace, cx| {
+            workspace.left_dock().read(cx).stack_state()
+        });
+        assert_eq!(
+            saved.showing.len(),
+            2,
+            "both panels should be recorded as showing"
+        );
+        assert_eq!(
+            saved.flexes.len(),
+            2,
+            "a proportion per section, or the layout would assert on the way back"
+        );
+
+        // Restoring a stack of *distinct* panels is exercised in `agent_ui`,
+        // where an agent panel and a test panel share a dock. It cannot be
+        // shown here: `Panel::persistent_name` is a static method naming a
+        // panel type, so the two `TestPanel`s above are one name as far as a
+        // record is concerned — which is also why a repeated name has to
+        // resolve to one section rather than two.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                assert!(dock.apply_stack_state(&saved, window, cx));
+                assert_eq!(
+                    dock.visible_panels().count(),
+                    1,
+                    "one name is one panel, however many times it was recorded"
+                );
+                assert_eq!(
+                    dock.stack_state().flexes.len(),
+                    1,
+                    "and the proportions must describe that one section, not two"
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        // Back to two showing for the checks below.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // An install from before stacks has no record at all, and one whose
+        // panels were removed names only strangers. Neither may blank the dock.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                let none = dock.apply_stack_state(&dock::DockStackState::default(), window, cx);
+                assert!(!none, "an empty record must be declined, not applied");
+                let strangers = dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: vec!["A Panel This Build Does Not Have".into()],
+                        flexes: vec![1.],
+                    },
+                    window,
+                    cx,
+                );
+                assert!(!strangers, "a record naming no panel here must be declined");
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            2,
+            "declining a record must leave what was showing alone"
+        );
+
+        // Proportions recorded for a different number of sections are stale;
+        // pane_axis asserts they match, so they must never reach it.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: saved.showing.clone(),
+                        flexes: vec![1., 1., 1.],
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    dock.stack_state().flexes.len(),
+                    1,
+                    "a proportion list that does not describe the sections the \
+                     record resolved to must fall back to an even share of them"
+                );
+            });
+        });
+    }
+
+    /// Hiding a panel while the dock is shut must not forget the rest of the stack.
+    ///
+    /// The scan for what was left folded `self.is_open` into its predicate, so a
+    /// closed dock reported nothing remaining however many panels were still
+    /// flagged — clearing `active_panel_index` outright. `Workspace::close_panel`
+    /// reaches `hide_panel_by_id` whether or not the dock is open, so this is the
+    /// ordinary path, not a corner of one.
+    #[gpui::test]
+    async fn hiding_a_panel_in_a_closed_dock_leaves_the_rest_of_the_stack(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let first = workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first.clone(), window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+                // Shut, but still remembering both — which is exactly the state
+                // reopening is supposed to come back to.
+                dock.set_open(false, window, cx);
+            });
+            first
+        });
+        cx.run_until_parked();
+
+        let first_id = first.panel_id();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.hide_panel_by_id(first_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                assert!(
+                    dock.active_panel_index().is_some(),
+                    "the panel still in the stack has to remain the active one"
+                );
+                dock.set_open(true, window, cx);
+                assert_eq!(
+                    dock.visible_panels().count(),
+                    1,
+                    "and reopening comes back to it"
+                );
+            });
+        });
+    }
+
+    /// A stack proportion the workspace never wrote must not reach layout.
+    ///
+    /// The record arrives from the key-value store, and the guard checked only
+    /// the section count and the sum — which `[3.0, -1.0]` satisfies exactly
+    /// while asking `pane_axis` for a negative share.
+    #[gpui::test]
+    async fn a_recorded_proportion_that_is_not_a_proportion_is_declined(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        // Two distinct *types*: a record names panels by `persistent_name`, so
+        // two `TestPanel`s resolve to one section and the length check alone
+        // would reject every case below without the sign check ever running.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let showing = workspace.read_with(cx, |workspace, cx| {
+            workspace.left_dock().read(cx).stack_state().showing
+        });
+        assert_eq!(
+            showing.len(),
+            2,
+            "the fixture has to resolve to two sections or this tests nothing"
+        );
+
+        for flexes in [vec![3., -1.], vec![f32::NAN, f32::NAN], vec![0., 2.]] {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.left_dock().update(cx, |dock, cx| {
+                    dock.apply_stack_state(
+                        &dock::DockStackState {
+                            showing: showing.clone(),
+                            flexes: flexes.clone(),
+                        },
+                        window,
+                        cx,
+                    );
+                    assert!(
+                        dock.stack_state()
+                            .flexes
+                            .iter()
+                            .all(|f| f.is_finite() && *f > 0.),
+                        "{flexes:?} reached layout as {:?}",
+                        dock.stack_state().flexes
+                    );
+                });
+            });
+        }
+    }
+
+    /// A stack nobody moved must not be written again.
+    ///
+    /// `serialize_workspace` fires on a 200ms throttle for every kind of change,
+    /// including all through a divider drag. Writing unconditionally cost a JSON
+    /// encode and an `INSERT OR REPLACE` per dock per tick regardless.
+    #[gpui::test]
+    async fn an_unchanged_stack_is_not_written_a_second_time(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                // Two sections, or there is no proportion to move: one section
+                // can only ever hold the whole dock.
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // `show_panel` records the stack on its way through, so by the time the
+        // serialize pass asks there is nothing new to say — and that is the case
+        // this exists for, since the pass runs on a timer rather than on a change.
+        workspace.update(cx, |workspace, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                assert!(
+                    dock.stack_state_if_changed().is_none(),
+                    "a stack already written down must not be written again"
+                );
+                assert!(
+                    dock.stack_state_if_changed().is_none(),
+                    "however many times the pass comes round"
+                );
+            });
+        });
+
+        // A divider drag is the one change that reaches nothing but the serialize
+        // pass, so a stack that really did move still has to come back. Moved
+        // through the handle `pane_axis` itself writes into, which is what a drag
+        // does and what nothing else records.
+        workspace.update(cx, |workspace, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                *dock.stack_flexes().lock() = vec![1.5, 0.5];
+                assert!(
+                    dock.stack_state_if_changed().is_some(),
+                    "a stack that actually moved has to be written"
+                );
+                assert!(
+                    dock.stack_state_if_changed().is_none(),
+                    "and then settle again"
+                );
+            });
+        });
+    }
+
+    /// Two panels showing at once must actually divide the dock between them.
+    ///
+    /// Measured rather than smoke-tested: the failure mode this guards is a
+    /// section that draws at full width and zero height, which every state
+    /// assertion in the world reports as fine.
+    #[gpui::test]
+    async fn two_panels_in_one_dock_split_it_between_them(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            2,
+            "both panels should be showing"
+        );
+
+        let top = cx
+            .debug_bounds("dock-stacked-panel:0")
+            .expect("the first section of the stack should be drawn");
+        let bottom = cx
+            .debug_bounds("dock-stacked-panel:1")
+            .expect("the second section of the stack should be drawn");
+
+        for (which, bounds) in [("first", top), ("second", bottom)] {
+            assert!(
+                bounds.size.width > px(0.) && bounds.size.height > px(0.),
+                "the {which} section drew with no area: {bounds:?}"
+            );
+        }
+        assert_eq!(
+            top.size.width, bottom.size.width,
+            "stacked panels share the dock's width"
+        );
+        assert!(
+            top.bottom() <= bottom.origin.y,
+            "the stack must read top-to-bottom without overlapping, \
+             got {top:?} then {bottom:?}"
+        );
+
+        // Taking one away hands the whole dock back to the other, rather than
+        // leaving the gap its share used to occupy.
+        let second_id = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .nth(1)
+                .map(|panel| panel.panel_id())
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.hide_panel_by_id(second_id.unwrap(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("dock-stacked-panel:1").is_none(),
+            "the hidden panel must stop being drawn"
+        );
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            1,
+            "one panel left showing"
+        );
     }
 
     #[gpui::test]

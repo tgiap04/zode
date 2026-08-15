@@ -1,7 +1,7 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # Permissions
 
-**Project**: zode (Zed fork)
+**Project**: Zode (Zed fork)
 **Generated**: 2026-08-07
 **Analysis Scope**: Full monorepo — native GPUI desktop editor, no collaboration/multiplayer
 backend, local-first with SSH-based remote development.
@@ -12,7 +12,7 @@ backend, local-first with SSH-based remote development.
 
 ## Honesty Note
 
-zode is not a web application and, unlike upstream Zed, it does not ship a collaboration server
+Zode is not a web application and, unlike upstream Zed, it does not ship a collaboration server
 (no `crates/collab`, no `crates/call` — confirmed by direct inspection of the source tree). So
 there is no multi-tenant user-role system at all, not even the collaboration `ChannelRole` system
 upstream Zed has. What this codebase calls "permissions" is three unrelated, independent gates:
@@ -52,7 +52,7 @@ view-only, or content from a remote SSH host the local client wasn't given a mut
 silently rejects edit attempts — there's no error dialog, the edit simply doesn't apply.
 
 **3. Workspace/worktree trust** — the first time you open a folder (or a single file outside any
-folder), it is treated as **untrusted** by default. Zed will not spawn a language server (or
+folder), it is treated as **untrusted** by default. Zode will not spawn a language server (or
 perform certain git-integration operations) against an untrusted folder until you explicitly grant
 trust through a security prompt. Trust has levels: trusting a single file is the narrowest grant;
 trusting a whole directory covers everything inside it; trusting a parent directory transitively
@@ -65,7 +65,7 @@ Docker manages its own isolation.
 
 **4. Feature flags** — a small number of in-development features (notebooks, an "ACP beta"
 program, agent-sharing, diff review, a streaming edit-file tool) are gated behind flags that
-default to visible for Zed staff accounts and hidden for everyone else, unless a flag has been
+default to visible for Zode staff accounts and hidden for everyone else, unless a flag has been
 explicitly marked as rolled out to all users. This is a rollout mechanism, not a security boundary.
 
 ## Access Boundaries
@@ -91,7 +91,7 @@ The real dividing lines in this codebase are not "admin vs. user" in the web-app
 - A global setting (`trust_all_worktrees`) lets a user disable the workspace-trust prompt entirely,
   auto-trusting every folder they open — an explicit opt-out for users who find the prompt
   unnecessary friction.
-- Workspace trust is skipped silently for folders Zed creates internally for its own purposes
+- Workspace trust is skipped silently for folders Zode creates internally for its own purposes
   (e.g. a temp directory used by the keymap editor) — these were never user-opened content, so
   there's nothing to vet.
 - Docker-based and (legacy, non-functional in this fork) collaboration-based projects are

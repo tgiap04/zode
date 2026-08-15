@@ -1,4 +1,6 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
+use crate::pane_group::element::pane_axis;
+use crate::pane_group::{SURFACE_MARGIN, SURFACE_ROUNDING};
 use crate::persistence::model::DockData;
 use crate::{
     DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, SidebarSide, WorkspaceSettings,
@@ -14,6 +16,8 @@ use gpui::{
     Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
     px,
 };
+use gpui::{Bounds, Pixels};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::sync::Arc;
@@ -24,6 +28,10 @@ use ui::{
 use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
+
+/// Element-id space for a dock's stack, kept clear of the centre pane group's
+/// bases (which start at 0 and grow by `(basis + ix) * 10` as it nests).
+const STACK_ELEMENT_BASIS: usize = 1_000_000;
 
 pub enum PanelEvent {
     ZoomIn,
@@ -70,6 +78,17 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
+    /// Whether this panel wants the editor's space as well as its own.
+    ///
+    /// Deliberately not `is_zoomed`, which drives the window-wide zoom overlay:
+    /// that keys off `DockPosition`, and the agent column shares its position
+    /// with the tool dock beside it — so zooming the agent that way would take
+    /// the git panel down with it, and cover the docks the request asks to keep.
+    /// Read only, never written to, so a panel answering it cannot reach back
+    /// into the workspace mid-update.
+    fn fills_the_center(&self, _window: &Window, _cx: &App) -> bool {
+        false
+    }
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
@@ -98,6 +117,7 @@ pub trait PanelHandle: Send + Sync {
     fn position_is_valid(&self, position: DockPosition, cx: &App) -> bool;
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
+    fn fills_the_center(&self, window: &Window, cx: &App) -> bool;
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn remote_id(&self) -> Option<proto::PanelId>;
@@ -165,6 +185,10 @@ where
 
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool {
         self.read(cx).is_zoomed(window, cx)
+    }
+
+    fn fills_the_center(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).fills_the_center(window, cx)
     }
 
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App) {
@@ -265,6 +289,35 @@ pub struct Dock {
     focus_handle: FocusHandle,
     focus_follows_mouse: FocusFollowsMouse,
     pub(crate) serialized_dock: Option<DockData>,
+    /// The stack recorded for this dock, pushed in by the workspace.
+    ///
+    /// Handed over rather than fetched, for the same reason `serialized_dock`
+    /// is: `restore_state` runs from `add_panel`, which itself runs inside a
+    /// `Workspace` update, so reading the workspace back through its handle
+    /// there aborts the process.
+    pub(crate) serialized_stack: Option<DockStackState>,
+    /// Whether this is the agent's column rather than one of the three docks.
+    ///
+    /// Only `stack_key` reads it, and only to keep the two apart in storage:
+    /// the agent column carries a `DockPosition` of its own so resizing knows
+    /// which way it grows, and that position is shared with a real dock.
+    is_agent_column: bool,
+    /// How the panels showing at once divide the dock's *length*.
+    ///
+    /// A second axis from `PanelEntry::size_state`, which measures the dock's
+    /// *width* (one value for the whole dock, dragged at its outer edge). This
+    /// one splits what is left between stacked panels — never confuse the two:
+    /// writing a stack proportion through `resize_active_panel` would resize
+    /// the dock instead.
+    stack_flexes: Arc<Mutex<Vec<f32>>>,
+    stack_bounding_boxes: Arc<Mutex<Vec<Option<Bounds<Pixels>>>>>,
+    /// The stack as last written down, so an unchanged one is not written again.
+    ///
+    /// `serialize_workspace` fires on every kind of workspace change, throttled
+    /// to 200ms — including all through a divider drag. Without this each of
+    /// those ticks cost a JSON encode and an `INSERT OR REPLACE` per dock,
+    /// whether or not that dock's stack had moved at all.
+    last_persisted_stack: Option<DockStackState>,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
     _subscriptions: [Subscription; 2],
@@ -304,7 +357,13 @@ impl Into<settings::DockPosition> for DockPosition {
 }
 
 impl DockPosition {
-    fn label(&self) -> &'static str {
+    /// How many positions there are, so a fourth dock can take an id space
+    /// past all of them rather than sharing one. See `stack_element_basis`.
+    const COUNT: usize = 3;
+
+    /// Also the key a dock's stack is recorded under, so these strings are
+    /// persisted: renaming one orphans what users had open.
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Left => "Left",
             Self::Bottom => "Bottom",
@@ -330,6 +389,18 @@ pub struct PanelSizeState {
 struct PanelEntry {
     panel: Arc<dyn PanelHandle>,
     size_state: PanelSizeState,
+    /// Whether this panel is one of the ones the dock is showing.
+    ///
+    /// A dock shows exactly one at a time today, so exactly one entry carries
+    /// this while the dock is open — a stack of several is what this flag is
+    /// here to make possible.
+    ///
+    /// Deliberately a flag on the entry rather than a set of indices held by
+    /// the dock: `add_panel` and `remove_panel` shift entry indices, and the
+    /// fiddly `+= 1` / `-= 1` fixups that already exist for `active_panel_index`
+    /// are exactly the bug this would multiply. A flag moves with the entry it
+    /// belongs to and cannot go stale.
+    visible: bool,
     _subscriptions: [Subscription; 3],
 }
 
@@ -339,6 +410,27 @@ pub struct PanelButtons {
 }
 
 pub(crate) const PANEL_SIZE_STATE_KEY: &str = "dock_panel_size";
+
+/// Which panels a dock was showing, and how they divided it.
+///
+/// Kept in the key-value store beside the panel sizes rather than in a column
+/// on `workspaces`: that table is read positionally (`impl Column for
+/// DockData`), so a new column has to be threaded through every SELECT in the
+/// right place or every field after it shifts, silently, on real user data. A
+/// key that is simply absent on an older install reads as "no stack recorded"
+/// and falls back to the single active panel — which is the behaviour wanted
+/// anyway.
+pub(crate) const DOCK_STACK_KEY: &str = "dock_stack";
+
+/// Panels are recorded by `persistent_name`, the same handle the serialized
+/// `active_panel` uses, so one that has since been removed from the app is
+/// skipped on the way back in rather than shifting everything after it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DockStackState {
+    pub showing: Vec<String>,
+    #[serde(default)]
+    pub flexes: Vec<f32>,
+}
 
 fn panel_uses_flexible_width(
     position: DockPosition,
@@ -395,6 +487,11 @@ impl Dock {
                 workspace: workspace.downgrade(),
                 panel_entries: Default::default(),
                 active_panel_index: None,
+                serialized_stack: None,
+                is_agent_column: false,
+                stack_flexes: Default::default(),
+                stack_bounding_boxes: Default::default(),
+                last_persisted_stack: None,
                 is_open: false,
                 focus_handle: focus_handle.clone(),
                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
@@ -451,6 +548,20 @@ impl Dock {
 
     pub fn position(&self) -> DockPosition {
         self.position
+    }
+
+    /// Moves the agent column to the other side of the editor.
+    ///
+    /// Only the agent column moves this way — the three ordinary docks are
+    /// defined by their side and never change it, while this one follows the
+    /// rail. The side decides which edge carries the border and the resize
+    /// handle, so it has to change with it rather than only at construction.
+    pub fn set_agent_column_position(&mut self, position: DockPosition, cx: &mut Context<Self>) {
+        if !self.is_agent_column || self.position == position {
+            return;
+        }
+        self.position = position;
+        cx.notify();
     }
 
     pub fn is_open(&self) -> bool {
@@ -571,6 +682,17 @@ impl Dock {
                 let panel = panel.clone();
 
                 move |this, window, cx| {
+                    // The agent column is the panel's home at either rail side:
+                    // the column itself moves (`set_agent_column_position`), so
+                    // there is no dock to migrate to. Without this the panel is
+                    // hauled into a tool dock the moment the rail flips —
+                    // exactly where the agent appeared before it had a column —
+                    // and whether that happens comes down to which of the two
+                    // settings observers fires first.
+                    if this.is_agent_column {
+                        return;
+                    }
+
                     let new_position = panel.read(cx).position(window, cx);
                     if new_position == this.position {
                         return;
@@ -718,6 +840,9 @@ impl Dock {
             PanelEntry {
                 panel: Arc::new(panel.clone()),
                 size_state,
+                // Added put away: `restore_state` and `starts_open` below are
+                // what decide to show it, exactly as before.
+                visible: false,
                 _subscriptions: subscriptions,
             },
         );
@@ -739,6 +864,16 @@ impl Dock {
                 && let Some(idx) = self.panel_index_for_persistent_name(active_panel.as_str(), cx)
             {
                 self.activate_panel(idx, window, cx);
+            }
+
+            // Layered over the single active panel rather than replacing it: an
+            // install from before stacks has no record here, and one whose
+            // recorded panels have all been removed must still come back to the
+            // panel above rather than to nothing.
+            if serialized.visible
+                && let Some(stack) = self.serialized_stack.clone()
+            {
+                self.apply_stack_state(&stack, window, cx);
             }
 
             if serialized.zoom
@@ -777,6 +912,7 @@ impl Dock {
             }
 
             self.panel_entries.remove(panel_ix);
+            self.reset_stack_flexes();
             cx.notify();
 
             true
@@ -802,6 +938,11 @@ impl Dock {
             .any(|entry| entry.panel.is_agent_panel(cx))
     }
 
+    /// Shows `panel_ix` and puts every other panel in this dock away.
+    ///
+    /// One panel at a time is what a dock does today, and this is the single
+    /// place that decides it — so it is also the single place a stack would
+    /// later stop being exclusive.
     pub fn activate_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if Some(panel_ix) != self.active_panel_index {
             if let Some(active_panel) = self.active_panel_entry() {
@@ -809,10 +950,16 @@ impl Dock {
             }
 
             self.active_panel_index = Some(panel_ix);
+            for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
+                entry.visible = ix == panel_ix;
+            }
+            self.reset_stack_flexes();
+
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(true, window, cx);
             }
 
+            self.persist_stack(cx);
             cx.notify();
         }
     }
@@ -827,12 +974,275 @@ impl Dock {
         Some(&panel_entry.panel)
     }
 
+    /// The panel the dock is drawing, if it is drawing one.
+    ///
+    /// Reads the entries' own `visible` flags rather than `active_panel_index`,
+    /// so what renders and what is marked visible cannot disagree. While a dock
+    /// shows one panel the two answers are the same panel; when a stack becomes
+    /// possible this is the first of them, and callers wanting all of them want
+    /// `visible_entries`.
     fn visible_entry(&self) -> Option<&PanelEntry> {
-        if self.is_open {
-            self.active_panel_entry()
-        } else {
-            None
+        self.visible_entries().next()
+    }
+
+    fn visible_entries(&self) -> impl Iterator<Item = &PanelEntry> {
+        let is_open = self.is_open;
+        self.panel_entries
+            .iter()
+            .filter(move |entry| is_open && entry.visible)
+    }
+
+    /// Every panel the dock is showing, in the order they are drawn.
+    ///
+    /// The point of it is that asking "is this panel up?" does not have to go
+    /// through `active_panel_index`, which answers a different question.
+    pub fn visible_panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.visible_entries().map(|entry| &entry.panel)
+    }
+
+    pub fn is_panel_visible(&self, panel_id: EntityId) -> bool {
+        self.visible_panels()
+            .any(|panel| panel.panel_id() == panel_id)
+    }
+
+    /// Adds a panel to what the dock is showing, keeping the rest up.
+    ///
+    /// The counterpart to `activate_panel`, which is exclusive. This is the one
+    /// that builds a stack.
+    pub fn show_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.panel_entries.get_mut(panel_ix) else {
+            return;
+        };
+        // The flag outlives a closed dock, so a panel can be marked showing
+        // while nothing is drawn. Asking for it again then means "open the dock
+        // back onto it", not "nothing to do".
+        let was_showing = entry.visible;
+        entry.visible = true;
+        if !was_showing {
+            self.reset_stack_flexes();
         }
+        self.active_panel_index = Some(panel_ix);
+        if !was_showing && let Some(entry) = self.panel_entries.get(panel_ix) {
+            entry.panel.set_active(true, window, cx);
+        }
+        self.set_open(true, window, cx);
+        self.persist_stack(cx);
+        cx.notify();
+    }
+
+    /// Takes a panel out of the stack, closing the dock if it was the last.
+    ///
+    /// Keyed by id rather than index because indices shift under `add_panel`
+    /// and `remove_panel`, and this is reached from a click on a header drawn
+    /// some frames earlier.
+    pub fn hide_panel_by_id(
+        &mut self,
+        panel_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel_ix) = self
+            .panel_entries
+            .iter()
+            .position(|entry| entry.panel.panel_id() == panel_id)
+        else {
+            return;
+        };
+        let Some(entry) = self.panel_entries.get_mut(panel_ix) else {
+            return;
+        };
+        if !entry.visible {
+            return;
+        }
+        entry.visible = false;
+        self.reset_stack_flexes();
+        if let Some(entry) = self.panel_entries.get(panel_ix) {
+            entry.panel.set_active(false, window, cx);
+        }
+
+        // Whatever is left takes over as the focused one; nothing left means
+        // the dock has no reason to hold width.
+        //
+        // Asked of the stack alone. Folding `is_open` into the predicate — as
+        // this did — makes a closed dock report nothing remaining however many
+        // panels are still flagged, so hiding one through `close_panel` cleared
+        // `active_panel_index` outright and the dock reopened onto a stack with
+        // no active panel in it.
+        let remaining = self.panel_entries.iter().position(|entry| entry.visible);
+        self.active_panel_index = remaining;
+        if remaining.is_none() {
+            self.set_open(false, window, cx);
+        }
+        self.persist_stack(cx);
+        cx.notify();
+    }
+
+    /// Shares the dock's length evenly whenever the stack gains or loses a
+    /// panel. `PaneAxis::insert_pane` does the same on a split — a stack that
+    /// silently kept a departed panel's share would leave a gap.
+    fn reset_stack_flexes(&mut self) {
+        let showing = self.panel_entries.iter().filter(|e| e.visible).count();
+        *self.stack_flexes.lock() = vec![1.; showing];
+    }
+
+    /// Writes the stack down so a restart comes back to it.
+    ///
+    /// Deferred rather than written inline: this runs from the middle of the
+    /// dock's own update, and the workspace is what holds the key-value store.
+    /// `resize_active_panel` persists the other axis the same way.
+    fn persist_stack(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.stack_state_if_changed() else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        let key = self.stack_key();
+        cx.defer(move |cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.persist_dock_stack(key, state, cx);
+                });
+            }
+        });
+    }
+
+    /// Marks this dock as the agent's column.
+    ///
+    /// Set once, at construction, by the workspace that owns it.
+    pub fn mark_as_agent_column(&mut self) {
+        self.is_agent_column = true;
+    }
+
+    /// Where this dock's stack puts its element ids.
+    ///
+    /// Keyed the same way `stack_key` is, and for the same reason: the agent
+    /// column shares a `DockPosition` with the dock beside it, so a basis of
+    /// `BASIS + position` had the two drawing their handles into one id space.
+    /// Out of reach today — the column holds a single panel, so it never draws
+    /// a stack — but the collision would land silently the day it holds two.
+    fn stack_element_basis(&self) -> usize {
+        let offset = if self.is_agent_column {
+            DockPosition::COUNT
+        } else {
+            self.position as usize
+        };
+        STACK_ELEMENT_BASIS + offset
+    }
+
+    /// What this dock's stack is recorded under.
+    ///
+    /// NOT the position: the agent column shares a `DockPosition` with whichever
+    /// side dock it stands next to, so keying by position would have the two
+    /// writing over each other -- the agent column, usually empty, blanking the
+    /// record of a dock that had panels in it.
+    pub fn stack_key(&self) -> &'static str {
+        if self.is_agent_column {
+            "agent"
+        } else {
+            self.position.label()
+        }
+    }
+
+    /// The proportions the stack's dividers write into.
+    ///
+    /// The very handle `render_stack` gives `pane_axis`, so a test can move a
+    /// divider the way a drag does. That matters because a drag is the one
+    /// change that reaches nothing but the serialize pass — every other one
+    /// goes through `persist_stack` on its way past.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stack_flexes(&self) -> Arc<Mutex<Vec<f32>>> {
+        self.stack_flexes.clone()
+    }
+
+    /// The stack, but only if it differs from the one last written down.
+    ///
+    /// Both writers go through here — the dock itself when panels come and go,
+    /// and `serialize_workspace` when a divider moves — so neither can rewrite
+    /// what the other has just stored.
+    pub fn stack_state_if_changed(&mut self) -> Option<DockStackState> {
+        let state = self.stack_state();
+        if self.last_persisted_stack.as_ref() == Some(&state) {
+            return None;
+        }
+        self.last_persisted_stack = Some(state.clone());
+        Some(state)
+    }
+
+    /// What this dock is showing, in a form that survives a restart.
+    pub fn stack_state(&self) -> DockStackState {
+        DockStackState {
+            showing: self
+                .panel_entries
+                .iter()
+                .filter(|entry| entry.visible)
+                .map(|entry| entry.panel.persistent_name().to_string())
+                .collect(),
+            flexes: self.stack_flexes.lock().clone(),
+        }
+    }
+
+    /// Puts back a stack recorded by `stack_state`.
+    ///
+    /// Panels named in the record but no longer in this dock are skipped, and a
+    /// record naming none of them leaves the dock untouched for `restore_state`
+    /// to handle the old way — an install that predates stacks, or a dock whose
+    /// panels have all been removed, must not end up showing nothing.
+    pub fn apply_stack_state(
+        &mut self,
+        state: &DockStackState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // `persistent_name` names a panel *type*, so a record can only ever
+        // resolve to distinct entries — but it arrives from disk, and a
+        // repeated name would otherwise yield an index twice and leave the
+        // proportions describing more sections than there are.
+        let mut indices: Vec<usize> = Vec::with_capacity(state.showing.len());
+        for name in &state.showing {
+            if let Some(ix) = self
+                .panel_entries
+                .iter()
+                .position(|entry| entry.panel.persistent_name() == name)
+                && !indices.contains(&ix)
+            {
+                indices.push(ix);
+            }
+        }
+        if indices.is_empty() {
+            return false;
+        }
+
+        for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
+            entry.visible = indices.contains(&ix);
+        }
+        self.active_panel_index = indices.first().copied();
+
+        // Only honour recorded proportions that still describe this many
+        // sections; `pane_axis` asserts the two agree, so a stale record has to
+        // fall back to an even share rather than reach layout.
+        //
+        // Each share is checked as well as the sum: these arrive from the
+        // key-value store, and `[3.0, -1.0]` sums to exactly the section count
+        // while asking layout for a negative height. The sum alone says nothing
+        // about the parts.
+        if state.flexes.len() == indices.len()
+            && state
+                .flexes
+                .iter()
+                .all(|flex| flex.is_finite() && *flex > 0.)
+            && (state.flexes.iter().sum::<f32>() - indices.len() as f32).abs() < 0.001
+        {
+            *self.stack_flexes.lock() = state.flexes.clone();
+        } else {
+            self.reset_stack_flexes();
+        }
+
+        for ix in &indices {
+            if let Some(entry) = self.panel_entries.get(*ix) {
+                entry.panel.set_active(true, window, cx);
+            }
+        }
+        cx.notify();
+        true
     }
 
     pub fn zoomed_panel(&self, window: &Window, cx: &App) -> Option<Arc<dyn PanelHandle>> {
@@ -1051,6 +1461,136 @@ impl Dock {
         }
     }
 
+    /// Draws whatever the dock is showing: one panel, or a stack of them.
+    ///
+    /// A single panel is drawn exactly as it always was — no header, no axis
+    /// element — so the case every dock is in most of the time pays nothing
+    /// for the case that is new.
+    fn render_showing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Counted before collecting, so the one-panel case — which is every
+        // dock nearly all of the time — really does pay nothing for the case
+        // that is new. Collecting first meant a `Vec` and an `Arc` clone per
+        // dock per frame to reach a branch that wanted neither.
+        let (first, has_more) = {
+            let mut showing = self.visible_panels();
+            let first = showing.next().cloned();
+            (first, showing.next().is_some())
+        };
+        match first {
+            Some(only) if !has_more => only
+                .to_any()
+                .cached(StyleRefinement::default().v_flex().size_full())
+                .into_any_element(),
+            Some(_) => {
+                let showing: Vec<Arc<dyn PanelHandle>> = self.visible_panels().cloned().collect();
+                self.render_stack(showing, window, cx)
+            }
+            None => div().into_any_element(),
+        }
+    }
+
+    fn render_stack(
+        &mut self,
+        showing: Vec<Arc<dyn PanelHandle>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if showing.is_empty() {
+            return div().into_any_element();
+        }
+
+        // Panels stack across the dock's own extent: a side dock is a column,
+        // the bottom dock a row.
+        let axis = match self.position.axis() {
+            Axis::Horizontal => Axis::Vertical,
+            Axis::Vertical => Axis::Horizontal,
+        };
+
+        let children: Vec<AnyElement> = showing
+            .iter()
+            .enumerate()
+            .map(|(ix, panel)| self.render_stacked_panel(ix, panel, window, cx))
+            .collect();
+
+        pane_axis(
+            axis,
+            self.stack_element_basis(),
+            self.stack_flexes.clone(),
+            self.stack_bounding_boxes.clone(),
+            self.workspace.clone(),
+        )
+        // Every child reports as not-a-leaf-pane, which is what switches off
+        // the inactive-pane dimming and the active-pane border. Those speak
+        // about editor panes; fading whichever panel is unfocused would be a
+        // surprise nobody asked this dock for.
+        .with_is_leaf_pane_mask(vec![false; children.len()])
+        .children(children)
+        .into_any_element()
+    }
+
+    /// One panel in a stack: a header naming it, then the panel.
+    ///
+    /// The header exists only here. A dock showing one panel has the rail or
+    /// the status bar to say which it is, but a stack has to name its own
+    /// sections and give each a way out.
+    fn render_stacked_panel(
+        &self,
+        ix: usize,
+        panel: &Arc<dyn PanelHandle>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let panel_id = panel.panel_id();
+        let name = SharedString::from(panel.persistent_name());
+        let icon = panel.icon(window, cx);
+        let colors = cx.theme().colors();
+
+        v_flex()
+            .id(("dock-stacked-panel", panel_id))
+            // Keyed by position in the stack rather than by name: two panels of
+            // one kind can stack, and a test asserting how they divide the dock
+            // is asking about first and second, not about which is which.
+            .debug_selector(move || format!("dock-stacked-panel:{ix}"))
+            .size_full()
+            .bg(colors.panel_background)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .children(icon.map(|icon| {
+                                Icon::new(icon).size(IconSize::Small).color(Color::Muted)
+                            }))
+                            .child(Label::new(name).size(LabelSize::Small)),
+                    )
+                    .child(
+                        IconButton::new(("hide-stacked-panel", panel_id), IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(move |_window, cx| Tooltip::simple("Hide Panel", cx))
+                            .on_click(cx.listener(move |dock, _, window, cx| {
+                                dock.hide_panel_by_id(panel_id, window, cx);
+                            })),
+                    ),
+            )
+            // `flex_1` with a floor of zero in a column, so the panel sizes
+            // against a definite height instead of running past the header.
+            .child(
+                div().flex_1().min_h_0().child(
+                    panel
+                        .to_any()
+                        .cached(StyleRefinement::default().v_flex().size_full()),
+                ),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn load_persisted_size_state(
         workspace: &Workspace,
         panel_key: &'static str,
@@ -1071,17 +1611,31 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
-        if let Some(entry) = self.visible_entry() {
+        // Built before the resize-handle closure below, which borrows `self`
+        // and `cx` for as long as it lives; drawing the panels needs both
+        // mutably.
+        let showing = self
+            .visible_entry()
+            .is_some()
+            .then(|| self.render_showing(window, cx));
+        if let Some(showing) = showing {
             let position = self.position;
+            let agent_column = self.is_agent_column;
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
-                    .on_drag(DraggedDock(position), |dock, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.new(|_| dock.clone())
-                    })
+                    .on_drag(
+                        DraggedDock {
+                            position,
+                            agent_column,
+                        },
+                        |dock, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.new(|_| *dock)
+                        },
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -1136,12 +1690,11 @@ impl Render for Dock {
 
             div()
                 .id("dock-panel")
+                .debug_selector(|| "dock-panel".into())
                 .key_context(dispatch_context)
                 .track_focus(&self.focus_handle(cx))
                 .focus_follows_mouse(self.focus_follows_mouse, cx)
                 .flex()
-                .bg(cx.theme().colors().panel_background)
-                .border_color(cx.theme().colors().border)
                 .overflow_hidden()
                 .map(|this| match self.position().axis() {
                     // Width and height are always set on the workspace wrapper in
@@ -1149,23 +1702,32 @@ impl Render for Dock {
                     Axis::Horizontal => this.w_full().h_full().flex_row(),
                     Axis::Vertical => this.h_full().w_full().flex_col(),
                 })
-                .map(|this| match self.position() {
-                    DockPosition::Left => this.border_r_1(),
-                    DockPosition::Right => this.border_l_1(),
-                    DockPosition::Bottom => this.border_t_1(),
-                })
+                // Every dock is a card, the way the centre group is: inset by
+                // the same margin, rounded by the same radius. Drawn here
+                // rather than in each panel so no panel can be the one that
+                // forgets — and so the agent column, which used to carry this
+                // recipe itself, no longer needs to be an exception.
+                //
+                // The inset is padding on a `size_full` box, not a margin: a
+                // 100% box plus a margin exceeds its parent and the parent
+                // clips the overflow, silently eating the very seam the margin
+                // exists to create. A percentage resolves against the content
+                // box, so the padding *is* the gap.
+                //
+                // `overflow_hidden` on the rounded box is load-bearing: panels
+                // paint their own square backgrounds inside it, and without the
+                // clip those corners paint straight over the radius.
                 .child(
-                    div()
-                        .map(|this| match self.position().axis() {
-                            Axis::Horizontal => this.w_full().h_full(),
-                            Axis::Vertical => this.h_full().w_full(),
-                        })
-                        .child(
-                            entry
-                                .panel
-                                .to_any()
-                                .cached(StyleRefinement::default().v_flex().size_full()),
-                        ),
+                    div().size_full().p(SURFACE_MARGIN).child(
+                        div()
+                            .size_full()
+                            .rounded(SURFACE_ROUNDING)
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().panel_background)
+                            .overflow_hidden()
+                            .child(showing),
+                    ),
                 )
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())
@@ -1247,7 +1809,6 @@ pub fn rail_draws_panel(
 impl Render for PanelButtons {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dock = self.dock.read(cx);
-        let active_index = dock.active_panel_index;
         let is_open = dock.is_open;
         let dock_position = dock.position;
 
@@ -1261,8 +1822,7 @@ impl Render for PanelButtons {
         let mut buttons: Vec<_> = dock
             .panel_entries
             .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| {
+            .filter_map(|entry| {
                 // Skip only what the rail is already drawing: clearing the whole
                 // dock would take the project panel's button with it, and that one
                 // belongs here whichever edge it is docked to.
@@ -1284,7 +1844,12 @@ impl Render for PanelButtons {
                 let dock_for_menu = dock_entity.clone();
                 let workspace_for_menu = workspace.clone();
 
-                let is_active_button = Some(i) == active_index && is_open;
+                // Lit per panel rather than per dock: several can be up at
+                // once, so several buttons can be lit at once. The action for
+                // one that is up still closes the dock — this button has no way
+                // to name a single panel, and `Panel::toggle_action` respects
+                // `close_panel_on_toggle`, so it cannot be relied on to hide.
+                let is_active_button = is_open && entry.visible;
                 let (action, tooltip) = if is_active_button {
                     let action = dock.toggle_action();
 
@@ -1461,6 +2026,7 @@ pub mod test {
         pub focus_handle: FocusHandle,
         pub default_size: Pixels,
         pub flexible: bool,
+        pub agent_column: bool,
         pub activation_priority: u32,
         /// Defaults to `None`, matching a panel that contributes no dock button.
         /// Set it when a test needs the panel to appear in an icon list.
@@ -1479,6 +2045,7 @@ pub mod test {
                 focus_handle: cx.focus_handle(),
                 default_size: px(300.),
                 flexible: false,
+                agent_column: false,
                 activation_priority,
                 icon: None,
             }
@@ -1494,11 +2061,96 @@ pub mod test {
                 ..Self::new(position, activation_priority, cx)
             }
         }
+
+        /// A panel the workspace routes into the agent column rather than the
+        /// dock named by `position`.
+        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self {
+                agent_column: true,
+                ..Self::new(position, activation_priority, cx)
+            }
+        }
     }
 
     impl Render for TestPanel {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().id("test").track_focus(&self.focus_handle(cx))
+        }
+    }
+
+    /// A second panel *type*, so a test can build a stack of two sections.
+    ///
+    /// `Panel::persistent_name` is a static method naming a type, so any number
+    /// of `TestPanel`s resolve to one name in a record — which is why every
+    /// stack test above collapses to a single section, and why the guard on
+    /// stale proportions had nothing exercising it. Two sections need two types.
+    pub struct OtherTestPanel(pub TestPanel);
+
+    impl OtherTestPanel {
+        pub fn new(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self(TestPanel::new(position, activation_priority, cx))
+        }
+    }
+
+    impl EventEmitter<PanelEvent> for OtherTestPanel {}
+
+    impl Render for OtherTestPanel {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().id("other-test-panel")
+        }
+    }
+
+    impl Focusable for OtherTestPanel {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.0.focus_handle.clone()
+        }
+    }
+
+    impl Panel for OtherTestPanel {
+        fn persistent_name() -> &'static str {
+            "OtherTestPanel"
+        }
+
+        fn panel_key() -> &'static str {
+            "OtherTestPanel"
+        }
+
+        fn position(&self, _window: &Window, _: &App) -> DockPosition {
+            self.0.position
+        }
+
+        fn position_is_valid(&self, _: DockPosition) -> bool {
+            true
+        }
+
+        fn set_position(&mut self, position: DockPosition, _: &mut Window, _: &mut Context<Self>) {
+            self.0.position = position;
+        }
+
+        fn default_size(&self, _window: &Window, _: &App) -> Pixels {
+            self.0.default_size
+        }
+
+        fn toggle_action(&self) -> Box<dyn Action> {
+            ToggleTestPanel.boxed_clone()
+        }
+
+        /// `None`, like `TestPanel`'s default: a panel with no icon draws no
+        /// dock button, which keeps this out of the button-list assertions.
+        fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
+            None
+        }
+
+        fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
+            None
+        }
+
+        fn set_active(&mut self, active: bool, _window: &mut Window, _cx: &mut Context<Self>) {
+            self.0.active = active;
+        }
+
+        fn activation_priority(&self) -> u32 {
+            self.0.activation_priority
         }
     }
 
@@ -1578,6 +2230,10 @@ pub mod test {
 
         fn activation_priority(&self) -> u32 {
             self.activation_priority
+        }
+
+        fn is_agent_panel(&self) -> bool {
+            self.agent_column
         }
     }
 

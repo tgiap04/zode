@@ -474,7 +474,58 @@ pub mod settings_profile_selector {
 pub mod agent {
     use gpui::{Action, SharedString, actions};
     use schemars::JsonSchema;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
+
+    /// Which face of an agent to open. The two are separate processes — an
+    /// interactive CLI in a pty on one side, an ACP connection over stdio on the
+    /// other — so a view is one or the other for its whole life, never both.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AgentViewMode {
+        /// The agent's own terminal UI, running the CLI the user installed.
+        ///
+        /// The default is what an agent opens in before it has ever been opened —
+        /// after that, whichever mode it was last used in wins.
+        #[default]
+        Terminal,
+        /// The native conversation view, driven over ACP.
+        Chat,
+    }
+
+    /// Opens an agent beside the editor.
+    ///
+    /// This lives here rather than in `agent_ui` so the sidebar can dispatch it
+    /// without depending on `agent_ui` — which from phase 04 onwards pulls in the
+    /// whole ACP stack, and the rail has no business linking against that.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenAgent {
+        /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
+        pub agent: String,
+        /// Which mode to open in, or `None` to reopen in whichever mode this agent
+        /// was last used in. A plain click on the rail means `None`: come back the
+        /// way I left you.
+        #[serde(default)]
+        pub mode: Option<AgentViewMode>,
+    }
+
+    /// Starts a second, independent session of an agent that may already be open.
+    ///
+    /// Separate from `OpenAgent` rather than a flag on it, because the two answer
+    /// to different gestures: clicking the rail means "show me the one that is
+    /// running", and only a deliberate choice should spend another CLI process.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct NewAgent {
+        /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
+        pub agent: String,
+        /// Which mode to open in, or `None` for the mode this agent was last
+        /// used in.
+        #[serde(default)]
+        pub mode: Option<AgentViewMode>,
+    }
 
     actions!(
         agent,

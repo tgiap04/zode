@@ -103,7 +103,7 @@ function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe and cli.exe. auto_update_helper is gone - this fork has no in-app updater.
     cargo build --release --package zode --package cli --target $target
-    Copy-Item -Path ".\$CargoOutDir\zode.exe" -Destination "$innoDir\Zed.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\zode.exe" -Destination "$innoDir\Zode.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     # Build explorer_command_injector.dll
     switch ($channel) {
@@ -202,7 +202,7 @@ function SignZedAndItsFriends {
         return
     }
 
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    $files = "$innoDir\Zode.exe,$innoDir\cli.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
     & "$innoDir\sign.ps1" $files
 }
 
@@ -249,57 +249,57 @@ function BuildInstaller {
         "stable" {
             $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
             $appIconName = "app-icon"
-            $appName = "Zed"
-            $appDisplayName = "Zed"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Zode"
+            $appDisplayName = "Zode"
+            $appSetupName = "Zode-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Stable-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "Zed"
+            $appMutex = "Zode-Editor-Stable-Instance-Mutex"
+            $appExeName = "Zode"
+            $regValueName = "Zode"
             $appUserId = "ZedIndustries.Zed"
-            $appShellNameShort = "Z&ed"
+            $appShellNameShort = "Z&ode"
             $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "preview" {
             $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
             $appIconName = "app-icon-preview"
-            $appName = "Zed Preview"
-            $appDisplayName = "Zed Preview"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Zode Preview"
+            $appDisplayName = "Zode Preview"
+            $appSetupName = "Zode-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Preview-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedPreview"
+            $appMutex = "Zode-Editor-Preview-Instance-Mutex"
+            $appExeName = "Zode"
+            $regValueName = "ZodePreview"
             $appUserId = "ZedIndustries.Zed.Preview"
-            $appShellNameShort = "Z&ed Preview"
+            $appShellNameShort = "Z&ode Preview"
             $appAppxFullName = "ZedIndustries.Zed.Preview_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "nightly" {
             $appId = "{{1BDB21D3-14E7-433C-843C-9C97382B2FE0}"
             $appIconName = "app-icon-nightly"
-            $appName = "Zed Nightly"
-            $appDisplayName = "Zed Nightly"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Zode Nightly"
+            $appDisplayName = "Zode Nightly"
+            $appSetupName = "Zode-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Nightly-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedNightly"
+            $appMutex = "Zode-Editor-Nightly-Instance-Mutex"
+            $appExeName = "Zode"
+            $regValueName = "ZodeNightly"
             $appUserId = "ZedIndustries.Zed.Nightly"
-            $appShellNameShort = "Z&ed Editor Nightly"
+            $appShellNameShort = "Z&ode Editor Nightly"
             $appAppxFullName = "ZedIndustries.Zed.Nightly_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "dev" {
             $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
             $appIconName = "app-icon-dev"
-            $appName = "Zed Dev"
-            $appDisplayName = "Zed Dev"
-            $appSetupName = "Zed-$Architecture"
+            $appName = "Zode Dev"
+            $appDisplayName = "Zode Dev"
+            $appSetupName = "Zode-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Dev-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedDev"
+            $appMutex = "Zode-Editor-Dev-Instance-Mutex"
+            $appExeName = "Zode"
+            $regValueName = "ZodeDev"
             $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ed Dev"
+            $appShellNameShort = "Z&ode Dev"
             $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
         }
         default {

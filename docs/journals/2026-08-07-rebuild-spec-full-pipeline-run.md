@@ -7,7 +7,7 @@
 
 ## What Happened
 
-Ran the complete `tkm:rebuild-spec` pipeline against the zode fork (Rust/GPUI Zed editor, 180 crates, local-first desktop app) to reverse-engineer structured documentation from source. The pipeline ran four passes in sequence: core artifacts (W7a), feature specs (FS), process flows (FL), and glossary (GLS), each with its own review/validation cycle. All four passes reached PASS (0 critical issues) before promotion to live docs.
+Ran the complete `tkm:rebuild-spec` pipeline against the Zode fork (Rust/GPUI Zed editor, 180 crates, local-first desktop app) to reverse-engineer structured documentation from source. The pipeline ran four passes in sequence: core artifacts (W7a), feature specs (FS), process flows (FL), and glossary (GLS), each with its own review/validation cycle. All four passes reached PASS (0 critical issues) before promotion to live docs.
 
 **Output scope:**
 - Core pass: 9 promoted artifacts (system-overview.md, architecture.md, data-model.md, behavior-logic.md, permissions.md, permissions-matrix.md, user-stories.md, feature-list.md, plus confidence reports)

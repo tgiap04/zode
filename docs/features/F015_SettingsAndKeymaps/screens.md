@@ -1,6 +1,6 @@
 # Screens — F015_SettingsAndKeymaps
 
-<!-- generic-source profile: zode has no route-list.md/screen-list.md (desktop GPUI app, not a
+<!-- generic-source profile: Zode has no route-list.md/screen-list.md (desktop GPUI app, not a
 web app with routes). SCR### codes are intentionally omitted rather than fabricated. The table
 below describes the GPUI panel/view surface in place of a web Screen List. -->
 

@@ -610,7 +610,12 @@ mod tests {
     #[test]
     fn logs_live_under_zode_too() {
         let logs = logs_dir();
-        let names = logs
+        // Only what the app chose, never the home directory it sits under: this
+        // scanned the whole path, so a machine whose user happens to be called
+        // `zed` — `/Users/zed/Library/Logs/Zode` — failed for its username
+        // rather than for anything this code decides.
+        let owned = logs.strip_prefix(home_dir().as_path()).unwrap_or(logs);
+        let names = owned
             .components()
             .filter_map(|component| component.as_os_str().to_str())
             .map(str::to_ascii_lowercase)

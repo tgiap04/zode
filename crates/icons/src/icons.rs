@@ -222,6 +222,7 @@ pub enum IconName {
     ThinkingModeOff,
     ThumbsDown,
     ThumbsUp,
+    Thread,
     TodoComplete,
     TodoPending,
     TodoProgress,

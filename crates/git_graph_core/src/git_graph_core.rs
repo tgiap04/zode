@@ -192,6 +192,11 @@ pub struct CommitEntry {
     pub data: Arc<InitialGraphCommitData>,
     pub lane: usize,
     pub color_idx: usize,
+    /// Lanes drawn on this commit's row — its own and every branch running past it.
+    ///
+    /// Per row, unlike `max_lanes`, so a view can start its subject clear of the lanes actually
+    /// beside it rather than clear of the deepest merge anywhere in the log.
+    pub lanes: usize,
 }
 
 pub type ActiveLaneIdx = usize;
@@ -437,10 +442,24 @@ impl GraphData {
 
             self.max_lanes = self.max_lanes.max(self.lane_states.len());
 
+            // The last *occupied* lane, not `lane_states.len()`: a lane that has been freed
+            // stays in the vector as `Empty` and would count as width nothing is drawn in.
+            //
+            // Never fewer than this commit's own lane, though. A commit with no parents releases
+            // its lane as it is processed, so the states no longer mention the row the node is
+            // still drawn on — the root commit came out as occupying nothing at all.
+            let lanes = self
+                .lane_states
+                .iter()
+                .rposition(|lane| !lane.is_empty())
+                .map_or(0, |last| last + 1)
+                .max(commit_lane + 1);
+
             self.commits.push(Rc::new(CommitEntry {
                 data: commit.clone(),
                 lane: commit_lane,
                 color_idx: commit_color.0 as usize,
+                lanes,
             }));
         }
 
@@ -707,4 +726,71 @@ pub fn paint_lanes(params: LanePaint, bounds: Bounds<Pixels>, window: &mut Windo
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oid(byte: u8) -> Oid {
+        Oid::from_bytes(&[byte; 20]).expect("twenty bytes make a valid oid")
+    }
+
+    fn commit(sha: u8, parents: &[u8]) -> Arc<InitialGraphCommitData> {
+        Arc::new(InitialGraphCommitData {
+            sha: oid(sha),
+            parents: parents.iter().copied().map(oid).collect(),
+            ref_names: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_log_with_no_branches_leaves_every_row_on_one_lane() {
+        let mut data = GraphData::new(8);
+        data.add_commits(&[commit(1, &[2]), commit(2, &[3]), commit(3, &[])]);
+
+        assert!(
+            data.commits.iter().all(|commit| commit.lanes == 1),
+            "nothing runs beside these commits, so no row should reserve a second lane: {:?}",
+            data.commits.iter().map(|c| c.lanes).collect::<Vec<_>>()
+        );
+    }
+
+    /// The point of recording lanes per row rather than reading `max_lanes`.
+    ///
+    /// A view that indents by `max_lanes` gives every row the width of the most tangled commit in
+    /// the log — a commit sitting alone on the first lane is pushed out as if a branch ran beside
+    /// it. This is that difference, stated as a property rather than as exact lane numbers, which
+    /// are the graph builder's business and not this field's.
+    #[test]
+    fn a_branch_widens_only_the_rows_it_runs_through() {
+        let mut data = GraphData::new(8);
+        data.add_commits(&[
+            commit(1, &[2, 3]),
+            commit(2, &[4]),
+            commit(3, &[4]),
+            commit(4, &[5]),
+            commit(5, &[]),
+        ]);
+
+        assert!(
+            data.max_lanes >= 2,
+            "the fixture has to actually branch for this to test anything"
+        );
+        assert!(
+            data.commits
+                .iter()
+                .any(|commit| commit.lanes < data.max_lanes),
+            "some row must be narrower than the deepest one, or per-row lanes buys nothing \
+             over max_lanes: {:?} against max {}",
+            data.commits.iter().map(|c| c.lanes).collect::<Vec<_>>(),
+            data.max_lanes
+        );
+        assert!(
+            data.commits
+                .iter()
+                .all(|commit| commit.lanes <= data.max_lanes),
+            "and none may exceed it"
+        );
+    }
 }

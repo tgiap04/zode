@@ -1,0 +1,148 @@
+{
+  "common": {
+    "comingSoon": "Sắp ra mắt"
+  },
+  "promo": {
+    "announcement": "Zode 0.142 All-In-One Super IDE chính thức ra mắt",
+    "desc": "Viết bằng Rust trên GPUI. Mở nhiều project cùng lúc, tích hợp Database, Docker Pods & AI Agent trong 1 ứng dụng duy nhất.",
+    "cta": "Tải bản trải nghiệm sớm"
+  },
+  "nav": {
+    "products": "Vấn Đề",
+    "architecture": "Tính năng",
+    "benchmarks": "Hiệu năng",
+    "allInOne": "Workspaces & Hạ tầng",
+    "downloads": "Tải về",
+    "github": "GitHub",
+    "getZode": "Tải Zode"
+  },
+  "hero": {
+    "badge": "All-In-One Super IDE Bản địa • Viết bằng Rust",
+    "version": "v0.142",
+    "titleLine1": "The All-In-One Super IDE.",
+    "titleLine2": "Kỹ thuật tối thượng bằng Rust.",
+    "subtitle": "Chấm dứt việc phải mở hàng chục cửa sổ IDE nặng nề, DBeaver và Docker Desktop riêng lẻ. Zode hợp nhất Multi-Project Workspaces, Trình quản lý Database, Docker Pods và AI Agent tự trị trong một ứng dụng Rust GPU-accelerated 120 FPS siêu tốc.",
+    "downloadFor": "Tải cho {{os}}",
+    "allPlatforms": "Mọi nền tảng & kiến trúc",
+    "metaSilicon": "Mở nhiều Project & Repo cùng lúc",
+    "metaZeroBloat": "Tích hợp sẵn Database & Docker Pods",
+    "metaStartup": "Khởi động dưới 5ms • Không Electron",
+    "floatingLeft": "🦀 Lõi GPUI Siêu Tốc",
+    "floatingRight": "⚡ Độ Trễ < 1ms"
+  },
+  "productMatrix": {
+    "badge": "VẤN ĐỀ NHỨC NHỐI",
+    "titleLine1": "Quá Nhiều Công Cụ.",
+    "titleLine2": "Quá Nhiều Lần Chuyển",
+    "titleLine3": "Ngữ Cảnh.",
+    "subtitle": "Lập trình viên lãng phí hàng giờ mỗi tuần để liên tục chuyển đổi giữa các công cụ rời rạc không thể kết nối với nhau: IDE, terminal, AI, database và hạ tầng.",
+    "bullet1": "Quy trình làm việc phân mảnh",
+    "bullet2": "Mất ngữ cảnh tập trung",
+    "bullet3": "Suy giảm hiệu suất lập trình",
+    "youNode": "Bạn",
+    "nodeDb": "Database",
+    "nodeTerminal": "Terminal",
+    "nodeDocker": "Docker & K8s",
+    "nodeWeb": "API & Web",
+    "nodeAi": "Trợ lý AI",
+    "nodeMobile": "Ứng dụng Di động",
+    "nodeGithub": "Git & GitHub"
+  },
+  "stats": {
+    "fps": "120 FPS",
+    "fpsLabel": "Tăng tốc GPU qua nhân GPUI thuần túy",
+    "fpsTag": "120 Hz Chuẩn nét",
+    "startup": "< 5 ms",
+    "startupLabel": "Thời gian khởi động lạnh tức thì",
+    "startupTag": "Khởi động < 5ms",
+    "memory": "68 MB",
+    "memoryLabel": "RAM cho 3 Repo + DB + Docker đang chạy",
+    "memoryTag": "Không Electron",
+    "latency": "0.9 ms",
+    "latencyLabel": "Phản hồi gõ phím đến điểm ảnh màn hình",
+    "latencyTag": "Độ trễ tức thì"
+  },
+  "idePreview": {
+    "eyebrow": "Xem trước All-In-One Studio",
+    "title": "Một không gian làm việc. Sức mạnh phát triển vô hạn.",
+    "subtitle": "Chuyển đổi liền mạch giữa mã nguồn nhiều dự án, truy vấn cơ sở dữ liệu trực tiếp, log container và trợ lý AI.",
+    "explorer": "Không gian Multi-Project",
+    "aiAssistant": "Trợ lý Zode AI Tự trị",
+    "acpLive": "Ngữ cảnh ACP Trực tuyến",
+    "aiContextTitle": "✨ Đã nạp ngữ cảnh Full-Stack",
+    "aiContextDesc": "Đã kết nối PostgreSQL (bảng users) và Docker pod 'api-gateway'. Sẵn sàng tạo migration schema và tối ưu hoá câu truy vấn SQL.",
+    "aiPlaceholder": "Yêu cầu Zode AI truy vấn DB hoặc gỡ lỗi Docker pod..."
+  },
+  "features": {
+    "eyebrow": "Hệ thống Năng lực Toàn diện",
+    "title": "Ma trận Tính năng Super IDE",
+    "subtitle": "Được lập trình bằng Rust thuần túy, hoàn toàn không phụ thuộc Electron. Hiệu năng vượt trội kết hợp hạ tầng phát triển toàn diện.",
+    "multiProjectTitle": "Không gian làm việc Multi-Project mượt mà",
+    "multiProjectDesc": "Mở nhiều repository, frontend monorepo và backend microservices trong cùng một cửa sổ duy nhất. Tìm kiếm symbol và nhảy định nghĩa xuyên repo trong tích tắc.",
+    "dbStudioTitle": "Trình quản lý Database bản địa tích hợp sẵn",
+    "dbStudioDesc": "Tích hợp sẵn driver bản địa cho PostgreSQL, MySQL, SQLite, Redis và MongoDB. Thực thi câu lệnh, xem quan hệ khóa ngoại và sửa trực tiếp dữ liệu mà không cần phần mềm bên ngoài.",
+    "dockerPodsTitle": "Quản lý Docker & Kubernetes Pods",
+    "dockerPodsDesc": "Quản lý container Docker, khởi động lại dịch vụ Compose và theo dõi log Kubernetes pod thời gian thực với terminal container tương tác trực tiếp.",
+    "aiAgentTitle": "Trợ lý AI tự trị & Giao thức ACP",
+    "aiAgentDesc": "Khả năng hiểu toàn bộ codebase với Agent Client Protocol (ACP). Zode AI tự đọc lược đồ cơ sở dữ liệu, phân tích log lỗi container và viết mã chính xác trên nhiều tệp.",
+    "gpuEngineTitle": "Động cơ đồ họa GPUI tăng tốc GPU bằng Rust",
+    "gpuEngineDesc": "Lập trình từ đầu bằng Rust trên nền tảng GPUI, tận dụng trực tiếp Metal/Vulkan cho khung hình 120 FPS, độ trễ gõ phím dưới 1ms và khởi động dưới 5ms.",
+    "superTerminalTitle": "Super Terminal chịu tải cao không giật lag",
+    "superTerminalDesc": "Bộ đệm xoay vòng circular buffer có thể xử lý hàng triệu dòng log streaming liên tục từ Docker và build output mà không hề rớt khung hình."
+  },
+  "benchmarks": {
+    "eyebrow": "Thử nghiệm hiệu năng thực tế",
+    "title": "Zode All-In-One so với các IDE truyền thống.",
+    "subtitle": "Đo đạc trên Apple M3 Max khi chạy đồng thời 3 project + kết nối PostgreSQL + stack Docker Compose đang hoạt động.",
+    "lowerIsBetter": "Càng thấp càng tốt",
+    "startupTitle": "Thời gian khởi động lạnh (Cold Launch)",
+    "startupDesc": "Thời gian từ lúc bật app đến khi mount toàn bộ các project và render không gian làm việc qua GPU.",
+    "memoryTitle": "Mức RAM chiếm dụng (3 Repos + DB + Docker)",
+    "memoryDesc": "Tổng lượng RAM tiêu thụ khi mở đồng thời 3 dự án, kết nối DB browser và stream log container.",
+    "latencyTitle": "Độ trễ gõ phím đến điểm ảnh (Latency)",
+    "latencyDesc": "Thời gian từ khi bấm phím vật lý đến khi khung hình GPU hiển thị ký tự lên màn hình."
+  },
+  "allInOneShowcase": {
+    "eyebrow": "Tích hợp Công cụ Hoàn hảo",
+    "title": "Thay thế 5+ ứng dụng rời rạc bằng Zode Super IDE.",
+    "subtitle": "Không còn cảnh chuyển qua chuyển lại giữa VS Code, DBeaver, Docker Desktop, iTerm và các trang AI Chat.",
+    "multiRepoTitle": "Không gian làm việc Multi-Repo",
+    "multiRepoDesc": "Kết hợp backend (Rust/Go), frontend (React/Next) và hạ tầng (Terraform/K8s) trong một không gian duy nhất với bộ tìm kiếm và terminal đồng nhất.",
+    "dbTitle": "Trình duyệt Cơ sở dữ liệu Trực quan",
+    "dbDesc": "Kết nối cơ sở dữ liệu cục bộ hoặc từ xa chỉ với 1 cú nhấp chuột. Chạy truy vấn SQL, xem dữ liệu dạng bảng/JSON, xem sơ đồ ER và chỉnh sửa trực tiếp.",
+    "dockerTitle": "Giám sát Trực tiếp Container & Pods",
+    "dockerDesc": "Xem trạng thái container, mức tiêu thụ CPU/RAM, kiểm tra biến môi trường, truy cập terminal container và stream log trực tiếp thời gian thực.",
+    "copy": "Sao chép",
+    "copied": "Đã sao chép!"
+  },
+  "downloads": {
+    "promoBadge": "v0.142.0 • Bản trải nghiệm công khai",
+    "promoTitle": "Super IDE All-In-One đã sẵn sàng.",
+    "promoDesc": "Trải nghiệm tương lai của công cụ phát triển phần mềm. Multi-project, Database Studio, Docker Pods và AI Agent trong một file thực thi Rust duy nhất.",
+    "promoBtn": "Tải cho macOS (Apple Silicon)",
+    "eyebrow": "Phân phối nhị phân toàn cầu",
+    "title": "Tương thích mọi nền tảng & kiến trúc",
+    "subtitle": "File thực thi nhị phân bản địa tối ưu cho ARM64 và x86_64 trên macOS, Windows và Linux.",
+    "macosTab": "macOS",
+    "windowsTab": "Windows",
+    "linuxTab": "Linux",
+    "recommended": "Khuyên dùng",
+    "packageLabel": "Gói cài đặt",
+    "downloadBtn": "Tải về {{format}}",
+    "comingSoon": "Sắp ra mắt",
+    "signedNotice": "Mọi bản phát hành đều được ký số mã hóa và công chứng bởi Apple & Microsoft Authenticode."
+  },
+  "footer": {
+    "tagline": "Trình soạn thảo All-In-One Super IDE tăng tốc GPU và tích hợp hạ tầng toàn diện viết bằng Rust.",
+    "productCol": "Super IDE",
+    "ecosystemCol": "Workspaces",
+    "resourcesCol": "Tài nguyên",
+    "communityCol": "Cộng đồng",
+    "rights": "Bảo lưu mọi quyền.",
+    "crafted": "Thiết kế cho macOS, Windows & Linux"
+  },
+  "language": {
+    "en": "English",
+    "vi": "Tiếng Việt"
+  }
+}

@@ -250,16 +250,16 @@ store. If via a direct file edit, `BL138_SettingsStoreFileWatcher` picks up the 
 and applies the same `set_user_settings` path. Either way every `impl Settings` consumer observing
 that key re-renders on the next `cx.refresh_windows()`.
 **Why this priority:** Live settings editing without restart is this feature's most-used
-capability — nearly every other Zed feature reads its configuration through this path.
+capability — nearly every other Zode feature reads its configuration through this path.
 **Independent Test:** Change `buffer_font_size` in the Settings UI, confirm an already-open editor
-immediately re-renders at the new size without restarting Zed.
+immediately re-renders at the new size without restarting Zode.
 
 **Acceptance Scenarios:**
 
 1. **Given** the Settings UI is open on the `buffer_font_size` field, **When** the developer types
    a new value, **Then** `settings.json` is rewritten and the value change is visible in an open
    editor within one settings-store refresh cycle.
-2. **Given** `settings.json` is hand-edited externally while Zed is running, **When** the file is
+2. **Given** `settings.json` is hand-edited externally while Zode is running, **When** the file is
    saved, **Then** the change is detected and applied the same way as a UI edit.
 
 **Requirements fulfilled:**
@@ -290,7 +290,7 @@ immediately.
 **Why this priority:** Rebinding keys is the primary reason developers open the keymap editor
 rather than hand-editing JSON.
 **Independent Test:** Rebind `Save` from `Cmd-S` to `Cmd-Shift-S`; confirm `Cmd-Shift-S` now
-triggers Save and `Cmd-S` no longer does, without restarting Zed.
+triggers Save and `Cmd-S` no longer does, without restarting Zode.
 
 **Acceptance Scenarios:**
 
@@ -531,4 +531,4 @@ flow) goes through the `fs::Fs` trait's `atomic_write`/`write` methods against p
 disk (`settings.json`, `global_settings.json`, `keymap.json`, their `*_backup.json` siblings, and
 project `.zed/settings.json` files) — confirmed at `crates/settings/src/settings_store.rs:575-586`,
 `crates/keymap_editor/src/keymap_editor.rs:3658-3663`, and
-`crates/zed/src/zed/migrate.rs:285-323`. None of these paths touch Zed's SQLite `db` crate.
+`crates/zed/src/zed/migrate.rs:285-323`. None of these paths touch Zode's SQLite `db` crate.

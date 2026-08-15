@@ -1,6 +1,6 @@
 ---
 title: Bash
-description: "Configure Bash language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Bash language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # Bash
@@ -37,4 +37,4 @@ If you wish to customize the warnings/errors reported you just need to create a 
 
 ### See also:
 
-- [Zed Docs: Language Support: Shell Scripts](./sh.md)
+- [Zode Docs: Language Support: Shell Scripts](./sh.md)

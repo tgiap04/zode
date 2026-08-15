@@ -9,7 +9,7 @@ function getZedDataDir() {
 
   if (platform === "darwin") {
     // macOS: ~/Library/Application Support/Zed
-    return path.join(os.homedir(), "Library", "Application Support", "Zed");
+    return path.join(os.homedir(), "Library", "Application Support", "Zode");
   } else if (platform === "linux" || platform === "freebsd") {
     // Linux/FreeBSD: $FLATPAK_XDG_DATA_HOME or XDG_DATA_HOME/zed
     if (process.env.FLATPAK_XDG_DATA_HOME) {
@@ -20,7 +20,7 @@ function getZedDataDir() {
   } else if (platform === "win32") {
     // Windows: LocalAppData/Zed
     const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-    return path.join(localAppData, "Zed");
+    return path.join(localAppData, "Zode");
   } else {
     // Fallback to XDG config dir
     const xdgConfigHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");

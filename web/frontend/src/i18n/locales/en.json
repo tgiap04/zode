@@ -1,0 +1,148 @@
+{
+  "common": {
+    "comingSoon": "Coming Soon"
+  },
+  "promo": {
+    "announcement": "Zode 0.142 All-In-One Super IDE is live",
+    "desc": "Built in Rust on GPUI. Multi-project, Native Database, Docker Pods & AI Agent in one binary.",
+    "cta": "Download Early Access"
+  },
+  "nav": {
+    "products": "The Problem",
+    "architecture": "Features",
+    "benchmarks": "Benchmarks",
+    "allInOne": "Workspaces & Infra",
+    "downloads": "Download",
+    "github": "GitHub",
+    "getZode": "Get Zode"
+  },
+  "hero": {
+    "badge": "All-In-One Native Super IDE • Built in Rust",
+    "version": "v0.142",
+    "titleLine1": "The All-In-One Super IDE.",
+    "titleLine2": "Engineered in Rust.",
+    "subtitle": "Stop juggling separate IDE windows, heavy Electron apps, DBeaver, and Docker Desktop. Zode natively unifies Multi-Project Workspaces, Database Studio, Docker Pods, and an Autonomous AI Agent into a blazing-fast 120 FPS GPU-accelerated Rust app.",
+    "downloadFor": "Download for {{os}}",
+    "allPlatforms": "All Platforms & Architectures",
+    "metaSilicon": "Multi-Project & Multi-Repo Native",
+    "metaZeroBloat": "Built-in Database & Docker Pods",
+    "metaStartup": "Sub-5ms Cold Startup • Zero Electron",
+    "floatingLeft": "🦀 GPUI Native Core",
+    "floatingRight": "⚡ Sub-1ms Latency"
+  },
+  "productMatrix": {
+    "badge": "THE PROBLEM",
+    "titleLine1": "Too Many Tools.",
+    "titleLine2": "Too Much Context",
+    "titleLine3": "Switching.",
+    "subtitle": "Developers waste hours every week switching between tools that don't talk to each other. Editors, terminals, AI assistants, databases, and more.",
+    "bullet1": "Fragmented workflow",
+    "bullet2": "Lost context",
+    "bullet3": "Reduced productivity",
+    "youNode": "You",
+    "nodeDb": "Database",
+    "nodeTerminal": "Terminal",
+    "nodeDocker": "Docker & K8s",
+    "nodeWeb": "API & Web",
+    "nodeAi": "AI Assistant",
+    "nodeMobile": "Mobile App",
+    "nodeGithub": "Git & GitHub"
+  },
+  "stats": {
+    "fps": "120 FPS",
+    "fpsLabel": "GPU-Accelerated Native GPUI Rendering",
+    "fpsTag": "120 Hz Native",
+    "startup": "< 5 ms",
+    "startupLabel": "Instant Cold Launch Time",
+    "startupTag": "Sub-5ms Startup",
+    "memory": "68 MB",
+    "memoryLabel": "RAM for 3 Repos + Active DB + Docker",
+    "memoryTag": "Zero Electron",
+    "latency": "0.9 ms",
+    "latencyLabel": "Keystroke-to-Pixel Response",
+    "latencyTag": "Real-time"
+  },
+  "idePreview": {
+    "eyebrow": "Interactive All-In-One Studio",
+    "title": "One workspace. Unlimited developer power.",
+    "subtitle": "Switch effortlessly between multi-repo code files, live database queries, container logs, and AI assistance.",
+    "explorer": "Multi-Project Workspace",
+    "aiAssistant": "Zode AI Autonomous Agent",
+    "acpLive": "ACP Live Context",
+    "aiContextTitle": "✨ Full-Stack Context Active",
+    "aiContextDesc": "Connected to PostgreSQL (users table) and Docker pod 'api-gateway'. Ready to generate schema migration & optimize SQL queries.",
+    "aiPlaceholder": "Ask Zode AI to query DB or fix Docker pod..."
+  },
+  "features": {
+    "eyebrow": "Comprehensive Developer Capabilities",
+    "title": "The Unified Super IDE Matrix",
+    "subtitle": "Engineered in pure Rust with zero Electron dependencies. Extreme speed meets complete developer infra.",
+    "multiProjectTitle": "Fluid Multi-Project Workspaces",
+    "multiProjectDesc": "Open multiple repositories, frontend monorepos, and backend microservices in a single unified window. Search symbols and jump to definitions across repositories instantly.",
+    "dbStudioTitle": "Built-in Native Database Studio",
+    "dbStudioDesc": "Direct native drivers for PostgreSQL, MySQL, SQLite, Redis, and MongoDB. Execute queries, inspect foreign keys, and modify table records without switching to third-party tools.",
+    "dockerPodsTitle": "Integrated Docker & Pod Manager",
+    "dockerPodsDesc": "Manage Docker containers, restart Compose services, and tail Kubernetes pod logs with integrated interactive container terminals and live metrics.",
+    "aiAgentTitle": "Autonomous AI Agent & ACP Protocol",
+    "aiAgentDesc": "Deep full-codebase understanding with Agent Client Protocol (ACP). Zode AI reads live database schemas, checks container error logs, and writes verified code across files.",
+    "gpuEngineTitle": "GPU-Accelerated GPUI Rust Engine",
+    "gpuEngineDesc": "Engineered in pure Rust on top of GPUI, leveraging direct Metal/Vulkan pipelines for 120 FPS rendering, sub-millisecond typing latency, and sub-5ms cold startup.",
+    "superTerminalTitle": "Zero-Lag High Load Super Terminal",
+    "superTerminalDesc": "High-throughput circular buffer terminal capable of handling millions of log lines from Docker streams and compile outputs without a single frame drop."
+  },
+  "benchmarks": {
+    "eyebrow": "Empirical Benchmarks",
+    "title": "Zode All-In-One vs Legacy IDEs.",
+    "subtitle": "Benchmarks measured on Apple M3 Max running 3 concurrent projects + PostgreSQL connection + active Docker Compose stack.",
+    "lowerIsBetter": "Lower is better",
+    "startupTitle": "Startup Time (Cold Launch)",
+    "startupDesc": "Time taken to launch IDE, mount projects, and present GPU-rendered workspace.",
+    "memoryTitle": "Memory Usage (3 Repos + DB + Docker)",
+    "memoryDesc": "Total RAM consumption with 3 projects open, live DB browser, and container logs streaming.",
+    "latencyTitle": "Keystroke-to-Pixel Latency",
+    "latencyDesc": "Time delay between physical keypress and GPU frame buffer display on screen."
+  },
+  "allInOneShowcase": {
+    "eyebrow": "Complete Tool Integration",
+    "title": "Replace 5+ apps with Zode Super IDE.",
+    "subtitle": "No more switching between VS Code, DBeaver, Docker Desktop, Terminal apps, and Web AI chats.",
+    "multiRepoTitle": "Multi-Repo Workspaces",
+    "multiRepoDesc": "Combine backend (Rust/Go), frontend (React/Next), and infra (Terraform/K8s) in one coherent workspace with unified search and terminal panes.",
+    "dbTitle": "Native Database Explorer",
+    "dbDesc": "Connect to local or remote databases with 1 click. Run SQL queries, format results as JSON/CSV, view ER diagrams, and edit live rows.",
+    "dockerTitle": "Container & Pod Live Monitor",
+    "dockerDesc": "View container status, CPU/memory usage, inspect environment variables, exec into container shells, and stream logs in real time.",
+    "copy": "Copy",
+    "copied": "Copied!"
+  },
+  "downloads": {
+    "promoBadge": "v0.142.0 • Public Early Access",
+    "promoTitle": "The All-In-One Super IDE is here.",
+    "promoDesc": "Experience the unified future of software engineering. Multi-project, Database Studio, Docker Pods, and AI Agent in a single ultra-lean Rust binary.",
+    "promoBtn": "Download for macOS (Apple Silicon)",
+    "eyebrow": "Universal Binary Distributions",
+    "title": "All Platforms & Architectures",
+    "subtitle": "Native binaries optimized for ARM64 and x86_64 across macOS, Windows, and Linux.",
+    "macosTab": "macOS",
+    "windowsTab": "Windows",
+    "linuxTab": "Linux",
+    "recommended": "Recommended",
+    "packageLabel": "Package",
+    "downloadBtn": "Download {{format}}",
+    "comingSoon": "Coming Soon",
+    "signedNotice": "All releases are cryptographically signed and notarized by Apple & Microsoft Authenticode."
+  },
+  "footer": {
+    "tagline": "The high-performance, GPU-accelerated All-In-One Super IDE built with Rust.",
+    "productCol": "Super IDE",
+    "ecosystemCol": "Workspaces",
+    "resourcesCol": "Resources",
+    "communityCol": "Community",
+    "rights": "All rights reserved.",
+    "crafted": "Crafted for macOS, Windows & Linux"
+  },
+  "language": {
+    "en": "English",
+    "vi": "Tiếng Việt"
+  }
+}

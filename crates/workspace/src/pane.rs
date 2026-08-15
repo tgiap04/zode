@@ -414,6 +414,16 @@ pub struct Pane {
     project: WeakEntity<Project>,
     pub drag_split_direction: Option<SplitDirection>,
     can_drop_predicate: Option<Arc<dyn Fn(&dyn Any, &mut Window, &mut App) -> bool>>,
+    /// How a tab dropped on this pane's edge turns into a split.
+    ///
+    /// `handle_tab_drop` otherwise routes through `Workspace::split_pane`, which
+    /// splits the workspace's centre group — correct for a centre pane and
+    /// meaningless for one that lives inside a dock panel's own group, where the
+    /// split silently lands nowhere. A panel that owns its panes sets this and
+    /// splits its own group.
+    split_for_drop: Option<
+        Arc<dyn Fn(&Entity<Pane>, SplitDirection, &mut Window, &mut App) -> Option<Entity<Pane>>>,
+    >,
     can_split_predicate:
         Option<Arc<dyn Fn(&mut Self, &dyn Any, &mut Window, &mut Context<Self>) -> bool>>,
     can_toggle_zoom: bool,
@@ -600,6 +610,7 @@ impl Pane {
             workspace,
             project: project.downgrade(),
             can_drop_predicate,
+            split_for_drop: None,
             can_split_predicate: None,
             can_toggle_zoom: true,
             should_display_tab_bar: Rc::new(|_, cx| TabBarSettings::get_global(cx).show),
@@ -835,6 +846,33 @@ impl Pane {
 
     pub fn set_should_display_welcome_page(&mut self, should_display_welcome_page: bool) {
         self.should_display_welcome_page = should_display_welcome_page;
+    }
+
+    pub fn set_split_for_drop(
+        &mut self,
+        split_for_drop: Option<
+            Arc<
+                dyn Fn(
+                    &Entity<Pane>,
+                    SplitDirection,
+                    &mut Window,
+                    &mut App,
+                ) -> Option<Entity<Pane>>,
+            >,
+        >,
+    ) {
+        self.split_for_drop = split_for_drop;
+    }
+
+    /// The predicate that decides what may be dropped on this pane's tab bar.
+    ///
+    /// Exposed so a panel that restricts what it accepts can be tested at the
+    /// predicate, rather than by staging a real drag.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn can_drop_predicate(
+        &self,
+    ) -> Option<Arc<dyn Fn(&dyn Any, &mut Window, &mut App) -> bool>> {
+        self.can_drop_predicate.clone()
     }
 
     pub fn set_can_split(
@@ -3788,7 +3826,14 @@ impl Pane {
             .update(cx, |_, cx| {
                 cx.defer_in(window, move |workspace, window, cx| {
                     if let Some(split_direction) = split_direction {
-                        to_pane = workspace.split_pane(to_pane, split_direction, window, cx);
+                        let owner_splits = to_pane.read(cx).split_for_drop.clone();
+                        to_pane = match owner_splits {
+                            Some(split) => match split(&to_pane, split_direction, window, cx) {
+                                Some(new_pane) => new_pane,
+                                None => return,
+                            },
+                            None => workspace.split_pane(to_pane, split_direction, window, cx),
+                        };
                     }
                     let database_id = workspace.database_id();
                     let was_pinned_in_from_pane = from_pane.read_with(cx, |pane, _| {

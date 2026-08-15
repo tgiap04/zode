@@ -129,7 +129,7 @@ fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
 
 fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
     eprintln!(
-        "Zed failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
+        "Zode failed to open a window: {e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
     );
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
@@ -637,6 +637,7 @@ fn main() {
         language_tools::init(cx);
         git_ui::init(cx);
         git_graph::init(cx);
+        agent_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         csv_preview::init(cx);

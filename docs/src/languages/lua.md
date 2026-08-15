@@ -1,6 +1,6 @@
 ---
 title: Lua
-description: "Configure Lua language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Lua language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # Lua
@@ -23,7 +23,7 @@ To configure LuaLS you can create a `.luarc.json` file in the root of your proje
 }
 ```
 
-See [LuaLS Settings Documentation](https://luals.github.io/wiki/settings/) for all available configuration options, or when editing this file in Zed available settings options will autocomplete, (e.g `runtime.version` will show `"Lua 5.1"`, `"Lua 5.2"`, `"Lua 5.3"`, `"Lua 5.4"` and `"LuaJIT"` as allowed values). Note when importing settings options from VS Code, remove the `Lua.` prefix. (e.g. `runtime.version` instead of `Lua.runtime.version`).
+See [LuaLS Settings Documentation](https://luals.github.io/wiki/settings/) for all available configuration options, or when editing this file in Zode available settings options will autocomplete, (e.g `runtime.version` will show `"Lua 5.1"`, `"Lua 5.2"`, `"Lua 5.3"`, `"Lua 5.4"` and `"LuaJIT"` as allowed values). Note when importing settings options from VS Code, remove the `Lua.` prefix. (e.g. `runtime.version` instead of `Lua.runtime.version`).
 
 ### LuaCATS Definitions
 
@@ -31,7 +31,7 @@ LuaLS can provide enhanced LSP autocompletion suggestions and type validation wi
 
 ### LÖVE (Love2D) {#love2d}
 
-To use [LÖVE (Love2D)](https://love2d.org/) in Zed, checkout [LuaCATS/love2d](https://github.com/LuaCATS/love2d) into a folder called `love2d-luacats` into the parent folder of your project:
+To use [LÖVE (Love2D)](https://love2d.org/) in Zode, checkout [LuaCATS/love2d](https://github.com/LuaCATS/love2d) into a folder called `love2d-luacats` into the parent folder of your project:
 
 ```sh
 cd .. && git clone https://github.com/LuaCATS/love2d love2d-luacats
@@ -52,7 +52,7 @@ Then in your `.luarc.json`:
 
 ### PlaydateSDK
 
-To use [Playdate Lua SDK](https://play.date/dev/) in Zed, checkout [playdate-luacats](https://github.com/notpeter/playdate-luacats) into the parent folder of your project:
+To use [Playdate Lua SDK](https://play.date/dev/) in Zode, checkout [playdate-luacats](https://github.com/notpeter/playdate-luacats) into the parent folder of your project:
 
 ```sh
 cd .. && git clone https://github.com/notpeter/playdate-luacats
@@ -91,7 +91,7 @@ Then in your `.luarc.json`:
 
 ### Inlay Hints
 
-To enable [Inlay Hints](../configuring-languages.md#inlay-hints) for LuaLS in Zed
+To enable [Inlay Hints](../configuring-languages.md#inlay-hints) for LuaLS in Zode
 
 1. Configure inlay hints in Settings ({#kb zed::OpenSettings}) under Languages > Lua, or add to your settings file:
 

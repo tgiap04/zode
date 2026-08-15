@@ -226,8 +226,8 @@ fn main() {
                 res.set_toolkit_path(explicit_rc_toolkit_path.as_str());
             }
             res.set_icon(icon.to_str().unwrap());
-            res.set("FileDescription", "Zed");
-            res.set("ProductName", "Zed");
+            res.set("FileDescription", "Zode");
+            res.set("ProductName", "Zode");
 
             if let Err(e) = res.compile() {
                 eprintln!("{}", e);

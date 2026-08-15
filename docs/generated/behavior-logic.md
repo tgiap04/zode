@@ -1,7 +1,7 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths — all references here are output targets or internal definitions -->
 # Behavior Logic
 
-**Project**: zode (Zed editor fork)
+**Project**: Zode (Zed editor fork)
 **Generated**: 2026-08-07
 **Analysis Scope**: Full codebase — 179 crates under `crates/`, 4 extension crates, 3 tooling crates. Stack: Rust/GPUI native desktop application (no HTTP routes/web surface).
 
@@ -145,7 +145,7 @@ Rules enforced by Wave 2b researcher and Wave 7a reviewer. Violations are critic
 | BL102 | DevContainerJsonParsing | integration | opening a folder with a `.devcontainer/devcontainer.json` (or a specific dev-container config) trigg |
 | BL103 | DevContainerManifestBuildAndRun | integration | user opens/attaches a project configured for a dev container — build image/compose stack, then run/e |
 | BL104 | DockerCliIntegration | integration | any dev-container operation needing to talk to the Docker (or Podman) engine — inspect, pull, compos |
-| BL105 | WindowsExplorerContextMenuInjector | integration | user right-clicks a file/folder in Windows Explorer and invokes the injected "Open with Zed" shell c |
+| BL105 | WindowsExplorerContextMenuInjector | integration | user right-clicks a file/folder in Windows Explorer and invokes the injected "Open with Zode" shell c |
 | BL106 | GitCliRepositoryIntegration | integration | any project operation that needs live git state or mutation — status, diff, commit, branch, stash, b |
 | BL107 | LanguageServerProcessLifecycle | integration | a worktree needs a language server for a detected language (buffer opened, language changed) — spawn |
 | BL108 | LspStoreStartLanguageServer | integration | `LspStore` decides a worktree/language pair needs a running language server (buffer opened, settings |
@@ -162,7 +162,7 @@ Rules enforced by Wave 2b researcher and Wave 7a reviewer. Violations are critic
 | BL119 | MacosPosixSpawnCommand | integration | any subprocess spawn on macOS (git, LSP servers, tasks, shells) that goes through `util::command::Co |
 | BL120 | ChildProcessGroupLifecycle | integration | any spawn path that needs guaranteed cleanup of a subprocess and all its descendants when the parent |
 | BL121 | ShellCommandLineBuilder | integration | any integration that needs to construct a shell-invocation command line (task runner, terminal spawn |
-| BL122 | LoginShellEnvironmentCapture | integration | Zed starts up (or a terminal/task needs a fresh environment) and needs to capture the user's real lo |
+| BL122 | LoginShellEnvironmentCapture | integration | Zode starts up (or a terminal/task needs a fresh environment) and needs to capture the user's real lo |
 | BL123 | VimShellExecCommand | integration | user runs a vim `:!command`, `:read !command`, or a range/motion/text-object filter (`!!`, `!ip`, `. |
 | BL124 | UserStore Connection Status Observer | observer | `Client` connection status stream emits `Status::SignedOut` or `Status::ConnectionLost` |
 | BL125 | Context Server Notification Dispatch | observer | Incoming MCP JSON-RPC notification received on the underlying `Client` connection |
@@ -246,9 +246,9 @@ Rules enforced by Wave 2b researcher and Wave 7a reviewer. Violations are critic
 | BL203 | Update Workspace Activation Timestamp | queue-worker | a workspace window becomes active |
 | BL204 | Save Workspace Welcome Page State | queue-worker | workspace item serialization pass for an open Welcome Page tab |
 | BL205 | Create Worktree Entry On Disk | queue-worker | user creates a new file or directory entry in the project panel/worktree |
-| BL206 | Watch Theme File Changes | queue-worker | Zed starts in an environment where the active theme file may change on disk |
+| BL206 | Watch Theme File Changes | queue-worker | Zode starts in an environment where the active theme file may change on disk |
 | BL207 | Run Keymap Or Settings Migration | queue-worker | user clicks "Backup and Update" in the settings/keymap migration dialog |
-| BL208 | Zed Cli Path Resolution | integration | something needs to invoke the zed/zed-cli executable from a shell context |
+| BL208 | Zode Cli Path Resolution | integration | something needs to invoke the zed/zed-cli executable from a shell context |
 
 ---
 
@@ -911,7 +911,7 @@ Defines the bulk of the editor's data-carrying keymap actions via repeated `#[de
 
 ### Description
 
-`actions!(cli, [InstallCliBinary])` symlinks the Zed CLI auxiliary executable into `/usr/local/bin/zed` (skipping if already up to date).
+`actions!(cli, [InstallCliBinary])` symlinks the Zode CLI auxiliary executable into `/usr/local/bin/zed` (skipping if already up to date).
 
 ### Related Modules
 
@@ -2159,7 +2159,7 @@ Declares `ActivateItem(usize)`, `CloseActiveItem { save_intent, close_pinned }`,
 
 ### Description
 
-`actions!(zed, [ShowWelcome])` opens the Zed welcome screen; `OpenRecentProject { index }` (`#[derive(Action)]`, namespace `welcome`) opens the recent-project entry at the given index from that screen.
+`actions!(zed, [ShowWelcome])` opens the Zode welcome screen; `OpenRecentProject { index }` (`#[derive(Action)]`, namespace `welcome`) opens the recent-project entry at the given index from that screen.
 
 ### Related Modules
 
@@ -2266,7 +2266,7 @@ Declares data-carrying `OpenBrowser { url }`, `OpenZedUrl { url }`, `ChangeKeybi
 
 ### Description
 
-Deserializes the `devcontainer.json` spec (lenient JSON with comments/trailing commas via `serde_json_lenient`) into the `DevContainer` struct: image/build/compose selection, port forwarding, mounts, features, lifecycle scripts (`onCreateCommand`, `postStartCommand`, etc.), and Zed-specific `customizations.zed.extensions`. `DevContainer::build_type()` picks Image / Dockerfile / DockerCompose / None, and `validate_devcontainer_contents()` enforces that `workspaceMount`/`workspaceFolder` are both set or both absent, and that Compose configs specify a `service`. `LifecycleScript::run()` (via `CommandRunner`) executes the parsed lifecycle commands inside the container's build/exec flow.
+Deserializes the `devcontainer.json` spec (lenient JSON with comments/trailing commas via `serde_json_lenient`) into the `DevContainer` struct: image/build/compose selection, port forwarding, mounts, features, lifecycle scripts (`onCreateCommand`, `postStartCommand`, etc.), and Zode-specific `customizations.zed.extensions`. `DevContainer::build_type()` picks Image / Dockerfile / DockerCompose / None, and `validate_devcontainer_contents()` enforces that `workspaceMount`/`workspaceFolder` are both set or both absent, and that Compose configs specify a `service`. `LifecycleScript::run()` (via `CommandRunner`) executes the parsed lifecycle commands inside the container's build/exec flow.
 
 ### Related Modules
 
@@ -2339,17 +2339,17 @@ Orchestrates the full dev-container lifecycle against a `DockerClient`: resolves
 ## BL105_WindowsExplorerContextMenuInjector: WindowsExplorerContextMenuInjector
 
 **Type**: integration
-**Trigger**: user right-clicks a file/folder in Windows Explorer and invokes the injected "Open with Zed" shell context-menu command
+**Trigger**: user right-clicks a file/folder in Windows Explorer and invokes the injected "Open with Zode" shell context-menu command
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
 **Source File**: crates/explorer_command_injector/src/explorer_command_injector.rs
 **Source Symbol**: ExplorerCommandInjector_Impl::Invoke
 
-**Note**: Auto-detected `[SIGNAL_INFERRED]` scope — this is a COM `IExplorerCommand` shell-extension DLL, not an in-process integration, but it is the mechanism by which Explorer launches the Zed executable as an external process, so it is included per Rule C1/C3.
+**Note**: Auto-detected `[SIGNAL_INFERRED]` scope — this is a COM `IExplorerCommand` shell-extension DLL, not an in-process integration, but it is the mechanism by which Explorer launches the Zode executable as an external process, so it is included per Rule C1/C3.
 
 ### Description
 
-Implements the Windows `IExplorerCommand`/`IClassFactory` COM interfaces for a shell-extension DLL registered under `Software\Classes\Zed*ContextMenu`. `Invoke()` resolves the Zed install folder from the DLL's own module path (`GetModuleFileNameW`), then for every selected `IShellItemArray` entry spawns `Zed.exe <item_path>` via `std::process::Command::new(&zed_exe).arg(&item_path).spawn()`. `GetTitle`/`GetIcon` read the menu label from the registry and the icon from the resolved Zed executable path.
+Implements the Windows `IExplorerCommand`/`IClassFactory` COM interfaces for a shell-extension DLL registered under `Software\Classes\Zed*ContextMenu`. `Invoke()` resolves the Zode install folder from the DLL's own module path (`GetModuleFileNameW`), then for every selected `IShellItemArray` entry spawns `Zed.exe <item_path>` via `std::process::Command::new(&zed_exe).arg(&item_path).spawn()`. `GetTitle`/`GetIcon` read the menu label from the registry and the icon from the resolved Zode executable path.
 
 ### Related Modules
 
@@ -2451,7 +2451,7 @@ Resolves the language-server binary via `get_language_server_binary` (respecting
 ## BL109_JsonLanguageServerSchemaContentExtension: JsonLanguageServerSchemaContentExtension
 
 **Type**: integration
-**Trigger**: the JSON language server (vscode-json-language-server) sends a `vscode/content` request for a `zed://schemas/action/...` URI it cannot resolve itself, or Zed needs to push a `json/schemaContent` change notification to it
+**Trigger**: the JSON language server (vscode-json-language-server) sends a `vscode/content` request for a `zed://schemas/action/...` URI it cannot resolve itself, or Zode needs to push a `json/schemaContent` change notification to it
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
 **Source File**: crates/project/src/lsp_store/json_language_server_ext.rs
@@ -2459,7 +2459,7 @@ Resolves the language-server binary via `get_language_server_binary` (respecting
 
 ### Description
 
-Registers a custom LSP request handler (`SchemaContentRequest`, method `vscode/content`) on a running JSON language server so it can ask Zed for the JSON-schema content associated with a `zed://schemas/action/...` URI (avoiding sending the full schema on server startup). Looks up a globally-registered `SchemaHandlingImpl` callback to produce the schema string, and separately `notify_schemas_changed` pushes `json/schemaContent` notifications to all running JSON-schema-adapter servers when schemas are invalidated.
+Registers a custom LSP request handler (`SchemaContentRequest`, method `vscode/content`) on a running JSON language server so it can ask Zode for the JSON-schema content associated with a `zed://schemas/action/...` URI (avoiding sending the full schema on server startup). Looks up a globally-registered `SchemaHandlingImpl` callback to produce the schema string, and separately `notify_schemas_changed` pushes `json/schemaContent` notifications to all running JSON-schema-adapter servers when schemas are invalidated.
 
 ### Related Modules
 
@@ -2571,7 +2571,7 @@ Starts a Prettier "language server"-style process (`Prettier::start`, given a No
 
 ### Description
 
-Resolves the shell program (from `TerminalSettings`, or the remote client's shell, or `get_default_system_shell`/`get_system_shell`), the working directory (active project directory, or Zed's own directory when force-local in a remote project), and the directory environment (`resolve_directory_environment`, including Python-toolchain venv activation scripts), then spawns the shell process on a background task via `ShellKind`-aware command construction. Distinguishes `create_terminal_shell` (respects remote client) from `create_local_terminal` (always local, "breaks out" of a remote/SSH project).
+Resolves the shell program (from `TerminalSettings`, or the remote client's shell, or `get_default_system_shell`/`get_system_shell`), the working directory (active project directory, or Zode's own directory when force-local in a remote project), and the directory environment (`resolve_directory_environment`, including Python-toolchain venv activation scripts), then spawns the shell process on a background task via `ShellKind`-aware command construction. Distinguishes `create_terminal_shell` (respects remote client) from `create_local_terminal` (always local, "breaks out" of a remote/SSH project).
 
 ### Related Modules
 
@@ -2755,7 +2755,7 @@ Implements process spawning on macOS via the raw `posix_spawnp` syscall (with `p
 ## BL120_ChildProcessGroupLifecycle: ChildProcessGroupLifecycle
 
 **Type**: integration
-**Trigger**: any spawn path that needs guaranteed cleanup of a subprocess and all its descendants when the parent Zed process is killed (Jupyter kernels, task/terminal children)
+**Trigger**: any spawn path that needs guaranteed cleanup of a subprocess and all its descendants when the parent Zode process is killed (Jupyter kernels, task/terminal children)
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
 **Source File**: crates/util/src/process.rs
@@ -2809,7 +2809,7 @@ Builds the correct `-c`/`/C` invocation and argument-quoting for the target shel
 ## BL122_LoginShellEnvironmentCapture: LoginShellEnvironmentCapture
 
 **Type**: integration
-**Trigger**: Zed starts up (or a terminal/task needs a fresh environment) and needs to capture the user's real login-shell environment (PATH, PYENV, NVM, etc.) that GUI-launched processes don't normally inherit
+**Trigger**: Zode starts up (or a terminal/task needs a fresh environment) and needs to capture the user's real login-shell environment (PATH, PYENV, NVM, etc.) that GUI-launched processes don't normally inherit
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
 **Source File**: crates/util/src/shell_env.rs
@@ -3363,7 +3363,7 @@ Spawns a background `BackgroundScanner` that watches the worktree's absolute pat
 
 ### Description
 
-Debug-only (`#[cfg(debug_assertions)]`) background task that watches the local grammar source tree (adding subdirectories explicitly since `fs.watch` isn't recursive on Linux) and calls `LanguageRegistry::reload()` whenever a changed `.scm` tree-sitter query file is detected, so language highlighting/queries hot-reload during Zed development.
+Debug-only (`#[cfg(debug_assertions)]`) background task that watches the local grammar source tree (adding subdirectories explicitly since `fs.watch` isn't recursive on Linux) and calls `LanguageRegistry::reload()` whenever a changed `.scm` tree-sitter query file is detected, so language highlighting/queries hot-reload during Zode development.
 
 ### Related Modules
 
@@ -5088,7 +5088,7 @@ Runs the filesystem `create_dir`/`write` call on the background executor, keepin
 ## BL206_WatchThemeFileChanges: Watch Theme File Changes
 
 **Type**: queue-worker
-**Trigger**: Zed starts in an environment where the active theme file may change on disk
+**Trigger**: Zode starts in an environment where the active theme file may change on disk
 **Payload**: N/A
 **File Schema**: N/A
 **Source File**: crates/zed/src/main.rs
@@ -5139,7 +5139,7 @@ Spawns a background task running the keymap or settings migration writer (backin
 
 ---
 
-## BL208_ZedCliPathResolution: Zed CLI Path Resolution
+## BL208_ZedCliPathResolution: Zode CLI Path Resolution
 
 **Type**: integration
 **Trigger**: Something needs to invoke the `zed`/`zed-cli` executable from a shell context (e.g. the `zed` shell alias, a task runner, or an install/reinstall action) and must resolve a shell-safe path to the current app bundle's CLI binary

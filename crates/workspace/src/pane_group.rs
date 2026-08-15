@@ -11,8 +11,13 @@ use anyhow::Result;
 /// and the status bar. Lives here rather than in a shared style helper: the
 /// centre is the only surface that carries it, and when both sides of a seam
 /// carried one the doubled channel read as a grey bar.
-const CENTRE_SURFACE_MARGIN: Pixels = px(3.0);
-const CENTRE_SURFACE_ROUNDING: Pixels = px(5.0);
+/// The gap and the corner a top-level surface carries.
+///
+/// Public because the agent dock draws its own surface with the same numbers: two
+/// surfaces that round differently read as two different apps, and a constant
+/// copied into a second file drifts on the first change to either.
+pub const SURFACE_MARGIN: Pixels = px(3.0);
+pub const SURFACE_ROUNDING: Pixels = px(5.0);
 use collections::HashMap;
 use gpui::{
     Along, AnyView, AnyWeakView, Axis, Bounds, Entity, Hsla, IntoElement, MouseButton, Pixels,
@@ -260,8 +265,8 @@ impl PaneGroup {
         div()
             .flex_1()
             .self_stretch()
-            .m(CENTRE_SURFACE_MARGIN)
-            .rounded(CENTRE_SURFACE_ROUNDING)
+            .m(SURFACE_MARGIN)
+            .rounded(SURFACE_ROUNDING)
             .border_1()
             .border_color(cx.theme().colors().border)
             .overflow_hidden()
@@ -1103,7 +1108,7 @@ impl SplitDirection {
     }
 }
 
-mod element {
+pub(crate) mod element {
     use std::mem;
     use std::{cell::RefCell, iter, rc::Rc, sync::Arc};
 
@@ -1127,7 +1132,14 @@ mod element {
 
     const DIVIDER_SIZE: f32 = 1.0;
 
-    pub(super) fn pane_axis(
+    /// Lays children out along `axis`, split by `flexes`, with a draggable
+    /// divider between each pair.
+    ///
+    /// `pub(crate)` rather than `pub(super)` because a dock showing several
+    /// panels at once is the same problem — N sections sharing one axis, each
+    /// resizable against its neighbour — and solving it twice would mean two
+    /// dividers that drag differently.
+    pub(crate) fn pane_axis(
         axis: Axis,
         basis: usize,
         flexes: Arc<Mutex<Vec<f32>>>,

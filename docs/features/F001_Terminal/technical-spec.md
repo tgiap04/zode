@@ -32,7 +32,7 @@ environment resolution, remote-vs-local routing).
 |------|-------------|------------------|------------|
 | FR-001 | Spawn a shell or task process cross-platform (macOS/Linux/Windows) via a single `Command`/`Child` abstraction | `util::command::new_command`/`new_std_command` | yes |
 | FR-002 | Capture the user's real login-shell environment (PATH, PYENV, NVM, etc.) so GUI-launched terminals match a real shell session | `util::shell_env::capture` | yes |
-| FR-003 | Guarantee cleanup of a spawned process and all its descendants when Zed exits, by running each child in its own process group | `util::process::Child::spawn` | yes |
+| FR-003 | Guarantee cleanup of a spawned process and all its descendants when Zode exits, by running each child in its own process group | `util::process::Child::spawn` | yes |
 
 **Source:** `crates/util/src/command.rs:1-40` (BL118), `crates/util/src/shell_env.rs` (BL122), `crates/util/src/process.rs` (BL120)
 
@@ -163,7 +163,7 @@ match result:
 - **SC-001** — Opening a terminal panel spawns a shell in the project's working directory and streams its output (covers FR-001, US045)
 - **SC-002** — Toggling the panel hides/shows it without interrupting a running session (covers US046)
 - **SC-005** — A terminal spawned from the GUI has PATH/PYENV/NVM and other login-shell environment variables matching a real interactive shell session, not the GUI process's bare environment (covers FR-002)
-- **SC-006** — Quitting Zed while a terminal has spawned child processes terminates the entire process group, leaving no orphaned descendant processes (covers FR-003)
+- **SC-006** — Quitting Zode while a terminal has spawned child processes terminates the entire process group, leaving no orphaned descendant processes (covers FR-003)
 
 ---
 
@@ -176,14 +176,14 @@ match result:
 
 ### US045_RunCommandInIntegratedTerminal — Run a command in the integrated terminal (Priority: P1)
 
-**What happens:** A developer opens a terminal panel, which spawns a shell process (`Project::create_terminal_shell`/`create_local_terminal`) in the project's working directory (or Zed's own directory for a "break out" local terminal on a remote project); the shell's output streams into the terminal pane as it is produced.
+**What happens:** A developer opens a terminal panel, which spawns a shell process (`Project::create_terminal_shell`/`create_local_terminal`) in the project's working directory (or Zode's own directory for a "break out" local terminal on a remote project); the shell's output streams into the terminal pane as it is produced.
 **Why this priority:** This is the feature's core capability — every other terminal user story (toggle, tasks, search) depends on a shell session existing first.
 **Independent Test:** Open a terminal, run `ls`, confirm the file listing for the project root appears in the pane.
 
 **Acceptance Scenarios:**
 
 1. **Given** a project is open with a valid shell configured, **When** the developer opens a terminal and runs `ls`, **Then** the shell spawns in the project root and lists its files.
-2. **Given** the project is a remote (SSH) project, **When** the developer requests a "local terminal" break-out, **Then** the shell spawns locally in Zed's own directory rather than on the remote host.
+2. **Given** the project is a remote (SSH) project, **When** the developer requests a "local terminal" break-out, **Then** the shell spawns locally in Zode's own directory rather than on the remote host.
 
 **Requirements fulfilled:**
 - **FR-001** Spawn a shell or task process cross-platform via a single `Command`/`Child` abstraction — via `Project::create_terminal_shell_internal`

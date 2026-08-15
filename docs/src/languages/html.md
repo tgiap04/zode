@@ -1,6 +1,6 @@
 ---
 title: HTML
-description: "Configure HTML language support in Zed, including language servers, formatting, and debugging."
+description: "Configure HTML language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # HTML
@@ -22,7 +22,7 @@ This extension is automatically installed, but if you do not want to use it, you
 
 ## Formatting
 
-By default Zed uses [Prettier](https://prettier.io/) for formatting HTML.
+By default Zode uses [Prettier](https://prettier.io/) for formatting HTML.
 
 Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > HTML, or add to your settings file:
 
@@ -48,7 +48,7 @@ To use the `vscode-html-language-server` language server auto-formatting instead
   }
 ```
 
-You can customize various [formatting options](https://code.visualstudio.com/docs/languages/html#_formatting) for `vscode-html-language-server` via your Zed `settings.json`:
+You can customize various [formatting options](https://code.visualstudio.com/docs/languages/html#_formatting) for `vscode-html-language-server` via your Zode `settings.json`:
 
 ```json [settings]
   "lsp": {

@@ -29,7 +29,7 @@ Worse: the tool's citation regex is incomplete by design. Git commit hashes are 
 
 Produced `plans/260726-1400-rebuild-spec/artifacts/design-intent.md` (2,482 words, 5 sections):
 
-1. **SSH-only remote dev replaces collaboration server** — formerly Zed's collab_ui backed by a LiveKit server; fork stripped it. Cited: commit `c3e2ac3` body ("remove auth, collab, AI and cloud subsystems"), plus `crates/remote/src/lib.rs:1-25` (SSH implementation entry point).
+1. **SSH-only remote dev replaces collaboration server** — formerly Zode's collab_ui backed by a LiveKit server; fork stripped it. Cited: commit `c3e2ac3` body ("remove auth, collab, AI and cloud subsystems"), plus `crates/remote/src/lib.rs:1-25` (SSH implementation entry point).
 
 2. **Three-state hibernation (Active → Warm → Hibernated)** — reduces memory and CPU when projects are backgrounded. Cited: commit `ad901af` ("project: improve hibernation cascade…") with technical rationale in body, plus `crates/project/src/project.rs:50-85` (state-machine definition).
 

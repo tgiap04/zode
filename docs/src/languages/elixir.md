@@ -1,6 +1,6 @@
 ---
 title: Elixir
-description: "Configure Elixir language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Elixir language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # Elixir
@@ -25,7 +25,7 @@ The Elixir extension offers language server support for ElixirLS, Expert, Dexter
 
 Some of the language servers can also accept initialization or workspace configuration options. See the sections below for an outline of what each server supports. The configuration can be passed in your settings file via `lsp.{language-server-id}.initialization_options` and `lsp.{language-server-id}.settings` respectively.
 
-Visit the [Configuring Zed](../configuring-zed.md#settings-files) guide for more information on how to edit your settings file.
+Visit the [Configuring Zode](../configuring-zed.md#settings-files) guide for more information on how to edit your settings file.
 
 ### Using ElixirLS
 
@@ -163,7 +163,7 @@ Enable Next LS by adding the following to your settings file:
 
 Next LS can accept initialization options.
 
-Completions are an experimental feature within Next LS, they are enabled by default in Zed. Disable them by adding the following to your settings file:
+Completions are an experimental feature within Next LS, they are enabled by default in Zode. Disable them by adding the following to your settings file:
 
 ```json [settings]
   "lsp": {

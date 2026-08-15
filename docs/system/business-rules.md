@@ -1,7 +1,7 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 # Business Rules (DRAFT)
 
-**Project**: zode (Zed fork)
+**Project**: Zode (Zed fork)
 **Generated**: 2026-08-07
 **Status**: DRAFT — summarized from behavior-logic.md (207 BL items across custom-command,
 integration, observer, scheduled-job, queue-worker categories), data-model.md, and architecture.md.
@@ -14,7 +14,7 @@ integration, observer, scheduled-job, queue-worker categories), data-model.md, a
 
 ## Command / Action System
 
-Nearly every user-facing operation in zode — cursor movement, git staging, debugger stepping, vim
+Nearly every user-facing operation in Zode — cursor movement, git staging, debugger stepping, vim
 motions, panel navigation — is modeled as a discrete, named "action" (`ShowErrorMessage`,
 `ToggleStaged`, `StepInto`, and roughly 250 others across the 100 custom-command items sampled).
 Each action is independently bindable to a keystroke via the keymap file and independently
@@ -43,14 +43,14 @@ Again") persists that dismissal so the same suggestion doesn't reappear for that
 
 ## Workspace / Worktree Trust
 
-Opening a new folder or file does not automatically permit zode to spawn tooling (language
+Opening a new folder or file does not automatically permit Zode to spawn tooling (language
 servers, certain git operations) against it — the folder starts untrusted, and trust must be
 explicitly granted (once) through a security prompt before that tooling runs. Trust is
 hierarchical: trusting a single file is the narrowest grant, trusting a directory covers
 everything inside it, and trusting a parent directory transitively trusts every subdirectory and
 file underneath it, present or future. Once granted, trust persists across restarts so the same
 folder isn't re-prompted every session. A global opt-out setting exists to auto-trust everything
-and skip the prompt entirely. Folders zode creates for its own internal purposes (e.g. a scratch
+and skip the prompt entirely. Folders Zode creates for its own internal purposes (e.g. a scratch
 directory backing the keymap editor) are never subject to this check since the user never opened
 them as content. See [Permissions](permissions.md) for the full mechanism.
 
@@ -74,7 +74,7 @@ above) and (b) actually needs one — triggered by opening a buffer in a detecte
 changing that buffer's assigned language. The server process is spawned as a child process
 communicating over framed JSON-RPC on stdio, with a fixed 5-second graceful-shutdown timeout before
 a harder kill. Several language servers get bespoke, non-standard protocol extensions handled
-specially: the JSON language server can request Zed-authored schema content by URI instead of
+specially: the JSON language server can request Zode-authored schema content by URI instead of
 receiving the full schema up front; rust-analyzer's non-standard health-status notifications are
 mapped into a common health enum and logged; the Vue language server's embedded TypeScript
 requests are proxied to a sibling, separately-registered TypeScript server and the response routed
@@ -85,7 +85,7 @@ project becomes idle (see Hibernation Lifecycle below).
 
 ## Background Workers / Fire-and-Forget Operations
 
-A large share of everyday UI interactions in zode are backed by a detached background task rather
+A large share of everyday UI interactions in Zode are backed by a detached background task rather
 than a synchronous call, specifically so the UI thread is never blocked: workspace-item
 serialization (persisting the state of open tabs — Git Graph, Project Diff, Image Viewer, Welcome
 Page, Component Preview, terminal tabs — so they can be restored on next launch), remote-server
@@ -98,7 +98,7 @@ operations where blocking the user would be worse than a quietly-logged error.
 
 ## Hibernation Lifecycle (fork-specific)
 
-zode adds a multi-project window/hibernation lifecycle not present in upstream Zed. Each open
+Zode adds a multi-project window/hibernation lifecycle not present in upstream Zed. Each open
 project carries an activity label — Active (its workspace is focused, never a hibernation
 candidate), Warm (unfocused but still fully live, running on an idle timer), or Hibernated (idle
 long enough to have been torn down). Only the visibly-active project's workspace is guaranteed to
@@ -127,7 +127,7 @@ failing the whole settings load.
 
 ## File Conflict Detection
 
-If a file open in the editor changes on disk without a corresponding save from within zode itself
+If a file open in the editor changes on disk without a corresponding save from within Zode itself
 (e.g. edited by another program, or `git checkout` touching the working tree), the system flags the
 buffer as conflicted and surfaces a notice to the user rather than silently overwriting either the
 on-disk or in-memory version.

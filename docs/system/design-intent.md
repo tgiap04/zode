@@ -1,7 +1,7 @@
 <!-- layout-exempt: plan-dir draft -->
 # Design Intent
 
-**Project**: zode (Zed fork)
+**Project**: Zode (Zed fork)
 
 **Generated**: 2026-08-07
 
@@ -47,12 +47,12 @@ why"), (c) `docs/system/architecture.md` / `business-rules.md`, or (d) `[INFERRE
 
 ### Why SSH remote development instead of a collaboration server
 
-zode strips real-time collaboration entirely and keeps only SSH-based remote development.
+Zode strips real-time collaboration entirely and keeps only SSH-based remote development.
 Per `docs/system/architecture.md` § System Architecture: "There is no client/server split, no
 collaboration backend, and no AI/agent subsystem in this fork — `client`, `rpc`, and `proto`
 exist solely to support **remote development**... not real-time multiplayer collaboration."
 The commit `c3e2ac3` ("refactor!: remove auth, collab, AI and cloud subsystems (54 crates)")
-states the scope directly: "removes the Zed account, real-time collaboration, all AI and
+states the scope directly: "removes the Zode account, real-time collaboration, all AI and
 edit-prediction features, in-app auto-update, and crash reporting... 372,180 lines deleted."
 That same commit's body documents the removal was forced to be atomic by tooling, not by
 design preference — "The removal is one commit because cargo makes it one: a stale path in
@@ -142,7 +142,7 @@ framing: "letting someone else's code run on your machine is risky, so this feat
 give developers a fast way to install, reload, and iterate on extensions while also making sure
 an extension can never do more than it explicitly said it would do up front." `docs/features/F012_ExtensionSystem/technical-spec.md:424`
 flags that this static model may be an intentional trade-off or a genuine gap versus upstream
-Zed's own history: "no UI surface was found for a user to grant/revoke
+Zode's own history: "no UI surface was found for a user to grant/revoke
 `granted_extension_capabilities` from inside the app... Confirm whether this is intentional or a
 gap." [INFERRED] — no ADR/comment resolves this; treated here as an open question, not settled
 rationale (carried into `## Open Questions` below).
@@ -150,7 +150,7 @@ rationale (carried into `## Open Questions` below).
 ### Why worktree trust is hierarchical and persistent rather than per-action
 
 `docs/system/business-rules.md` § Workspace / Worktree Trust: "Opening a new folder or file does
-not automatically permit zode to spawn tooling... the folder starts untrusted... Trust is
+not automatically permit Zode to spawn tooling... the folder starts untrusted... Trust is
 hierarchical: trusting a single file is the narrowest grant, trusting a directory covers
 everything inside it, and trusting a parent directory transitively trusts every subdirectory...
 Once granted, trust persists across restarts so the same folder isn't re-prompted every

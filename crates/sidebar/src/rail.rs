@@ -3,7 +3,7 @@ use crate::project_list::ListEntry;
 use gpui::{AnyElement, App, Context, SharedString, Window, px};
 use settings::Settings as _;
 use ui::{Tooltip, prelude::*};
-use workspace::{SidebarSide, WorkspaceSettings};
+use workspace::{SidebarSide, WorkspaceSettings, pane_group::SURFACE_ROUNDING};
 
 /// The edge the whole sidebar column stands against. Every part of the column
 /// that has a side -- the order of rail and panel, the rail's own separator, the
@@ -87,7 +87,6 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panels = self.render_rail_panels(window, cx);
-        let has_panels = panels.is_some();
         let colors = cx.theme().colors();
         let entries = self.contents.rail_entries.clone();
         let side = rail_side(cx);
@@ -99,13 +98,22 @@ impl Sidebar {
             .w(RAIL_WIDTH)
             .flex_shrink_0()
             .bg(colors.title_bar_background)
+            // A rule across the top, so the rail starts on the same line the
+            // panels beside it do rather than running up into the title bar.
+            .border_t_1()
             // The separator belongs on the edge facing the rest of the window,
             // which flips with the column. Drawn on the fixed right it would sit
             // against the window frame on a right-docked rail and leave the seam
             // that matters -- rail against panel -- with nothing on it.
+            //
+            // The corner rounds on that same inward edge, and only there: the
+            // outward edge is flush against the window frame, where a radius
+            // would open a notch onto the frame rather than a seam. Same radius
+            // as the docks, which the rail now stands beside as a card of the
+            // same layout.
             .map(|el| match side {
-                SidebarSide::Left => el.border_r_1(),
-                SidebarSide::Right => el.border_l_1(),
+                SidebarSide::Left => el.border_r_1().rounded_tr(SURFACE_ROUNDING),
+                SidebarSide::Right => el.border_l_1().rounded_tl(SURFACE_ROUNDING),
             })
             .border_color(colors.border)
             .child(
@@ -122,7 +130,8 @@ impl Sidebar {
                     ),
             )
             .children(panels)
-            .child(self.render_rail_footer(has_panels, cx))
+            .child(self.render_rail_agents(window, cx))
+            .child(self.render_rail_footer(cx))
             .into_any_element()
     }
 
@@ -225,10 +234,9 @@ impl Sidebar {
     /// alone shows no project names, so the panel needs a discoverable way
     /// in that isn't only the `cmd-alt-j` keybinding.
     ///
-    /// `follows_panels` draws the seam against the panel switcher above. Absent
-    /// that block the footer sits straight under the project squares, where a
-    /// rule would divide nothing.
-    fn render_rail_footer(&self, follows_panels: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The seam above is unconditional: the agent block always draws, so there is
+    /// always a block between the project squares and this footer to rule off from.
+    fn render_rail_footer(&self, cx: &mut Context<Self>) -> AnyElement {
         let panel_open = self.panel_open(cx);
         let border = cx.theme().colors().border;
 
@@ -237,7 +245,8 @@ impl Sidebar {
             .py(RAIL_ICON_GAP)
             .gap(RAIL_ICON_GAP)
             .items_center()
-            .when(follows_panels, |el| el.border_t_1().border_color(border))
+            .border_t_1()
+            .border_color(border)
             .child(
                 // Not a tree glyph: the panel switcher directly above already
                 // carries `FileTree` and `ListTree` from the project and

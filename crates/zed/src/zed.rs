@@ -25,11 +25,11 @@ use git_ui::commit_view::CommitViewToolbar;
 use git_ui::git_panel::GitPanel;
 use git_ui::project_diff::{BranchDiffToolbar, ProjectDiffToolbar};
 use gpui::{
-    Action, App, AppContext as _, ClipboardItem, Context, DismissEvent,
-    Element, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, ParentElement,
-    PathPromptOptions, PromptLevel, ReadGlobal, SharedString, Size, Task, TitlebarOptions,
-    UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
-    actions, image_cache, img, point, px, retain_all,
+    Action, App, AppContext as _, ClipboardItem, Context, DismissEvent, Element, Entity,
+    FocusHandle, Focusable, Image, ImageFormat, KeyBinding, ParentElement, PathPromptOptions,
+    PromptLevel, ReadGlobal, SharedString, Size, Task, TitlebarOptions, UpdateGlobal, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions, image_cache, img,
+    point, px, retain_all,
 };
 use image_viewer::ImageInfo;
 use language::Capability;
@@ -79,17 +79,16 @@ use vim_mode_setting::VimModeSetting;
 use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 
 use workspace::{
-    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Toast, Workspace,
-    WorkspaceSettings, create_and_open_local_file,
-    notifications::simple_message_notification::MessageNotification, open_new,
+    AppState, MultiWorkspace, NewFile, NewWindow, OpenLog, Toast, Workspace, WorkspaceSettings,
+    create_and_open_local_file, notifications::simple_message_notification::MessageNotification,
+    open_new,
 };
 use workspace::{
     CloseIntent, CloseProject, CloseWindow, RestoreBanner, with_active_or_new_workspace,
 };
 use workspace::{Pane, notifications::DetachAndPromptErr};
 use zed_actions::{
-    About, OpenBrowser, OpenDocs, OpenServerSettings, OpenSettingsFile,
-    OpenZedUrl, Quit,
+    About, OpenBrowser, OpenDocs, OpenServerSettings, OpenSettingsFile, OpenZedUrl, Quit,
 };
 
 actions!(
@@ -639,6 +638,12 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
+        // Built holding nothing. It reopens the agents this workspace had
+        // running — and starts them — only once it is in the workspace, which is
+        // why it does not go through `add_panel_when_ready` below: putting the
+        // column back reaches through the workspace handle, and the workspace
+        // does not hold this panel while `load` is still resolving.
+        let agent_panel = agent_ui::AgentPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -656,12 +661,39 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             }
         }
 
+        async fn add_agent_panel(
+            panel_task: impl Future<Output = anyhow::Result<Entity<agent_ui::AgentPanel>>> + 'static,
+            workspace_handle: WeakEntity<Workspace>,
+            mut cx: gpui::AsyncWindowContext,
+        ) {
+            let Some(panel) = panel_task
+                .await
+                .context("failed to load the agent panel")
+                .log_err()
+            else {
+                return;
+            };
+            workspace_handle
+                .update_in(&mut cx, |workspace, window, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                })
+                .log_err();
+            // Second, and separately: the panel has to be findable through the
+            // workspace before it can open its own column.
+            panel
+                .update_in(&mut cx, |panel, window, cx| {
+                    panel.restore_tabs(window, cx);
+                })
+                .log_err();
+        }
+
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+            add_agent_panel(agent_panel, workspace_handle.clone(), cx.clone()),
         );
 
         anyhow::Ok(())
@@ -1091,7 +1123,6 @@ fn register_actions(
             }
         });
     }
-
 }
 
 fn initialize_pane(
@@ -1140,6 +1171,8 @@ fn initialize_pane(
             toolbar.add_item(branch_diff_toolbar, window, cx);
             let commit_view_toolbar = cx.new(|_| CommitViewToolbar::new());
             toolbar.add_item(commit_view_toolbar, window, cx);
+            let agent_diff_toolbar = cx.new(agent_ui::AgentDiffToolbar::new);
+            toolbar.add_item(agent_diff_toolbar, window, cx);
             let basedpyright_banner = cx.new(|cx| BasedPyrightBanner::new(workspace, cx));
             toolbar.add_item(basedpyright_banner, window, cx);
             let image_view_toolbar = cx.new(|_| image_viewer::ImageViewToolbarControls::new());
@@ -5256,6 +5289,7 @@ mod tests {
             terminal_view::init(cx);
             image_viewer::init(cx);
             git_graph::init(cx);
+            agent_ui::init(cx);
 
             repl::init(app_state.fs.clone(), cx);
             repl::notebook::init(cx);

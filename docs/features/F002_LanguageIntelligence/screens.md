@@ -1,6 +1,6 @@
 # Screens — F002_LanguageIntelligence
 
-> **Profile note (generic-source, non-web):** zode is a native GPUI desktop app with no route/screen-code system (`route-list.md`/`screen-list.md` do not exist in this profile). The table below lists the feature's user-facing panels/dev-tool views by name and source location instead of `SCR###` codes.
+> **Profile note (generic-source, non-web):** Zode is a native GPUI desktop app with no route/screen-code system (`route-list.md`/`screen-list.md` do not exist in this profile). The table below lists the feature's user-facing panels/dev-tool views by name and source location instead of `SCR###` codes.
 
 ## Screen List
 
@@ -19,7 +19,7 @@
 2. If the user wants a different toolchain, they open the **Toolchain Selector** from the status bar, see the detected options, and pick one — the active language server reconfigures using it.
 3. If a file's language was misdetected, the user opens the **Language Selector**, sees the language list with the current one highlighted, and picks the correct one — syntax highlighting updates immediately.
 4. If the user suspects a language server is stuck, they open the **LSP Tool** status-bar menu, and from there can jump to the **Language Server Logs** view to inspect recent activity, or trigger a restart.
-5. For deeper debugging, a user (typically a zode contributor) opens the **Syntax Tree** or **Highlights Tree** dev views to inspect how the current buffer is being parsed and highlighted.
+5. For deeper debugging, a user (typically a Zode contributor) opens the **Syntax Tree** or **Highlights Tree** dev views to inspect how the current buffer is being parsed and highlighted.
 
 ```mermaid
 journey

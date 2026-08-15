@@ -5,7 +5,7 @@
 
 ## Overview
 
-Language Intelligence is zode's LSP client layer: it spawns and supervises per-worktree language-server processes, lets a developer override toolchain/language assignment from the status bar, bridges bespoke non-standard protocol extensions for specific servers (JSON schema, rust-analyzer health, Vue↔TS proxying), runs Prettier as an equivalent server-lifecycle process, and exposes dev-tool log/tree views over the whole pipeline. It is consumed by Editor Core (F008, syntax/inlay/completions) and Diagnostics (F009), and is gated by workspace/worktree trust before any process is spawned.
+Language Intelligence is Zode's LSP client layer: it spawns and supervises per-worktree language-server processes, lets a developer override toolchain/language assignment from the status bar, bridges bespoke non-standard protocol extensions for specific servers (JSON schema, rust-analyzer health, Vue↔TS proxying), runs Prettier as an equivalent server-lifecycle process, and exposes dev-tool log/tree views over the whole pipeline. It is consumed by Editor Core (F008, syntax/inlay/completions) and Diagnostics (F009), and is gated by workspace/worktree trust before any process is spawned.
 
 ## Polymorphic Behavior
 

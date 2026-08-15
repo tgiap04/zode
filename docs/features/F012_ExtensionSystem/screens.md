@@ -1,6 +1,6 @@
 # Screens — F012_ExtensionSystem
 
-> **Non-web adaptation note:** zode is a native Rust/GPUI desktop application (`generic-source`
+> **Non-web adaptation note:** Zode is a native Rust/GPUI desktop application (`generic-source`
 > profile). There is no `route-list.md`/`screen-list.md` upstream for this profile, so this file
 > describes editor panels/pages and their in-app triggers instead of the standard web
 > `SCR###`-coded screen table.

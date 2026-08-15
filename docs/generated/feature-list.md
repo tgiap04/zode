@@ -8,7 +8,7 @@ orchestrator renumbers for contiguity/canonical slugs after this draft.
 
 # Feature List
 
-**Project**: zode (Zed Editor fork)
+**Project**: Zode (Zode Editor fork)
 **Generated**: 2026-08-07
 **Analysis Scope**: Full monorepo, `generic-source` profile (native Rust/GPUI desktop editor, no
 HTTP surface, no ScreenList/RouteList upstream — `screen_source: none`)
@@ -48,17 +48,17 @@ grouping.
 
 | Code | Name | Type | Language | Workspace | Priority |
 |------|------|------|----------|-----------|----------|
-| F008_EditorCore | Editor Core | mixed | Rust | zode (crates/editor, text, multi_buffer, workspace) | P0 |
-| F009_Diagnostics | Diagnostics | mixed | Rust | zode (crates/diagnostics, project — LspStore) | P0 |
-| F010_Debugging | Debugging | mixed | Rust | zode (crates/debugger, dap, project — DapStore) | P0 |
-| F011_GitIntegration | Git Integration | mixed | Rust | zode (crates/git, git_ui, project — GitStore) | P0 |
-| F012_ExtensionSystem | Extension System | mixed | Rust | zode (crates/extension, extension_host, context_server) | P0 |
-| F013_WorkspaceAndProjectManagement | Workspace & Project Management | mixed | Rust | zode (crates/workspace, project, project_panel, sidebar, worktree) | P0 |
-| F001_Terminal | Terminal | mixed | Rust | zode (crates/terminal, terminal_view, project — Terminals) | P0 |
-| F002_LanguageIntelligence | Language Intelligence | mixed | Rust | zode (crates/project — LspStore, lsp, language, toolchain) | P0 |
-| F014_VimEmulation | Vim Emulation | mixed | Rust | zode (crates/vim) | P1 |
-| F015_SettingsAndKeymaps | Settings & Keymaps | mixed | Rust | zode (crates/settings, theme, keymap_editor, feature_flags) | P0 |
-| F016_Search | Search | ui | Rust | zode (crates/search, file_finder, project — project search) | P0 |
+| F008_EditorCore | Editor Core | mixed | Rust | Zode (crates/editor, text, multi_buffer, workspace) | P0 |
+| F009_Diagnostics | Diagnostics | mixed | Rust | Zode (crates/diagnostics, project — LspStore) | P0 |
+| F010_Debugging | Debugging | mixed | Rust | Zode (crates/debugger, dap, project — DapStore) | P0 |
+| F011_GitIntegration | Git Integration | mixed | Rust | Zode (crates/git, git_ui, project — GitStore) | P0 |
+| F012_ExtensionSystem | Extension System | mixed | Rust | Zode (crates/extension, extension_host, context_server) | P0 |
+| F013_WorkspaceAndProjectManagement | Workspace & Project Management | mixed | Rust | Zode (crates/workspace, project, project_panel, sidebar, worktree) | P0 |
+| F001_Terminal | Terminal | mixed | Rust | Zode (crates/terminal, terminal_view, project — Terminals) | P0 |
+| F002_LanguageIntelligence | Language Intelligence | mixed | Rust | Zode (crates/project — LspStore, lsp, language, toolchain) | P0 |
+| F014_VimEmulation | Vim Emulation | mixed | Rust | Zode (crates/vim) | P1 |
+| F015_SettingsAndKeymaps | Settings & Keymaps | mixed | Rust | Zode (crates/settings, theme, keymap_editor, feature_flags) | P0 |
+| F016_Search | Search | ui | Rust | Zode (crates/search, file_finder, project — project search) | P0 |
 
 ## Feature Details
 
@@ -71,7 +71,7 @@ deletion, split-diff comparison views, encoding/line-ending handling, inlay hint
 `MultiBuffer`/`Buffer`/`Editor` stack every other panel (diagnostics, search, git diff) reuses to
 render text. This is the one subsystem every other feature in this list ultimately renders through.
 
-**Workspace**: zode (native GPUI desktop app)
+**Workspace**: Zode (native GPUI desktop app)
 **Languages**: Rust
 
 **Related User Stories**:
@@ -122,7 +122,7 @@ render text. This is the one subsystem every other feature in this list ultimate
 **Description**: Surfaces LSP diagnostics (errors/warnings) both per-buffer and project-wide, and
 exposes the last language-server error from the status bar.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -152,7 +152,7 @@ exposes the last language-server error from the status bar.
 breakpoints, watch expressions, variable inspection/editing, remote-process attach, and DAP log
 viewing for troubleshooting adapters themselves.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -187,7 +187,7 @@ viewing for troubleshooting adapters themselves.
 project-wide diff review, and commit-graph visualization — all wrapping a local `git` CLI
 integration, no server-side collab component.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -218,7 +218,7 @@ integration, no server-side collab component.
 local dev extension, connect to MCP context servers, and the sandbox capability allowlist
 (`ProcessExec`/`DownloadFile`/`NpmInstallPackage`) that fences what an extension can do at runtime.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust (host), WASM (extension guest)
 
 **Related User Stories**:
@@ -252,7 +252,7 @@ window-level tab/pane navigation (folded in here rather than as its own thin fea
 "navigate within an open workspace" intent as project-panel/sidebar navigation, consistent with
 KISS).
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -315,7 +315,7 @@ KISS).
 **Description**: The embedded terminal (Alacritty-backed) — interactive shell sessions, running
 configured `tasks.json` tasks, toggling panel visibility, and searching terminal scrollback.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -343,7 +343,7 @@ configured `tasks.json` tasks, toggling panel visibility, and searching terminal
 formatter (Prettier) integration, and cross-language bridging (e.g. Vue↔TS server forwarding) —
 the LSP client layer that Diagnostics (F009) and Editor Core (F008) consume.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -378,7 +378,7 @@ the LSP client layer that Diagnostics (F009) and Editor Core (F008) consume.
 commands, macro repeat/record, and text-object operators. Self-contained emulation layer (`crates/vim`)
 gated behind `Editor.use_modal_editing`.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -413,7 +413,7 @@ selection/appearance, and the backup-then-migrate flow that protects a user's co
 schema changes on update. Also owns the client-side staff feature-flag gate (an app-wide
 configuration concern with no better home in this partition).
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:
@@ -445,7 +445,7 @@ configuration concern with no better home in this partition).
 **Description**: Fuzzy file finding, whole-project text search, and in-buffer search — the three
 find surfaces of the editor.
 
-**Workspace**: zode
+**Workspace**: Zode
 **Languages**: Rust
 
 **Related User Stories**:

@@ -1,6 +1,6 @@
 ---
 title: TOML
-description: "Configure TOML language support in Zed, including language servers, formatting, and debugging."
+description: "Configure TOML language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # TOML

@@ -1,6 +1,6 @@
 ---
 title: Ruby
-description: "Configure Ruby language support in Zed, including language servers, formatting, and debugging."
+description: "Configure Ruby language support in Zode, including language servers, formatting, and debugging."
 ---
 
 # Ruby
@@ -21,16 +21,16 @@ The Ruby extension also provides support for ERB files.
 
 ## Language Servers
 
-There are multiple language servers available for Ruby. Zed supports the two following:
+There are multiple language servers available for Ruby. Zode supports the two following:
 
 - [solargraph](https://github.com/castwide/solargraph)
 - [ruby-lsp](https://github.com/Shopify/ruby-lsp)
 
 They both have an overlapping feature set of autocomplete, diagnostics, code actions, etc. and it's up to you to decide which one you want to use. Note that you can't use both at the same time.
 
-In addition to these two language servers, Zed also supports:
+In addition to these two language servers, Zode also supports:
 
-- [rubocop](https://github.com/rubocop/rubocop) which is a static code analyzer and linter for Ruby. Under the hood, it's also used by Zed as a language server, but its functionality is complimentary to that of solargraph and ruby-lsp.
+- [rubocop](https://github.com/rubocop/rubocop) which is a static code analyzer and linter for Ruby. Under the hood, it's also used by Zode as a language server, but its functionality is complimentary to that of solargraph and ruby-lsp.
 - [sorbet](https://sorbet.org/) which is a static type checker for Ruby with a custom gradual type system.
 - [steep](https://github.com/soutaro/steep) which is a static type checker for Ruby that uses Ruby Signature (RBS).
 - [Herb](https://herb-tools.dev) which is a language server for ERB files.
@@ -125,7 +125,7 @@ Or, conversely, you can disable `ruby-lsp` and enable `solargraph` and `rubocop`
 
 ## Setting up `solargraph`
 
-Solargraph has formatting and diagnostics disabled by default. We can tell Zed to enable them by adding the following to your `settings.json`:
+Solargraph has formatting and diagnostics disabled by default. We can tell Zode to enable them by adding the following to your `settings.json`:
 
 ```json [settings]
 {
@@ -186,7 +186,7 @@ LSP `settings` and `initialization_options` can also be project-specific. For ex
 
 ## Setting up `rubocop` LSP
 
-Rubocop has unsafe autocorrection disabled by default. We can tell Zed to enable it by adding the following to your `settings.json`:
+Rubocop has unsafe autocorrection disabled by default. We can tell Zode to enable it by adding the following to your `settings.json`:
 
 ```json [settings]
 {
@@ -364,7 +364,7 @@ Similar task syntax can be used for other test frameworks such as `quickdraw` or
 
 ## Debugging
 
-The Ruby extension provides a debug adapter for debugging Ruby code. Zed's name for the adapter (in the UI and `debug.json`) is `rdbg`, and under the hood, it uses the [`debug`](https://github.com/ruby/debug) gem. The extension uses the [same activation logic](#language-server-activation) as the language servers.
+The Ruby extension provides a debug adapter for debugging Ruby code. Zode's name for the adapter (in the UI and `debug.json`) is `rdbg`, and under the hood, it uses the [`debug`](https://github.com/ruby/debug) gem. The extension uses the [same activation logic](#language-server-activation) as the language servers.
 
 ### Examples
 

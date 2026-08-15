@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <rect x="4" y="4" width="40" height="40" rx="10" fill="#064E3B" stroke="#10B981" stroke-width="1.5" />
+  <!-- Globe / Network -->
+  <circle cx="24" cy="24" r="14" fill="none" stroke="#34D399" stroke-width="1.5" />
+  <ellipse cx="24" cy="24" rx="7" ry="14" fill="none" stroke="#34D399" stroke-width="1.5" />
+  <line x1="10" y1="24" x2="38" y2="24" stroke="#34D399" stroke-width="1.5" />
+  <line x1="14" y1="17" x2="34" y2="17" stroke="#34D399" stroke-width="1.2" />
+  <line x1="14" y1="31" x2="34" y2="31" stroke="#34D399" stroke-width="1.2" />
+</svg>

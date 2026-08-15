@@ -1,6 +1,6 @@
 # Screens — F016_Search
 
-**Non-web adaptation note (`generic-source` profile):** zode has no route-list/screen-list —
+**Non-web adaptation note (`generic-source` profile):** Zode has no route-list/screen-list —
 this is a Rust/GPUI desktop app, not a web app. There is no `SCR###` catalog to bridge to; the
 surfaces below are a modal picker, a toolbar-item results view, and an in-editor bar, all opened
 by dispatching actions/keybindings rather than navigating to a URL. The tab switcher

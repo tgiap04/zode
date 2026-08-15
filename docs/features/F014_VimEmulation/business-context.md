@@ -2,7 +2,7 @@
 
 ## Why It Matters
 
-Many professional developers have years of muscle memory built around Vim's keyboard-driven editing style and will not adopt an editor that forces them to give it up. Vim emulation lets zode offer a familiar, fully keyboard-driven editing experience — navigation, text selection, and bulk text changes without touching the mouse — layered on top of the same editor everyone else uses, so Vim users and non-Vim users share one codebase and one set of files without friction.
+Many professional developers have years of muscle memory built around Vim's keyboard-driven editing style and will not adopt an editor that forces them to give it up. Vim emulation lets Zode offer a familiar, fully keyboard-driven editing experience — navigation, text selection, and bulk text changes without touching the mouse — layered on top of the same editor everyone else uses, so Vim users and non-Vim users share one codebase and one set of files without friction.
 
 ## Who Uses It
 
