@@ -230,7 +230,7 @@ fn start_etw_recording(cx: &mut App, heap_pid: Option<u32>) {
 
 const RECORDING_TIMEOUT: Duration = Duration::from_secs(60);
 
-const INSTANCE_NAME: &str = "Zed";
+const INSTANCE_NAME: &str = "Zode";
 
 const BUILTIN_PROFILES: &[&str] = &[
     "CPU.Verbose.Memory",
@@ -265,7 +265,7 @@ fn heap_tracing_profile(heap_pid: Option<u32>) -> String {
 
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
-<WindowsPerformanceRecorder Version="1.0" Author="Zed Industries">
+<WindowsPerformanceRecorder Version="1.0" Author="Zode">
   <Profiles>
     {heap_provider}
 

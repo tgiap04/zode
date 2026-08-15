@@ -584,8 +584,18 @@ pub struct GitExcludeOverride {
 }
 
 impl GitExcludeOverride {
-    const START_BLOCK_MARKER: &str = "\n\n#  ====== Auto-added by Zed: =======\n";
-    const END_BLOCK_MARKER: &str = "\n#  ====== End of auto-added by Zed =======\n";
+    const START_BLOCK_MARKER: &str = "\n\n#  ====== Auto-added by Zode: =======\n";
+    const END_BLOCK_MARKER: &str = "\n#  ====== End of auto-added by Zode =======\n";
+
+    /// The markers this fork wrote before it stopped calling itself Zed.
+    ///
+    /// Still swept on cleanup: these went into real `.git/info/exclude` files,
+    /// and a block whose marker no longer matches is one nothing will ever
+    /// remove again — left behind in the user's repository for good.
+    const LEGACY_MARKERS: (&str, &str) = (
+        "\n\n#  ====== Auto-added by Zed: =======\n",
+        "\n#  ====== End of auto-added by Zed =======\n",
+    );
 
     pub async fn new(git_exclude_path: PathBuf) -> Result<Self> {
         let original_excludes =
@@ -636,28 +646,28 @@ impl GitExcludeOverride {
     }
 
     fn remove_auto_generated_block(content: &str) -> String {
-        let start_marker = Self::START_BLOCK_MARKER;
-        let end_marker = Self::END_BLOCK_MARKER;
         let mut content = content.to_string();
 
-        let start_index = content.find(start_marker);
-        let end_index = content.rfind(end_marker);
+        for (start_marker, end_marker) in [
+            (Self::START_BLOCK_MARKER, Self::END_BLOCK_MARKER),
+            Self::LEGACY_MARKERS,
+        ] {
+            let start_index = content.find(start_marker);
+            let end_index = content.rfind(end_marker);
 
-        if let (Some(start), Some(end)) = (start_index, end_index) {
-            if end > start {
+            if let (Some(start), Some(end)) = (start_index, end_index)
+                && end > start
+            {
                 content.replace_range(start..end + end_marker.len(), "");
             }
-        }
 
-        // Older versions of Zed didn't have end-of-block markers,
-        // so it's impossible to determine auto-generated lines.
-        // Conservatively remove the standard list of excludes
-        let standard_excludes = format!(
-            "{}{}",
-            Self::START_BLOCK_MARKER,
-            include_str!("./checkpoint.gitignore")
-        );
-        content = content.replace(&standard_excludes, "");
+            // Older versions didn't have end-of-block markers, so it is
+            // impossible to determine auto-generated lines. Conservatively
+            // remove the standard list of excludes.
+            let standard_excludes =
+                format!("{}{}", start_marker, include_str!("./checkpoint.gitignore"));
+            content = content.replace(&standard_excludes, "");
+        }
 
         content
     }
@@ -3721,12 +3731,23 @@ fn parse_upstream_track(upstream_track: &str) -> Result<UpstreamTracking> {
     }))
 }
 
+/// Who a checkpoint commit is attributed to.
+///
+/// The address is deliberately unroutable rather than upstream's: a checkpoint
+/// this fork writes is not Zed's work, and stamping someone else's contact
+/// address onto a user's git history is worse than having none.
 fn checkpoint_author_envs() -> HashMap<String, String> {
     HashMap::from_iter([
-        ("GIT_AUTHOR_NAME".to_string(), "Zed".to_string()),
-        ("GIT_AUTHOR_EMAIL".to_string(), "hi@zed.dev".to_string()),
-        ("GIT_COMMITTER_NAME".to_string(), "Zed".to_string()),
-        ("GIT_COMMITTER_EMAIL".to_string(), "hi@zed.dev".to_string()),
+        ("GIT_AUTHOR_NAME".to_string(), "Zode".to_string()),
+        (
+            "GIT_AUTHOR_EMAIL".to_string(),
+            "zode@localhost".to_string(),
+        ),
+        ("GIT_COMMITTER_NAME".to_string(), "Zode".to_string()),
+        (
+            "GIT_COMMITTER_EMAIL".to_string(),
+            "zode@localhost".to_string(),
+        ),
     ])
 }
 
