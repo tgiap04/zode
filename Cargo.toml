@@ -27,6 +27,11 @@ members = [
     "crates/csv_preview",
     "crates/dap",
     "crates/dap_adapters",
+    "crates/database",
+    "crates/database_drivers/mysql",
+    "crates/database_drivers/postgres",
+    "crates/database_drivers/sqlite",
+    "crates/database_ui",
     "crates/db",
     "crates/debug_adapter_extension",
     "crates/debugger_tools",
@@ -247,6 +252,10 @@ crossbeam = "0.8.4"
 csv_preview = { path = "crates/csv_preview"}
 dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
+# `default-features = false` here so a driver binary can take the protocol
+# alone; anything talking *to* a driver asks for `features = ["client"]`.
+database = { path = "crates/database", default-features = false }
+database_ui = { path = "crates/database_ui" }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
@@ -521,6 +530,21 @@ jupyter-protocol = "1.4.0"
 jupyter-websocket-client = "1.1.0"
 libc = "0.2"
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
+# Only the `zode-db-sqlite` driver binary uses this; it is not in
+# `default-members`, so a normal Zode build never compiles it. Pinned to the
+# rusqlite line that carries the same `libsqlite3-sys` the workspace already has.
+# Only the `zode-db-postgres` driver binary uses these two; like the SQLite
+# driver it is outside `default-members`, so a normal Zode build never compiles
+# them. The sync client is deliberate: the driver's serve loop is threads, and
+# `Client::cancel_token()` is what makes `cancel` reach a running query.
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls"] }
+postgres = "0.19"
+tokio-postgres-rustls = "0.14"
+
+# `column_decltype` gates `Statement::columns()`, which is how a driver learns a
+# column's declared type -- the difference between showing a TIMESTAMP as a
+# timestamp and showing it as anonymous text.
+rusqlite = { version = "0.32", features = ["bundled", "column_decltype"] }
 linkify = "0.10.0"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 lsp-types = { git = "https://github.com/zed-industries/lsp-types", rev = "f4dfa89a21ca35cd929b70354b1583fabae325f8" }

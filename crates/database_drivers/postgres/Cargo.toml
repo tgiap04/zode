@@ -1,0 +1,26 @@
+[package]
+name = "zode-db-postgres"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zode-db-postgres"
+path = "src/main.rs"
+
+[dependencies]
+# No `client` feature: a driver needs the protocol and the serve loop, and
+# nothing that would drag gpui into a sidecar binary.
+database.workspace = true
+postgres.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+serde_json.workspace = true
+tokio-postgres-rustls.workspace = true
+
+[dev-dependencies]
+database = { workspace = true, features = ["driver-test-suite"] }
