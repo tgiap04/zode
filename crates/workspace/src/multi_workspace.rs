@@ -2677,7 +2677,18 @@ impl Render for MultiWorkspace {
             .read(cx)
             .titlebar_item()
             .map(|_| ui::utils::platform_title_bar_height(window));
-        let sidebar: Option<AnyElement> = if multi_workspace_enabled {
+        // A column that has taken the whole window takes the rail with it. The
+        // rail is drawn here, as the workspace's sibling, so this is the only
+        // place that can -- the workspace's own zoom overlay cannot reach it.
+        //
+        // Read, never written: the panel decides, and nothing here calls back
+        // into it while it is being drawn.
+        let column_fills_the_window = self
+            .workspace()
+            .read(cx)
+            .a_column_fills_the_window(window, cx);
+
+        let sidebar: Option<AnyElement> = if multi_workspace_enabled && !column_fills_the_window {
             self.sidebar.as_ref().map(|sidebar_handle| {
                 let weak = cx.weak_entity();
 
