@@ -130,6 +130,7 @@ impl Sidebar {
                     ),
             )
             .children(panels)
+            .child(self.render_rail_database(window, cx))
             .child(self.render_rail_agents(window, cx))
             .child(self.render_rail_footer(cx))
             .into_any_element()

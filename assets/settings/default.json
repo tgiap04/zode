@@ -1467,6 +1467,24 @@
       "max_output_tokens": 64,
     },
   },
+  // Settings for the database column
+  "database": {
+    // Databases available to every project on this machine. Each entry needs a
+    // unique "name", a "driver" ("sqlite", "postgres", "mysql", or one an
+    // extension declares), and a "url".
+    //
+    // Passwords are NEVER written here -- they go to the OS keychain. A password
+    // in this file would sit in plain text somewhere people share and back up.
+    //
+    //   "connections": [
+    //     { "name": "local app", "driver": "sqlite", "url": "./db/app.sqlite" },
+    //     { "name": "staging", "driver": "postgres",
+    //       "url": "postgres://reader@staging.internal:5432/app" }
+    //   ]
+    "connections": [],
+    // How many rows one page of results holds
+    "page_size": 200,
+  },
   // Settings specific to journaling
   "journal": {
     // The path of the directory where journal entries are stored

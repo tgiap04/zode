@@ -908,6 +908,18 @@
     },
   },
   {
+    "context": "DatabasePanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "database::RunQuery",
+      "cmd-escape": "database::CancelQuery",
+      "alt-cmd-right": "database::NextPage",
+      "alt-cmd-left": "database::PreviousPage",
+      "cmd-shift-c": "database::CopyResultsAsCsv",
+      "cmd-shift-f": "database::ToggleFullScreen",
+    },
+  },
+  {
     "context": "GitPanel",
     "use_key_equivalents": true,
     "bindings": {

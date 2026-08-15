@@ -638,6 +638,7 @@ fn main() {
         git_ui::init(cx);
         git_graph::init(cx);
         agent_ui::init(cx);
+        database_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         csv_preview::init(cx);

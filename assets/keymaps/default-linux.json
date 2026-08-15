@@ -833,6 +833,18 @@
     },
   },
   {
+    "context": "DatabasePanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-enter": "database::RunQuery",
+      "ctrl-escape": "database::CancelQuery",
+      "alt-ctrl-right": "database::NextPage",
+      "alt-ctrl-left": "database::PreviousPage",
+      "ctrl-shift-c": "database::CopyResultsAsCsv",
+      "ctrl-shift-f": "database::ToggleFullScreen",
+    },
+  },
+  {
     "context": "GitPanel",
     "bindings": {
       "ctrl-g ctrl-g": "git::Fetch",
