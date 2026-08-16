@@ -693,3 +693,56 @@ async fn the_toggle_action_hides_the_column_on_a_second_use(cx: &mut TestAppCont
     cx.run_until_parked();
     assert!(column_open(cx), "and a third use must bring it back");
 }
+
+/// The tool docks are pulled back in when the window narrows; the own columns
+/// were not, so a column sized for a wide window kept that width when the
+/// sidebar opened beside it and pushed the editor out of view.
+#[gpui::test]
+async fn a_column_is_pulled_back_in_when_the_space_beside_it_shrinks(cx: &mut TestAppContext) {
+    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(900.)));
+    cx.run_until_parked();
+
+    let column_width = |cx: &mut gpui::VisualTestContext| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .dock_for_column(DockColumn::Database)
+                .expect("the database column exists")
+                .read(cx)
+                .active_panel_size()
+                .and_then(|state| state.size)
+                .unwrap_or_default()
+        })
+    };
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .update(cx, |dock, cx| {
+                dock.resize_active_panel(Some(gpui::px(1200.)), None, window, cx);
+            });
+    });
+    cx.run_until_parked();
+    assert!(column_width(cx) > gpui::px(600.), "the column starts wide");
+
+    // The window narrows -- which is also what happens when the sidebar's panel
+    // opens beside the workspace and takes part of the row.
+    cx.simulate_resize(gpui::size(gpui::px(500.), gpui::px(900.)));
+    cx.run_until_parked();
+
+    assert!(
+        column_width(cx) < gpui::px(500.),
+        "a column wider than the space it stands in leaves nothing for the editor"
+    );
+}
