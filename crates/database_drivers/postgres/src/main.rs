@@ -277,6 +277,11 @@ fn connection_form() -> ConnectionForm {
 }
 
 fn main() -> std::io::Result<()> {
+    // Before anything can ask rustls for a handshake, and not lazily: the
+    // failure it prevents is a panic on a background thread, which surfaces as
+    // a connection that simply never answers.
+    tls::install_crypto_provider();
+
     let driver = Arc::new(PostgresDriver::default());
     serve(driver, std::io::stdin().lock(), std::io::stdout())
 }

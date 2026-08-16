@@ -308,7 +308,46 @@ fn connection_form() -> ConnectionForm {
     }
 }
 
+/// Picks the cryptography rustls will use, before anything asks it to.
+///
+/// The `mysql` crate's own documentation says to do this, and the reason is the
+/// same one the PostgreSQL driver hit: rustls infers its provider from crate
+/// features and panics when they name two. Cargo unifies features across
+/// whatever packages share one `cargo build`, and the bundle scripts build this
+/// driver alongside the editor -- which brings `ring` in through `hyper-rustls`
+/// while this driver's rustls asks for `aws-lc-rs`. The result was a driver
+/// that worked when built alone and died at the first TLS handshake when built
+/// the way it ships.
+fn install_crypto_provider() {
+    // The error only means another thread installed one first, and every
+    // caller here installs the same one.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok();
+}
+
 fn main() -> std::io::Result<()> {
+    // Before anything can ask rustls for a handshake, and not lazily: the
+    // failure it prevents is a panic on a background thread, which surfaces as
+    // a connection that simply never answers.
+    install_crypto_provider();
+
     let driver = Arc::new(MysqlDriver::default());
     serve(driver, std::io::stdin().lock(), std::io::stdout())
+}
+
+#[cfg(test)]
+mod crypto_tests {
+    /// Asked the way the connection path asks it. Before the provider was
+    /// installed outright this panicked, and only in builds where another
+    /// package had pulled in a second provider -- so a driver could pass every
+    /// test and still die at the first handshake once it was packaged.
+    #[test]
+    fn rustls_knows_which_cryptography_to_use() {
+        super::install_crypto_provider();
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "a TLS connection would panic on a background thread and simply never answer"
+        );
+    }
 }
