@@ -91,6 +91,10 @@ pub struct DatabasePanel {
     pub(crate) context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, gpui::Subscription)>,
     pub(crate) tree_height: Pixels,
     pub(crate) sql_height: Pixels,
+    /// How wide the table list stands in full screen. Only read there: in the
+    /// column the list is as wide as the column, and there is no second region
+    /// beside it to take the space from.
+    pub(crate) tree_width: Pixels,
     /// Which handle is being dragged and where the pointer was last seen, so a
     /// drag can move a region by the distance travelled rather than by where in
     /// the window the pointer happens to be.
@@ -133,6 +137,7 @@ impl DatabasePanel {
             context_menu: None,
             tree_height: panel_layout::DEFAULT_TREE_HEIGHT,
             sql_height: panel_layout::DEFAULT_SQL_HEIGHT,
+            tree_width: panel_layout::DEFAULT_TREE_WIDTH,
             split_drag: None,
             full_screen: false,
             _settings_observer: settings_observer,
@@ -172,31 +177,34 @@ impl DatabasePanel {
         mut cx: gpui::AsyncWindowContext,
     ) -> anyhow::Result<Entity<Self>> {
         let pinned = Self::load_pins(&workspace, &mut cx);
-        let heights = Self::load_heights(&workspace, &mut cx);
+        let layout = Self::load_layout(&workspace, &mut cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {
             cx.new(|cx| {
                 let mut panel = DatabasePanel::new(workspace, window, cx);
                 panel.pinned = pinned;
-                (panel.tree_height, panel.sql_height) = heights;
+                (panel.tree_height, panel.sql_height, panel.tree_width) = layout;
                 panel.reload_connections(cx);
                 panel
             })
         })
     }
 
-    /// How tall this project last left the column's regions. Read once at load,
-    /// for the same reason as the pins: nothing else writes them.
-    fn load_heights(
+    /// How this project last left the column's regions. Read once at load, for
+    /// the same reason as the pins: nothing else writes them.
+    fn load_layout(
         workspace: &WeakEntity<Workspace>,
         cx: &mut gpui::AsyncWindowContext,
-    ) -> (Pixels, Pixels) {
-        let saved = workspace
+    ) -> (Pixels, Pixels, Pixels) {
+        let (heights, width) = workspace
             .update(cx, |workspace, cx| {
-                workspace.load_workspace_state::<Vec<f32>>(LAYOUT_KEY, "heights", cx)
+                (
+                    workspace.load_workspace_state::<Vec<f32>>(LAYOUT_KEY, "heights", cx),
+                    workspace.load_workspace_state::<f32>(LAYOUT_KEY, "tree-width", cx),
+                )
             })
-            .ok()
-            .flatten();
-        Self::saved_heights(saved)
+            .unwrap_or((None, None));
+        let (tree_height, sql_height) = Self::saved_heights(heights);
+        (tree_height, sql_height, Self::saved_tree_width(width))
     }
 
     /// Which connections this project pinned last time.

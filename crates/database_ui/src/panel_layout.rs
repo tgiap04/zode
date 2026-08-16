@@ -18,6 +18,10 @@ pub(crate) const DEFAULT_TREE_HEIGHT: Pixels = px(240.0);
 /// Sized to about six lines: a statement, plus room to think.
 pub(crate) const DEFAULT_SQL_HEIGHT: Pixels = px(132.0);
 
+/// How wide the table list stands in full screen, before anyone drags it.
+/// Enough for a schema-qualified table name without wrapping.
+pub(crate) const DEFAULT_TREE_WIDTH: Pixels = px(280.0);
+
 /// Below this a region is a sliver that cannot be read or dragged back, which
 /// is a state the user cannot undo with the same gesture that caused it.
 const MIN_REGION_HEIGHT: Pixels = px(56.0);
@@ -26,6 +30,14 @@ const MIN_REGION_HEIGHT: Pixels = px(56.0);
 /// own height is the real limit, and a region past it is shrunk by the flexbox
 /// rather than by this.
 const MAX_REGION_HEIGHT: Pixels = px(1200.0);
+
+/// Narrower than this and a table name is unreadable, which is the only thing
+/// the list is for.
+const MIN_REGION_WIDTH: Pixels = px(160.0);
+
+/// A backstop of the same kind as `MAX_REGION_HEIGHT`: past this the list is
+/// eating the data it exists to open.
+const MAX_REGION_WIDTH: Pixels = px(900.0);
 
 pub(crate) const LAYOUT_KEY: &str = "database-column-layout";
 
@@ -36,6 +48,17 @@ pub(crate) enum Split {
     TreeAndSql,
     /// Between the scratch buffer and the results.
     SqlAndResults,
+    /// Between the table list and the data and statement beside it. Full screen
+    /// only, and the one boundary here that is a vertical line.
+    TreeAndBody,
+}
+
+impl Split {
+    /// Whether the boundary is a vertical line, and therefore whether a drag
+    /// along it is measured on the pointer's x rather than its y.
+    pub(crate) fn is_vertical(self) -> bool {
+        matches!(self, Split::TreeAndBody)
+    }
 }
 
 /// The payload GPUI carries for the length of a drag. Empty on purpose -- the
@@ -57,25 +80,26 @@ impl DatabasePanel {
     /// place in the window: a region's own bounds are not known here, and
     /// tracking them would mean measuring on every frame to answer a question
     /// only asked while a handle is held.
-    pub(crate) fn drag_split(&mut self, split: Split, pointer_y: Pixels, cx: &mut Context<Self>) {
+    pub(crate) fn drag_split(&mut self, split: Split, pointer: Pixels, cx: &mut Context<Self>) {
         let previous = match self.split_drag {
-            Some((dragged, last_y)) if dragged == split => Some(last_y),
+            Some((dragged, last)) if dragged == split => Some(last),
             _ => None,
         };
-        self.split_drag = Some((split, pointer_y));
+        self.split_drag = Some((split, pointer));
 
         // The first move of a drag only sets the reference the rest measure
         // against. Moving on it would jump the region by the distance from
         // wherever the pointer last was.
-        let Some(last_y) = previous else {
+        let Some(last) = previous else {
             return;
         };
 
-        let height = match split {
-            Split::TreeAndSql => &mut self.tree_height,
-            Split::SqlAndResults => &mut self.sql_height,
+        let (size, minimum, maximum) = match split {
+            Split::TreeAndSql => (&mut self.tree_height, MIN_REGION_HEIGHT, MAX_REGION_HEIGHT),
+            Split::SqlAndResults => (&mut self.sql_height, MIN_REGION_HEIGHT, MAX_REGION_HEIGHT),
+            Split::TreeAndBody => (&mut self.tree_width, MIN_REGION_WIDTH, MAX_REGION_WIDTH),
         };
-        *height = (*height + (pointer_y - last_y)).clamp(MIN_REGION_HEIGHT, MAX_REGION_HEIGHT);
+        *size = (*size + (pointer - last)).clamp(minimum, maximum);
 
         self.persist_layout(cx);
         cx.notify();
@@ -87,16 +111,22 @@ impl DatabasePanel {
         match split {
             Split::TreeAndSql => self.tree_height = DEFAULT_TREE_HEIGHT,
             Split::SqlAndResults => self.sql_height = DEFAULT_SQL_HEIGHT,
+            Split::TreeAndBody => self.tree_width = DEFAULT_TREE_WIDTH,
         }
         self.persist_layout(cx);
         cx.notify();
     }
 
+    /// The width goes under its own key rather than as a third entry in the
+    /// heights list: that list is read positionally, and a width sitting in it
+    /// would be read back as a height by any build that predates this.
     fn persist_layout(&mut self, cx: &mut Context<Self>) {
         let heights = vec![f32::from(self.tree_height), f32::from(self.sql_height)];
+        let tree_width = f32::from(self.tree_width);
         self.workspace
             .update(cx, |workspace, cx| {
                 workspace.persist_workspace_state(LAYOUT_KEY, "heights", &heights, cx);
+                workspace.persist_workspace_state(LAYOUT_KEY, "tree-width", &tree_width, cx);
             })
             .ok();
     }
@@ -110,16 +140,22 @@ impl DatabasePanel {
         let id = match split {
             Split::TreeAndSql => "database-split-tree",
             Split::SqlAndResults => "database-split-sql",
+            Split::TreeAndBody => "database-split-body",
         };
+        let vertical = split.is_vertical();
 
         let panel = cx.weak_entity();
 
         div()
             .id(id)
-            .h(px(5.0))
-            .w_full()
             .flex_none()
-            .cursor_row_resize()
+            .map(|handle| {
+                if vertical {
+                    handle.w(px(5.0)).h_full().cursor_col_resize()
+                } else {
+                    handle.h(px(5.0)).w_full().cursor_row_resize()
+                }
+            })
             .hover(|style| style.bg(cx.theme().colors().border_focused))
             .on_drag(DraggedSplit(split), move |dragged, _offset, _window, cx| {
                 // Cleared here, at the *start* of a drag, rather than when the
@@ -155,7 +191,12 @@ impl DatabasePanel {
         cx: &mut Context<Self>,
     ) {
         let DraggedSplit(split) = *event.drag(cx);
-        self.drag_split(split, event.event.position.y, cx);
+        let pointer = if split.is_vertical() {
+            event.event.position.x
+        } else {
+            event.event.position.y
+        };
+        self.drag_split(split, pointer, cx);
     }
 
     /// The heights this project was last left with.
@@ -171,6 +212,15 @@ impl DatabasePanel {
                 .clamp(MIN_REGION_HEIGHT, MAX_REGION_HEIGHT)
         };
         (read(0, DEFAULT_TREE_HEIGHT), read(1, DEFAULT_SQL_HEIGHT))
+    }
+
+    /// How wide this project last left the table list, held to the same limits
+    /// a drag is: nothing validates what is in the key-value store.
+    pub(crate) fn saved_tree_width(width: Option<f32>) -> Pixels {
+        width
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .map_or(DEFAULT_TREE_WIDTH, px)
+            .clamp(MIN_REGION_WIDTH, MAX_REGION_WIDTH)
     }
 }
 
@@ -220,6 +270,23 @@ mod tests {
                 "{bad} is not a height"
             );
         }
+    }
+
+    #[test]
+    fn a_nonsensical_or_absent_saved_tree_width_is_ignored() {
+        assert_eq!(DatabasePanel::saved_tree_width(None), DEFAULT_TREE_WIDTH);
+        for bad in [0.0, -50.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                DatabasePanel::saved_tree_width(Some(bad)),
+                DEFAULT_TREE_WIDTH,
+                "{bad} is not a width"
+            );
+        }
+        assert_eq!(
+            DatabasePanel::saved_tree_width(Some(9.0)),
+            MIN_REGION_WIDTH,
+            "a width too narrow to read a table name is brought back"
+        );
     }
 
     #[test]

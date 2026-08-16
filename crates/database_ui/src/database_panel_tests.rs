@@ -445,6 +445,102 @@ async fn a_region_cannot_be_dragged_away_to_nothing(cx: &mut TestAppContext) {
     });
 }
 
+/// The one boundary here that is a vertical line. It is measured on the
+/// pointer's x, and a drag that read y instead would move the table list by
+/// however far the pointer happened to fall down the screen.
+#[gpui::test]
+async fn the_table_list_edge_is_dragged_sideways(cx: &mut TestAppContext) {
+    use crate::panel_layout::Split;
+    use gpui::px;
+
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+
+    panel.update(cx, |panel, cx| {
+        let start = panel.tree_width;
+
+        panel.drag_split(Split::TreeAndBody, px(400.), cx);
+        assert_eq!(
+            panel.tree_width, start,
+            "the first move of a drag only sets the reference"
+        );
+
+        panel.drag_split(Split::TreeAndBody, px(460.), cx);
+        assert_eq!(panel.tree_width, start + px(60.));
+
+        assert_eq!(
+            panel.tree_height,
+            crate::panel_layout::DEFAULT_TREE_HEIGHT,
+            "widening the list must not also make it taller"
+        );
+
+        panel.drag_split(Split::TreeAndBody, px(-5_000.), cx);
+        assert!(
+            panel.tree_width > px(0.),
+            "a list dragged past the left edge must keep a width someone can grab"
+        );
+    });
+}
+
+/// Measured rather than reasoned about: this ordering lives in an element tree
+/// and nothing else in the crate would notice it collapsing back into the
+/// column's own stack.
+///
+/// Both regions on the right are asserted to be drawn with no connection open,
+/// which is the difference from the column: there they are hidden until there is
+/// something to run against, here they are the layout that was asked for.
+#[gpui::test]
+async fn full_screen_puts_the_table_list_beside_the_data_with_the_query_below_it(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+    });
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.toggle_full_screen(window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let tree = cx
+        .debug_bounds("database-tree-column")
+        .expect("the table list is drawn in full screen");
+    let data = cx
+        .debug_bounds("database-data-view")
+        .expect("the data view is drawn in full screen, with or without a connection");
+    let query = cx
+        .debug_bounds("database-query-input")
+        .expect("the query input is drawn in full screen, with or without a connection");
+
+    assert!(
+        tree.right() <= data.origin.x && tree.right() <= query.origin.x,
+        "the table list must stand to the left of both, got list {tree:?} data {data:?} query {query:?}"
+    );
+    assert!(
+        data.bottom() <= query.origin.y,
+        "the data must sit above the statement, got data {data:?} query {query:?}"
+    );
+    assert!(
+        data.size.height > query.size.height,
+        "the rows are what the window was taken for, got data {data:?} query {query:?}"
+    );
+    assert!(
+        cx.debug_bounds("database-no-table-placeholder").is_some(),
+        "with no table chosen the data view must say so rather than stand empty"
+    );
+}
+
 /// A modal in a real window, for the add-connection tests.
 ///
 /// Built through the workspace like the real one is: it takes the project's
@@ -746,6 +842,7 @@ async fn a_column_is_pulled_back_in_when_the_space_beside_it_shrinks(cx: &mut Te
         "a column wider than the space it stands in leaves nothing for the editor"
     );
 }
+
 /// The row's power button does two jobs and must never offer the wrong one:
 /// closing what is already closed, or opening what is already open.
 #[gpui::test]

@@ -12,7 +12,7 @@ impl DatabasePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match &self.query {
-            QueryState::Idle => note("Run a statement to see results here", Color::Muted, cx),
+            QueryState::Idle => self.render_nothing_chosen(cx),
             QueryState::Running { cancelling, .. } => {
                 v_flex()
                     .size_full()
@@ -97,6 +97,37 @@ impl DatabasePanel {
                     .into_any_element()
             }
         }
+    }
+
+    /// What stands where the rows go before anything has been asked for.
+    ///
+    /// A line of grey text is enough in the column, where this region is a few
+    /// hundred pixels tall. Full screen it is the largest thing on the screen,
+    /// and an all-but-empty half-window reads as a failure to load rather than
+    /// as a waiting room -- so there it says what to do, and where.
+    fn render_nothing_chosen(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.full_screen {
+            return note("Run a statement to see results here", Color::Muted, cx);
+        }
+
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .debug_selector(|| "database-no-table-placeholder".into())
+            .child(
+                Icon::new(IconName::Table)
+                    .size(IconSize::XLarge)
+                    .color(Color::Muted),
+            )
+            .child(Label::new("No table selected"))
+            .child(
+                Label::new("Pick a table on the left to read its rows, or write a statement below and run it.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element()
     }
 
     fn render_pager(&self, cx: &mut Context<Self>) -> impl IntoElement {
