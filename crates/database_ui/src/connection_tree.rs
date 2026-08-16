@@ -257,18 +257,41 @@ impl DatabasePanel {
                 // nothing next to "password authentication failed for user".
                 element.tooltip(move |_window, cx| Tooltip::simple(error.clone(), cx))
             })
-            // Only while open, and only then: a button offering to close what
-            // is already closed is a button that does nothing.
-            .when(matches!(node.state, NodeState::Connected(_)), |element| {
+            // One button, two jobs, and never both at once: what a connection
+            // needs is either to be closed or to be opened again, and the row
+            // already says which of those it is.
+            //
+            // Nothing while connecting -- a stop button that cannot stop
+            // anything would be the third thing this row does not need.
+            .when(!matches!(node.state, NodeState::Connecting), |element| {
+                let connected = matches!(node.state, NodeState::Connected(_));
                 element.child(
-                    IconButton::new(("database-disconnect", index), IconName::Power)
-                        .icon_size(IconSize::XSmall)
-                        .tooltip(|_window, cx| {
-                            Tooltip::simple("Disconnect, stopping the driver", cx)
-                        })
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                    IconButton::new(
+                        ("database-connection-power", index),
+                        if connected {
+                            IconName::Power
+                        } else {
+                            IconName::RotateCw
+                        },
+                    )
+                    .icon_size(IconSize::XSmall)
+                    .tooltip(move |_window, cx| {
+                        Tooltip::simple(
+                            if connected {
+                                "Disconnect, stopping the driver"
+                            } else {
+                                "Connect again"
+                            },
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _event, window, cx| {
+                        if connected {
                             this.disconnect(index, cx);
-                        })),
+                        } else {
+                            this.reconnect(index, window, cx);
+                        }
+                    })),
                 )
             })
             // A pinned connection is marked rather than reordered: a tree that

@@ -353,6 +353,17 @@ impl DatabasePanel {
         }
     }
 
+    /// Whether a connection has been asked for and has not answered yet.
+    ///
+    /// The row shows neither button in this state: a stop that cannot stop and
+    /// a start that has already started are both worse than nothing.
+    #[cfg(test)]
+    pub(crate) fn is_reaching_for_a_driver(&self, index: usize) -> bool {
+        self.connections
+            .get(index)
+            .is_some_and(|node| matches!(node.state, NodeState::Connecting))
+    }
+
     /// Whether a connection is open, which is what decides the menu entry and
     /// the row's own button.
     pub(crate) fn is_connected(&self, index: usize) -> bool {

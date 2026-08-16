@@ -44,12 +44,23 @@ impl DatabasePanel {
                         .ok();
                 }
             })
+            .separator()
             .when(connected, |menu| {
-                menu.separator().entry("Disconnect", None, {
+                menu.entry("Disconnect", None, {
                     let panel = panel.clone();
                     move |_window, cx| {
                         panel
                             .update(cx, |panel, cx| panel.disconnect(index, cx))
+                            .ok();
+                    }
+                })
+            })
+            .when(!connected, |menu| {
+                menu.entry("Connect Again", None, {
+                    let panel = panel.clone();
+                    move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.reconnect(index, window, cx))
                             .ok();
                     }
                 })

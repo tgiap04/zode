@@ -746,3 +746,22 @@ async fn a_column_is_pulled_back_in_when_the_space_beside_it_shrinks(cx: &mut Te
         "a column wider than the space it stands in leaves nothing for the editor"
     );
 }
+/// The row's power button does two jobs and must never offer the wrong one:
+/// closing what is already closed, or opening what is already open.
+#[gpui::test]
+async fn a_closed_connection_offers_to_open_again(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("a", "/tmp/a.sqlite")]);
+
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(!panel.is_connected(0), "nothing opens by being configured");
+
+        // What the button calls when the row is not connected. It leaves the
+        // node reaching for its driver rather than sitting where it was.
+        panel.reconnect(0, window, cx);
+        assert!(
+            panel.is_reaching_for_a_driver(0),
+            "connecting again must actually start, not quietly do nothing"
+        );
+    });
+}
