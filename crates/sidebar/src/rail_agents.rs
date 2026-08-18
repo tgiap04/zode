@@ -4,7 +4,7 @@ use agent_ui::AgentPanel;
 use gpui::{AnyElement, App, Context, Entity, Window};
 use project::AgentId;
 use ui::{Tooltip, prelude::*};
-use zed_actions::agent::{AgentViewMode, OpenAgent};
+use zed_actions::agent::{AgentViewMode, OpenAgent, ToggleAgent};
 
 /// The agents the rail draws a button for.
 ///
@@ -50,9 +50,12 @@ impl Sidebar {
             // choice someone already made, and asking them to make it again every
             // time is the same as not having asked. The terminal stays one
             // right-click away for the times the answer is "not that, this once".
-            let remembered = OpenAgent {
+            // A toggle, not an open: pressing a lit button has to put the
+            // column away, and `OpenAgent` has no such branch. The mode is
+            // still remembered -- the toggle's open path reopens the way it was
+            // last used, which is the choice someone already made.
+            let remembered = ToggleAgent {
                 agent: (*agent).to_string(),
-                mode: None,
             };
             let terminal = OpenAgent {
                 agent: (*agent).to_string(),

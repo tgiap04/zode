@@ -11,6 +11,26 @@ See the platform-specific instructions for building Zode from source:
 - [Linux](./development/linux.md)
 - [Windows](./development/windows.md)
 
+## Database drivers
+
+The database column talks to each engine through a separate binary
+(`zode-db-sqlite`, `zode-db-postgres`, `zode-db-mysql`), which the app starts
+from beside its own executable. Nothing links against them, and they are not in
+`default-members`, so `cargo run` does not build them — in a fresh checkout
+every connection fails with "could not start the driver".
+
+Build them once:
+
+```sh
+script/build-database-drivers            # beside `cargo run`
+script/build-database-drivers --release  # beside `cargo run --release`
+```
+
+The release bundles build and ship them; this is only for development builds.
+
+Note that saving a connection's password uses the keychain, so on a development
+build see the section below.
+
 ## Keychain access
 
 Zode stores secrets in the system keychain.

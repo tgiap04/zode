@@ -119,6 +119,8 @@ pub struct ExtensionManifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub debug_locators: BTreeMap<Arc<str>, DebugLocatorManifestEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub database_drivers: BTreeMap<Arc<str>, DatabaseDriverManifestEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub language_model_providers: BTreeMap<Arc<str>, LanguageModelProviderManifestEntry>,
 }
 
@@ -160,6 +162,10 @@ impl ExtensionManifest {
 
         if !self.debug_adapters.is_empty() {
             provides.insert(ExtensionProvides::DebugAdapters);
+        }
+
+        if !self.database_drivers.is_empty() {
+            provides.insert(ExtensionProvides::DatabaseDrivers);
         }
 
         provides
@@ -359,6 +365,28 @@ pub struct DebugAdapterManifestEntry {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct DebugLocatorManifestEntry {}
 
+/// A database engine an extension can talk to.
+///
+/// Small on purpose, like `DebugAdapterManifestEntry`: it holds only what Zode
+/// needs *before* running the binary. Everything else -- which schemas exist,
+/// what a value means, whether the engine can be interrupted -- the driver
+/// answers for itself over the protocol, so it cannot go stale here.
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+pub struct DatabaseDriverManifestEntry {
+    /// Shown when choosing an engine for a new connection.
+    pub name: String,
+    /// The binary to run, relative to the extension's directory.
+    ///
+    /// A path rather than a bare name: an extension's driver is its own file,
+    /// and resolving it through `PATH` would let anything on the machine answer
+    /// to that name.
+    pub path: RelPathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
 /// Manifest entry for a language model provider.
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub struct LanguageModelProviderManifestEntry {
@@ -439,6 +467,7 @@ fn manifest_from_old_manifest(
         capabilities: Vec::new(),
         debug_adapters: Default::default(),
         debug_locators: Default::default(),
+        database_drivers: Default::default(),
         language_model_providers: Default::default(),
     }
 }
@@ -475,6 +504,7 @@ mod tests {
             capabilities: vec![],
             debug_adapters: Default::default(),
             debug_locators: Default::default(),
+            database_drivers: Default::default(),
             language_model_providers: BTreeMap::default(),
         }
     }
@@ -587,6 +617,60 @@ mod tests {
         "#};
         let manifest: ExtensionManifest = toml::from_str(&content).expect("manifest should parse");
         assert_eq!(manifest.languages, vec![rel_path_buf("foo/bar")]);
+    }
+
+    /// An extension declaring a database driver is the whole point of the
+    /// entry: an engine Zode does not ship should reach the connection picker
+    /// without Zode being rebuilt.
+    #[test]
+    fn parse_manifest_with_a_database_driver() {
+        let toml_src = indoc! {r#"
+            id = "example.duckdb"
+            name = "DuckDB"
+            version = "1.0.0"
+            schema_version = 0
+
+            [database_drivers.duckdb]
+            name = "DuckDB"
+            path = "bin/zode-db-duckdb"
+            args = ["--quiet"]
+        "#};
+
+        let manifest: ExtensionManifest = toml::from_str(toml_src).expect("manifest should parse");
+        let driver = manifest
+            .database_drivers
+            .get("duckdb")
+            .expect("the driver must be listed under the id settings will name");
+        assert_eq!(driver.name, "DuckDB");
+        assert_eq!(driver.path, rel_path_buf("bin/zode-db-duckdb"));
+        assert_eq!(driver.args, vec!["--quiet".to_string()]);
+
+        assert!(
+            manifest
+                .provides()
+                .contains(&ExtensionProvides::DatabaseDrivers),
+            "or the extension store cannot tell anyone what this extension is for"
+        );
+    }
+
+    /// Every other entry is optional, and this one has to be too: an extension
+    /// written before database drivers existed must still parse.
+    #[test]
+    fn a_manifest_without_database_drivers_still_parses() {
+        let toml_src = indoc! {r#"
+            id = "example.theme"
+            name = "Theme"
+            version = "1.0.0"
+            schema_version = 0
+        "#};
+
+        let manifest: ExtensionManifest = toml::from_str(toml_src).expect("manifest should parse");
+        assert!(manifest.database_drivers.is_empty());
+        assert!(
+            !manifest
+                .provides()
+                .contains(&ExtensionProvides::DatabaseDrivers)
+        );
     }
 
     #[test]

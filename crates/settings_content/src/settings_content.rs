@@ -151,6 +151,8 @@ pub struct SettingsContent {
     /// Default: false
     pub helix_mode: Option<bool>,
 
+    pub database: Option<DatabaseSettingsContent>,
+
     pub journal: Option<JournalSettingsContent>,
 
     /// A map of log scopes to the desired log level.
@@ -846,6 +848,40 @@ pub struct CursorShapeSettings {
     ///
     /// The default value follows the primary cursor_shape.
     pub insert: Option<VimInsertModeCursorShape>,
+}
+
+/// One database the database column can connect to.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct DatabaseConnectionContent {
+    /// What to call it in the tree. Must be unique -- it is how a project pins
+    /// a connection, and how the password is found in the keychain.
+    pub name: Option<String>,
+    /// Which driver speaks to it: `sqlite`, `postgres`, `mysql`, or the id an
+    /// extension declared.
+    pub driver: Option<String>,
+    /// How the driver reaches it. A file path for SQLite, a DSN for a server.
+    ///
+    /// **Never the password.** That lives in the OS keychain, put there by the
+    /// connection editor; a password written here would sit in plain text in a
+    /// file people share and back up.
+    pub url: Option<String>,
+}
+
+/// Settings for the database column.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct DatabaseSettingsContent {
+    /// Databases available to every project on this machine.
+    ///
+    /// Global rather than per-project because a database belongs to the machine
+    /// you are sitting at, not to a checkout. Which of them a given project
+    /// shows is pinned per project instead, and kept out of settings entirely.
+    pub connections: Option<Vec<DatabaseConnectionContent>>,
+    /// How many rows one page of results holds.
+    ///
+    /// Default: 200
+    pub page_size: Option<u32>,
 }
 
 /// Settings specific to journaling

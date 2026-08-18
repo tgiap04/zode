@@ -89,6 +89,22 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn fills_the_center(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
+    /// Whether this panel wants the whole window: the centre, the docks, and
+    /// the rail beside them.
+    ///
+    /// A step past [`Self::fills_the_center`], and separate from it because the
+    /// two answer different requests -- one is "give me the editor's room", the
+    /// other is "get everything out of the way". Neither is `is_zoomed`: that
+    /// drives an overlay whose bookkeeping is keyed by `DockPosition`, which an
+    /// own column shares with the tool dock beside it, and it draws inside the
+    /// `Workspace` element -- so it could not cover the rail, which
+    /// `MultiWorkspace` draws as its sibling.
+    ///
+    /// Read only, never written to, so a panel answering it cannot reach back
+    /// into the workspace mid-update.
+    fn fills_the_window(&self, _window: &Window, _cx: &App) -> bool {
+        false
+    }
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
@@ -104,8 +120,13 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn enabled(&self, _cx: &App) -> bool {
         true
     }
-    fn is_agent_panel(&self) -> bool {
-        false
+    /// Which column of its own this panel asks for, if any.
+    ///
+    /// `None` -- the default -- puts the panel in the tool dock named by
+    /// `position`. Anything else routes it to the workspace's column for that
+    /// variant, where it never shares vertical space with a tool panel.
+    fn own_column(&self) -> Option<DockColumn> {
+        None
     }
 }
 
@@ -118,6 +139,7 @@ pub trait PanelHandle: Send + Sync {
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
     fn fills_the_center(&self, window: &Window, cx: &App) -> bool;
+    fn fills_the_window(&self, window: &Window, cx: &App) -> bool;
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn remote_id(&self) -> Option<proto::PanelId>;
@@ -137,7 +159,7 @@ pub trait PanelHandle: Send + Sync {
     fn to_any(&self) -> AnyView;
     fn activation_priority(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
-    fn is_agent_panel(&self, cx: &App) -> bool;
+    fn own_column(&self, cx: &App) -> Option<DockColumn>;
     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
         let current_position = self.position(window, cx);
         let next_position = [
@@ -189,6 +211,10 @@ where
 
     fn fills_the_center(&self, window: &Window, cx: &App) -> bool {
         self.read(cx).fills_the_center(window, cx)
+    }
+
+    fn fills_the_window(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).fills_the_window(window, cx)
     }
 
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App) {
@@ -267,8 +293,8 @@ where
         self.read(cx).enabled(cx)
     }
 
-    fn is_agent_panel(&self, cx: &App) -> bool {
-        self.read(cx).is_agent_panel()
+    fn own_column(&self, cx: &App) -> Option<DockColumn> {
+        self.read(cx).own_column()
     }
 }
 
@@ -296,12 +322,12 @@ pub struct Dock {
     /// `Workspace` update, so reading the workspace back through its handle
     /// there aborts the process.
     pub(crate) serialized_stack: Option<DockStackState>,
-    /// Whether this is the agent's column rather than one of the three docks.
+    /// Which column this dock is, when its `DockPosition` alone cannot say.
     ///
-    /// Only `stack_key` reads it, and only to keep the two apart in storage:
-    /// the agent column carries a `DockPosition` of its own so resizing knows
-    /// which way it grows, and that position is shared with a real dock.
-    is_agent_column: bool,
+    /// An own column carries a `DockPosition` so resizing knows which way it
+    /// grows, and shares that position with the tool dock beside it. Storage
+    /// keys, element id space and resize-handle routing all read this instead.
+    column: DockColumn,
     /// How the panels showing at once divide the dock's *length*.
     ///
     /// A second axis from `PanelEntry::size_state`, which measures the dock's
@@ -326,6 +352,53 @@ pub struct Dock {
 impl Focusable for Dock {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+/// Which column of the window a dock is, as distinct from which side it is on.
+///
+/// `Tool` is one of the three ordinary docks, named by its `DockPosition`.
+/// Every other variant is a column of its own drawn beside the centre group:
+/// it still carries a `DockPosition` so resizing knows which way it grows, but
+/// it shares that position with the tool dock on the same side. Anywhere the
+/// two must be told apart -- storage keys, element id space, which resize
+/// handle the pointer is on -- reads this rather than the position.
+///
+/// Adding a variant means giving it a distinct `stack_key` and a distinct
+/// `stack_element_basis` offset; both are derived here so they cannot drift.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DockColumn {
+    Tool,
+    Agent,
+    Database,
+}
+
+impl DockColumn {
+    /// Whether this dock is a column of its own rather than one of the three
+    /// tool docks. Chrome, position-following and panel migration all branch on
+    /// this and never on the specific variant -- own columns behave alike.
+    pub fn is_own_column(self) -> bool {
+        !matches!(self, DockColumn::Tool)
+    }
+
+    /// What an own column's stack is recorded under. `None` for `Tool`, which
+    /// keys by its position instead.
+    fn storage_key(self) -> Option<&'static str> {
+        match self {
+            DockColumn::Tool => None,
+            DockColumn::Agent => Some("agent"),
+            DockColumn::Database => Some("database"),
+        }
+    }
+
+    /// Distinct slot in the stack element id space, past the three positions.
+    /// `None` for `Tool`, which uses its position as the offset.
+    fn element_basis_offset(self) -> Option<usize> {
+        match self {
+            DockColumn::Tool => None,
+            DockColumn::Agent => Some(DockPosition::COUNT),
+            DockColumn::Database => Some(DockPosition::COUNT + 1),
+        }
     }
 }
 
@@ -488,7 +561,7 @@ impl Dock {
                 panel_entries: Default::default(),
                 active_panel_index: None,
                 serialized_stack: None,
-                is_agent_column: false,
+                column: DockColumn::Tool,
                 stack_flexes: Default::default(),
                 stack_bounding_boxes: Default::default(),
                 last_persisted_stack: None,
@@ -550,14 +623,14 @@ impl Dock {
         self.position
     }
 
-    /// Moves the agent column to the other side of the editor.
+    /// Moves an own column to the other side of the editor.
     ///
-    /// Only the agent column moves this way — the three ordinary docks are
-    /// defined by their side and never change it, while this one follows the
-    /// rail. The side decides which edge carries the border and the resize
-    /// handle, so it has to change with it rather than only at construction.
-    pub fn set_agent_column_position(&mut self, position: DockPosition, cx: &mut Context<Self>) {
-        if !self.is_agent_column || self.position == position {
+    /// Only own columns move this way — the three ordinary docks are defined by
+    /// their side and never change it, while these follow the rail. The side
+    /// decides which edge carries the border and the resize handle, so it has
+    /// to change with it rather than only at construction.
+    pub fn set_own_column_position(&mut self, position: DockPosition, cx: &mut Context<Self>) {
+        if !self.column.is_own_column() || self.position == position {
             return;
         }
         self.position = position;
@@ -682,14 +755,14 @@ impl Dock {
                 let panel = panel.clone();
 
                 move |this, window, cx| {
-                    // The agent column is the panel's home at either rail side:
-                    // the column itself moves (`set_agent_column_position`), so
+                    // An own column is the panel's home at either rail side:
+                    // the column itself moves (`set_own_column_position`), so
                     // there is no dock to migrate to. Without this the panel is
                     // hauled into a tool dock the moment the rail flips —
                     // exactly where the agent appeared before it had a column —
                     // and whether that happens comes down to which of the two
                     // settings observers fires first.
-                    if this.is_agent_column {
+                    if this.column.is_own_column() {
                         return;
                     }
 
@@ -935,7 +1008,7 @@ impl Dock {
     pub fn has_agent_panel(&self, cx: &App) -> bool {
         self.panel_entries
             .iter()
-            .any(|entry| entry.panel.is_agent_panel(cx))
+            .any(|entry| entry.panel.own_column(cx) == Some(DockColumn::Agent))
     }
 
     /// Shows `panel_ix` and puts every other panel in this dock away.
@@ -1105,41 +1178,44 @@ impl Dock {
         });
     }
 
-    /// Marks this dock as the agent's column.
+    /// Marks this dock as a column of its own rather than a tool dock.
     ///
     /// Set once, at construction, by the workspace that owns it.
-    pub fn mark_as_agent_column(&mut self) {
-        self.is_agent_column = true;
+    pub fn mark_as_own_column(&mut self, column: DockColumn) {
+        self.column = column;
+    }
+
+    /// Which column this dock is. `DockColumn::Tool` for the three ordinary
+    /// docks, which are told apart by their position alone.
+    pub fn column(&self) -> DockColumn {
+        self.column
     }
 
     /// Where this dock's stack puts its element ids.
     ///
-    /// Keyed the same way `stack_key` is, and for the same reason: the agent
+    /// Keyed the same way `stack_key` is, and for the same reason: an own
     /// column shares a `DockPosition` with the dock beside it, so a basis of
     /// `BASIS + position` had the two drawing their handles into one id space.
-    /// Out of reach today — the column holds a single panel, so it never draws
-    /// a stack — but the collision would land silently the day it holds two.
+    /// Out of reach today — the columns hold a single panel, so they never draw
+    /// a stack — but the collision would land silently the day one holds two.
     fn stack_element_basis(&self) -> usize {
-        let offset = if self.is_agent_column {
-            DockPosition::COUNT
-        } else {
-            self.position as usize
-        };
+        let offset = self
+            .column
+            .element_basis_offset()
+            .unwrap_or(self.position as usize);
         STACK_ELEMENT_BASIS + offset
     }
 
     /// What this dock's stack is recorded under.
     ///
-    /// NOT the position: the agent column shares a `DockPosition` with whichever
+    /// NOT the position: an own column shares a `DockPosition` with whichever
     /// side dock it stands next to, so keying by position would have the two
-    /// writing over each other -- the agent column, usually empty, blanking the
+    /// writing over each other -- an own column, usually empty, blanking the
     /// record of a dock that had panels in it.
     pub fn stack_key(&self) -> &'static str {
-        if self.is_agent_column {
-            "agent"
-        } else {
-            self.position.label()
-        }
+        self.column
+            .storage_key()
+            .unwrap_or_else(|| self.position.label())
     }
 
     /// The proportions the stack's dividers write into.
@@ -1622,20 +1698,14 @@ impl Render for Dock {
             .then(|| self.render_showing(window, cx));
         if let Some(showing) = showing {
             let position = self.position;
-            let agent_column = self.is_agent_column;
+            let column = self.column;
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
-                    .on_drag(
-                        DraggedDock {
-                            position,
-                            agent_column,
-                        },
-                        |dock, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.new(|_| *dock)
-                        },
-                    )
+                    .on_drag(DraggedDock { position, column }, |dock, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| *dock)
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -2026,7 +2096,7 @@ pub mod test {
         pub focus_handle: FocusHandle,
         pub default_size: Pixels,
         pub flexible: bool,
-        pub agent_column: bool,
+        pub own_column: Option<DockColumn>,
         pub activation_priority: u32,
         /// Defaults to `None`, matching a panel that contributes no dock button.
         /// Set it when a test needs the panel to appear in an icon list.
@@ -2045,7 +2115,7 @@ pub mod test {
                 focus_handle: cx.focus_handle(),
                 default_size: px(300.),
                 flexible: false,
-                agent_column: false,
+                own_column: None,
                 activation_priority,
                 icon: None,
             }
@@ -2062,13 +2132,30 @@ pub mod test {
             }
         }
 
-        /// A panel the workspace routes into the agent column rather than the
-        /// dock named by `position`.
-        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+        /// A panel the workspace routes into a column of its own rather than
+        /// the dock named by `position`.
+        pub fn new_in_column(
+            column: DockColumn,
+            position: DockPosition,
+            activation_priority: u32,
+            cx: &mut App,
+        ) -> Self {
             Self {
-                agent_column: true,
+                own_column: Some(column),
                 ..Self::new(position, activation_priority, cx)
             }
+        }
+
+        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
+            Self::new_in_column(DockColumn::Agent, position, activation_priority, cx)
+        }
+
+        pub fn new_database(
+            position: DockPosition,
+            activation_priority: u32,
+            cx: &mut App,
+        ) -> Self {
+            Self::new_in_column(DockColumn::Database, position, activation_priority, cx)
         }
     }
 
@@ -2232,8 +2319,8 @@ pub mod test {
             self.activation_priority
         }
 
-        fn is_agent_panel(&self) -> bool {
-            self.agent_column
+        fn own_column(&self) -> Option<DockColumn> {
+            self.own_column
         }
     }
 

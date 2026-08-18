@@ -10,6 +10,7 @@ mod project_item;
 mod project_list;
 mod rail;
 mod rail_agents;
+mod rail_database;
 mod rail_panels;
 mod refresh;
 mod render;

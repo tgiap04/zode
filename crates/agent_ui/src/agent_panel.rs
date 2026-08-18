@@ -11,7 +11,7 @@ use ui::prelude::*;
 use ui::{ContextMenu, PopoverMenu, Tooltip};
 use workspace::{
     AppState, Pane, SidebarSide, SplitDirection, Workspace, WorkspaceSettings,
-    dock::{DockPosition, Panel, PanelEvent},
+    dock::{DockColumn, DockPosition, Panel, PanelEvent},
     pane,
     pane_group::PaneGroup,
 };
@@ -707,7 +707,7 @@ impl Panel for AgentPanel {
 
     /// Zoomed, this column asks for the editor's space too.
     ///
-    /// `Workspace::render_centre_with_agent` reads it and stands the centre
+    /// `Workspace::render_centre_with_own_columns` reads it and stands the centre
     /// down. Not routed through `PanelEvent::ZoomIn`, which would put the dock
     /// machinery in charge: that keys on `DockPosition`, which this column
     /// shares with the tool dock beside it.
@@ -791,8 +791,8 @@ impl Panel for AgentPanel {
     /// A dock is one column, so sharing one with the git or project panel means
     /// either taking turns with it or being stacked into its width. The agent
     /// is a working surface, so it stands beside the editor instead.
-    fn is_agent_panel(&self) -> bool {
-        true
+    fn own_column(&self) -> Option<DockColumn> {
+        Some(DockColumn::Agent)
     }
 
     /// Closed until asked for: opening it starts a process.
@@ -861,6 +861,49 @@ mod tests {
                 })
                 .unwrap_or(false)
         })
+    }
+
+    /// The rail button is a toggle, so a press has to decide between showing an
+    /// agent and putting the column away. Both halves of that decision are
+    /// pinned here.
+    ///
+    /// The agent half is the one worth guarding: two agents stand side by side
+    /// in this column, so pressing A's button while B is up must show A rather
+    /// than sweep the column away.
+    #[gpui::test]
+    async fn the_rail_toggle_only_puts_away_an_agent_that_is_actually_up(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+        let showing = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_window, cx| {
+                workspace
+                    .read_with(cx, |workspace, cx| {
+                        crate::agent_is_showing(workspace, &project::AgentId::new("claude-acp"), cx)
+                    })
+                    .unwrap_or(true)
+            })
+        };
+
+        assert!(
+            !showing(cx),
+            "with the column closed there is nothing to put away"
+        );
+
+        workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx);
+                workspace.agent_dock().update(cx, |dock, cx| {
+                    dock.set_open(true, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            !showing(cx),
+            "an open column holding no such agent must show it, not hide the column"
+        );
     }
 
     /// The dock remembers being open from the last session, but what stood inside
