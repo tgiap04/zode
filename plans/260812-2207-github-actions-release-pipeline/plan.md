@@ -61,8 +61,8 @@ Không tái dùng artifact của nightly ở đường tag — build lại là t
 |---|---|---|---|
 | 01 | [Runner + cổng owner: workflow chạy được trên account này](phase-01-runners-and-owner-gate.md) | ✅ | — |
 | 02 | [Script: signing Windows, bỏ `remote_server`, thay channel](phase-02-scripts-signing-and-remote-server.md) | ✅ | — |
-| 03 | [Ép build vừa 14 GB / 7 GB: env override + dọn disk](phase-03-fit-the-build-on-free-runners.md) | 🔶 code xong, chưa chạy CI | 01, 02 |
-| 04 | [Hai đường phát hành: nightly cuộn + draft release ở tag](phase-04-nightly-and-tag-release.md) | 🔶 code xong, chưa chạy CI | 03 |
+| 03 | [Ép build vừa 14 GB / 7 GB: env override + dọn disk](phase-03-fit-the-build-on-free-runners.md) | ✅ **6/6 target xanh trên CI** (run 32296843005) | 01, 02 |
+| 04 | [Hai đường phát hành: nightly cuộn + draft release ở tag](phase-04-nightly-and-tag-release.md) | 🔶 code xong; chỉ kiểm được sau khi merge vào `main` | 03 |
 | 05 | [Kiểm cài trên máy sạch từng OS + README](phase-05-verify-on-clean-machines.md) | ⬜ README xong, chưa kiểm máy | 04 |
 
 **01 và 02 chạy song song được** — file ownership rời hẳn nhau (`tooling/xtask/**` vs `script/**`). Từ 03 trở đi là chuỗi.

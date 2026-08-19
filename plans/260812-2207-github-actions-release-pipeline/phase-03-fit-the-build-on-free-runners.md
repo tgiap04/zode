@@ -129,16 +129,46 @@ Chạy `./script/bundle-mac aarch64-apple-darwin` với đúng bốn env overrid
 
 Điều này **chưa** nói gì về hai rủi ro còn lại trên runner CI: **RAM 7 GB** (máy local có 32 GB) và **thời gian trên 3 core** (máy local có 10 core). Hai cái đó chỉ CI trả lời được.
 
-### Chưa đo — cần chạy CI
+### Đã đo trên CI — run 32296843005, `conclusion: success`
 
-| Job | Runner | Kết quả | Thời gian | Disk | Ghi chú |
-|---|---|---|---|---|---|
-| bundle_linux_x86_64 | ubuntu-22.04 | | | | |
-| bundle_linux_aarch64 | ubuntu-22.04-arm | | | | |
-| bundle_mac_aarch64 | macos-15 | | | | RAM 7 GB — rủi ro còn lại lớn nhất |
-| bundle_mac_x86_64 | macos-15-intel | | | | RAM 14 GB |
-| bundle_windows_x86_64 | windows-2025 | | | | Inno Setup có sẵn? `pwsh` không có ở local nên script Windows **chưa kiểm cú pháp** |
-| bundle_windows_aarch64 | windows-11-arm | | | | |
+| Job | Runner | Kết quả | Thời gian | Artifact |
+|---|---|---|---|---|
+| bundle_linux_aarch64 | `ubuntu-24.04-arm` | ✅ | 33 phút | `zode-linux-aarch64.tar.gz` 113 MB |
+| bundle_linux_x86_64 | `ubuntu-24.04` | ✅ | 42 phút | `zode-linux-x86_64.tar.gz` 115 MB |
+| bundle_mac_aarch64 | `macos-15` | ✅ | 73 phút | `Zode-aarch64.dmg` 108 MB |
+| bundle_mac_x86_64 | `macos-15-intel` | ✅ | 99 phút | `Zode-x86_64.dmg` 116 MB |
+| bundle_windows_x86_64 | `windows-2025` | ✅ | ~78 phút | `Zode-x86_64.exe` 56 MB |
+| bundle_windows_aarch64 | `windows-2025` (cross) | ✅ | ~78 phút | `Zode-aarch64.exe` 49 MB |
+
+**Hai rủi ro lớn nhất của brainstorm đã bị loại bằng bằng chứng:**
+
+- **macOS arm 7 GB RAM không OOM.** Plan ghi "xác suất cao" và dự phòng "nếu vẫn OOM thì phải mở lại quyết định chỉ dùng runner free". Không cần mở lại.
+- **Thời gian 33–99 phút**, xa trần 360. Nhưng cũng cho thấy `timeout_minutes(60)` gốc sẽ giết **cả sáu** job — kể cả job nhanh nhất chỉ dưới ngưỡng 18 phút.
+
+Runner khác plan: Linux dùng 24.04 (không phải 22.04) và Windows arm cross-compile trên x64 (không phải `windows-11-arm`) — lý do ở mục dưới.
+
+### Windows: sáu lượt mới xanh
+
+Không lượt nào đoán trước được từ local (không có `pwsh`, không có Windows), và mỗi lượt sau bước signing tốn ~77 phút:
+
+| Lượt | Chết ở | Sau | Nguồn |
+|---|---|---|---|
+| 1 | `...\2022\Community\...Launch-VsDevShell.ps1` không tồn tại | 16s | hạ tầng Zed — runner GitHub có Enterprise |
+| 2 | `-HostArch arm64` không thuộc `x86,amd64` | 28s | **lỗi khi triển khai** — cho chạy native thay vì cross-compile |
+| 3 | `path too long` (261 ký tự) khi checkout git dep `pet` | 5,5 phút | hạ tầng Zed — dev drive của họ ngắn hơn 17 ký tự |
+| 4 | `sign.ps1: The 'ENDPOINT' env is required` | 77 phút | **lỗi khi triển khai** — `Test-Path env:X` đúng với biến rỗng |
+| 5 | `No files found matching "...\tools\*"` | 77 phút | có sẵn từ lần xoá auto-update |
+| 6 | — | ✅ | — |
+
+Lượt 4 là bài học đáng ghi: tôi khẳng định làm theo `bundle-mac:128` nhưng nó dùng `-n "${MACOS_CERTIFICATE:-}"` — kiểm **giá trị**, không kiểm sự tồn tại. Workflow map một secret không tồn tại vẫn **định nghĩa** biến, với giá trị rỗng.
+
+Lượt 5 phát hiện thêm hai lỗi có sẵn: `zed.iss` đòi `tools\*` (từng chứa `auto_update_helper.exe`) nên **installer Windows của fork không build được kể từ lần xoá auto-update**; và `zed.iss` **không có entry nào cho 3 driver `zode-db-*.exe`**, nên bản Windows sẽ ship thiếu chúng trong khi mac/linux có.
+
+### Câu hỏi mở của plan — đã trả lời
+
+- **Inno Setup có sẵn** trên `windows-2025` tại `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`.
+- **`cargo-bundle v0.6.1-zed` không cần bước CI** — `bundle-mac:60-62` tự `cargo install` từ git khi version lệch.
+- **`ZED_WORKSPACE` không cần workflow set** — `ParseZedWorkspace` tự suy từ `cargo metadata`.
 
 ## Success criteria
 
