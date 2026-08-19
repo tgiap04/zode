@@ -166,7 +166,7 @@ jobs:
     if: |-
       (github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
       (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'run-bundling'))
-    runs-on: windows-11-arm
+    runs-on: windows-2025
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_RELEASE_DEBUG: none

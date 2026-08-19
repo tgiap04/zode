@@ -310,7 +310,7 @@ jobs:
     - check_style
     - run_tests_linux
     - clippy_linux
-    runs-on: windows-11-arm
+    runs-on: windows-2025
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_RELEASE_DEBUG: none

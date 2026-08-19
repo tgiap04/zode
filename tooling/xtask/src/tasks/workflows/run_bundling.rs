@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::tasks::workflows::{
     release::ReleaseBundleJobs,
-    runners::{Arch, Platform, ReleaseChannel},
+    runners::{self, Arch, Platform, ReleaseChannel},
     steps::{FluentBuilder, NamedJob, dependant_job, named},
     vars::{assets, bundle_envs},
 };
@@ -163,7 +163,7 @@ pub(crate) fn bundle_windows(
     NamedJob {
         name: format!("bundle_windows_{arch}"),
         job: bundle_job(deps)
-            .runs_on(arch.windows_bundler())
+            .runs_on(runners::WINDOWS_DEFAULT)
             .envs(bundle_envs(platform))
             .add_step(checkout_for(release_channel))
             .when_some(release_channel, |job, release_channel| {

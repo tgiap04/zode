@@ -25,8 +25,14 @@ pub const LINUX_LARGE_RAM: Runner = Runner("ubuntu-24.04");
 // aarch64 bundle is the tightest of the six targets rather than the roomiest.
 pub const MAC_DEFAULT: Runner = Runner("macos-15");
 pub const MAC_INTEL: Runner = Runner("macos-15-intel");
+
+// Both Windows architectures build here, on an x64 host. There is a `windows-11-arm`
+// runner, but `Launch-VsDevShell.ps1` only accepts `x86` or `amd64` for `-HostArch`, so a
+// native arm64 host is rejected outright. Cross-compiling from x64 is what upstream does
+// and what `bundle-windows.ps1` is written for -- it takes the target architecture as an
+// argument, unlike `bundle-linux`, which builds for whatever `uname -m` reports and
+// therefore does need a native arm runner.
 pub const WINDOWS_DEFAULT: Runner = Runner("windows-2025");
-pub const WINDOWS_ARM: Runner = Runner("windows-11-arm");
 
 pub struct Runner(&'static str);
 
@@ -63,13 +69,6 @@ impl Arch {
         match self {
             Arch::X86_64 => MAC_INTEL,
             Arch::AARCH64 => MAC_DEFAULT,
-        }
-    }
-
-    pub fn windows_bundler(&self) -> Runner {
-        match self {
-            Arch::X86_64 => WINDOWS_DEFAULT,
-            Arch::AARCH64 => WINDOWS_ARM,
         }
     }
 }
