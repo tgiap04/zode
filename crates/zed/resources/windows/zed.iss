@@ -50,7 +50,6 @@ Name: "simplifiedChinese"; MessagesFile: "{#ResourcesDir}\messages\Default.zh-cn
 
 [UninstallDelete]
 ; Delete logs
-Type: filesandordirs; Name: "{app}\tools"
 Type: filesandordirs; Name: "{app}\updates"
 ; Delete newer files which may not have been added by the initial installation
 Type: filesandordirs; Name: "{app}\x64"
@@ -70,7 +69,9 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 [Files]
 Source: "{#ResourcesDir}\Zode.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
-Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
+; Beside Zode.exe, which is where `driver_path` looks -- the same reasoning that puts them
+; in `libexec` next to the binary on Linux and in `Contents/MacOS` on macOS.
+Source: "{#ResourcesDir}\zode-db-*.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
 #ifexist ResourcesDir + "\amd_ags_x64.dll"
 Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion
