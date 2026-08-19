@@ -104,10 +104,18 @@ function CheckEnvironmentVariables {
         return
     }
 
+    # Emptiness, not existence: a workflow that maps a secret which does not exist still
+    # defines the variable, with an empty value. `Test-Path env:X` is true for those, which
+    # is why `script/bundle-mac` tests `-n "${MACOS_CERTIFICATE:-}"` rather than presence.
+    function Test-EnvMissing {
+        param([string]$Name)
+        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name))
+    }
+
     $requiredVars = @('ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL')
 
     foreach ($var in $requiredVars) {
-        if (-not (Test-Path "env:$var")) {
+        if (Test-EnvMissing $var) {
             Write-Error "$var is not set"
             exit 1
         }
@@ -123,7 +131,7 @@ function CheckEnvironmentVariables {
         'FILE_DIGEST', 'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER'
     )
 
-    $missingSigningVars = $signingVars | Where-Object { -not (Test-Path "env:$_") }
+    $missingSigningVars = $signingVars | Where-Object { Test-EnvMissing $_ }
 
     if ($missingSigningVars) {
         $script:canCodeSign = $false
@@ -187,7 +195,15 @@ function ZipZedAndItsFriendsDebug {
         ".\$CargoOutDir\zode.pdb",
         ".\$CargoOutDir\cli.pdb",
         ".\$CargoOutDir\explorer_command_injector.pdb"
-    )
+    ) | Where-Object { Test-Path $_ }
+
+    # Release builds in CI run with CARGO_PROFILE_RELEASE_DEBUG=none to fit the runner's
+    # disk, and then no PDB is emitted at all. Compress-Archive treats a missing path as an
+    # error, so an archive of nothing must be skipped rather than attempted.
+    if ($items.Count -eq 0) {
+        Write-Output "No PDBs to archive (built without debug info)"
+        return
+    }
 
     Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
 }
@@ -354,10 +370,19 @@ function BuildInstaller {
         }
     }
 
-    # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
-    # Currently, we are using Windows 2022 runner.
-    # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
+    # The 2025 runner image ships Inno Setup but does not put iscc on PATH,
+    # https://github.com/actions/runner-images/issues/11228 -- hence the explicit path,
+    # with PATH as a fallback for anywhere that does expose it.
     $innoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path $innoSetupPath)) {
+        $onPath = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+        if ($onPath) {
+            $innoSetupPath = $onPath.Source
+        }
+        else {
+            throw "Inno Setup not found at '$innoSetupPath' and ISCC.exe is not on PATH. Install it with: choco install innosetup"
+        }
+    }
 
     $definitions = @{
         "AppId"          = $appId
