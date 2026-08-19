@@ -170,6 +170,7 @@ pub(crate) fn bundle_windows(
                 job.add_step(set_release_channel(platform, release_channel))
             })
             .add_step(steps::free_disk_space(platform))
+            .add_step(steps::windows_enable_long_paths())
             .add_step(bundle_windows(arch))
             .add_step(upload_artifact(&format!("target/{artifact_name}"))),
     }

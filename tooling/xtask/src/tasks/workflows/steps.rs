@@ -235,6 +235,25 @@ pub fn free_disk_space(platform: Platform) -> Step<Run> {
     }
 }
 
+/// Lifts Windows' 260-character path limit, which a cargo git checkout crosses:
+///
+/// ```text
+/// path too long: 'C:/Users/runneradmin/.cargo/git/checkouts/python-environment-tools-.../
+///   python-fastjsonschema-2.16.2-py310hca03da5_0.json'; class=Filesystem (30)
+/// ```
+///
+/// That path is 261 characters. Upstream never sees it because their self-hosted runner
+/// puts CARGO_HOME on a dev drive at a drive-letter root, which is 17 characters shorter
+/// than the hosted runner's profile directory. Shortening the prefix would clear the limit
+/// by a single character, so the limit is removed instead.
+pub fn windows_enable_long_paths() -> Step<Run> {
+    named::pwsh(indoc::indoc! {r#"
+        git config --global core.longpaths true
+        New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+    "#})
+}
+
 pub fn clippy(platform: Platform, target: Option<&str>) -> Step<Run> {
     match platform {
         Platform::Windows => named::pwsh("./script/clippy.ps1"),

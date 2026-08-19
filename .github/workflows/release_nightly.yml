@@ -346,6 +346,12 @@ jobs:
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
         Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
       shell: pwsh
+    - name: steps::windows_enable_long_paths
+      run: |
+        git config --global core.longpaths true
+        New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+      shell: pwsh
     - name: run_bundling::bundle_windows::bundle_windows
       run: script/bundle-windows.ps1 -Architecture aarch64
       shell: pwsh
@@ -396,6 +402,12 @@ jobs:
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
         Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+      shell: pwsh
+    - name: steps::windows_enable_long_paths
+      run: |
+        git config --global core.longpaths true
+        New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
       shell: pwsh
     - name: run_bundling::bundle_windows::bundle_windows
       run: script/bundle-windows.ps1 -Architecture x86_64
