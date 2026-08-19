@@ -19,8 +19,13 @@ This fork removed:
   from (see Installing, below).
 
 What's kept: the editor itself, LSP integration, the terminal, git integration, the
-debugger, extensions, and SSH remote development (rebuilt on a direct connection path
-rather than through a relay server).
+debugger, and extensions.
+
+SSH remote development is a middle case. The code is still here and still builds from
+source, but the released installers **do not ship the `remote_server` binary** it needs
+on the far end: building it doubles the build time and disk of every release, which does
+not fit the free GitHub-hosted runners this project releases from. Build it yourself with
+`cargo build --release --package remote_server` if you want it.
 
 **One dependency was kept and disclosed rather than removed**: browsing and installing
 extensions still queries Zed Industries' extension registry (`api.zed.dev`). Dropping
@@ -40,8 +45,43 @@ with.
 
 ## Installing
 
-<!-- TODO(packaging): fill in once a signed, notarized release artifact and a
-     Homebrew cask (or equivalent) exist. Until then, build from source: -->
+Grab an installer from [Releases](https://github.com/tgiap04/zode/releases). Tagged
+releases are built from the tag; `nightly` is a single rolling pre-release rebuilt from
+`main` once a day, so its assets are replaced rather than accumulated.
+
+| Platform | Asset |
+|---|---|
+| macOS, Apple silicon | `Zode-aarch64.dmg` |
+| macOS, Intel | `Zode-x86_64.dmg` |
+| Linux, x86_64 | `zode-linux-x86_64.tar.gz` |
+| Linux, arm64 | `zode-linux-aarch64.tar.gz` |
+| Windows, x86_64 | `Zode-x86_64.exe` |
+| Windows, arm64 | `Zode-aarch64.exe` |
+
+### Read this before you install
+
+Three limits are real, not caveats to skim:
+
+1. **The binaries are not code-signed or notarized.** Your OS will say so, and it is
+   right to: nothing has verified where these came from except you. You are choosing to
+   trust an unsigned build. If that is not a trade you want, build from source below.
+2. **There is no in-app updater.** Nothing will tell you a new version exists; you have
+   to come back here and download it.
+3. **Debug symbols are stripped in release builds**, so a crash backtrace will be mostly
+   empty. Reproduce against a source build if you want a useful one.
+
+To open despite the warning — do this for the one file, and never disable Gatekeeper or
+SmartScreen system-wide:
+
+- **macOS**: `xattr -d com.apple.quarantine /Applications/Zode.app`, or open it once via
+  right-click → Open.
+- **Windows**: on the SmartScreen prompt, *More info* → *Run anyway*.
+- **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zode.app/bin/zed`.
+
+Linux builds are produced on Ubuntu 22.04, so they need **glibc 2.35 or newer**. Older
+distributions (Ubuntu 20.04, Debian 11) will fail with a `GLIBC_2.35 not found` error.
+
+### From source
 
 ```sh
 git clone https://github.com/tgiap04/zode.git
