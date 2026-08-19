@@ -126,8 +126,10 @@ pub(crate) fn bundle_linux(
         job: bundle_job(deps)
             .runs_on(arch.linux_bundler())
             .envs(bundle_envs(platform))
-            .add_env(Env::new("CC", "clang-18"))
-            .add_env(Env::new("CXX", "clang++-18"))
+            // Unversioned on purpose: upstream pinned clang-18, which exists only on the
+            // 20.04 image its bundler used. On 24.04 the default `clang` already is 18.
+            .add_env(Env::new("CC", "clang"))
+            .add_env(Env::new("CXX", "clang++"))
             .add_step(checkout_for(release_channel))
             .when_some(release_channel, |job, release_channel| {
                 job.add_step(set_release_channel(platform, release_channel))

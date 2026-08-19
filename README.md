@@ -78,8 +78,9 @@ SmartScreen system-wide:
 - **Windows**: on the SmartScreen prompt, *More info* → *Run anyway*.
 - **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zode.app/bin/zed`.
 
-Linux builds are produced on Ubuntu 22.04, so they need **glibc 2.35 or newer**. Older
-distributions (Ubuntu 20.04, Debian 11) will fail with a `GLIBC_2.35 not found` error.
+Linux builds are produced on Ubuntu 24.04, so they need **glibc 2.39 or newer**. Older
+distributions — including Ubuntu 22.04 — will fail with a `GLIBC_2.39 not found` error;
+build from source there.
 
 ### From source
 

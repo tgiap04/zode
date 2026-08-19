@@ -8,10 +8,16 @@ pub const LINUX_XL: Runner = Runner("ubuntu-24.04");
 pub const LINUX_LARGE: Runner = Runner("ubuntu-24.04");
 pub const LINUX_MEDIUM: Runner = Runner("ubuntu-24.04");
 
-// 22.04 (glibc 2.35) is the oldest image GitHub still offers; upstream targeted 20.04
-// (glibc 2.31) for a lower floor, but that image was retired.
-pub const LINUX_X86_BUNDLER: Runner = Runner("ubuntu-22.04");
-pub const LINUX_ARM_BUNDLER: Runner = Runner("ubuntu-22.04-arm");
+// 24.04, which sets the glibc floor at 2.39. Upstream targeted 20.04 (glibc 2.31) for a
+// lower floor, but GitHub retired that image, and 22.04 does not work here: `script/linux`
+// only installs clang-18 on its 20.04 branch, webrtc-sys needs clang 17+, and while the
+// x86 22.04 image happens to carry clang-18 the arm one does not. 24.04 ships clang-18 as
+// the default `clang` on both architectures.
+//
+// Lowering the floor again means building inside a container -- `Dockerfile-distros` is
+// already in the repository for that.
+pub const LINUX_X86_BUNDLER: Runner = Runner("ubuntu-24.04");
+pub const LINUX_ARM_BUNDLER: Runner = Runner("ubuntu-24.04-arm");
 
 pub const LINUX_LARGE_RAM: Runner = Runner("ubuntu-24.04");
 

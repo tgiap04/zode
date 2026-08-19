@@ -47,8 +47,38 @@ function Get-VSArch {
     }
 }
 
+# Located through vswhere rather than a hard-coded path: upstream's self-hosted runner
+# has the Community edition, GitHub-hosted runners ship Enterprise, and the path carries
+# the edition name. vswhere itself does live at a fixed, edition-independent location.
+function Get-VsDevShellPath {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -property installationPath | Select-Object -First 1
+        if ($installPath) {
+            $candidate = Join-Path $installPath "Common7\Tools\Launch-VsDevShell.ps1"
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    # vswhere only lists VS 2017 and newer; fall back to a direct search so an unusual
+    # layout produces a real path instead of a misleading "vswhere missing" message.
+    $fallback = Get-ChildItem -Path "$env:ProgramFiles\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio" `
+        -Filter "Launch-VsDevShell.ps1" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($fallback) {
+        return $fallback
+    }
+
+    throw "Could not locate Launch-VsDevShell.ps1. Is Visual Studio with the C++ workload installed?"
+}
+
+$vsDevShell = Get-VsDevShellPath
+Write-Output "Using VS dev shell: $vsDevShell"
+
 Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
