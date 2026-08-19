@@ -14,6 +14,10 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $buildSuccess = $false
 
+# Stays false unless CheckEnvironmentVariables finds a full set of signing credentials,
+# so a local build never tries to sign.
+$canCodeSign = $false
+
 $OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "x86_64" }
     "Arm64" { "aarch64" }
@@ -70,18 +74,34 @@ function CheckEnvironmentVariables {
         return
     }
 
-    $requiredVars = @(
-        'ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL',
-        'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
-        'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'ENDPOINT',
-        'FILE_DIGEST', 'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER'
-    )
+    $requiredVars = @('ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL')
 
     foreach ($var in $requiredVars) {
         if (-not (Test-Path "env:$var")) {
             Write-Error "$var is not set"
             exit 1
         }
+    }
+
+    # Signing is optional, the way `script/bundle-mac` already treats it: without the
+    # Azure Trusted Signing credentials the build still produces an installer, just an
+    # unsigned one. Upstream listed these as required and exited 1, which is correct for
+    # them and fatal for a fork that has no certificate.
+    $signingVars = @(
+        'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
+        'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'ENDPOINT',
+        'FILE_DIGEST', 'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER'
+    )
+
+    $missingSigningVars = $signingVars | Where-Object { -not (Test-Path "env:$_") }
+
+    if ($missingSigningVars) {
+        $script:canCodeSign = $false
+        Write-Output "NOT code signing: missing $($missingSigningVars -join ', ')"
+    }
+    else {
+        $script:canCodeSign = $true
+        Write-Output "Code signing enabled"
     }
 }
 
@@ -132,31 +152,11 @@ function BuildZedAndItsFriends {
     Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
 }
 
-function BuildRemoteServer {
-    Write-Output "Building remote_server for $target"
-    cargo build --release --package remote_server --target $target
-
-    # Create zipped remote server binary
-    $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
-
-    if ($env:CI) {
-        Write-Output "Code signing remote_server.exe"
-        & "$innoDir\sign.ps1" $remoteServerSrc
-    }
-
-    $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
-    Write-Output "Compressing remote_server to $remoteServerDst"
-    Compress-Archive -Path $remoteServerSrc -DestinationPath $remoteServerDst -Force
-
-    Write-Output "Remote server compressed successfully"
-}
-
 function ZipZedAndItsFriendsDebug {
     $items = @(
         ".\$CargoOutDir\zode.pdb",
         ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
-        ".\$CargoOutDir\remote_server.pdb"
+        ".\$CargoOutDir\explorer_command_injector.pdb"
     )
 
     Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
@@ -210,7 +210,8 @@ function MakeAppx {
 }
 
 function SignZedAndItsFriends {
-    if (-not $env:CI) {
+    if (-not $script:canCodeSign) {
+        Write-Output "Skipping code signing"
         return
     }
 
@@ -352,9 +353,15 @@ function BuildInstaller {
     }
 
     $innoArgs = @($issFilePath) + $defs
-    if($env:CI) {
+    if($script:canCodeSign) {
+        # zed.iss only declares `SignTool=Defaultsign` when this is set, so the directive
+        # and the argument below always appear together or not at all.
+        $env:ZODE_CODE_SIGN = "1"
         $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
         $innoArgs += "/sDefaultsign=`"$signTool`""
+    }
+    else {
+        $env:ZODE_CODE_SIGN = ""
     }
 
     # Execute Inno Setup
@@ -381,7 +388,6 @@ CheckEnvironmentVariables
 PrepareForBundle
 GenerateLicenses
 BuildZedAndItsFriends
-BuildRemoteServer
 MakeAppx
 SignZedAndItsFriends
 ZipZedAndItsFriendsDebug

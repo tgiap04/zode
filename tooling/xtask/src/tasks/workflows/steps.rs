@@ -159,15 +159,6 @@ pub fn setup_node() -> Step<Use> {
     .add_with(("node-version", "20"))
 }
 
-pub fn setup_sentry() -> Step<Use> {
-    named::uses(
-        "matbour",
-        "setup-sentry-cli",
-        "3e938c54b3018bdd019973689ef984e033b0454b",
-    )
-    .add_with(("token", vars::SENTRY_AUTH_TOKEN))
-}
-
 pub fn prettier() -> Step<Run> {
     named::bash("./script/prettier")
 }
@@ -219,6 +210,31 @@ pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
     }
 }
 
+/// Reclaims space on the runner before a bundle build. Hosted runners document 14 GB of
+/// free disk, against a release `target/` dir that runs to tens of GB.
+///
+/// The trailing `df`/`Get-PSDrive` is load-bearing for tuning: it puts the real number in
+/// the job log so the next adjustment is made against a measurement, not a guess.
+pub fn free_disk_space(platform: Platform) -> Step<Run> {
+    match platform {
+        Platform::Linux => named::bash(indoc::indoc! {r#"
+            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+            sudo docker image prune --all --force || true
+            df -h /
+        "#}),
+        // No equivalent windfall exists here, which makes the 7 GB / 14 GB arm64 mac
+        // runner the likeliest of the six targets to fail first.
+        Platform::Mac => named::bash(indoc::indoc! {r#"
+            sudo rm -rf /Applications/Xcode_15*.app
+            df -h /
+        "#}),
+        Platform::Windows => named::pwsh(indoc::indoc! {r#"
+            Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
+            Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
+        "#}),
+    }
+}
+
 pub fn clippy(platform: Platform, target: Option<&str>) -> Step<Run> {
     match platform {
         Platform::Windows => named::pwsh("./script/clippy.ps1"),
@@ -233,14 +249,21 @@ pub fn install_rustup_target(target: &str) -> Step<Run> {
     named::bash(format!("rustup target add {target}"))
 }
 
+/// Caches only the crate sources, never `target/`: the GitHub Actions cache is capped at
+/// 10 GB per repository and a release `target/` dir is many times that, so caching it
+/// would thrash rather than help. Cold compiles are the accepted cost of free runners.
 pub fn cache_rust_dependencies_namespace() -> Step<Use> {
     named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
+        "actions",
+        "cache",
+        "0057852bfaa89a56745cba8c7296529d2fc39830",
     )
-    .add_with(("cache", "rust"))
-    .add_with(("path", "~/.rustup"))
+    .add_with(("path", "~/.cargo/registry\n~/.cargo/git"))
+    .add_with((
+        "key",
+        "cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}",
+    ))
+    .add_with(("restore-keys", "cargo-${{ runner.os }}-${{ runner.arch }}-"))
 }
 
 pub fn setup_sccache(platform: Platform) -> Step<Run> {
@@ -264,27 +287,6 @@ pub fn show_sccache_stats(platform: Platform) -> Step<Run> {
         }
         Platform::Linux | Platform::Mac => named::bash("sccache --show-stats || true"),
     }
-}
-
-pub fn cache_nix_dependencies_namespace() -> Step<Use> {
-    named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
-    )
-    .add_with(("cache", "nix"))
-}
-
-pub fn cache_nix_store_macos() -> Step<Use> {
-    // On macOS, `/nix` is on a read-only root filesystem so nscloud's `cache: nix`
-    // cannot mount or symlink there. Instead we cache a user-writable directory and
-    // use nix-store --import/--export in separate steps to transfer store paths.
-    named::uses(
-        "namespacelabs",
-        "nscloud-cache-action",
-        "a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9", // v1
-    )
-    .add_with(("path", "~/nix-cache"))
 }
 
 pub fn setup_linux() -> Step<Run> {
@@ -321,8 +323,9 @@ pub struct NamedJob<J: JobType = RunJob> {
 //     }
 // }
 
-pub(crate) const DEFAULT_REPOSITORY_OWNER_GUARD: &str =
-    "(github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')";
+// Kept rather than removed: it still stops the workflows from running on someone else's
+// fork and burning their quota.
+pub(crate) const DEFAULT_REPOSITORY_OWNER_GUARD: &str = "(github.repository_owner == 'tgiap04')";
 
 pub fn repository_owner_guard_expression(trigger_always: bool) -> Expression {
     Expression::new(format!(
@@ -345,8 +348,13 @@ impl CommonJobConditions for Job {
 pub(crate) fn release_job(deps: &[&NamedJob]) -> Job {
     dependant_job(deps)
         .with_repository_owner_guard()
-        .timeout_minutes(60u32)
+        .timeout_minutes(RELEASE_JOB_TIMEOUT_MINUTES)
 }
+
+/// GitHub's own hard ceiling for a hosted job. Upstream used 60, which is generous on a
+/// 32-core machine and fatal on a 4-core one: a cold Zode build gets cut at minute 60 and
+/// looks exactly like a hang.
+pub(crate) const RELEASE_JOB_TIMEOUT_MINUTES: u32 = 360;
 
 pub(crate) fn dependant_job(deps: &[&NamedJob]) -> Job {
     let job = Job::default();

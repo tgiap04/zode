@@ -1,11 +1,7 @@
 use crate::tasks::workflows::{
-    nix_build::build_nix,
-    release::{
-        ReleaseBundleJobs, create_sentry_release, download_workflow_artifacts, notify_on_failure,
-        prep_release_artifacts,
-    },
+    release::{ReleaseBundleJobs, download_workflow_artifacts, prep_release_artifacts},
     run_bundling::{bundle_linux, bundle_mac, bundle_windows},
-    run_tests::{clippy, run_platform_tests_no_filter},
+    run_tests::{clippy_on_ref, run_platform_tests_no_filter_on_ref},
     runners::{Arch, Platform, ReleaseChannel},
     steps::{CommonJobConditions, FluentBuilder, NamedJob},
 };
@@ -16,42 +12,32 @@ use gh_workflow::*;
 /// Generates the release_nightly.yml workflow
 pub fn release_nightly() -> Workflow {
     let style = check_style();
-    // run only on windows as that's our fastest platform right now.
-    let tests = run_platform_tests_no_filter(Platform::Windows);
-    let clippy_job = clippy(Platform::Windows, None);
+    // Linux, not Windows: upstream gated on Windows because that was their fastest
+    // platform, but on GitHub-hosted runners Linux is.
+    let tests = run_platform_tests_no_filter_on_ref(Platform::Linux, "main");
+    let clippy_job = clippy_on_ref(Platform::Linux, None, Some("main"));
     let nightly = Some(ReleaseChannel::Nightly);
 
+    let gate: &[&NamedJob] = &[&style, &tests, &clippy_job];
+
     let bundle = ReleaseBundleJobs {
-        linux_aarch64: bundle_linux(Arch::AARCH64, nightly, &[&style, &tests, &clippy_job]),
-        linux_x86_64: bundle_linux(Arch::X86_64, nightly, &[&style, &tests, &clippy_job]),
-        mac_aarch64: bundle_mac(Arch::AARCH64, nightly, &[&style, &tests, &clippy_job]),
-        mac_x86_64: bundle_mac(Arch::X86_64, nightly, &[&style, &tests, &clippy_job]),
-        windows_aarch64: bundle_windows(Arch::AARCH64, nightly, &[&style, &tests, &clippy_job]),
-        windows_x86_64: bundle_windows(Arch::X86_64, nightly, &[&style, &tests, &clippy_job]),
+        linux_aarch64: bundle_linux(Arch::AARCH64, nightly, gate),
+        linux_x86_64: bundle_linux(Arch::X86_64, nightly, gate),
+        mac_aarch64: bundle_mac(Arch::AARCH64, nightly, gate),
+        mac_x86_64: bundle_mac(Arch::X86_64, nightly, gate),
+        windows_aarch64: bundle_windows(Arch::AARCH64, nightly, gate),
+        windows_x86_64: bundle_windows(Arch::X86_64, nightly, gate),
     };
 
-    let nix_linux_x86 = build_nix(
-        Platform::Linux,
-        Arch::X86_64,
-        "default",
-        None,
-        &[&style, &tests],
-    );
-    let nix_mac_arm = build_nix(
-        Platform::Mac,
-        Arch::AARCH64,
-        "default",
-        None,
-        &[&style, &tests],
-    );
-    let update_nightly_tag = update_nightly_tag_job(&bundle);
-    let notify_on_failure = notify_on_failure(&bundle.jobs());
+    let publish_nightly = publish_nightly_job(&bundle);
 
     named::workflow()
         .on(Event::default()
             // Fire every day at 7:00am UTC (Roughly before EU workday and after US workday)
             .schedule([Schedule::new("0 7 * * *")])
-            .push(Push::default().add_tag("nightly")))
+            // Lets the whole path be exercised without waiting for the cron, which matters
+            // because `schedule` only ever reads this file from the default branch.
+            .workflow_dispatch(WorkflowDispatch::default()))
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("RUST_BACKTRACE", "1"))
         .add_job(style.name, style.job)
@@ -63,18 +49,18 @@ pub fn release_nightly() -> Workflow {
             }
             workflow
         })
-        .add_job(nix_linux_x86.name, nix_linux_x86.job)
-        .add_job(nix_mac_arm.name, nix_mac_arm.job)
-        .add_job(update_nightly_tag.name, update_nightly_tag.job)
-        .add_job(notify_on_failure.name, notify_on_failure.job)
+        .add_job(publish_nightly.name, publish_nightly.job)
 }
 
+/// Formatting only. Upstream also ran `script/clippy` here, on a mac runner, which on this
+/// account would compile the workspace a second time for no new signal -- `clippy_linux`
+/// already covers it. `cargo fmt --check` compiles nothing, so the 60-minute ceiling from
+/// `release_job` stays appropriate here.
 fn check_style() -> NamedJob {
     let job = release_job(&[])
-        .runs_on(runners::MAC_DEFAULT)
-        .add_step(steps::checkout_repo().with_full_history())
-        .add_step(steps::cargo_fmt())
-        .add_step(steps::script("./script/clippy"));
+        .runs_on(runners::LINUX_SMALL)
+        .add_step(steps::checkout_repo().with_ref("main"))
+        .add_step(steps::cargo_fmt());
 
     named::job(job)
 }
@@ -90,10 +76,12 @@ fn release_job(deps: &[&NamedJob]) -> Job {
     }
 }
 
-fn update_nightly_tag_job(bundle: &ReleaseBundleJobs) -> NamedJob {
-    fn update_nightly_tag() -> Step<Run> {
+/// Publishes into a single rolling prerelease rather than upstream's DigitalOcean Spaces
+/// bucket, so nothing external is needed and old builds do not accumulate.
+fn publish_nightly_job(bundle: &ReleaseBundleJobs) -> NamedJob {
+    fn move_nightly_tag() -> Step<Run> {
         named::bash(indoc::indoc! {r#"
-            if [ "$(git rev-parse nightly)" = "$(git rev-parse HEAD)" ]; then
+            if [ "$(git rev-parse nightly 2>/dev/null || true)" = "$(git rev-parse HEAD)" ]; then
               echo "Nightly tag already points to current commit. Skipping tagging."
               exit 0
             fi
@@ -104,26 +92,29 @@ fn update_nightly_tag_job(bundle: &ReleaseBundleJobs) -> NamedJob {
         "#})
     }
 
+    // `--clobber` is what makes this roll: one release whose assets are replaced, instead
+    // of a new release per run. The tag has to move first, or `gh release create` would
+    // point the release at the previous commit.
+    fn publish_rolling_prerelease() -> Step<Run> {
+        named::bash(indoc::indoc! {r#"
+            gh release view nightly --repo="$GITHUB_REPOSITORY" \
+              || gh release create nightly --repo="$GITHUB_REPOSITORY" \
+                   --prerelease --target main --title "Nightly" \
+                   --notes "Automated build from main. Unsigned, and it does not update itself."
+            gh release upload nightly --repo="$GITHUB_REPOSITORY" --clobber release-artifacts/*
+        "#})
+        .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))
+    }
+
     NamedJob {
-        name: "update_nightly_tag".to_owned(),
+        name: "publish_nightly".to_owned(),
         job: steps::release_job(&bundle.jobs())
             .runs_on(runners::LINUX_MEDIUM)
-            .add_step(steps::checkout_repo().with_full_history())
+            .add_step(steps::checkout_repo().with_full_history().with_ref("main"))
             .add_step(download_workflow_artifacts())
             .add_step(steps::script("ls -lR ./artifacts"))
             .add_step(prep_release_artifacts())
-            .add_step(
-                steps::script("./script/upload-nightly")
-                    .add_env((
-                        "DIGITALOCEAN_SPACES_ACCESS_KEY",
-                        vars::DIGITALOCEAN_SPACES_ACCESS_KEY,
-                    ))
-                    .add_env((
-                        "DIGITALOCEAN_SPACES_SECRET_KEY",
-                        vars::DIGITALOCEAN_SPACES_SECRET_KEY,
-                    )),
-            )
-            .add_step(update_nightly_tag())
-            .add_step(create_sentry_release()),
+            .add_step(move_nightly_tag())
+            .add_step(publish_rolling_prerelease()),
     }
 }

@@ -31,7 +31,10 @@ WizardStyle=modern
 
 CloseApplications=force
 
-#if GetEnv("CI") != ""
+; Driven by the same signal that decides whether `bundle-windows.ps1` passes
+; `/sDefaultsign`. Keyed off CI alone, the two sides could disagree and Inno would abort
+; on an undefined SignTool name whenever the signing credentials were absent.
+#if GetEnv("ZODE_CODE_SIGN") != ""
 SignTool=Defaultsign
 #endif
 

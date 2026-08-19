@@ -515,6 +515,17 @@ fn check_workspace_binaries() -> NamedJob {
 }
 
 pub(crate) fn clippy(platform: Platform, arch: Option<Arch>) -> NamedJob {
+    clippy_on_ref(platform, arch, None)
+}
+
+/// `git_ref` exists for schedule-triggered workflows: GitHub evaluates `schedule` against
+/// the default branch, so a nightly gate would otherwise check a different commit than the
+/// one it goes on to bundle.
+pub(crate) fn clippy_on_ref(
+    platform: Platform,
+    arch: Option<Arch>,
+    git_ref: Option<&str>,
+) -> NamedJob {
     let target = arch.map(|arch| match (platform, arch) {
         (Platform::Mac, Arch::X86_64) => "x86_64-apple-darwin",
         (Platform::Mac, Arch::AARCH64) => "aarch64-apple-darwin",
@@ -527,7 +538,10 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>) -> NamedJob {
     };
     let mut job = release_job(&[])
         .runs_on(runner)
-        .add_step(steps::checkout_repo())
+        .add_step(match git_ref {
+            Some(git_ref) => steps::checkout_repo().with_ref(git_ref),
+            None => steps::checkout_repo(),
+        })
         .add_step(steps::setup_cargo_config(platform))
         .when(
             platform == Platform::Linux || platform == Platform::Mac,
@@ -554,14 +568,23 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>) -> NamedJob {
 }
 
 pub(crate) fn run_platform_tests(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, true)
+    run_platform_tests_impl(platform, true, None)
 }
 
 pub(crate) fn run_platform_tests_no_filter(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, false)
+    run_platform_tests_impl(platform, false, None)
 }
 
-fn run_platform_tests_impl(platform: Platform, filter_packages: bool) -> NamedJob {
+/// See `clippy_on_ref` for why `git_ref` is needed.
+pub(crate) fn run_platform_tests_no_filter_on_ref(platform: Platform, git_ref: &str) -> NamedJob {
+    run_platform_tests_impl(platform, false, Some(git_ref))
+}
+
+fn run_platform_tests_impl(
+    platform: Platform,
+    filter_packages: bool,
+    git_ref: Option<&str>,
+) -> NamedJob {
     let runner = match platform {
         Platform::Windows => runners::WINDOWS_DEFAULT,
         Platform::Linux => runners::LINUX_DEFAULT,
@@ -585,7 +608,10 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool) -> NamedJo
                         ),
                 )
             })
-            .add_step(steps::checkout_repo())
+            .add_step(match git_ref {
+                Some(git_ref) => steps::checkout_repo().with_ref(git_ref),
+                None => steps::checkout_repo(),
+            })
             .add_step(steps::setup_cargo_config(platform))
             .when(platform == Platform::Mac, |this| {
                 this.add_step(steps::cache_rust_dependencies_namespace())
