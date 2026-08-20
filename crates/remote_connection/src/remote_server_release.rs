@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn digest_comparison_detects_tampering() {
         let genuine = b"genuine remote server archive";
-        let tampered = b"tampered remote server archve";
+        let tampered = b"tampered remote server archive";
 
         let mut hasher = Sha256::new();
         hasher.update(genuine);
