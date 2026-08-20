@@ -5,11 +5,11 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use git::Clone as GitClone;
+use gpui::WeakEntity;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, img, Styled, Task, Window, actions,
+    ParentElement, Render, Styled, Task, Window, actions, img,
 };
-use gpui::WeakEntity;
 use menu::{SelectNext, SelectPrevious};
 
 use schemars::JsonSchema;

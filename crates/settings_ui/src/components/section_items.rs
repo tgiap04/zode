@@ -16,7 +16,6 @@ impl SettingsSectionHeader {
             no_padding: false,
         }
     }
-
 }
 
 impl RenderOnce for SettingsSectionHeader {

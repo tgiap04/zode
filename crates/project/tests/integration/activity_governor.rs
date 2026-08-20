@@ -48,7 +48,9 @@ async fn test_activity_transitions_never_disturb_a_running_terminal_process(
         ..SpawnInTerminal::default()
     };
     let terminal = project
-        .update(cx, |project, cx| project.create_terminal_task(spawn_task, cx))
+        .update(cx, |project, cx| {
+            project.create_terminal_task(spawn_task, cx)
+        })
         .await
         .expect("spawning `sleep 1` in a real terminal should succeed");
 

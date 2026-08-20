@@ -12,7 +12,6 @@ pub use rodio_ext::RodioExt;
 
 use crate::audio_settings::LIVE_SETTINGS;
 
-
 use super::SAMPLE_RATE;
 
 pub fn init(cx: &mut App) {
@@ -49,7 +48,6 @@ impl Audio {
             this.output.take();
         });
     }
-
 }
 
 pub fn open_input_stream(

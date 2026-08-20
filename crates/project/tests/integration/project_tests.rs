@@ -27,6 +27,7 @@ use buffer_diff::{
     assert_hunks,
 };
 use collections::{BTreeSet, HashMap, HashSet};
+use dap::adapters::DebugAdapterName;
 use encoding_rs;
 use fs::{FakeFs, PathEventKind};
 use futures::{StreamExt, future};
@@ -59,7 +60,6 @@ use parking_lot::Mutex;
 use paths::{config_dir, global_gitignore_path, tasks_file};
 use postage::stream::Stream as _;
 use pretty_assertions::{assert_eq, assert_matches};
-use dap::adapters::DebugAdapterName;
 use project::{
     Event, TaskContexts,
     debugger::session::SessionQuirks,
@@ -13891,16 +13891,18 @@ async fn test_disk_based_diagnostics_finished_only_sweeps_its_own_server_generat
 
     let fake_rust_server = fake_rust_servers.next().await.unwrap();
     let fake_other_server = fake_other_servers.next().await.unwrap();
-    fake_rust_server.notify::<lsp::notification::PublishDiagnostics>(lsp::PublishDiagnosticsParams {
-        uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
-        version: None,
-        diagnostics: vec![lsp::Diagnostic {
-            range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
-            severity: Some(lsp::DiagnosticSeverity::ERROR),
-            message: "a error".to_string(),
-            ..Default::default()
-        }],
-    });
+    fake_rust_server.notify::<lsp::notification::PublishDiagnostics>(
+        lsp::PublishDiagnosticsParams {
+            uri: Uri::from_file_path(path!("/dir/a.rs")).unwrap(),
+            version: None,
+            diagnostics: vec![lsp::Diagnostic {
+                range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 1)),
+                severity: Some(lsp::DiagnosticSeverity::ERROR),
+                message: "a error".to_string(),
+                ..Default::default()
+            }],
+        },
+    );
     fake_other_server.notify::<lsp::notification::PublishDiagnostics>(
         lsp::PublishDiagnosticsParams {
             uri: Uri::from_file_path(path!("/dir/b.ts")).unwrap(),
@@ -14546,7 +14548,9 @@ async fn test_resource_stats_reports_counts_and_activity(cx: &mut gpui::TestAppC
 // all despite the RSS caveat recorded there.
 
 #[gpui::test]
-async fn test_hibernate_shrinks_and_wake_restores_terminal_scrollback(cx: &mut gpui::TestAppContext) {
+async fn test_hibernate_shrinks_and_wake_restores_terminal_scrollback(
+    cx: &mut gpui::TestAppContext,
+) {
     init_test(cx);
     cx.executor().allow_parking();
 
@@ -14574,7 +14578,9 @@ async fn test_hibernate_shrinks_and_wake_restores_terminal_scrollback(cx: &mut g
     for line in 0..2_000 {
         generated.push_str(&format!("line {line}\n"));
     }
-    terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+    terminal.update(cx, |terminal, cx| {
+        terminal.write_output(generated.as_bytes(), cx)
+    });
     cx.executor().run_until_parked();
 
     let lines_before_hibernate = terminal.read_with(cx, |terminal, _| terminal.total_lines());
@@ -14609,7 +14615,9 @@ async fn test_hibernate_shrinks_and_wake_restores_terminal_scrollback(cx: &mut g
     // FR6: the cap lifts, but the already-dropped lines don't come back --
     // regrow past the shrunk limit to prove the cap is gone, not just that
     // it happens to still read <= 500.
-    terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+    terminal.update(cx, |terminal, cx| {
+        terminal.write_output(generated.as_bytes(), cx)
+    });
     cx.executor().run_until_parked();
     let lines_after_wake_and_regrow = terminal.read_with(cx, |terminal, _| terminal.total_lines());
     assert!(

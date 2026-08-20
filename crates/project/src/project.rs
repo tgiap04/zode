@@ -60,9 +60,7 @@ pub use worktree_store::WorktreePaths;
 
 use anyhow::{Context as _, Result, anyhow};
 use buffer_store::{BufferStore, BufferStoreEvent};
-use client::{
-    Client, Collaborator, ProjectId, TypedEnvelope, UserStore, proto,
-};
+use client::{Client, Collaborator, ProjectId, TypedEnvelope, UserStore, proto};
 use clock::ReplicaId;
 
 use dap::client::DebugAdapterClient;
@@ -4961,7 +4959,8 @@ impl Project {
     /// here diffs a snapshot by hand.
     fn wake_resources(&mut self, cx: &mut Context<Self>) {
         self.hibernate_retry.take();
-        self.lsp_store.update(cx, |lsp_store, cx| lsp_store.wake(cx));
+        self.lsp_store
+            .update(cx, |lsp_store, cx| lsp_store.wake(cx));
 
         // FR2: resume worktrees with an open buffer first, so the rescan
         // that matters most to what the user is actually looking at
