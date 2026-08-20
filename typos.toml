@@ -71,11 +71,6 @@ extend-exclude = [
     "docs/journals/",
     # Machine-generated tables; the truncated words in them come from the generator.
     "docs/generated/",
-    # The marketing site and its locale files carry Vietnamese copy.
-    "web/frontend/src/i18n/locales/",
-    "web/frontend/src/components/",
-    # Unicode range declarations read as words.
-    "web/frontend/src/index.css",
     # Vim documents commands as `:bd[elete][!]`, which is notation, not spelling.
     "docs/src/vim.md",
     # Test fixtures use deliberately mangled strings such as "AyCD{}GHIzJ".
