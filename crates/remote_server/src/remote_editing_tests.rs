@@ -2237,6 +2237,23 @@ async fn test_remote_git_checkpoints(cx: &mut TestAppContext, server_cx: &mut Te
     assert!(diff.is_empty(), "diff after restore should be empty");
 }
 
+/// Whether the store currently exposes an agent under this id.
+///
+/// Membership rather than the whole set: `external_agents()` also carries the
+/// `BUILTIN_AGENTS` this fork registers, and on the headless path they appear only once
+/// settings have been refreshed, so the exact set is not stable at a fixed point in the
+/// test. What the test is actually about is a `agent_servers` entry from server settings
+/// becoming visible, and that is what this checks.
+fn has_external_agent(project: &Entity<Project>, cx: &mut TestAppContext, id: &str) -> bool {
+    project.update(cx, |project, cx| {
+        project
+            .agent_server_store()
+            .read(cx)
+            .external_agents()
+            .any(|name| name.to_string() == id)
+    })
+}
+
 #[gpui::test]
 async fn test_remote_external_agent_server(
     cx: &mut TestAppContext,
@@ -2252,15 +2269,10 @@ async fn test_remote_external_agent_server(
         })
         .await
         .unwrap();
-    let names = project.update(cx, |project, cx| {
-        project
-            .agent_server_store()
-            .read(cx)
-            .external_agents()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>()
-    });
-    pretty_assertions::assert_eq!(names, Vec::<String>::new());
+    assert!(
+        !has_external_agent(&project, cx, "foo"),
+        "\"foo\" should not exist before the server settings declare it"
+    );
     server_cx.update_global::<SettingsStore, _>(|settings_store, cx| {
         settings_store
             .set_server_settings(
@@ -2283,15 +2295,10 @@ async fn test_remote_external_agent_server(
     });
     server_cx.run_until_parked();
     cx.run_until_parked();
-    let names = project.update(cx, |project, cx| {
-        project
-            .agent_server_store()
-            .read(cx)
-            .external_agents()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>()
-    });
-    pretty_assertions::assert_eq!(names, ["foo"]);
+    assert!(
+        has_external_agent(&project, cx, "foo"),
+        "\"foo\" should be visible once the server settings declare it"
+    );
     let command = project
         .update(cx, |project, cx| {
             project.agent_server_store().update(cx, |store, cx| {

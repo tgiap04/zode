@@ -645,13 +645,18 @@ mod tests {
         });
         let (workspace, cx) = init_test(user_settings_json, cx).await;
 
-        // User has buffer_font_size: 10, factory default is 15.
+        // The factory default is whatever `assets/settings/default.json` says, which this
+        // fork lowered to 10.5. That file wins over the `#[default]` in the settings
+        // types, so read the value there rather than from the Rust definitions.
+        const FACTORY_BUFFER_FONT_SIZE: f32 = 10.5;
+
+        // User has buffer_font_size: 10.
         cx.update(|_, cx| {
             assert_eq!(ThemeSettings::get_global(cx).buffer_font_size(cx), px(10.0));
         });
 
-        // "Clean Slate" has base: "default" with no settings overrides,
-        // so we get the factory default (15), not the user's value (10).
+        // "Clean Slate" has base: "default" with no settings overrides, so we get the
+        // factory default rather than the user's value.
         cx.dispatch_action(settings_profile_selector::Toggle);
         let picker = active_settings_profile_picker(&workspace, cx);
         cx.dispatch_action(SelectNext);
@@ -661,7 +666,10 @@ mod tests {
                 picker.delegate.selected_profile_name.as_deref(),
                 Some("Clean Slate")
             );
-            assert_eq!(ThemeSettings::get_global(cx).buffer_font_size(cx), px(15.0));
+            assert_eq!(
+                ThemeSettings::get_global(cx).buffer_font_size(cx),
+                px(FACTORY_BUFFER_FONT_SIZE)
+            );
         });
 
         // "Custom on Defaults" has base: "default" with buffer_font_size: 30,
