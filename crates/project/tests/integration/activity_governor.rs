@@ -2,7 +2,11 @@ use fs::FakeFs;
 use gpui::TestAppContext;
 use project::{Project, ProjectActivity};
 use serde_json::json;
+// Only the `#[cfg(unix)]` test below spawns a terminal task, so on Windows these are
+// unused imports and `-D warnings` turns that into a build failure.
+#[cfg(unix)]
 use task::SpawnInTerminal;
+#[cfg(unix)]
 use terminal::TaskStatus;
 
 use crate::init_test;

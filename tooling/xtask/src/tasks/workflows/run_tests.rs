@@ -637,10 +637,10 @@ fn run_platform_tests_impl(
                 steps::install_linux_dependencies,
             )
             .add_step(steps::setup_node())
-            .when(
-                platform == Platform::Linux || platform == Platform::Mac,
-                |job| job.add_step(steps::cargo_install_nextest()),
-            )
+            // Windows included: it was excluded because upstream's self-hosted runner has
+            // nextest preinstalled, and a hosted one does not -- `cargo nextest` failed
+            // with "no such command".
+            .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(platform))
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
