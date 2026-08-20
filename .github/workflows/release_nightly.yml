@@ -9,8 +9,34 @@ on:
   - cron: 0 7 * * *
   workflow_dispatch: {}
 jobs:
-  check_style:
+  main_moved_since_nightly:
     if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
+    steps:
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+        fetch-depth: 0
+        ref: main
+    - id: compare
+      name: compare
+      run: |
+        previous=$(git rev-parse --verify --quiet refs/tags/nightly || true)
+        current=$(git rev-parse HEAD)
+        if [ "$previous" = "$current" ]; then
+            echo "main is unchanged since the last nightly ($current); skipping the build."
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+        else
+            echo "main moved: ${previous:-<no nightly tag yet>} -> $current"
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+        fi
+    outputs:
+      moved: ${{ steps.compare.outputs.moved }}
+  check_style:
+    needs:
+    - main_moved_since_nightly
+    if: (github.repository_owner == 'tgiap04') && (needs.main_moved_since_nightly.outputs.moved == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
@@ -22,7 +48,9 @@ jobs:
       run: cargo fmt --all -- --check
     timeout-minutes: 60
   run_tests_linux:
-    if: (github.repository_owner == 'tgiap04')
+    needs:
+    - main_moved_since_nightly
+    if: (github.repository_owner == 'tgiap04') && (needs.main_moved_since_nightly.outputs.moved == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     env:
       CC: clang
@@ -83,7 +111,9 @@ jobs:
         - 5432:5432
         options: --health-cmd pg_isready --health-interval 500ms --health-timeout 5s --health-retries 10
   clippy_linux:
-    if: (github.repository_owner == 'tgiap04')
+    needs:
+    - main_moved_since_nightly
+    if: (github.repository_owner == 'tgiap04') && (needs.main_moved_since_nightly.outputs.moved == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     env:
       CC: clang
