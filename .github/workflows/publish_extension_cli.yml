@@ -27,6 +27,7 @@ jobs:
         restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: publish_extension_cli::publish_job::build_extension_cli
       run: cargo build --release --package extension_cli
     - name: publish_extension_cli::publish_job::upload_binary

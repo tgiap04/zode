@@ -308,8 +308,11 @@ pub fn show_sccache_stats(platform: Platform) -> Step<Run> {
     }
 }
 
+/// Bounded because this wedged once for 4h27m inside `apt-get update`, with the 360-minute
+/// job ceiling as its only backstop. Installing the dependencies takes a couple of minutes,
+/// so 20 turns an apt mirror stall into a quick, obvious failure that the next run clears.
 pub fn setup_linux() -> Step<Run> {
-    named::bash("./script/linux")
+    named::bash("./script/linux").timeout_minutes(20u32)
 }
 
 fn download_wasi_sdk() -> Step<Run> {

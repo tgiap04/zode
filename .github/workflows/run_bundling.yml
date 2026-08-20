@@ -36,6 +36,7 @@ jobs:
         df -h /
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: ./script/bundle-linux
@@ -73,6 +74,7 @@ jobs:
         df -h /
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: ./script/bundle-linux

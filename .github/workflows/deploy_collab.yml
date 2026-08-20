@@ -35,6 +35,7 @@ jobs:
         restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: steps::cargo_fmt
@@ -69,6 +70,7 @@ jobs:
         restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: steps::cargo_install_nextest
