@@ -96,9 +96,6 @@ echo "Compiling zed binaries"
 cargo build ${build_flag} --package zode --package cli \
     --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql \
     --target $target_triple
-# Build remote_server in separate invocation to prevent feature unification from other crates
-# from influencing dynamic libraries required by it.
-cargo build ${build_flag} --package remote_server --target $target_triple
 
 echo "Creating application bundle"
 pushd crates/zed
@@ -258,7 +255,7 @@ function sign_app_binaries() {
     else
         dmg_target_directory="target/${target_triple}/${target_dir}"
         dmg_source_directory="${dmg_target_directory}/dmg"
-        dmg_file_path="${dmg_target_directory}/Zed-${arch_suffix}.dmg"
+        dmg_file_path="${dmg_target_directory}/Zode-${arch_suffix}.dmg"
         xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
 
         rm -rf ${dmg_source_directory}
@@ -296,15 +293,6 @@ function sign_app_binaries() {
     fi
 }
 
-function sign_binary() {
-    local binary_path=$1
-
-    if [[ $can_code_sign = true ]]; then
-        echo "Code signing executable $binary_path"
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${binary_path}" -v
-    fi
-}
-
 function upload_debug_symbols() {
     if [ "$local_install" = true ]; then
         echo "local install; skipping sentry upload."
@@ -316,19 +304,13 @@ function upload_debug_symbols() {
             cat target/dsymutil.log
             exit 1
         fi
-        if ! dsymutil --flat "target/${target_triple}/${target_dir}/remote_server" 2> target/dsymutil.log; then
-            echo "dsymutil failed"
-            cat target/dsymutil.log
-            exit 1
-        fi
         # note: this uploads the unstripped binary which is needed because it contains
         # .eh_frame data for stack unwinding. see https://github.com/getsentry/symbolic/issues/783
         # Try uploading up to 3 times
         for attempt in 1 2 3; do
             echo "Sentry upload attempt $attempt..."
             if sentry-cli debug-files upload --include-sources --wait -p zode -o zode-dev \
-                "target/${target_triple}/${target_dir}/zode.dwarf" \
-                "target/${target_triple}/${target_dir}/remote_server.dwarf"; then
+                "target/${target_triple}/${target_dir}/zode.dwarf"; then
                 break
             else
                 echo "Sentry upload failed on attempt $attempt"
@@ -352,6 +334,3 @@ for driver in "${database_drivers[@]}"; do
     cp "target/${target_triple}/${target_dir}/${driver}" "${app_path}/Contents/MacOS/${driver}"
 done
 sign_app_binaries
-
-sign_binary "target/$target_triple/release/remote_server"
-gzip -f --stdout --best target/$target_triple/release/remote_server > target/zode-remote-server-macos-$arch_suffix.gz

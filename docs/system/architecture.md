@@ -142,20 +142,20 @@ graph TB
 
 ## Tech Stack
 
-| Layer | Technology | Version / Evidence |
-|-------|------------|---------|
-| Language | Rust | toolchain per `rust-toolchain.toml` |
-| UI framework | GPUI (in-house, `crates/gpui`) | GPU-accelerated retained-mode UI; own entity/element/layout system (Taffy flex layout) |
-| Rendering backend | `gpui_wgpu` (wgpu) + platform backends | `gpui_macos` (Cocoa/Metal via objc2), `gpui_linux` (X11/Wayland), `gpui_windows` (Win32/Direct3D), `gpui_web` (wasm32-unknown-unknown, experimental) |
-| Text/buffer engine | `text`, `rope`, `sum_tree` (in-house rope + B-tree index) | |
-| Language intelligence | `lsp` (custom LSP client), tree-sitter grammars via `grammars`/`languages` | LSP client transport, not tower-lsp |
-| Debugging | `dap` / `dap_adapters` (Debug Adapter Protocol client) | separate from the language-server layer |
-| Extension runtime | WASM via `extension_host`, in-tree extensions under `extensions/*` (glsl, html, proto, test-extension) | |
-| Local persistence | SQLite via `sqlez` (thin async wrapper) + `db` | app/window/multi-workspace state, KV store |
-| Remote development | `client` + `rpc`/`proto` (custom binary wire protocol) + `remote`/`remote_connection` + `remote_server` (headless binary, `x86_64-unknown-linux-musl` target) | SSH-based remoting only — **no collaboration backend, no multiplayer, no AI agent** in this fork |
-| Async runtime | GPUI's own executor (`cx.spawn`, `cx.background_spawn`); `gpui_tokio` bridges Tokio only where a dependency requires it | not tokio-first |
-| Build/workspace | Cargo workspace, resolver "2", 180 crate paths (`crates/*`) + 4 `extensions/*` + 3 `tooling/*` | root `Cargo.toml` |
-| Packaging targets | macOS/Linux/Windows native, musl (remote server), WASM (extensions + experimental web) | `rust-toolchain.toml` |
+| Layer                 | Technology                                                                                                                                                    | Version / Evidence                                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Language              | Rust                                                                                                                                                          | toolchain per `rust-toolchain.toml`                                                                                                                  |
+| UI framework          | GPUI (in-house, `crates/gpui`)                                                                                                                                | GPU-accelerated retained-mode UI; own entity/element/layout system (Taffy flex layout)                                                               |
+| Rendering backend     | `gpui_wgpu` (wgpu) + platform backends                                                                                                                        | `gpui_macos` (Cocoa/Metal via objc2), `gpui_linux` (X11/Wayland), `gpui_windows` (Win32/Direct3D), `gpui_web` (wasm32-unknown-unknown, experimental) |
+| Text/buffer engine    | `text`, `rope`, `sum_tree` (in-house rope + B-tree index)                                                                                                     |                                                                                                                                                      |
+| Language intelligence | `lsp` (custom LSP client), tree-sitter grammars via `grammars`/`languages`                                                                                    | LSP client transport, not tower-lsp                                                                                                                  |
+| Debugging             | `dap` / `dap_adapters` (Debug Adapter Protocol client)                                                                                                        | separate from the language-server layer                                                                                                              |
+| Extension runtime     | WASM via `extension_host`, in-tree extensions under `extensions/*` (glsl, html, proto, test-extension)                                                        |                                                                                                                                                      |
+| Local persistence     | SQLite via `sqlez` (thin async wrapper) + `db`                                                                                                                | app/window/multi-workspace state, KV store                                                                                                           |
+| Remote development    | `client` + `rpc`/`proto` (custom binary wire protocol) + `remote`/`remote_connection` + `remote_server` (headless binary, `x86_64-unknown-linux-musl` target) | SSH-based remoting only — **no collaboration backend, no multiplayer, no AI agent** in this fork                                                     |
+| Async runtime         | GPUI's own executor (`cx.spawn`, `cx.background_spawn`); `gpui_tokio` bridges Tokio only where a dependency requires it                                       | not tokio-first                                                                                                                                      |
+| Build/workspace       | Cargo workspace, resolver "2", 180 crate paths (`crates/*`) + 4 `extensions/*` + 3 `tooling/*`                                                                | root `Cargo.toml`                                                                                                                                    |
+| Packaging targets     | macOS/Linux/Windows native, musl (remote server), WASM (extensions + experimental web)                                                                        | `rust-toolchain.toml`                                                                                                                                |
 
 **Removed relative to upstream Zed** (verified absent from workspace members and `crates/`): `agent`,
 `agent_ui`, `acp_thread`, `collab` (server binary), `language_model` + per-vendor provider crates

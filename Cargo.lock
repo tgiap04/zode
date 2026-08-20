@@ -222,7 +222,6 @@ dependencies = [
  "settings",
  "smol",
  "task",
- "tempfile",
  "terminal",
  "thiserror 2.0.17",
  "ui",
@@ -230,30 +229,20 @@ dependencies = [
  "uuid",
  "watch",
  "workspace",
- "zed_credentials_provider",
 ]
 
 [[package]]
 name = "agent_settings"
 version = "0.1.0"
 dependencies = [
- "agent-client-protocol",
- "anyhow",
- "collections",
- "convert_case 0.8.0",
  "fs",
- "futures 0.3.32",
  "gpui",
- "log",
  "paths",
  "project",
- "regex",
- "schemars 1.0.4",
  "serde",
  "serde_json",
  "serde_json_lenient",
  "settings",
- "util",
 ]
 
 [[package]]
@@ -269,9 +258,6 @@ dependencies = [
  "audio",
  "base64 0.22.1",
  "buffer_diff",
- "chrono",
- "client",
- "cloud_api_types",
  "collections",
  "component",
  "db",
@@ -304,12 +290,10 @@ dependencies = [
  "pretty_assertions",
  "project",
  "prompt_store",
- "proto",
  "regex",
  "release_channel",
  "rope",
  "schemars 1.0.4",
- "semver",
  "serde",
  "serde_json",
  "settings",
@@ -322,7 +306,6 @@ dependencies = [
  "theme_settings",
  "time",
  "ui",
- "ui_input",
  "url",
  "util",
  "uuid",

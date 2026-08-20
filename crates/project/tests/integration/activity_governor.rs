@@ -2,7 +2,11 @@ use fs::FakeFs;
 use gpui::TestAppContext;
 use project::{Project, ProjectActivity};
 use serde_json::json;
+// Only the `#[cfg(unix)]` test below spawns a terminal task, so on Windows these are
+// unused imports and `-D warnings` turns that into a build failure.
+#[cfg(unix)]
 use task::SpawnInTerminal;
+#[cfg(unix)]
 use terminal::TaskStatus;
 
 use crate::init_test;
@@ -48,7 +52,9 @@ async fn test_activity_transitions_never_disturb_a_running_terminal_process(
         ..SpawnInTerminal::default()
     };
     let terminal = project
-        .update(cx, |project, cx| project.create_terminal_task(spawn_task, cx))
+        .update(cx, |project, cx| {
+            project.create_terminal_task(spawn_task, cx)
+        })
         .await
         .expect("spawning `sleep 1` in a real terminal should succeed");
 

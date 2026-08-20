@@ -1,4 +1,5 @@
 <!-- layout-exempt: plan-dir draft -->
+
 # Design Intent
 
 **Project**: Zode (Zed fork)
@@ -8,6 +9,7 @@
 **Status**: EXPERIMENTAL — report-only (see disclaimer below)
 
 <!-- disclaimer:start -->
+
 > **⚠ EXPERIMENTAL — read before trusting anything below.**
 >
 > This document infers "why the system was built this way" — architecture choices, patterns,
@@ -26,6 +28,7 @@
 >   differing stacks with `[INFERRED]` ≤25%, zero fabricated citations, and human confirmation —
 >   see `CHANGELOG.md` v26.1.0 sub-entry 3 for the full criteria. Until then, treat this
 >   artifact as advisory, not authoritative.
+
 <!-- disclaimer:end -->
 
 **Non-duplication boundary**: this file holds ONLY cross-cutting **architectural rationale** —
@@ -57,8 +60,8 @@ edit-prediction features, in-app auto-update, and crash reporting... 372,180 lin
 That same commit's body documents the removal was forced to be atomic by tooling, not by
 design preference — "The removal is one commit because cargo makes it one: a stale path in
 `[workspace.dependencies]` fails `cargo metadata` for the entire workspace before any per-crate
-error can surface" — which is evidence about *how* the fork was executed, not *why* collab was
-targeted for removal in the first place. The *why* itself is not stated in any commit message
+error can surface" — which is evidence about _how_ the fork was executed, not _why_ collab was
+targeted for removal in the first place. The _why_ itself is not stated in any commit message
 or doc found. [INFERRED] — no commit message or doc states the business motive; inferred from
 the pattern that every removed subsystem (collab, auth, cloud API, AI/edit-prediction,
 auto-update, crash reporting) requires either a hosted backend or a vendor account, and what
@@ -115,11 +118,11 @@ on 2026-08-07), including `debugger_ui`'s session views holding `WeakEntity<Proj
 `WeakEntity<Workspace>` (e.g. `crates/debugger_ui/src/debugger_panel.rs`,
 `crates/project/src/connection_manager.rs`). `crates/workspace/src/multi_workspace.rs:352-364`
 gives an explicit, non-generic instance of the reasoning at the call-site level: `warm_since`
-holds a `WeakEntity<Project>` (not `Workspace`) "Deliberately a *project* handle, not a
+holds a `WeakEntity<Project>` (not `Workspace`) "Deliberately a _project_ handle, not a
 workspace one: nothing in `MultiWorkspace` keeps a defocused, never-independently-retained
 workspace's `Entity<Workspace>` alive at all once `activate()` reassigns
 `self.active_workspace` away from it... the shell can be dropped out from under this bookkeeping
-while its `Project` lives on." This shows the choice of *which* entity to hold weakly is itself
+while its `Project` lives on." This shows the choice of _which_ entity to hold weakly is itself
 load-bearing engineering judgment, not boilerplate — a `WeakEntity<Workspace>` "would go stale
 exactly when [the workspace shell drops]; the project itself does not"
 (`crates/workspace/src/multi_workspace.rs:363-364`).

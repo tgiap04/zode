@@ -733,10 +733,15 @@ async fn test_extension_store_with_test_extension(cx: &mut TestAppContext) {
     }));
 
     let executor = cx.executor();
+    // This step compiles the test extension's Rust crate to WASM, so its budget tracks the
+    // machine rather than any logic under test: 60s held on a 32-core runner and expired on
+    // the hosted mac and Windows ones, which have 3 and 4 cores. Kept below the 300s
+    // nextest override for this test, so a genuine hang still reports through the message
+    // above rather than being cut off by the harness.
     await_or_timeout(
         &executor,
         "awaiting install_dev_extension",
-        60,
+        240,
         extension_store.update(cx, |store, cx| {
             store.install_dev_extension(test_extension_dir.clone(), cx)
         }),

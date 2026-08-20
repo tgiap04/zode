@@ -18,7 +18,7 @@ on:
         default: ''
 jobs:
   run_perf:
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -30,6 +30,7 @@ jobs:
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: compare_perf::run_perf::install_hyperfine

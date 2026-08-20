@@ -69,7 +69,7 @@ If this script is insufficient for your use case, you run into problems running 
 
 Zode supports the follow macOS releases:
 
-| Version       | Codename | Apple Status   | Zode Status          |
+| Version       | Codename | Apple Status   | Zode Status         |
 | ------------- | -------- | -------------- | ------------------- |
 | macOS 26.x    | Tahoe    | Supported      | Supported           |
 | macOS 15.x    | Sequoia  | Supported      | Supported           |

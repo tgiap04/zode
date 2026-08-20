@@ -14,6 +14,10 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $buildSuccess = $false
 
+# Stays false unless CheckEnvironmentVariables finds a full set of signing credentials,
+# so a local build never tries to sign.
+$canCodeSign = $false
+
 $OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "x86_64" }
     "Arm64" { "aarch64" }
@@ -43,8 +47,38 @@ function Get-VSArch {
     }
 }
 
+# Located through vswhere rather than a hard-coded path: upstream's self-hosted runner
+# has the Community edition, GitHub-hosted runners ship Enterprise, and the path carries
+# the edition name. vswhere itself does live at a fixed, edition-independent location.
+function Get-VsDevShellPath {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -property installationPath | Select-Object -First 1
+        if ($installPath) {
+            $candidate = Join-Path $installPath "Common7\Tools\Launch-VsDevShell.ps1"
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    # vswhere only lists VS 2017 and newer; fall back to a direct search so an unusual
+    # layout produces a real path instead of a misleading "vswhere missing" message.
+    $fallback = Get-ChildItem -Path "$env:ProgramFiles\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio" `
+        -Filter "Launch-VsDevShell.ps1" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($fallback) {
+        return $fallback
+    }
+
+    throw "Could not locate Launch-VsDevShell.ps1. Is Visual Studio with the C++ workload installed?"
+}
+
+$vsDevShell = Get-VsDevShellPath
+Write-Output "Using VS dev shell: $vsDevShell"
+
 Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
@@ -70,18 +104,42 @@ function CheckEnvironmentVariables {
         return
     }
 
-    $requiredVars = @(
-        'ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL',
+    # Emptiness, not existence: a workflow that maps a secret which does not exist still
+    # defines the variable, with an empty value. `Test-Path env:X` is true for those, which
+    # is why `script/bundle-mac` tests `-n "${MACOS_CERTIFICATE:-}"` rather than presence.
+    function Test-EnvMissing {
+        param([string]$Name)
+        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name))
+    }
+
+    $requiredVars = @('ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL')
+
+    foreach ($var in $requiredVars) {
+        if (Test-EnvMissing $var) {
+            Write-Error "$var is not set"
+            exit 1
+        }
+    }
+
+    # Signing is optional, the way `script/bundle-mac` already treats it: without the
+    # Azure Trusted Signing credentials the build still produces an installer, just an
+    # unsigned one. Upstream listed these as required and exited 1, which is correct for
+    # them and fatal for a fork that has no certificate.
+    $signingVars = @(
         'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
         'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'ENDPOINT',
         'FILE_DIGEST', 'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER'
     )
 
-    foreach ($var in $requiredVars) {
-        if (-not (Test-Path "env:$var")) {
-            Write-Error "$var is not set"
-            exit 1
-        }
+    $missingSigningVars = $signingVars | Where-Object { Test-EnvMissing $_ }
+
+    if ($missingSigningVars) {
+        $script:canCodeSign = $false
+        Write-Output "NOT code signing: missing $($missingSigningVars -join ', ')"
+    }
+    else {
+        $script:canCodeSign = $true
+        Write-Output "Code signing enabled"
     }
 }
 
@@ -132,32 +190,20 @@ function BuildZedAndItsFriends {
     Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
 }
 
-function BuildRemoteServer {
-    Write-Output "Building remote_server for $target"
-    cargo build --release --package remote_server --target $target
-
-    # Create zipped remote server binary
-    $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
-
-    if ($env:CI) {
-        Write-Output "Code signing remote_server.exe"
-        & "$innoDir\sign.ps1" $remoteServerSrc
-    }
-
-    $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
-    Write-Output "Compressing remote_server to $remoteServerDst"
-    Compress-Archive -Path $remoteServerSrc -DestinationPath $remoteServerDst -Force
-
-    Write-Output "Remote server compressed successfully"
-}
-
 function ZipZedAndItsFriendsDebug {
     $items = @(
         ".\$CargoOutDir\zode.pdb",
         ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
-        ".\$CargoOutDir\remote_server.pdb"
-    )
+        ".\$CargoOutDir\explorer_command_injector.pdb"
+    ) | Where-Object { Test-Path $_ }
+
+    # Release builds in CI run with CARGO_PROFILE_RELEASE_DEBUG=none to fit the runner's
+    # disk, and then no PDB is emitted at all. Compress-Archive treats a missing path as an
+    # error, so an archive of nothing must be skipped rather than attempted.
+    if ($items.Count -eq 0) {
+        Write-Output "No PDBs to archive (built without debug info)"
+        return
+    }
 
     Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
 }
@@ -210,7 +256,8 @@ function MakeAppx {
 }
 
 function SignZedAndItsFriends {
-    if (-not $env:CI) {
+    if (-not $script:canCodeSign) {
+        Write-Output "Skipping code signing"
         return
     }
 
@@ -323,10 +370,19 @@ function BuildInstaller {
         }
     }
 
-    # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
-    # Currently, we are using Windows 2022 runner.
-    # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
+    # The 2025 runner image ships Inno Setup but does not put iscc on PATH,
+    # https://github.com/actions/runner-images/issues/11228 -- hence the explicit path,
+    # with PATH as a fallback for anywhere that does expose it.
     $innoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path $innoSetupPath)) {
+        $onPath = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+        if ($onPath) {
+            $innoSetupPath = $onPath.Source
+        }
+        else {
+            throw "Inno Setup not found at '$innoSetupPath' and ISCC.exe is not on PATH. Install it with: choco install innosetup"
+        }
+    }
 
     $definitions = @{
         "AppId"          = $appId
@@ -352,9 +408,15 @@ function BuildInstaller {
     }
 
     $innoArgs = @($issFilePath) + $defs
-    if($env:CI) {
+    if($script:canCodeSign) {
+        # zed.iss only declares `SignTool=Defaultsign` when this is set, so the directive
+        # and the argument below always appear together or not at all.
+        $env:ZODE_CODE_SIGN = "1"
         $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
         $innoArgs += "/sDefaultsign=`"$signTool`""
+    }
+    else {
+        $env:ZODE_CODE_SIGN = ""
     }
 
     # Execute Inno Setup
@@ -381,7 +443,6 @@ CheckEnvironmentVariables
 PrepareForBundle
 GenerateLicenses
 BuildZedAndItsFriends
-BuildRemoteServer
 MakeAppx
 SignZedAndItsFriends
 ZipZedAndItsFriendsDebug

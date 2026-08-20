@@ -404,16 +404,12 @@ impl CommitModal {
             .h(px(self.properties.footer_height))
             .gap_1()
             .child(
-                h_flex()
-                    .gap_1()
-                    .flex_shrink()
-                    .overflow_x_hidden()
-                    .child(
-                        h_flex()
-                            .flex_shrink()
-                            .overflow_x_hidden()
-                            .child(branch_picker),
-                    ),
+                h_flex().gap_1().flex_shrink().overflow_x_hidden().child(
+                    h_flex()
+                        .flex_shrink()
+                        .overflow_x_hidden()
+                        .child(branch_picker),
+                ),
             )
             .child(div().flex_1())
             .child(

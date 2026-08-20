@@ -9,8 +9,8 @@ on:
   workflow_dispatch: {}
 jobs:
   scheduled_compliance_check:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -18,10 +18,13 @@ jobs:
         clean: false
         fetch-depth: 0
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - id: determine-version
       name: compliance_check::scheduled_compliance_check
       run: |

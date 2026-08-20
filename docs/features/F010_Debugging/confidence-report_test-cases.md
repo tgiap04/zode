@@ -14,9 +14,9 @@ generated_by: derive_confidence_report.py
 
 Legend: `○` = cited (Source file:line present) · `△` = marker-tagged (uncertain, no citation).
 
-| Claim | Section | Evidence (file:line) | Status ○/△ |
-|---|---|---|---|
-| marked `` with "exact line range not re-verified in this pass" — too uncertain a basis | Coverage Notes | — | △ |
+| Claim                                                                                  | Section        | Evidence (file:line) | Status ○/△ |
+| -------------------------------------------------------------------------------------- | -------------- | -------------------- | ---------- |
+| marked `` with "exact line range not re-verified in this pass" — too uncertain a basis | Coverage Notes | —                    | △          |
 
 ## Missing Info
 

@@ -27,6 +27,11 @@ accepted = [
     "Zlib",
     "BSL-1.0",
     "bzip2-1.0.6",
+    # webpki-roots >= 1.0 declares this for the Mozilla root CA data it ships.
+    # Permissive and not copyleft: it permits use, modification and redistribution,
+    # requiring only that the licence text travel with the data. Without it,
+    # `script/generate-licenses` fails, and every bundle script calls that first.
+    "CDLA-Permissive-2.0",
 ]
 
 [procinfo.clarify]

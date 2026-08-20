@@ -93,19 +93,19 @@ graph TB
 
 ### Technology Stack
 
-| Layer | Technology | Version |
-|-------|------------|---------|
-| Language | Rust | per `rust-toolchain.toml` |
-| UI framework | GPUI (in-house, `crates/gpui`) | GPU-accelerated retained-mode UI, own entity/element/layout system |
-| Rendering | `gpui_wgpu` + platform backends | `gpui_macos`, `gpui_linux`, `gpui_windows`, `gpui_web` (experimental) |
-| Text/buffer engine | `text`, `rope`, `sum_tree` | in-house rope + B-tree index |
-| Language intelligence | `lsp` (custom client), tree-sitter grammars | not tower-lsp |
-| Debugging | `dap` / `dap_adapters` | Debug Adapter Protocol |
-| Extension runtime | WASM via `extension_host` | in-tree extensions: glsl, html, proto, test-extension |
-| Local persistence | SQLite via `sqlez` + `db` | app/window/multi-workspace state |
-| Remote development | `client` + `rpc`/`proto` + `remote_server` | SSH-based remoting only — no collaboration backend |
-| Async runtime | GPUI's own executor (`cx.spawn`, `cx.background_spawn`) | not Tokio-first (`gpui_tokio` bridges select dependencies only) |
-| Build/workspace | Cargo workspace, resolver "2", 180 crate paths (179 top-level + 1 nested) + 4 extensions + 3 tooling crates | root `Cargo.toml` |
+| Layer                 | Technology                                                                                                  | Version                                                               |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Language              | Rust                                                                                                        | per `rust-toolchain.toml`                                             |
+| UI framework          | GPUI (in-house, `crates/gpui`)                                                                              | GPU-accelerated retained-mode UI, own entity/element/layout system    |
+| Rendering             | `gpui_wgpu` + platform backends                                                                             | `gpui_macos`, `gpui_linux`, `gpui_windows`, `gpui_web` (experimental) |
+| Text/buffer engine    | `text`, `rope`, `sum_tree`                                                                                  | in-house rope + B-tree index                                          |
+| Language intelligence | `lsp` (custom client), tree-sitter grammars                                                                 | not tower-lsp                                                         |
+| Debugging             | `dap` / `dap_adapters`                                                                                      | Debug Adapter Protocol                                                |
+| Extension runtime     | WASM via `extension_host`                                                                                   | in-tree extensions: glsl, html, proto, test-extension                 |
+| Local persistence     | SQLite via `sqlez` + `db`                                                                                   | app/window/multi-workspace state                                      |
+| Remote development    | `client` + `rpc`/`proto` + `remote_server`                                                                  | SSH-based remoting only — no collaboration backend                    |
+| Async runtime         | GPUI's own executor (`cx.spawn`, `cx.background_spawn`)                                                     | not Tokio-first (`gpui_tokio` bridges select dependencies only)       |
+| Build/workspace       | Cargo workspace, resolver "2", 180 crate paths (179 top-level + 1 nested) + 4 extensions + 3 tooling crates | root `Cargo.toml`                                                     |
 
 ## Data Flow
 

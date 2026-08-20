@@ -1,18 +1,38 @@
-pub const LINUX_SMALL: Runner = Runner("namespace-profile-2x4-ubuntu-2404");
+// GitHub-hosted standard runners: free without a minute cap on public repositories.
+// The size tiers below all resolve to the same label because only one size exists at
+// that price (4 vCPU / 16 GB); the distinct names are kept so the ~60 call sites don't
+// have to change.
+pub const LINUX_SMALL: Runner = Runner("ubuntu-24.04");
 pub const LINUX_DEFAULT: Runner = LINUX_XL;
-pub const LINUX_XL: Runner = Runner("namespace-profile-16x32-ubuntu-2204");
-pub const LINUX_LARGE: Runner = Runner("namespace-profile-8x16-ubuntu-2204");
-pub const LINUX_MEDIUM: Runner = Runner("namespace-profile-4x8-ubuntu-2204");
+pub const LINUX_XL: Runner = Runner("ubuntu-24.04");
+pub const LINUX_LARGE: Runner = Runner("ubuntu-24.04");
+pub const LINUX_MEDIUM: Runner = Runner("ubuntu-24.04");
 
-// Using Ubuntu 20.04 for minimal glibc version
-pub const LINUX_X86_BUNDLER: Runner = Runner("namespace-profile-32x64-ubuntu-2004");
-pub const LINUX_ARM_BUNDLER: Runner = Runner("namespace-profile-8x32-ubuntu-2004-arm-m4");
+// 24.04, which sets the glibc floor at 2.39. Upstream targeted 20.04 (glibc 2.31) for a
+// lower floor, but GitHub retired that image, and 22.04 does not work here: `script/linux`
+// only installs clang-18 on its 20.04 branch, webrtc-sys needs clang 17+, and while the
+// x86 22.04 image happens to carry clang-18 the arm one does not. 24.04 ships clang-18 as
+// the default `clang` on both architectures.
+//
+// Lowering the floor again means building inside a container -- `Dockerfile-distros` is
+// already in the repository for that.
+pub const LINUX_X86_BUNDLER: Runner = Runner("ubuntu-24.04");
+pub const LINUX_ARM_BUNDLER: Runner = Runner("ubuntu-24.04-arm");
 
-// Larger Ubuntu runner with glibc 2.39 for extension bundling
-pub const LINUX_LARGE_RAM: Runner = Runner("namespace-profile-8x32-ubuntu-2404");
+pub const LINUX_LARGE_RAM: Runner = Runner("ubuntu-24.04");
 
-pub const MAC_DEFAULT: Runner = Runner("namespace-profile-mac-large");
-pub const WINDOWS_DEFAULT: Runner = Runner("self-32vcpu-windows-2022");
+// The arm64 mac runner carries only 7 GB of RAM against the Intel one's 14 GB, so the
+// aarch64 bundle is the tightest of the six targets rather than the roomiest.
+pub const MAC_DEFAULT: Runner = Runner("macos-15");
+pub const MAC_INTEL: Runner = Runner("macos-15-intel");
+
+// Both Windows architectures build here, on an x64 host. There is a `windows-11-arm`
+// runner, but `Launch-VsDevShell.ps1` only accepts `x86` or `amd64` for `-HostArch`, so a
+// native arm64 host is rejected outright. Cross-compiling from x64 is what upstream does
+// and what `bundle-windows.ps1` is written for -- it takes the target architecture as an
+// argument, unlike `bundle-linux`, which builds for whatever `uname -m` reports and
+// therefore does need a native arm runner.
+pub const WINDOWS_DEFAULT: Runner = Runner("windows-2025");
 
 pub struct Runner(&'static str);
 
@@ -42,6 +62,13 @@ impl Arch {
         match self {
             Arch::X86_64 => LINUX_X86_BUNDLER,
             Arch::AARCH64 => LINUX_ARM_BUNDLER,
+        }
+    }
+
+    pub fn mac_bundler(&self) -> Runner {
+        match self {
+            Arch::X86_64 => MAC_INTEL,
+            Arch::AARCH64 => MAC_DEFAULT,
         }
     }
 }

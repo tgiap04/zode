@@ -8,11 +8,11 @@ N/A — `generic-source` profile, no screen-list/route surface for this native d
 
 ### Editor Surface (non-route adaptation)
 
-| Surface | What User Sees | What User Can Do |
-|---------|----------------|-------------------|
-| Editor tab (single-file) | Buffer text with gutter, syntax highlighting, cursor(s)/selection(s), optional inlay hints | Navigate with structural motions, extend multi-selection, delete to line boundary, undo/redo |
-| Split-diff editor tab | Either one unified pane with inline diff markers, or two side-by-side panes (lhs/rhs) comparing buffer versions | Toggle between unified and split diff presentation via `ToggleSplitDiff` |
-| Status-bar encoding/line-ending indicators | Current buffer text encoding and line-ending convention | Click to open a picker and switch encoding or line-ending convention |
+| Surface                                    | What User Sees                                                                                                  | What User Can Do                                                                             |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Editor tab (single-file)                   | Buffer text with gutter, syntax highlighting, cursor(s)/selection(s), optional inlay hints                      | Navigate with structural motions, extend multi-selection, delete to line boundary, undo/redo |
+| Split-diff editor tab                      | Either one unified pane with inline diff markers, or two side-by-side panes (lhs/rhs) comparing buffer versions | Toggle between unified and split diff presentation via `ToggleSplitDiff`                     |
+| Status-bar encoding/line-ending indicators | Current buffer text encoding and line-ending convention                                                         | Click to open a picker and switch encoding or line-ending convention                         |
 
 ## User Journey
 

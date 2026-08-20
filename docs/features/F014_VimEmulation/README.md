@@ -15,11 +15,10 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Editor pane (Vim-enabled) | — | — |
-| Mode indicator (status bar) | — | — |
-| Ex command line | — | — |
-
+| Screen                      | SCR | Spec |
+| --------------------------- | --- | ---- |
+| Editor pane (Vim-enabled)   | —   | —    |
+| Mode indicator (status bar) | —   | —    |
+| Ex command line             | —   | —    |
 
 <!-- end-generated -->

@@ -26,7 +26,7 @@ Example:
 
 ### Supported Emacs Variables
 
-| Variable                   | Description                    | Zode Setting                                                                                |
+| Variable                   | Description                    | Zode Setting                                                                               |
 | -------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------ |
 | `mode`                     | Major mode/language            | Language detection                                                                         |
 | `tab-width`                | Tab display width              | [`tab_size`](./reference/all-settings.md#tab-size)                                         |
@@ -48,7 +48,7 @@ Example:
 
 ### Supported Vim Options
 
-| Option         | Aliases | Description                       | Zode Setting                                                                                |
+| Option         | Aliases | Description                       | Zode Setting                                                                               |
 | -------------- | ------- | --------------------------------- | ------------------------------------------------------------------------------------------ |
 | `filetype`     | `ft`    | File type/language                | Language detection                                                                         |
 | `tabstop`      | `ts`    | Number of spaces a tab counts for | [`tab_size`](./reference/all-settings.md#tab-size)                                         |

@@ -15,11 +15,10 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Editor tab (single-file) | — | — |
-| Split-diff editor tab | — | — |
-| Status-bar encoding/line-ending indicators | — | — |
-
+| Screen                                     | SCR | Spec |
+| ------------------------------------------ | --- | ---- |
+| Editor tab (single-file)                   | —   | —    |
+| Split-diff editor tab                      | —   | —    |
+| Status-bar encoding/line-ending indicators | —   | —    |
 
 <!-- end-generated -->

@@ -1,4 +1,5 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths — all references here are output targets or internal definitions -->
+
 # Behavior Logic
 
 **Project**: Zode (Zed editor fork)
@@ -8,6 +9,7 @@
 **Code Format**: All codes MUST follow `BL###_NameSlug` format (e.g., BL001_ScheduledReport, BL002_EventListener)
 
 **Behavior Logic Types** (canonical 10 — language-neutral):
+
 - `scheduled-job` — Cron-like scheduled tasks
 - `queue-worker` — Background job workers (async queue consumers)
 - `event-listener` — Event-driven handlers
@@ -39,216 +41,216 @@ Rules enforced by Wave 2b researcher and Wave 7a reviewer. Violations are critic
 
 ## Behavior Logic Index
 
-| Code | Name | Type | Trigger |
-|------|------|------|---------|
-| BL001 | ActivityIndicatorStatusActions | custom-command | Keybinding (keymap.json) / command palette, invoked from the status-bar activity indicator |
-| BL002 | CsvPreviewOpenActions | custom-command | Command palette / editor tab context menu on `.csv` files |
-| BL003 | InitializeDevContainerAction | custom-command | Command palette |
-| BL004 | OpenDebugAdapterLogsAction | custom-command | Command palette (dev tools) |
-| BL005 | DebuggerSessionControlActions | custom-command | Keybinding (keymap.json) / command palette / debugger toolbar buttons |
-| BL006 | NewProcessModalTabActions | custom-command | Keybinding (keymap.json) inside the New Process modal |
-| BL007 | BreakpointListNavigationActions | custom-command | Keybinding while breakpoint list panel is focused |
-| BL008 | ConsoleWatchExpressionAction | custom-command | Keybinding / context menu while debugger console is focused |
-| BL009 | MemoryViewGoToAddressAction | custom-command | Keybinding / query-bar submit inside the memory view |
-| BL010 | VariableListActions | custom-command | Keybinding / context menu while variable list is focused |
-| BL011 | DeployCurrentFileDiagnosticsAction | custom-command | Command palette / keybinding |
-| BL012 | ProjectDiagnosticsActions | custom-command | Command palette / keybinding |
-| BL013 | EditorCoreActions | custom-command | Keybinding (keymap.json) — the editor's primary command surface |
-| BL014 | ToggleSplitDiffAction | custom-command | Keybinding / toolbar toggle in a split editor |
-| BL015 | EncodingSelectorToggleAction | custom-command | Command palette / status-bar encoding indicator click |
-| BL016 | EtwTracingActions | custom-command | Command palette (Windows-only diagnostic tooling) |
-| BL017 | ReloadExtensionsAction | custom-command | Command palette |
-| BL018 | InstallDevExtensionAction | custom-command | Command palette / "Install Dev Extension" button on the Extensions page |
-| BL019 | FeedbackActions | custom-command | Command palette / Help menu |
-| BL020 | FileFinderActions | custom-command | Keybinding while the file finder modal is open |
-| BL021 | GitHunkStagingActions | custom-command | Keybinding / git panel context menu on a hunk or status entry |
-| BL022 | GitGraphActions | custom-command | Keybinding / command palette from the Git Graph tab |
-| BL023 | BranchPickerActions | custom-command | Keybinding while the branch picker is open |
-| BL024 | CommitViewStashActions | custom-command | Command palette / keybinding |
-| BL025 | GitPanelActions | custom-command | Keybinding / git panel toolbar and context menu |
-| BL026 | GitPickerTabActions | custom-command | Keybinding while the combined git picker is open |
-| BL027 | ProjectDiffActions | custom-command | Keybinding / command palette |
-| BL028 | StashPickerActions | custom-command | Keybinding while the stash picker is open |
-| BL029 | DeleteWorktreeAction | custom-command | Keybinding while the worktree picker is open |
-| BL030 | ActionsMacroDefinition | custom-command | N/A — compile-time declarative macro, not an invokable command itself |
-| BL031 | ImageViewerZoomActions | custom-command | Keybinding / toolbar buttons while viewing an image |
-| BL032 | DumpInputLatencyHistogramAction | custom-command | Command palette (dev tools) |
-| BL033 | InstallCliBinaryAction | custom-command | Command palette |
-| BL034 | RegisterZedSchemeAction | custom-command | Command palette |
-| BL035 | NewJournalEntryAction | custom-command | Command palette / keybinding |
-| BL036 | KeymapEditorActions | custom-command | Keybinding / context menu inside the keymap editor |
-| BL037 | KeystrokeRecordingActions | custom-command | Keybinding / click on the keystroke-capture input widget |
-| BL038 | LanguageSelectorToggleAction | custom-command | Command palette / status-bar language indicator click |
-| BL039 | HighlightsTreeViewActions | custom-command | Command palette (dev tools) |
-| BL040 | OpenKeyContextViewAction | custom-command | Command palette (dev tools) |
-| BL041 | LspToolMenuToggleAction | custom-command | Click on the LSP status-bar button / keybinding |
-| BL042 | OpenLanguageServerLogsAction | custom-command | Command palette (dev tools) |
-| BL043 | SyntaxTreeViewActions | custom-command | Command palette (dev tools) |
-| BL044 | LineEndingSelectorToggleAction | custom-command | Command palette / status-bar line-ending indicator click |
-| BL045 | MarkdownCopyActions | custom-command | Keybinding / context menu on selected markdown text |
-| BL046 | MarkdownPreviewScrollActions | custom-command | Keybinding while a markdown preview pane is focused |
-| BL047 | MenuNavigationActions | custom-command | Keybinding while any menu/list/picker is focused (shared cross-cutting namespace) |
-| BL048 | ToggleBaseKeymapSelectorAction | custom-command | Command palette / onboarding flow |
-| BL049 | OnboardingFlowActions | custom-command | Buttons within the first-run onboarding screen |
-| BL050 | OutlinePanelActions | custom-command | Keybinding / context menu while the outline panel is focused |
-| BL051 | PanelTabNavigationActions | custom-command | Keybinding while a tabbed dock panel is focused |
-| BL052 | PickerConfirmActions | custom-command | Keybinding while a picker's input editor is focused |
-| BL053 | WindowTabManagementActions | custom-command | Keybinding / Window menu (native window tabs) |
-| BL054 | ContextServerRestartAction | custom-command | Command palette / context server status UI |
-| BL055 | ProjectPanelActions | custom-command | Keybinding / context menu while the project panel is focused |
-| BL056 | RecentProjectsMenuActions | custom-command | Keybinding while the recent-projects picker is open |
-| BL057 | OpenWslPathAction | custom-command | Programmatic (WSL remote connection flow), not user-keybound |
-| BL058 | ReplSessionActions | custom-command | Keybinding / command palette in a REPL-connected editor |
-| BL059 | ProjectSearchActions | custom-command | Keybinding / command palette while project search is open |
-| BL060 | BufferSearchActions | custom-command | Keybinding / command palette while the in-buffer search bar is open |
-| BL061 | SettingsEditorActions | custom-command | Keybinding while the Settings UI is focused |
-| BL062 | FocusSidebarFilterAction | custom-command | Keybinding |
-| BL063 | SnippetsConfigActions | custom-command | Command palette |
-| BL064 | SvgOpenFollowingPreviewAction | custom-command | Command palette / editor tab context menu on `.svg` files |
-| BL065 | CopySystemSpecsAction | custom-command | Command palette / Help menu |
-| BL066 | TabSwitcherActions | custom-command | Keybinding (Ctrl/Cmd+Tab-style modal) |
-| BL067 | TerminalCoreActions | custom-command | Keybinding while a terminal pane is focused |
-| BL068 | TerminalPanelToggleActions | custom-command | Keybinding / command palette |
-| BL069 | TerminalViewTextActions | custom-command | Programmatic / task-runner integration (SendText, SendKeystroke) and keybinding (RerunTask, RenameTe |
-| BL070 | ThemeSelectorReloadAction | custom-command | Command palette (dev/theme-authoring workflow) |
-| BL071 | ApplicationMenuActivationActions | custom-command | Keybinding within the client-side (non-native) application menu bar |
-| BL072 | TitleBarProjectMenuActions | custom-command | Click on the title bar's project/branch dropdown |
-| BL073 | ToolchainSelectorActions | custom-command | Command palette / status-bar toolchain indicator click |
-| BL074 | VimChangeListNavigationActions | custom-command | Keybinding in Vim normal mode (`g;` / `g,`) |
-| BL075 | VimExCommandActions | custom-command | Vim `:`-command line (ex commands) |
-| BL076 | VimDigraphLiteralAction | custom-command | Vim insert-mode digraph sequence (`Ctrl-K` + two chars) |
-| BL077 | VimHelixModeActions | custom-command | Keybinding when Vim's Helix emulation mode is active |
-| BL078 | VimHelixPasteAction | custom-command | Keybinding in Helix mode |
-| BL079 | VimIndentActions | custom-command | Keybinding in Vim normal/visual mode (`>`, `<`, `=`) |
-| BL080 | VimInsertModeActions | custom-command | Keybinding while in Vim insert mode |
-| BL081 | VimMotionActions | custom-command | Keybinding — Vim motion commands (`w`, `e`, `b`, `k`/`j`, etc.) |
-| BL082 | VimNormalModeInsertActions | custom-command | Keybinding in Vim normal mode (`i`, `a`, `I`, `A`, `o`, `O`) |
-| BL083 | VimIncrementDecrementActions | custom-command | Keybinding in Vim normal mode (`Ctrl-A` / `Ctrl-X`) |
-| BL084 | VimPasteAction | custom-command | Keybinding in Vim normal mode (`p` / `P`) |
-| BL085 | VimRepeatMacroActions | custom-command | Keybinding in Vim normal mode (`.`, `q`, `@@`) |
-| BL086 | VimScrollActions | custom-command | Keybinding in Vim normal mode (`Ctrl-E`/`Ctrl-Y`, `zz`, etc.) |
-| BL087 | VimSearchActions | custom-command | Keybinding in Vim normal mode (`/`, `?`, `*`, `#`) |
-| BL088 | VimSubstituteActions | custom-command | Keybinding in Vim normal mode (`s`, `S`) |
-| BL089 | VimTextObjectActions | custom-command | Keybinding as the object half of a Vim operator+object combo (`diw`, `ci(`, etc.) |
-| BL090 | VimReplaceModeActions | custom-command | Keybinding in Vim normal mode (`R`) |
-| BL091 | VimRewrapAction | custom-command | Keybinding in Vim normal mode (`gq`) |
-| BL092 | VimOperatorPendingPushActions | custom-command | Internal — pushed onto Vim's operator-pending stack while a multi-key command is being composed |
-| BL093 | VimVisualModeActions | custom-command | Keybinding in Vim visual mode (`v`, `V`, `Ctrl-V`, `d`, `x`, etc.) |
-| BL094 | MultiWorkspaceSidebarActions | custom-command | Keybinding / click on the multi-project sidebar |
-| BL095 | PaneItemManagementActions | custom-command | Keybinding / tab bar interaction on a pane |
-| BL096 | OpenThemePreviewAction | custom-command | Command palette (dev tools) |
-| BL097 | WelcomeScreenActions | custom-command | Command palette / click on a recent-project entry on the welcome screen |
-| BL098 | WorkspacePaneNavigationActions | custom-command | Keybinding / command palette — core workspace pane/window navigation |
-| BL099 | ZedApplicationWindowActions | custom-command | Keybinding / command palette / native application menu |
-| BL100 | ZedActionsSharedRegistry | custom-command | Keybinding / command palette — cross-crate shared action namespace re-exported to avoid circular cra |
-| BL101 | EncryptedPasswordAtRest | integration | an SSH/git askpass prompt (or similar credential flow) needs to hold a user-entered password in memo |
-| BL102 | DevContainerJsonParsing | integration | opening a folder with a `.devcontainer/devcontainer.json` (or a specific dev-container config) trigg |
-| BL103 | DevContainerManifestBuildAndRun | integration | user opens/attaches a project configured for a dev container — build image/compose stack, then run/e |
-| BL104 | DockerCliIntegration | integration | any dev-container operation needing to talk to the Docker (or Podman) engine — inspect, pull, compos |
-| BL105 | WindowsExplorerContextMenuInjector | integration | user right-clicks a file/folder in Windows Explorer and invokes the injected "Open with Zode" shell c |
-| BL106 | GitCliRepositoryIntegration | integration | any project operation that needs live git state or mutation — status, diff, commit, branch, stash, b |
-| BL107 | LanguageServerProcessLifecycle | integration | a worktree needs a language server for a detected language (buffer opened, language changed) — spawn |
-| BL108 | LspStoreStartLanguageServer | integration | `LspStore` decides a worktree/language pair needs a running language server (buffer opened, settings |
-| BL109 | JsonLanguageServerSchemaContentExtension | integration | the JSON language server (vscode-json-language-server) sends a `vscode/content` request for a `zed:/ |
-| BL110 | RustAnalyzerServerStatusExtension | integration | a running rust-analyzer language server emits an `experimental/serverStatus` notification (health Ok |
-| BL111 | VueLanguageServerTsServerBridge | integration | the Vue language server sends a `tsserver/request` notification that must be proxied to the co-insta |
-| BL112 | PrettierProcessLifecycle | integration | a buffer needs formatting via Prettier — either a worktree-local Prettier install is detected, or th |
-| BL113 | ProjectTerminalShellSpawn | integration | user opens a new terminal panel/dock (or a remote "local terminal" breakout) for a project |
-| BL114 | ProjectTaskTerminalSpawn | integration | a configured task (from `tasks.json`/task runner) is executed, spawning its command inside a new or  |
-| BL115 | HeadlessProjectRemoteJupyterKernelSpawn | integration | a remote (SSH headless) project session receives a request to start a Jupyter/IPython kernel for the |
-| BL116 | NativeJupyterKernelProcessLifecycle | integration | user starts a REPL/notebook session locally against a discovered Jupyter kernelspec |
-| BL117 | SystemSpecsGpuProbe | integration | user invokes "Copy System Specs Into Clipboard" (or any code path constructing `SystemSpecs`) on Lin |
-| BL118 | CrossPlatformCommandWrapper | integration | any subsystem needs to spawn an external process portably across macOS/Linux/Windows (git, LSP serve |
-| BL119 | MacosPosixSpawnCommand | integration | any subprocess spawn on macOS (git, LSP servers, tasks, shells) that goes through `util::command::Co |
-| BL120 | ChildProcessGroupLifecycle | integration | any spawn path that needs guaranteed cleanup of a subprocess and all its descendants when the parent |
-| BL121 | ShellCommandLineBuilder | integration | any integration that needs to construct a shell-invocation command line (task runner, terminal spawn |
-| BL122 | LoginShellEnvironmentCapture | integration | Zode starts up (or a terminal/task needs a fresh environment) and needs to capture the user's real lo |
-| BL123 | VimShellExecCommand | integration | user runs a vim `:!command`, `:read !command`, or a range/motion/text-object filter (`!!`, `!ip`, `. |
-| BL124 | UserStore Connection Status Observer | observer | `Client` connection status stream emits `Status::SignedOut` or `Status::ConnectionLost` |
-| BL125 | Context Server Notification Dispatch | observer | Incoming MCP JSON-RPC notification received on the underlying `Client` connection |
-| BL126 | Editor Inlay Hints Refresh on Buffer/Settings/LSP Changes | observer | `InlayHintRefreshReason` variant fires — buffer edited, new lines scrolled into view, inlay hint set |
-| BL127 | Feature Flag Store Change Observer | observer | `FeatureFlagStore` global is mutated (server flags updated, staff status changed) |
-| BL128 | Filesystem Watch Event Stream | observer | OS-level filesystem change under a watched path (create/modify/remove/rescan) |
-| BL129 | Global Filesystem Watcher Event Dispatch | observer | `notify` crate delivers a raw OS filesystem event to the process-wide watcher |
-| BL130 | Web Window Appearance/DPR Media Query Observer | observer | Browser `matchMedia` "change" event for color-scheme (dark/light) or device-pixel-ratio, plus `Resiz |
-| BL131 | LSP Log View Server Entry Observer | observer | `LogStore` emits `Event::NewServerLogEntry` or changes its set of tracked language servers |
-| BL132 | Debounced Delay Trigger | observer | `DebouncedDelay::fire_new` called again before the previous delay elapsed (supersedes it) or the del |
-| BL133 | Debug Session Breakpoint Store Observer | observer | `BreakpointStore` emits `BreakpointStoreEvent::BreakpointsUpdated` or `BreakpointStoreEvent::Breakpo |
-| BL134 | Prompt Template Override Directory Watcher | observer | Filesystem changes to the prompt-template-overrides directory (or its parent, for create/delete of t |
-| BL135 | Remote Server Projects Settings Observer | observer | `SettingsStore` global changes, specifically the `RemoteSettings::read_ssh_config` value |
-| BL136 | External Editorconfig File Watcher | observer | Filesystem change to an `.editorconfig` file located outside a worktree (an ancestor directory of th |
-| BL137 | Config File Content Watcher | observer | Filesystem change event on a single watched config file (settings.json, global settings, keymap.json |
-| BL138 | Settings Store User/Global File Watcher | observer | User settings file or global settings file changes on disk |
-| BL139 | Snippet Directory Watcher | observer | Filesystem change under a watched snippets directory (global or per-project) |
-| BL140 | Vim Marks Buffer Lifecycle Observer | observer | `BufferStore` emits `BufferStoreEvent::BufferAdded`, or a watched `Buffer` emits `BufferEvent::Edite |
-| BL141 | Worktree Background Scanner Filesystem Observer | observer | Filesystem change under the worktree root reported by `Fs::watch`, or an explicit rescan/path-prefix |
-| BL142 | Dev-Mode Grammar Source Watcher | observer | Filesystem change (`.scm` query file) under `crates/grammars/src` in a debug build |
-| BL143 | Keymap File and Settings-Driven Keymap Observer | observer | Keymap file changes on disk, or the `SettingsStore` global changes in a way that affects the base ke |
-| BL144 | Debounced Delay Timer | scheduled-job | `DebouncedDelay::fire_new` invoked while a prior timer for the same debouncer is still pending — can |
-| BL145 | Git Diff Debounced Recalculation | scheduled-job | `Project::request_buffer_diff_recalculation` is called when a buffer is registered (`register_buffer |
-| BL146 | Log Command Invocation | queue-worker | user confirms a command in the command palette (Enter) |
-| BL147 | Save Component Preview Active Page | queue-worker | workspace item serialization pass for an open Component Preview tab |
-| BL148 | Mcp Serve Connection | queue-worker | an MCP client connects to the local Unix socket created for the context-server listener |
-| BL149 | Db Write And Log | queue-worker | any call site that needs a fire-and-forget SQLite write |
-| BL150 | Fetch Remote Process List For Attach | queue-worker | user opens the debugger "Attach to Process" modal for a remote (SSH) project |
-| BL151 | Forward Spawned Terminal Pid | queue-worker | a debug session spawns an integrated terminal for a debuggee process |
-| BL152 | Persist Stack Frame Filter Preference | queue-worker | user toggles "only user frames" filter in the debugger stack-frame list |
-| BL153 | Compute Completion Menu Filter Matches | queue-worker | editor completion menu results need re-filtering against a query |
-| BL154 | Serialize Editor Selections | queue-worker | editor selections change and the workspace item is eligible for restore-on-startup persistence |
-| BL155 | Serialize Editor Folds | queue-worker | editor fold state changes for a file-backed buffer |
-| BL156 | Compute Runnable Ranges | queue-worker | editor needs to recompute runnable (test/run) code-lens ranges for the visible multi-buffer range |
-| BL157 | Compile Dev Extension | queue-worker | user triggers rebuild of a locally-installed dev extension |
-| BL158 | Dismiss Language Extension Suggestion | queue-worker | user clicks "No, don't install it" on the language-extension suggestion banner |
-| BL159 | Check Recent History Path Exists | queue-worker | file finder populates candidates from recent-navigation history for a local project |
-| BL160 | Read Global Git Committer Identity | queue-worker | git operations need the configured global committer name/email |
-| BL161 | Save Git Graph Serialization | queue-worker | workspace item serialization pass for an open Git Graph tab |
-| BL162 | Create Git Remote | queue-worker | user confirms adding a new remote in the branch picker's create-remote flow |
-| BL163 | Commit Staged Changes | queue-worker | user triggers commit in the git panel with staged changes present |
-| BL164 | Save Project Diff Base | queue-worker | workspace item serialization pass for an open Project Diff tab |
-| BL165 | Detach And Log Err Task | queue-worker | any call site holding a fallible `Task<Result<T, E>>` that should run to completion without blocking |
-| BL166 | Save Image Viewer Path | queue-worker | workspace item serialization pass for an open Image Viewer tab |
-| BL167 | Prompt Cli Install On Linux | queue-worker | user runs "Install CLI" on Linux/FreeBSD where symlinking must be done manually |
-| BL168 | Create Journal Entry File | queue-worker | user invokes "New Journal Entry" |
-| BL169 | Debounce Keymap Action Search | queue-worker | user types in the keymap editor's action/keystroke search query fields |
-| BL170 | Send Lsp Initialize Request | queue-worker | a language server process is spawned and needs the LSP handshake performed |
-| BL171 | Parse Markdown Source | queue-worker | markdown source content changes and needs re-parsing |
-| BL172 | Search Markdown Preview Source | queue-worker | user runs an in-buffer search (Cmd-F) inside a markdown preview view |
-| BL173 | Export Miniprofiler Report | queue-worker | user chooses a save path for exporting a performance profile from the miniprofiler UI |
-| BL174 | Save Onboarding Active Page | queue-worker | workspace item serialization pass for an open Onboarding tab |
-| BL175 | Serialize Outline Panel State | queue-worker | outline panel's active/visible state changes and needs persisting |
-| BL176 | Load Buffer Contents Off Thread | queue-worker | a buffer is requested that is not yet resident in memory |
-| BL177 | Forward Breakpoint Toggle To Remote | queue-worker | user toggles a breakpoint while the project is a remote (collab) session |
-| BL178 | Prune Stale Js Debug Companion Versions | queue-worker | DapStore is constructed (local mode) |
-| BL179 | Install Latest Js Debug Companion | queue-worker | a newer js-debug-companion npm package version is detected than what is installed |
-| BL180 | Restore Git Checkpoints | queue-worker | an agent/edit-prediction flow requests restoring the working tree to a previously captured git check |
-| BL181 | Wait For Image Load | queue-worker | an image path is requested that is not yet loaded into the image store |
-| BL182 | Restart Language Servers For Buffers | queue-worker | user or system requests restarting language servers for a set of buffers (remote project path) |
-| BL183 | Forward Vue Ts Request To Typescript Server | queue-worker | the Vue language server issues an embedded TypeScript request that must be proxied to the real tsser |
-| BL184 | Clear Prettier Caches On Settings Change | queue-worker | prettier-related project settings change, requiring active prettier instances to reload |
-| BL185 | Forward Buffer Update To Remote Server | queue-worker | a remote-hosted buffer receives a local edit operation while acting as a remote server client |
-| BL186 | Copy Worktree Entry Off Thread | queue-worker | user copies a file/directory entry within a local worktree |
-| BL187 | Dismiss Dev Container Suggestion | queue-worker | user clicks "Don't Show Again" on the dev-container open suggestion banner |
-| BL188 | Forward Buffer Update On Headless Project | queue-worker | a locally-originated buffer operation occurs inside a headless (remote_server) project |
-| BL189 | Read Remote Server Stdin Loop | queue-worker | the remote server process starts and needs to read incoming protocol frames from stdin |
-| BL190 | Route Jupyter Messages To Channels | queue-worker | a Jupyter kernel session starts and needs its shell/control/stdin channels wired |
-| BL191 | Refresh Python Kernelspecs | queue-worker | a notebook editor needs to refresh available Python kernelspecs for its worktree |
-| BL192 | Install Ipykernel Package | queue-worker | REPL execution detects the target Python environment is missing ipykernel |
-| BL193 | Compute Settings Exact Search Matches | queue-worker | user types a query in the Settings window's search box |
-| BL194 | Build Task Contexts Off Thread | queue-worker | the tasks UI (spawn/run) needs the current task execution context (cwd, selection, LSP task sources) |
-| BL195 | Search Terminal Scrollback | queue-worker | user runs an in-terminal search (Cmd-F) inside an integrated terminal |
-| BL196 | Serialize Terminal Panel Layout | queue-worker | the terminal panel's pane layout changes and needs persisting (debounced) |
-| BL197 | Save Terminal Working Directory And Title | queue-worker | workspace item serialization pass for an open terminal tab whose cwd/title changed |
-| BL198 | Pipe Vim Filter Command Stdin | queue-worker | a Vim `:!` filter command is run against a buffer range with piped stdin input |
-| BL199 | Delete Vim Mark From Db | queue-worker | user deletes a Vim mark (buffer-local or global) |
-| BL200 | Clone Item On Split Off Thread | queue-worker | user splits a pane, requiring the active item to be cloned into the new pane |
-| BL201 | Bind Session To Window On Flush | queue-worker | multi-workspace flushes serialization for all open workspaces (e.g. on window close/quit) |
-| BL202 | Await Spawned Task Process Output | queue-worker | a task template is resolved and spawned in an integrated terminal, and the workspace needs to know i |
-| BL203 | Update Workspace Activation Timestamp | queue-worker | a workspace window becomes active |
-| BL204 | Save Workspace Welcome Page State | queue-worker | workspace item serialization pass for an open Welcome Page tab |
-| BL205 | Create Worktree Entry On Disk | queue-worker | user creates a new file or directory entry in the project panel/worktree |
-| BL206 | Watch Theme File Changes | queue-worker | Zode starts in an environment where the active theme file may change on disk |
-| BL207 | Run Keymap Or Settings Migration | queue-worker | user clicks "Backup and Update" in the settings/keymap migration dialog |
-| BL208 | Zode Cli Path Resolution | integration | something needs to invoke the zed/zed-cli executable from a shell context |
+| Code  | Name                                                      | Type           | Trigger                                                                                               |
+| ----- | --------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
+| BL001 | ActivityIndicatorStatusActions                            | custom-command | Keybinding (keymap.json) / command palette, invoked from the status-bar activity indicator            |
+| BL002 | CsvPreviewOpenActions                                     | custom-command | Command palette / editor tab context menu on `.csv` files                                             |
+| BL003 | InitializeDevContainerAction                              | custom-command | Command palette                                                                                       |
+| BL004 | OpenDebugAdapterLogsAction                                | custom-command | Command palette (dev tools)                                                                           |
+| BL005 | DebuggerSessionControlActions                             | custom-command | Keybinding (keymap.json) / command palette / debugger toolbar buttons                                 |
+| BL006 | NewProcessModalTabActions                                 | custom-command | Keybinding (keymap.json) inside the New Process modal                                                 |
+| BL007 | BreakpointListNavigationActions                           | custom-command | Keybinding while breakpoint list panel is focused                                                     |
+| BL008 | ConsoleWatchExpressionAction                              | custom-command | Keybinding / context menu while debugger console is focused                                           |
+| BL009 | MemoryViewGoToAddressAction                               | custom-command | Keybinding / query-bar submit inside the memory view                                                  |
+| BL010 | VariableListActions                                       | custom-command | Keybinding / context menu while variable list is focused                                              |
+| BL011 | DeployCurrentFileDiagnosticsAction                        | custom-command | Command palette / keybinding                                                                          |
+| BL012 | ProjectDiagnosticsActions                                 | custom-command | Command palette / keybinding                                                                          |
+| BL013 | EditorCoreActions                                         | custom-command | Keybinding (keymap.json) — the editor's primary command surface                                       |
+| BL014 | ToggleSplitDiffAction                                     | custom-command | Keybinding / toolbar toggle in a split editor                                                         |
+| BL015 | EncodingSelectorToggleAction                              | custom-command | Command palette / status-bar encoding indicator click                                                 |
+| BL016 | EtwTracingActions                                         | custom-command | Command palette (Windows-only diagnostic tooling)                                                     |
+| BL017 | ReloadExtensionsAction                                    | custom-command | Command palette                                                                                       |
+| BL018 | InstallDevExtensionAction                                 | custom-command | Command palette / "Install Dev Extension" button on the Extensions page                               |
+| BL019 | FeedbackActions                                           | custom-command | Command palette / Help menu                                                                           |
+| BL020 | FileFinderActions                                         | custom-command | Keybinding while the file finder modal is open                                                        |
+| BL021 | GitHunkStagingActions                                     | custom-command | Keybinding / git panel context menu on a hunk or status entry                                         |
+| BL022 | GitGraphActions                                           | custom-command | Keybinding / command palette from the Git Graph tab                                                   |
+| BL023 | BranchPickerActions                                       | custom-command | Keybinding while the branch picker is open                                                            |
+| BL024 | CommitViewStashActions                                    | custom-command | Command palette / keybinding                                                                          |
+| BL025 | GitPanelActions                                           | custom-command | Keybinding / git panel toolbar and context menu                                                       |
+| BL026 | GitPickerTabActions                                       | custom-command | Keybinding while the combined git picker is open                                                      |
+| BL027 | ProjectDiffActions                                        | custom-command | Keybinding / command palette                                                                          |
+| BL028 | StashPickerActions                                        | custom-command | Keybinding while the stash picker is open                                                             |
+| BL029 | DeleteWorktreeAction                                      | custom-command | Keybinding while the worktree picker is open                                                          |
+| BL030 | ActionsMacroDefinition                                    | custom-command | N/A — compile-time declarative macro, not an invokable command itself                                 |
+| BL031 | ImageViewerZoomActions                                    | custom-command | Keybinding / toolbar buttons while viewing an image                                                   |
+| BL032 | DumpInputLatencyHistogramAction                           | custom-command | Command palette (dev tools)                                                                           |
+| BL033 | InstallCliBinaryAction                                    | custom-command | Command palette                                                                                       |
+| BL034 | RegisterZedSchemeAction                                   | custom-command | Command palette                                                                                       |
+| BL035 | NewJournalEntryAction                                     | custom-command | Command palette / keybinding                                                                          |
+| BL036 | KeymapEditorActions                                       | custom-command | Keybinding / context menu inside the keymap editor                                                    |
+| BL037 | KeystrokeRecordingActions                                 | custom-command | Keybinding / click on the keystroke-capture input widget                                              |
+| BL038 | LanguageSelectorToggleAction                              | custom-command | Command palette / status-bar language indicator click                                                 |
+| BL039 | HighlightsTreeViewActions                                 | custom-command | Command palette (dev tools)                                                                           |
+| BL040 | OpenKeyContextViewAction                                  | custom-command | Command palette (dev tools)                                                                           |
+| BL041 | LspToolMenuToggleAction                                   | custom-command | Click on the LSP status-bar button / keybinding                                                       |
+| BL042 | OpenLanguageServerLogsAction                              | custom-command | Command palette (dev tools)                                                                           |
+| BL043 | SyntaxTreeViewActions                                     | custom-command | Command palette (dev tools)                                                                           |
+| BL044 | LineEndingSelectorToggleAction                            | custom-command | Command palette / status-bar line-ending indicator click                                              |
+| BL045 | MarkdownCopyActions                                       | custom-command | Keybinding / context menu on selected markdown text                                                   |
+| BL046 | MarkdownPreviewScrollActions                              | custom-command | Keybinding while a markdown preview pane is focused                                                   |
+| BL047 | MenuNavigationActions                                     | custom-command | Keybinding while any menu/list/picker is focused (shared cross-cutting namespace)                     |
+| BL048 | ToggleBaseKeymapSelectorAction                            | custom-command | Command palette / onboarding flow                                                                     |
+| BL049 | OnboardingFlowActions                                     | custom-command | Buttons within the first-run onboarding screen                                                        |
+| BL050 | OutlinePanelActions                                       | custom-command | Keybinding / context menu while the outline panel is focused                                          |
+| BL051 | PanelTabNavigationActions                                 | custom-command | Keybinding while a tabbed dock panel is focused                                                       |
+| BL052 | PickerConfirmActions                                      | custom-command | Keybinding while a picker's input editor is focused                                                   |
+| BL053 | WindowTabManagementActions                                | custom-command | Keybinding / Window menu (native window tabs)                                                         |
+| BL054 | ContextServerRestartAction                                | custom-command | Command palette / context server status UI                                                            |
+| BL055 | ProjectPanelActions                                       | custom-command | Keybinding / context menu while the project panel is focused                                          |
+| BL056 | RecentProjectsMenuActions                                 | custom-command | Keybinding while the recent-projects picker is open                                                   |
+| BL057 | OpenWslPathAction                                         | custom-command | Programmatic (WSL remote connection flow), not user-keybound                                          |
+| BL058 | ReplSessionActions                                        | custom-command | Keybinding / command palette in a REPL-connected editor                                               |
+| BL059 | ProjectSearchActions                                      | custom-command | Keybinding / command palette while project search is open                                             |
+| BL060 | BufferSearchActions                                       | custom-command | Keybinding / command palette while the in-buffer search bar is open                                   |
+| BL061 | SettingsEditorActions                                     | custom-command | Keybinding while the Settings UI is focused                                                           |
+| BL062 | FocusSidebarFilterAction                                  | custom-command | Keybinding                                                                                            |
+| BL063 | SnippetsConfigActions                                     | custom-command | Command palette                                                                                       |
+| BL064 | SvgOpenFollowingPreviewAction                             | custom-command | Command palette / editor tab context menu on `.svg` files                                             |
+| BL065 | CopySystemSpecsAction                                     | custom-command | Command palette / Help menu                                                                           |
+| BL066 | TabSwitcherActions                                        | custom-command | Keybinding (Ctrl/Cmd+Tab-style modal)                                                                 |
+| BL067 | TerminalCoreActions                                       | custom-command | Keybinding while a terminal pane is focused                                                           |
+| BL068 | TerminalPanelToggleActions                                | custom-command | Keybinding / command palette                                                                          |
+| BL069 | TerminalViewTextActions                                   | custom-command | Programmatic / task-runner integration (SendText, SendKeystroke) and keybinding (RerunTask, RenameTe  |
+| BL070 | ThemeSelectorReloadAction                                 | custom-command | Command palette (dev/theme-authoring workflow)                                                        |
+| BL071 | ApplicationMenuActivationActions                          | custom-command | Keybinding within the client-side (non-native) application menu bar                                   |
+| BL072 | TitleBarProjectMenuActions                                | custom-command | Click on the title bar's project/branch dropdown                                                      |
+| BL073 | ToolchainSelectorActions                                  | custom-command | Command palette / status-bar toolchain indicator click                                                |
+| BL074 | VimChangeListNavigationActions                            | custom-command | Keybinding in Vim normal mode (`g;` / `g,`)                                                           |
+| BL075 | VimExCommandActions                                       | custom-command | Vim `:`-command line (ex commands)                                                                    |
+| BL076 | VimDigraphLiteralAction                                   | custom-command | Vim insert-mode digraph sequence (`Ctrl-K` + two chars)                                               |
+| BL077 | VimHelixModeActions                                       | custom-command | Keybinding when Vim's Helix emulation mode is active                                                  |
+| BL078 | VimHelixPasteAction                                       | custom-command | Keybinding in Helix mode                                                                              |
+| BL079 | VimIndentActions                                          | custom-command | Keybinding in Vim normal/visual mode (`>`, `<`, `=`)                                                  |
+| BL080 | VimInsertModeActions                                      | custom-command | Keybinding while in Vim insert mode                                                                   |
+| BL081 | VimMotionActions                                          | custom-command | Keybinding — Vim motion commands (`w`, `e`, `b`, `k`/`j`, etc.)                                       |
+| BL082 | VimNormalModeInsertActions                                | custom-command | Keybinding in Vim normal mode (`i`, `a`, `I`, `A`, `o`, `O`)                                          |
+| BL083 | VimIncrementDecrementActions                              | custom-command | Keybinding in Vim normal mode (`Ctrl-A` / `Ctrl-X`)                                                   |
+| BL084 | VimPasteAction                                            | custom-command | Keybinding in Vim normal mode (`p` / `P`)                                                             |
+| BL085 | VimRepeatMacroActions                                     | custom-command | Keybinding in Vim normal mode (`.`, `q`, `@@`)                                                        |
+| BL086 | VimScrollActions                                          | custom-command | Keybinding in Vim normal mode (`Ctrl-E`/`Ctrl-Y`, `zz`, etc.)                                         |
+| BL087 | VimSearchActions                                          | custom-command | Keybinding in Vim normal mode (`/`, `?`, `*`, `#`)                                                    |
+| BL088 | VimSubstituteActions                                      | custom-command | Keybinding in Vim normal mode (`s`, `S`)                                                              |
+| BL089 | VimTextObjectActions                                      | custom-command | Keybinding as the object half of a Vim operator+object combo (`diw`, `ci(`, etc.)                     |
+| BL090 | VimReplaceModeActions                                     | custom-command | Keybinding in Vim normal mode (`R`)                                                                   |
+| BL091 | VimRewrapAction                                           | custom-command | Keybinding in Vim normal mode (`gq`)                                                                  |
+| BL092 | VimOperatorPendingPushActions                             | custom-command | Internal — pushed onto Vim's operator-pending stack while a multi-key command is being composed       |
+| BL093 | VimVisualModeActions                                      | custom-command | Keybinding in Vim visual mode (`v`, `V`, `Ctrl-V`, `d`, `x`, etc.)                                    |
+| BL094 | MultiWorkspaceSidebarActions                              | custom-command | Keybinding / click on the multi-project sidebar                                                       |
+| BL095 | PaneItemManagementActions                                 | custom-command | Keybinding / tab bar interaction on a pane                                                            |
+| BL096 | OpenThemePreviewAction                                    | custom-command | Command palette (dev tools)                                                                           |
+| BL097 | WelcomeScreenActions                                      | custom-command | Command palette / click on a recent-project entry on the welcome screen                               |
+| BL098 | WorkspacePaneNavigationActions                            | custom-command | Keybinding / command palette — core workspace pane/window navigation                                  |
+| BL099 | ZedApplicationWindowActions                               | custom-command | Keybinding / command palette / native application menu                                                |
+| BL100 | ZedActionsSharedRegistry                                  | custom-command | Keybinding / command palette — cross-crate shared action namespace re-exported to avoid circular cra  |
+| BL101 | EncryptedPasswordAtRest                                   | integration    | an SSH/git askpass prompt (or similar credential flow) needs to hold a user-entered password in memo  |
+| BL102 | DevContainerJsonParsing                                   | integration    | opening a folder with a `.devcontainer/devcontainer.json` (or a specific dev-container config) trigg  |
+| BL103 | DevContainerManifestBuildAndRun                           | integration    | user opens/attaches a project configured for a dev container — build image/compose stack, then run/e  |
+| BL104 | DockerCliIntegration                                      | integration    | any dev-container operation needing to talk to the Docker (or Podman) engine — inspect, pull, compos  |
+| BL105 | WindowsExplorerContextMenuInjector                        | integration    | user right-clicks a file/folder in Windows Explorer and invokes the injected "Open with Zode" shell c |
+| BL106 | GitCliRepositoryIntegration                               | integration    | any project operation that needs live git state or mutation — status, diff, commit, branch, stash, b  |
+| BL107 | LanguageServerProcessLifecycle                            | integration    | a worktree needs a language server for a detected language (buffer opened, language changed) — spawn  |
+| BL108 | LspStoreStartLanguageServer                               | integration    | `LspStore` decides a worktree/language pair needs a running language server (buffer opened, settings  |
+| BL109 | JsonLanguageServerSchemaContentExtension                  | integration    | the JSON language server (vscode-json-language-server) sends a `vscode/content` request for a `zed:/  |
+| BL110 | RustAnalyzerServerStatusExtension                         | integration    | a running rust-analyzer language server emits an `experimental/serverStatus` notification (health Ok  |
+| BL111 | VueLanguageServerTsServerBridge                           | integration    | the Vue language server sends a `tsserver/request` notification that must be proxied to the co-insta  |
+| BL112 | PrettierProcessLifecycle                                  | integration    | a buffer needs formatting via Prettier — either a worktree-local Prettier install is detected, or th  |
+| BL113 | ProjectTerminalShellSpawn                                 | integration    | user opens a new terminal panel/dock (or a remote "local terminal" breakout) for a project            |
+| BL114 | ProjectTaskTerminalSpawn                                  | integration    | a configured task (from `tasks.json`/task runner) is executed, spawning its command inside a new or   |
+| BL115 | HeadlessProjectRemoteJupyterKernelSpawn                   | integration    | a remote (SSH headless) project session receives a request to start a Jupyter/IPython kernel for the  |
+| BL116 | NativeJupyterKernelProcessLifecycle                       | integration    | user starts a REPL/notebook session locally against a discovered Jupyter kernelspec                   |
+| BL117 | SystemSpecsGpuProbe                                       | integration    | user invokes "Copy System Specs Into Clipboard" (or any code path constructing `SystemSpecs`) on Lin  |
+| BL118 | CrossPlatformCommandWrapper                               | integration    | any subsystem needs to spawn an external process portably across macOS/Linux/Windows (git, LSP serve  |
+| BL119 | MacosPosixSpawnCommand                                    | integration    | any subprocess spawn on macOS (git, LSP servers, tasks, shells) that goes through `util::command::Co  |
+| BL120 | ChildProcessGroupLifecycle                                | integration    | any spawn path that needs guaranteed cleanup of a subprocess and all its descendants when the parent  |
+| BL121 | ShellCommandLineBuilder                                   | integration    | any integration that needs to construct a shell-invocation command line (task runner, terminal spawn  |
+| BL122 | LoginShellEnvironmentCapture                              | integration    | Zode starts up (or a terminal/task needs a fresh environment) and needs to capture the user's real lo |
+| BL123 | VimShellExecCommand                                       | integration    | user runs a vim `:!command`, `:read !command`, or a range/motion/text-object filter (`!!`, `!ip`, `.  |
+| BL124 | UserStore Connection Status Observer                      | observer       | `Client` connection status stream emits `Status::SignedOut` or `Status::ConnectionLost`               |
+| BL125 | Context Server Notification Dispatch                      | observer       | Incoming MCP JSON-RPC notification received on the underlying `Client` connection                     |
+| BL126 | Editor Inlay Hints Refresh on Buffer/Settings/LSP Changes | observer       | `InlayHintRefreshReason` variant fires — buffer edited, new lines scrolled into view, inlay hint set  |
+| BL127 | Feature Flag Store Change Observer                        | observer       | `FeatureFlagStore` global is mutated (server flags updated, staff status changed)                     |
+| BL128 | Filesystem Watch Event Stream                             | observer       | OS-level filesystem change under a watched path (create/modify/remove/rescan)                         |
+| BL129 | Global Filesystem Watcher Event Dispatch                  | observer       | `notify` crate delivers a raw OS filesystem event to the process-wide watcher                         |
+| BL130 | Web Window Appearance/DPR Media Query Observer            | observer       | Browser `matchMedia` "change" event for color-scheme (dark/light) or device-pixel-ratio, plus `Resiz  |
+| BL131 | LSP Log View Server Entry Observer                        | observer       | `LogStore` emits `Event::NewServerLogEntry` or changes its set of tracked language servers            |
+| BL132 | Debounced Delay Trigger                                   | observer       | `DebouncedDelay::fire_new` called again before the previous delay elapsed (supersedes it) or the del  |
+| BL133 | Debug Session Breakpoint Store Observer                   | observer       | `BreakpointStore` emits `BreakpointStoreEvent::BreakpointsUpdated` or `BreakpointStoreEvent::Breakpo  |
+| BL134 | Prompt Template Override Directory Watcher                | observer       | Filesystem changes to the prompt-template-overrides directory (or its parent, for create/delete of t  |
+| BL135 | Remote Server Projects Settings Observer                  | observer       | `SettingsStore` global changes, specifically the `RemoteSettings::read_ssh_config` value              |
+| BL136 | External Editorconfig File Watcher                        | observer       | Filesystem change to an `.editorconfig` file located outside a worktree (an ancestor directory of th  |
+| BL137 | Config File Content Watcher                               | observer       | Filesystem change event on a single watched config file (settings.json, global settings, keymap.json  |
+| BL138 | Settings Store User/Global File Watcher                   | observer       | User settings file or global settings file changes on disk                                            |
+| BL139 | Snippet Directory Watcher                                 | observer       | Filesystem change under a watched snippets directory (global or per-project)                          |
+| BL140 | Vim Marks Buffer Lifecycle Observer                       | observer       | `BufferStore` emits `BufferStoreEvent::BufferAdded`, or a watched `Buffer` emits `BufferEvent::Edite  |
+| BL141 | Worktree Background Scanner Filesystem Observer           | observer       | Filesystem change under the worktree root reported by `Fs::watch`, or an explicit rescan/path-prefix  |
+| BL142 | Dev-Mode Grammar Source Watcher                           | observer       | Filesystem change (`.scm` query file) under `crates/grammars/src` in a debug build                    |
+| BL143 | Keymap File and Settings-Driven Keymap Observer           | observer       | Keymap file changes on disk, or the `SettingsStore` global changes in a way that affects the base ke  |
+| BL144 | Debounced Delay Timer                                     | scheduled-job  | `DebouncedDelay::fire_new` invoked while a prior timer for the same debouncer is still pending — can  |
+| BL145 | Git Diff Debounced Recalculation                          | scheduled-job  | `Project::request_buffer_diff_recalculation` is called when a buffer is registered (`register_buffer  |
+| BL146 | Log Command Invocation                                    | queue-worker   | user confirms a command in the command palette (Enter)                                                |
+| BL147 | Save Component Preview Active Page                        | queue-worker   | workspace item serialization pass for an open Component Preview tab                                   |
+| BL148 | Mcp Serve Connection                                      | queue-worker   | an MCP client connects to the local Unix socket created for the context-server listener               |
+| BL149 | Db Write And Log                                          | queue-worker   | any call site that needs a fire-and-forget SQLite write                                               |
+| BL150 | Fetch Remote Process List For Attach                      | queue-worker   | user opens the debugger "Attach to Process" modal for a remote (SSH) project                          |
+| BL151 | Forward Spawned Terminal Pid                              | queue-worker   | a debug session spawns an integrated terminal for a debuggee process                                  |
+| BL152 | Persist Stack Frame Filter Preference                     | queue-worker   | user toggles "only user frames" filter in the debugger stack-frame list                               |
+| BL153 | Compute Completion Menu Filter Matches                    | queue-worker   | editor completion menu results need re-filtering against a query                                      |
+| BL154 | Serialize Editor Selections                               | queue-worker   | editor selections change and the workspace item is eligible for restore-on-startup persistence        |
+| BL155 | Serialize Editor Folds                                    | queue-worker   | editor fold state changes for a file-backed buffer                                                    |
+| BL156 | Compute Runnable Ranges                                   | queue-worker   | editor needs to recompute runnable (test/run) code-lens ranges for the visible multi-buffer range     |
+| BL157 | Compile Dev Extension                                     | queue-worker   | user triggers rebuild of a locally-installed dev extension                                            |
+| BL158 | Dismiss Language Extension Suggestion                     | queue-worker   | user clicks "No, don't install it" on the language-extension suggestion banner                        |
+| BL159 | Check Recent History Path Exists                          | queue-worker   | file finder populates candidates from recent-navigation history for a local project                   |
+| BL160 | Read Global Git Committer Identity                        | queue-worker   | git operations need the configured global committer name/email                                        |
+| BL161 | Save Git Graph Serialization                              | queue-worker   | workspace item serialization pass for an open Git Graph tab                                           |
+| BL162 | Create Git Remote                                         | queue-worker   | user confirms adding a new remote in the branch picker's create-remote flow                           |
+| BL163 | Commit Staged Changes                                     | queue-worker   | user triggers commit in the git panel with staged changes present                                     |
+| BL164 | Save Project Diff Base                                    | queue-worker   | workspace item serialization pass for an open Project Diff tab                                        |
+| BL165 | Detach And Log Err Task                                   | queue-worker   | any call site holding a fallible `Task<Result<T, E>>` that should run to completion without blocking  |
+| BL166 | Save Image Viewer Path                                    | queue-worker   | workspace item serialization pass for an open Image Viewer tab                                        |
+| BL167 | Prompt Cli Install On Linux                               | queue-worker   | user runs "Install CLI" on Linux/FreeBSD where symlinking must be done manually                       |
+| BL168 | Create Journal Entry File                                 | queue-worker   | user invokes "New Journal Entry"                                                                      |
+| BL169 | Debounce Keymap Action Search                             | queue-worker   | user types in the keymap editor's action/keystroke search query fields                                |
+| BL170 | Send Lsp Initialize Request                               | queue-worker   | a language server process is spawned and needs the LSP handshake performed                            |
+| BL171 | Parse Markdown Source                                     | queue-worker   | markdown source content changes and needs re-parsing                                                  |
+| BL172 | Search Markdown Preview Source                            | queue-worker   | user runs an in-buffer search (Cmd-F) inside a markdown preview view                                  |
+| BL173 | Export Miniprofiler Report                                | queue-worker   | user chooses a save path for exporting a performance profile from the miniprofiler UI                 |
+| BL174 | Save Onboarding Active Page                               | queue-worker   | workspace item serialization pass for an open Onboarding tab                                          |
+| BL175 | Serialize Outline Panel State                             | queue-worker   | outline panel's active/visible state changes and needs persisting                                     |
+| BL176 | Load Buffer Contents Off Thread                           | queue-worker   | a buffer is requested that is not yet resident in memory                                              |
+| BL177 | Forward Breakpoint Toggle To Remote                       | queue-worker   | user toggles a breakpoint while the project is a remote (collab) session                              |
+| BL178 | Prune Stale Js Debug Companion Versions                   | queue-worker   | DapStore is constructed (local mode)                                                                  |
+| BL179 | Install Latest Js Debug Companion                         | queue-worker   | a newer js-debug-companion npm package version is detected than what is installed                     |
+| BL180 | Restore Git Checkpoints                                   | queue-worker   | an agent/edit-prediction flow requests restoring the working tree to a previously captured git check  |
+| BL181 | Wait For Image Load                                       | queue-worker   | an image path is requested that is not yet loaded into the image store                                |
+| BL182 | Restart Language Servers For Buffers                      | queue-worker   | user or system requests restarting language servers for a set of buffers (remote project path)        |
+| BL183 | Forward Vue Ts Request To Typescript Server               | queue-worker   | the Vue language server issues an embedded TypeScript request that must be proxied to the real tsser  |
+| BL184 | Clear Prettier Caches On Settings Change                  | queue-worker   | prettier-related project settings change, requiring active prettier instances to reload               |
+| BL185 | Forward Buffer Update To Remote Server                    | queue-worker   | a remote-hosted buffer receives a local edit operation while acting as a remote server client         |
+| BL186 | Copy Worktree Entry Off Thread                            | queue-worker   | user copies a file/directory entry within a local worktree                                            |
+| BL187 | Dismiss Dev Container Suggestion                          | queue-worker   | user clicks "Don't Show Again" on the dev-container open suggestion banner                            |
+| BL188 | Forward Buffer Update On Headless Project                 | queue-worker   | a locally-originated buffer operation occurs inside a headless (remote_server) project                |
+| BL189 | Read Remote Server Stdin Loop                             | queue-worker   | the remote server process starts and needs to read incoming protocol frames from stdin                |
+| BL190 | Route Jupyter Messages To Channels                        | queue-worker   | a Jupyter kernel session starts and needs its shell/control/stdin channels wired                      |
+| BL191 | Refresh Python Kernelspecs                                | queue-worker   | a notebook editor needs to refresh available Python kernelspecs for its worktree                      |
+| BL192 | Install Ipykernel Package                                 | queue-worker   | REPL execution detects the target Python environment is missing ipykernel                             |
+| BL193 | Compute Settings Exact Search Matches                     | queue-worker   | user types a query in the Settings window's search box                                                |
+| BL194 | Build Task Contexts Off Thread                            | queue-worker   | the tasks UI (spawn/run) needs the current task execution context (cwd, selection, LSP task sources)  |
+| BL195 | Search Terminal Scrollback                                | queue-worker   | user runs an in-terminal search (Cmd-F) inside an integrated terminal                                 |
+| BL196 | Serialize Terminal Panel Layout                           | queue-worker   | the terminal panel's pane layout changes and needs persisting (debounced)                             |
+| BL197 | Save Terminal Working Directory And Title                 | queue-worker   | workspace item serialization pass for an open terminal tab whose cwd/title changed                    |
+| BL198 | Pipe Vim Filter Command Stdin                             | queue-worker   | a Vim `:!` filter command is run against a buffer range with piped stdin input                        |
+| BL199 | Delete Vim Mark From Db                                   | queue-worker   | user deletes a Vim mark (buffer-local or global)                                                      |
+| BL200 | Clone Item On Split Off Thread                            | queue-worker   | user splits a pane, requiring the active item to be cloned into the new pane                          |
+| BL201 | Bind Session To Window On Flush                           | queue-worker   | multi-workspace flushes serialization for all open workspaces (e.g. on window close/quit)             |
+| BL202 | Await Spawned Task Process Output                         | queue-worker   | a task template is resolved and spawned in an integrated terminal, and the workspace needs to know i  |
+| BL203 | Update Workspace Activation Timestamp                     | queue-worker   | a workspace window becomes active                                                                     |
+| BL204 | Save Workspace Welcome Page State                         | queue-worker   | workspace item serialization pass for an open Welcome Page tab                                        |
+| BL205 | Create Worktree Entry On Disk                             | queue-worker   | user creates a new file or directory entry in the project panel/worktree                              |
+| BL206 | Watch Theme File Changes                                  | queue-worker   | Zode starts in an environment where the active theme file may change on disk                          |
+| BL207 | Run Keymap Or Settings Migration                          | queue-worker   | user clicks "Backup and Update" in the settings/keymap migration dialog                               |
+| BL208 | Zode Cli Path Resolution                                  | integration    | something needs to invoke the zed/zed-cli executable from a shell context                             |
 
 ---
 
@@ -5227,4 +5229,4 @@ N/A — no file upload / progress-tracking UI detected (no client-server file up
 
 ### Realtime (WebSocket / SSE / EventSource)
 
-N/A as a general web-client pattern — however, `crates/client`/`crates/rpc`/`crates/remote`/`crates/remote_server` implement a persistent binary RPC connection over SSH for **remote development** (not multiplayer collaboration — that subsystem was removed from this fork; see architecture.md). This is a maintained bidirectional connection with reconnect logic, analogous in *shape* to a WebSocket client but purpose-built for a remote dev-server protocol rather than realtime UI updates. Flagged here for completeness; not modeled as its own BL item since it is the RPC transport layer already covered by the `integration` BL entries for remote/headless project management.
+N/A as a general web-client pattern — however, `crates/client`/`crates/rpc`/`crates/remote`/`crates/remote_server` implement a persistent binary RPC connection over SSH for **remote development** (not multiplayer collaboration — that subsystem was removed from this fork; see architecture.md). This is a maintained bidirectional connection with reconnect logic, analogous in _shape_ to a WebSocket client but purpose-built for a remote dev-server protocol rather than realtime UI updates. Flagged here for completeness; not modeled as its own BL item since it is the RPC transport layer already covered by the `integration` BL entries for remote/headless project management.

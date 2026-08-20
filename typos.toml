@@ -63,6 +63,18 @@ extend-exclude = [
     # Eval examples contain intentionally partial words (e.g. "secur" for "secure")
     # Tests contain `baˇr` that cause `"ba" should be "by" or "be".`-like false-positives
     "crates/editor/src/document_symbols.rs",
+    # Plans and their reports are written in Vietnamese, where an English spell checker
+    # reads "thay", "tham", "vai" and "thi" as misspellings. They are a record of decisions
+    # already taken, not prose to be corrected.
+    "plans/",
+    # Session journals, also Vietnamese, and likewise a record rather than prose.
+    "docs/journals/",
+    # Machine-generated tables; the truncated words in them come from the generator.
+    "docs/generated/",
+    # Vim documents commands as `:bd[elete][!]`, which is notation, not spelling.
+    "docs/src/vim.md",
+    # Test fixtures use deliberately mangled strings such as "AyCD{}GHIzJ".
+    "crates/text/src/tests.rs",
 ]
 
 [default]
@@ -92,6 +104,13 @@ extend-ignore-re = [
     # Yarn Plug'n'Play
     "PnP",
     # `image` crate method: Delay::from_numer_denom_ms
-    "numer"
+    "numer",
+    # Name of the screen-capture crate, and the prefix of the types wrapping it.
+    "scap",
+    "Scap",
+    # Part of the extension WIT interface; renaming it would break the API.
+    "writeable",
+    # Business Analyst, in the docs' role tables.
+    "BA",
 ]
 check-filename = true

@@ -16,9 +16,7 @@ use fs::{Fs, RealFs};
 use futures::{StreamExt, channel::oneshot};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
-use gpui::{
-    App, AppContext, Application, AsyncApp, QuitMode, Task, UpdateGlobal as _,
-};
+use gpui::{App, AppContext, Application, AsyncApp, QuitMode, Task, UpdateGlobal as _};
 use gpui_platform;
 
 use gpui_tokio::Tokio;
@@ -56,8 +54,8 @@ use workspace::{
 };
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
-    derive_paths_with_position, handle_cli_connection,
-    handle_keymap_file_changes, initialize_workspace, open_paths_with_positions,
+    derive_paths_with_position, handle_cli_connection, handle_keymap_file_changes,
+    initialize_workspace, open_paths_with_positions,
 };
 
 use crate::zed::{OpenRequestKind, eager_load_active_theme_and_icon_theme};

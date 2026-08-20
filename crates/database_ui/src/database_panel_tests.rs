@@ -847,6 +847,20 @@ async fn a_column_is_pulled_back_in_when_the_space_beside_it_shrinks(cx: &mut Te
 /// closing what is already closed, or opening what is already open.
 #[gpui::test]
 async fn a_closed_connection_offers_to_open_again(cx: &mut TestAppContext) {
+    // The only test here that reaches the connect path, and connecting starts a
+    // driver: `Session::open` builds a `StdioTransport`, which spawns a child
+    // process through `smol::process`. That brings up the `async-io` reactor on
+    // a thread of its own, and the reactor then wakes gpui tasks from there --
+    // which the test scheduler counts as non-determinism and reports at
+    // `end_test`, whether or not this test ever looks at the driver.
+    //
+    // Same reason `neovim_backed_test_context` and the `debugger_ui` tests say
+    // it: a test that starts a real process cannot also promise every wake-up
+    // arrives on one thread. It went unnoticed until a macOS runner ran the
+    // test eighteen times slower than a developer machine and gave the reactor
+    // long enough to fire inside the test's own window.
+    cx.executor().allow_parking();
+
     let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     set_connections(cx, &[("a", "/tmp/a.sqlite")]);
 

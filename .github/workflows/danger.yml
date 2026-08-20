@@ -10,10 +10,14 @@ on:
     - edited
     branches:
     - main
+    - develop
 jobs:
   danger:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -34,8 +38,7 @@ jobs:
     - name: danger::danger_job::run
       run: pnpm run --dir script/danger danger ci
       env:
-        GITHUB_TOKEN: not_a_real_token
-        DANGER_GITHUB_API_BASE_URL: https://danger-proxy.zed.dev/github
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 defaults:
   run:
     shell: bash -euxo pipefail {0}

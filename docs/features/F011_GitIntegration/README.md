@@ -15,16 +15,15 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Git Panel | — | — |
-| Branch Picker | — | — |
-| Commit View | — | — |
-| Stash Picker | — | — |
-| Project Diff | — | — |
-| Git Graph | — | — |
-| Git Picker (combined tab) | — | — |
-| Worktree Picker | — | — |
-
+| Screen                    | SCR | Spec |
+| ------------------------- | --- | ---- |
+| Git Panel                 | —   | —    |
+| Branch Picker             | —   | —    |
+| Commit View               | —   | —    |
+| Stash Picker              | —   | —    |
+| Project Diff              | —   | —    |
+| Git Graph                 | —   | —    |
+| Git Picker (combined tab) | —   | —    |
+| Worktree Picker           | —   | —    |
 
 <!-- end-generated -->

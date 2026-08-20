@@ -548,7 +548,10 @@ mod relocated_enum_tests {
             let parsed: OpenAiReasoningEffort =
                 serde_json::from_value(serde_json::json!(json)).unwrap();
             assert_eq!(parsed, variant, "{json} should parse to {variant:?}");
-            assert_eq!(serde_json::to_value(variant).unwrap(), serde_json::json!(json));
+            assert_eq!(
+                serde_json::to_value(variant).unwrap(),
+                serde_json::json!(json)
+            );
         }
     }
 
@@ -578,6 +581,9 @@ mod relocated_enum_tests {
         assert_eq!(parsed, Speed::Standard);
         let parsed: Speed = serde_json::from_value(serde_json::json!("fast")).unwrap();
         assert_eq!(parsed, Speed::Fast);
-        assert_eq!(serde_json::to_value(Speed::Fast).unwrap(), serde_json::json!("fast"));
+        assert_eq!(
+            serde_json::to_value(Speed::Fast).unwrap(),
+            serde_json::json!("fast")
+        );
     }
 }

@@ -443,6 +443,10 @@ fn check_dependencies() -> NamedJob {
         named::bash("cargo update --locked --workspace")
     }
 
+    // Advisory rather than blocking: the action reports "Dependency review is not supported
+    // on this repository", which is a repository setting (Dependency graph) and not
+    // something a workflow can turn on. Left in place so it starts reporting the moment the
+    // setting is enabled, instead of failing every pull request until then.
     fn check_vulnerable_dependencies() -> Step<Use> {
         named::uses(
             "actions",
@@ -451,6 +455,7 @@ fn check_dependencies() -> NamedJob {
         )
         .if_condition(Expression::new("github.event_name == 'pull_request'"))
         .with(("license-check", false))
+        .continue_on_error(true)
     }
 
     named::job(use_clang(
@@ -507,7 +512,9 @@ fn check_workspace_binaries() -> NamedJob {
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
             .add_step(steps::setup_sccache(Platform::Linux))
-            .add_step(steps::script("cargo build -p collab"))
+            // `cargo build -p collab` was here. That crate went with the collaboration
+            // server, so the step could only ever fail; the workspace build below already
+            // covers everything this fork ships.
             .add_step(steps::script("cargo build --workspace --bins --examples"))
             .add_step(steps::show_sccache_stats(Platform::Linux))
             .add_step(steps::cleanup_cargo_config(Platform::Linux)),
@@ -515,6 +522,17 @@ fn check_workspace_binaries() -> NamedJob {
 }
 
 pub(crate) fn clippy(platform: Platform, arch: Option<Arch>) -> NamedJob {
+    clippy_on_ref(platform, arch, None)
+}
+
+/// `git_ref` exists for schedule-triggered workflows: GitHub evaluates `schedule` against
+/// the default branch, so a nightly gate would otherwise check a different commit than the
+/// one it goes on to bundle.
+pub(crate) fn clippy_on_ref(
+    platform: Platform,
+    arch: Option<Arch>,
+    git_ref: Option<&str>,
+) -> NamedJob {
     let target = arch.map(|arch| match (platform, arch) {
         (Platform::Mac, Arch::X86_64) => "x86_64-apple-darwin",
         (Platform::Mac, Arch::AARCH64) => "aarch64-apple-darwin",
@@ -527,8 +545,14 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>) -> NamedJob {
     };
     let mut job = release_job(&[])
         .runs_on(runner)
-        .add_step(steps::checkout_repo())
+        .add_step(match git_ref {
+            Some(git_ref) => steps::checkout_repo().with_ref(git_ref),
+            None => steps::checkout_repo(),
+        })
         .add_step(steps::setup_cargo_config(platform))
+        .when(platform == Platform::Windows, |this| {
+            this.add_step(steps::windows_enable_long_paths())
+        })
         .when(
             platform == Platform::Linux || platform == Platform::Mac,
             |this| this.add_step(steps::cache_rust_dependencies_namespace()),
@@ -554,14 +578,23 @@ pub(crate) fn clippy(platform: Platform, arch: Option<Arch>) -> NamedJob {
 }
 
 pub(crate) fn run_platform_tests(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, true)
+    run_platform_tests_impl(platform, true, None)
 }
 
 pub(crate) fn run_platform_tests_no_filter(platform: Platform) -> NamedJob {
-    run_platform_tests_impl(platform, false)
+    run_platform_tests_impl(platform, false, None)
 }
 
-fn run_platform_tests_impl(platform: Platform, filter_packages: bool) -> NamedJob {
+/// See `clippy_on_ref` for why `git_ref` is needed.
+pub(crate) fn run_platform_tests_no_filter_on_ref(platform: Platform, git_ref: &str) -> NamedJob {
+    run_platform_tests_impl(platform, false, Some(git_ref))
+}
+
+fn run_platform_tests_impl(
+    platform: Platform,
+    filter_packages: bool,
+    git_ref: Option<&str>,
+) -> NamedJob {
     let runner = match platform {
         Platform::Windows => runners::WINDOWS_DEFAULT,
         Platform::Linux => runners::LINUX_DEFAULT,
@@ -585,8 +618,14 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool) -> NamedJo
                         ),
                 )
             })
-            .add_step(steps::checkout_repo())
+            .add_step(match git_ref {
+                Some(git_ref) => steps::checkout_repo().with_ref(git_ref),
+                None => steps::checkout_repo(),
+            })
             .add_step(steps::setup_cargo_config(platform))
+            .when(platform == Platform::Windows, |this| {
+                this.add_step(steps::windows_enable_long_paths())
+            })
             .when(platform == Platform::Mac, |this| {
                 this.add_step(steps::cache_rust_dependencies_namespace())
             })
@@ -598,10 +637,10 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool) -> NamedJo
                 steps::install_linux_dependencies,
             )
             .add_step(steps::setup_node())
-            .when(
-                platform == Platform::Linux || platform == Platform::Mac,
-                |job| job.add_step(steps::cargo_install_nextest()),
-            )
+            // Windows included: it was excluded because upstream's self-hosted runner has
+            // nextest preinstalled, and a hosted one does not -- `cargo nextest` failed
+            // with "no such command".
+            .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(platform))
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {

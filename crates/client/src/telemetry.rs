@@ -281,7 +281,6 @@ impl Telemetry {
     pub fn installation_id(self: &Arc<Self>) -> Option<Arc<str>> {
         self.state.lock().installation_id.clone()
     }
-
 }
 
 #[cfg(test)]

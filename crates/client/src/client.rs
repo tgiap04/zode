@@ -3,10 +3,7 @@ pub mod user;
 pub mod zed_urls;
 
 use anyhow::Result;
-use async_tungstenite::tungstenite::{
-    error::Error as WebsocketError,
-    http::StatusCode,
-};
+use async_tungstenite::tungstenite::{error::Error as WebsocketError, http::StatusCode};
 use clock::SystemClock;
 use futures::{FutureExt, Stream, TryFutureExt as _, future::BoxFuture};
 use gpui::{App, AsyncApp, Entity, Global, Task, WeakEntity};
@@ -870,5 +867,4 @@ mod tests {
             Some("http://127.0.0.1:10809")
         );
     }
-
 }

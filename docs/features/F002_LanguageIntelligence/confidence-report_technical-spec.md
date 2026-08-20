@@ -14,18 +14,18 @@ generated_by: derive_confidence_report.py
 
 Legend: `○` = cited (Source file:line present) · `△` = marker-tagged (uncertain, no citation).
 
-| Claim | Section | Evidence (file:line) | Status ○/△ |
-|---|---|---|---|
-| , `crates/lsp/src/lsp.rs:61,1098-1105`, `crates/toolchain_selector/src/toolchain_selector.rs:909-95… | Cross-Cutting Logic | crates/project/src/lsp_store.rs:423-500 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/project/src/lsp_store.rs:448-486 | ○ |
-| ,1090-1110` | Cross-Cutting Logic | crates/lsp/src/lsp.rs:61 | ○ |
-| , `crates/workspace/src/persistence.rs:2388-2423` | Cross-Cutting Logic | crates/toolchain_selector/src/toolchain_selector.rs:909-951 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/language_selector/src/language_selector.rs:209-227 | ○ |
-| (full file; per `behavior-logic.md:2507-2532`, `BL111_VueLanguageServerTsServerBridge`) | Cross-Cutting Logic | crates/project/src/lsp_store/vue_language_server_ext.rs:1-133 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/project/src/prettier_store.rs:336-420 | ○ |
-| (unlabeled claim) | User Stories | crates/toolchain_selector/src/toolchain_selector.rs:909-951 | ○ |
-| (unlabeled claim) | User Stories | crates/language_selector/src/language_selector.rs:209-227 | ○ |
-| (unlabeled claim) | User Stories | crates/project/src/lsp_store.rs:11717-11766 | ○ |
+| Claim                                                                                                | Section             | Evidence (file:line)                                          | Status ○/△ |
+| ---------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------------------- | ---------- |
+| , `crates/lsp/src/lsp.rs:61,1098-1105`, `crates/toolchain_selector/src/toolchain_selector.rs:909-95… | Cross-Cutting Logic | crates/project/src/lsp_store.rs:423-500                       | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/project/src/lsp_store.rs:448-486                       | ○          |
+| ,1090-1110`                                                                                          | Cross-Cutting Logic | crates/lsp/src/lsp.rs:61                                      | ○          |
+| , `crates/workspace/src/persistence.rs:2388-2423`                                                    | Cross-Cutting Logic | crates/toolchain_selector/src/toolchain_selector.rs:909-951   | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/language_selector/src/language_selector.rs:209-227     | ○          |
+| (full file; per `behavior-logic.md:2507-2532`, `BL111_VueLanguageServerTsServerBridge`)              | Cross-Cutting Logic | crates/project/src/lsp_store/vue_language_server_ext.rs:1-133 | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/project/src/prettier_store.rs:336-420                  | ○          |
+| (unlabeled claim)                                                                                    | User Stories        | crates/toolchain_selector/src/toolchain_selector.rs:909-951   | ○          |
+| (unlabeled claim)                                                                                    | User Stories        | crates/language_selector/src/language_selector.rs:209-227     | ○          |
+| (unlabeled claim)                                                                                    | User Stories        | crates/project/src/lsp_store.rs:11717-11766                   | ○          |
 
 ## Missing Info
 

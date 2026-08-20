@@ -16,8 +16,8 @@ on:
     - v[0-9]+.[0-9]+.x
 jobs:
   orchestrate:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -129,18 +129,21 @@ jobs:
       run_tests: ${{ steps.filter.outputs.run_tests }}
       changed_extensions: ${{ steps.filter.outputs.changed_extensions }}
   check_style:
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions')
-    runs-on: namespace-profile-4x8-ubuntu-2204
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_pnpm
       uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
       with:
@@ -172,12 +175,12 @@ jobs:
             echo "zed://extension/tree-sitter-query"
             false
         }
-    timeout-minutes: 60
+    timeout-minutes: 360
   clippy_windows:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: self-32vcpu-windows-2022
+    runs-on: windows-2025
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -187,6 +190,12 @@ jobs:
       run: |
         New-Item -ItemType Directory -Path "./../.cargo" -Force
         Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
+      shell: pwsh
+    - name: steps::windows_enable_long_paths
+      run: |
+        git config --global core.longpaths true
+        New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
       shell: pwsh
     - name: steps::setup_sccache
       run: ./script/setup-sccache.ps1
@@ -202,12 +211,12 @@ jobs:
     - name: steps::show_sccache_stats
       run: if ($env:RUSTC_WRAPPER) { & $env:RUSTC_WRAPPER --show-stats }; exit 0
       shell: pwsh
-    timeout-minutes: 60
+    timeout-minutes: 360
   clippy_linux:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -221,12 +230,16 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: steps::setup_sccache
@@ -240,12 +253,12 @@ jobs:
       run: ./script/clippy
     - name: steps::show_sccache_stats
       run: sccache --show-stats || true
-    timeout-minutes: 60
+    timeout-minutes: 360
   clippy_mac:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-mac-large
+    runs-on: macos-15
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -256,10 +269,13 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_sccache
       run: ./script/setup-sccache
       env:
@@ -271,12 +287,12 @@ jobs:
       run: ./script/clippy
     - name: steps::show_sccache_stats
       run: sccache --show-stats || true
-    timeout-minutes: 60
+    timeout-minutes: 360
   clippy_mac_x86_64:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-mac-large
+    runs-on: macos-15
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -287,10 +303,13 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::install_rustup_target
       run: rustup target add x86_64-apple-darwin
     - name: steps::setup_sccache
@@ -304,12 +323,12 @@ jobs:
       run: ./script/clippy --target x86_64-apple-darwin
     - name: steps::show_sccache_stats
       run: sccache --show-stats || true
-    timeout-minutes: 60
+    timeout-minutes: 360
   run_tests_windows:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: self-32vcpu-windows-2022
+    runs-on: windows-2025
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -320,10 +339,18 @@ jobs:
         New-Item -ItemType Directory -Path "./../.cargo" -Force
         Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
       shell: pwsh
+    - name: steps::windows_enable_long_paths
+      run: |
+        git config --global core.longpaths true
+        New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+      shell: pwsh
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
         node-version: '20'
+    - name: steps::cargo_install_nextest
+      uses: taiki-e/install-action@921e2c9f7148d7ba14cd819f417db338f63e733c
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than.ps1 350 200
       shell: pwsh
@@ -346,12 +373,12 @@ jobs:
       run: |
         Remove-Item -Recurse -Path "./../.cargo" -Force -ErrorAction SilentlyContinue
       shell: pwsh
-    timeout-minutes: 60
+    timeout-minutes: 360
   run_tests_linux:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -365,12 +392,16 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: steps::setup_node
@@ -396,7 +427,7 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 60
+    timeout-minutes: 360
     services:
       postgres:
         image: postgres:15
@@ -409,7 +440,7 @@ jobs:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-mac-large
+    runs-on: macos-15
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -420,10 +451,13 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -447,12 +481,12 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 60
+    timeout-minutes: 360
   doctests:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -462,12 +496,16 @@ jobs:
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: steps::setup_cargo_config
@@ -491,12 +529,12 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 60
+    timeout-minutes: 360
   check_workspace_binaries:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-8x16-ubuntu-2204
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -510,12 +548,16 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: steps::setup_sccache
@@ -525,8 +567,6 @@ jobs:
         R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
         R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         SCCACHE_BUCKET: sccache-zed
-    - name: cargo build -p collab
-      run: cargo build -p collab
     - name: cargo build --workspace --bins --examples
       run: cargo build --workspace --bins --examples
     - name: steps::show_sccache_stats
@@ -535,12 +575,12 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 60
+    timeout-minutes: 360
   check_wasm:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-8x16-ubuntu-2204
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -551,10 +591,13 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: run_tests::check_wasm::install_nightly_wasm_toolchain
       run: rustup toolchain install nightly --component rust-src --target wasm32-unknown-unknown
     - name: steps::setup_sccache
@@ -575,12 +618,12 @@ jobs:
       if: always()
       run: |
         rm -rf ./../.cargo
-    timeout-minutes: 60
+    timeout-minutes: 360
   check_dependencies:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -590,10 +633,13 @@ jobs:
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: run_tests::check_dependencies::install_cargo_machete
       uses: taiki-e/install-action@02cc5f8ca9f2301050c0c099055816a41ee05507
       with:
@@ -607,12 +653,13 @@ jobs:
       uses: actions/dependency-review-action@67d4f4bd7a9b17a0db54d2a7519187c65e339de8
       with:
         license-check: false
-    timeout-minutes: 60
+      continue-on-error: true
+    timeout-minutes: 360
   check_docs:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_docs == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-8x16-ubuntu-2204
+    runs-on: ubuntu-24.04
     env:
       CC: clang
       CXX: clang++
@@ -626,10 +673,13 @@ jobs:
         mkdir -p ./../.cargo
         cp ./.cargo/ci-config.toml ./../.cargo/config.toml
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: run_tests::check_docs::lychee_link_check
       uses: lycheeverse/lychee-action@82202e5e9c2f4ef1a55a3d02563e1cb6041e5332
       with:
@@ -638,6 +688,7 @@ jobs:
         jobSummary: false
     - name: steps::setup_linux
       run: ./script/linux
+      timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
     - name: ./script/generate-action-metadata
@@ -656,22 +707,25 @@ jobs:
         args: --no-progress --exclude '^http' 'target/deploy/docs'
         fail: true
         jobSummary: false
-    timeout-minutes: 60
+    timeout-minutes: 360
   check_licenses:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_licenses == 'true' && github.event_name != 'merge_group'
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: ./script/check-licenses
       run: ./script/check-licenses
     - name: ./script/generate-licenses
@@ -680,7 +734,7 @@ jobs:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_action_checks == 'true'
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -696,10 +750,13 @@ jobs:
       env:
         ACTIONLINT_BIN: ${{ steps.get_actionlint.outputs.executable }}
     - name: steps::cache_rust_dependencies_namespace
-      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
-        cache: rust
-        path: ~/.rustup
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
     - name: run_tests::check_scripts::check_xtask_workflows
       run: |
         cargo xtask workflows
@@ -708,12 +765,12 @@ jobs:
           echo "Please run 'cargo xtask workflows' locally and commit the changes"
           exit 1
         fi
-    timeout-minutes: 60
+    timeout-minutes: 360
   check_postgres_and_protobuf_migrations:
     needs:
     - orchestrate
     if: needs.orchestrate.outputs.run_tests == 'true'
-    runs-on: namespace-profile-16x32-ubuntu-2204
+    runs-on: ubuntu-24.04
     env:
       GIT_AUTHOR_NAME: Protobuf Action
       GIT_AUTHOR_EMAIL: ci@zed.dev
@@ -749,7 +806,7 @@ jobs:
       run: buf lint crates/proto/proto
     - name: run_tests::check_postgres_and_protobuf_migrations::check_protobuf_formatting
       run: buf format --diff --exit-code crates/proto/proto
-    timeout-minutes: 60
+    timeout-minutes: 360
   extension_tests:
     needs:
     - orchestrate
@@ -783,8 +840,8 @@ jobs:
     - check_licenses
     - check_scripts
     - extension_tests
-    if: (github.repository_owner == 'zed-industries' || github.repository_owner == 'zed-extensions') && always()
-    runs-on: namespace-profile-2x4-ubuntu-2404
+    if: (github.repository_owner == 'tgiap04') && always()
+    runs-on: ubuntu-24.04
     steps:
     - name: run_tests::tests_pass
       run: |

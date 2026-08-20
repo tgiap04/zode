@@ -15,14 +15,13 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| SettingsWindow | — | — |
-| KeymapEditor | — | — |
-| KeybindingEditorModal | — | — |
-| BaseKeymapSelector | — | — |
-| ThemeSelector | — | — |
-| MigrationBanner | — | — |
-
+| Screen                | SCR | Spec |
+| --------------------- | --- | ---- |
+| SettingsWindow        | —   | —    |
+| KeymapEditor          | —   | —    |
+| KeybindingEditorModal | —   | —    |
+| BaseKeymapSelector    | —   | —    |
+| ThemeSelector         | —   | —    |
+| MigrationBanner       | —   | —    |
 
 <!-- end-generated -->
