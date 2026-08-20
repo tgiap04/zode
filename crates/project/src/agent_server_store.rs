@@ -270,7 +270,6 @@ enum AgentServerStoreState {
         upstream_client: Entity<RemoteClient>,
         worktree_store: Entity<WorktreeStore>,
     },
-    Collab,
 }
 
 pub struct ExternalAgentEntry {
@@ -415,9 +414,6 @@ impl AgentServerStore {
                         agents,
                     })
                     .log_err();
-            }
-            AgentServerStoreState::Collab => {
-                // Do nothing
             }
         }
 
@@ -816,13 +812,6 @@ impl AgentServerStore {
         }
     }
 
-    pub fn collab() -> Self {
-        Self {
-            state: AgentServerStoreState::Collab,
-            external_agents: HashMap::default(),
-        }
-    }
-
     pub fn shared(&mut self, project_id: u64, client: AnyProtoClient, cx: &mut Context<Self>) {
         match &mut self.state {
             AgentServerStoreState::Local {
@@ -850,9 +839,6 @@ impl AgentServerStore {
                 debug_panic!(
                     "external agents over collab not implemented, remote project should not be shared"
                 );
-            }
-            AgentServerStoreState::Collab => {
-                debug_panic!("external agents over collab not implemented, should not be shared");
             }
         }
     }

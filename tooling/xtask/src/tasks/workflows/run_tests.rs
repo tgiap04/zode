@@ -443,6 +443,10 @@ fn check_dependencies() -> NamedJob {
         named::bash("cargo update --locked --workspace")
     }
 
+    // Advisory rather than blocking: the action reports "Dependency review is not supported
+    // on this repository", which is a repository setting (Dependency graph) and not
+    // something a workflow can turn on. Left in place so it starts reporting the moment the
+    // setting is enabled, instead of failing every pull request until then.
     fn check_vulnerable_dependencies() -> Step<Use> {
         named::uses(
             "actions",
@@ -451,6 +455,7 @@ fn check_dependencies() -> NamedJob {
         )
         .if_condition(Expression::new("github.event_name == 'pull_request'"))
         .with(("license-check", false))
+        .continue_on_error(true)
     }
 
     named::job(use_clang(

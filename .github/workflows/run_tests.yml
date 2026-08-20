@@ -651,6 +651,7 @@ jobs:
       uses: actions/dependency-review-action@67d4f4bd7a9b17a0db54d2a7519187c65e339de8
       with:
         license-check: false
+      continue-on-error: true
     timeout-minutes: 360
   check_docs:
     needs:

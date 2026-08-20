@@ -327,6 +327,14 @@ enum ProjectClientState {
     /// Multi-player mode but still a local project.
     Shared { remote_id: u64 },
     /// Multi-player mode but working on a remote project.
+    ///
+    /// Unreachable since collaboration was removed: the only constructor left was a test
+    /// helper nothing calls. Excising it is not a matter of deleting the variant --
+    /// `synchronize_remote_buffers` and `disconnected_from_host_internal` exist solely to
+    /// serve this state, and unwinding them reaches into `collab_client`,
+    /// `client_subscriptions`, `collaborators` and the `disconnected_from_host` path of
+    /// three sub-stores. That belongs in its own change, not in a release-pipeline one.
+    #[allow(dead_code)]
     Collab {
         sharing_has_stopped: bool,
         capability: Capability,
