@@ -15,12 +15,11 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Buffer Diagnostics Editor | — | — |
-| Project Diagnostics Editor | — | — |
-| Activity Indicator | — | — |
-| Project Panel diagnostic badges | — | — |
-
+| Screen                          | SCR | Spec |
+| ------------------------------- | --- | ---- |
+| Buffer Diagnostics Editor       | —   | —    |
+| Project Diagnostics Editor      | —   | —    |
+| Activity Indicator              | —   | —    |
+| Project Panel diagnostic badges | —   | —    |
 
 <!-- end-generated -->

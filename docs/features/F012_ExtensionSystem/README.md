@@ -15,11 +15,10 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Extensions page | — | — |
-| Language-extension suggestion banner | — | — |
-| Context-server status view | — | — |
-
+| Screen                               | SCR | Spec |
+| ------------------------------------ | --- | ---- |
+| Extensions page                      | —   | —    |
+| Language-extension suggestion banner | —   | —    |
+| Context-server status view           | —   | —    |
 
 <!-- end-generated -->

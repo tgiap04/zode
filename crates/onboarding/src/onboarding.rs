@@ -9,8 +9,8 @@ use gpui::{
 use settings::SettingsStore;
 use std::sync::Arc;
 use ui::{
-    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement,
-    WithScrollbar as _, prelude::*, rems_from_px,
+    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, WithScrollbar as _,
+    prelude::*, rems_from_px,
 };
 
 pub use workspace::welcome::ShowWelcome;
@@ -493,7 +493,10 @@ mod name_tests {
         for (path, source) in [
             ("onboarding.rs", include_str!("onboarding.rs")),
             ("basics_page.rs", include_str!("basics_page.rs")),
-            ("base_keymap_picker.rs", include_str!("base_keymap_picker.rs")),
+            (
+                "base_keymap_picker.rs",
+                include_str!("base_keymap_picker.rs"),
+            ),
             ("multibuffer_hint.rs", include_str!("multibuffer_hint.rs")),
         ] {
             // Only the shipping half of each file. Test code is not user-facing

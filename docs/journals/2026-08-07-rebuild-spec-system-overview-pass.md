@@ -12,6 +12,7 @@ Completed the `tkm:rebuild-spec --overview` pass (waves OV.1 through OV.4) as th
 **Output:** `docs/Zed_zode_fork_System_Overview.md` (markdown source, promoted to live docs), `docs/Zed_zode_fork_System_Overview.docx` (styled deliverable, 28,242 bytes), confidence-report sidecar.
 
 **Key metrics:**
+
 - Sections sourced from live docs: 8 of 11 (100% coverage with graceful degradation for 3 missing artifact categories)
 - Validator round-trip: 1 pass, clean (0 leaked technical tokens on first run — a first for this session's synthesis passes)
 - Reviewer round-trip: 1 pass with 2 findings; 1 finding fixed (wording collision), 1 finding fixed (missing UI element)
@@ -19,7 +20,7 @@ Completed the `tkm:rebuild-spec --overview` pass (waves OV.1 through OV.4) as th
 
 ## The Brutal Truth
 
-The galling part: a single word collision between two semantically unrelated parts of the document nearly shipped a false impression. The hibernation feature section (§4 Business Flows & Lifecycle) described it as pausing "the assistant that is scanning files in the background" — perfectly accurate phrasing in isolation. But this document's §1 System Overview and §2 Purpose & Business Value *explicitly and repeatedly* state that Zode has NO AI writing-assistant subsystem (removed from upstream Zed). A reader hitting "assistant" in §4 right after two firm "no AI" disclaimers would very plausibly misread it as a residual or incomplete removal of AI capability, even though "assistant" meant the worktree's background file-watcher (`Worktree::pause_scanning()`). The deterministic token-leak gate caught zero technical jargon (good — that gate works), but a careful human reviewer spotted the wording trap that no regex can catch: a word choice that's contextually correct but collides with the document's own repeated disclaimers.
+The galling part: a single word collision between two semantically unrelated parts of the document nearly shipped a false impression. The hibernation feature section (§4 Business Flows & Lifecycle) described it as pausing "the assistant that is scanning files in the background" — perfectly accurate phrasing in isolation. But this document's §1 System Overview and §2 Purpose & Business Value _explicitly and repeatedly_ state that Zode has NO AI writing-assistant subsystem (removed from upstream Zed). A reader hitting "assistant" in §4 right after two firm "no AI" disclaimers would very plausibly misread it as a residual or incomplete removal of AI capability, even though "assistant" meant the worktree's background file-watcher (`Worktree::pause_scanning()`). The deterministic token-leak gate caught zero technical jargon (good — that gate works), but a careful human reviewer spotted the wording trap that no regex can catch: a word choice that's contextually correct but collides with the document's own repeated disclaimers.
 
 The second issue was mundane: the project-navigation section omitted one real UI element (the quick tab switcher) from its bullet list. Not a defect in derivation, just an incomplete enumeration when pulling from multiple `screens.md` files.
 
@@ -98,6 +99,7 @@ After both fixes applied: **0 critical, 0 warnings.** Clean promotion gate.
 Markdown source was converted to styled `.docx` via the pass's bundled pandoc-based builder (Arial body font, navy heading palette, bordered/shaded tables per section, page-break-before-heading, page-numbered footer).
 
 **Build gates:**
+
 - **Round-trip gate:** The `.docx` was reopened via pandoc's reverse conversion (docx → markdown) to confirm the styling didn't introduce any XML shape corruption. Passed clean.
 - **Style-presence gate:** Inspected the `.docx` binary's style definitions to confirm that the styling actually landed (not silently no-op'd by a pandoc-version change). Confirmed: navy color codes, border specifications, and page-break directives all present in the XML.
 
@@ -107,7 +109,7 @@ Markdown source was converted to styled `.docx` via the pass's bundled pandoc-ba
 
 1. **Wave OV.1 parallel dispatch:** Spawned four background agents, each owning one section cluster, all writing concurrently without shared state. **Result: All four completed without blocking.** The degradation logic (missing screen-list, screen-flow, api-map) was handled inline by each researcher rather than requiring a coordinator intervention.
 
-2. **Front-loaded client-language instruction:** Baked the "no technical tokens, no jargon" requirement into the agent prompts *before* they drafted (not as a separate post-pass rewrite). **Result: Token-leak gate passed clean on first run, saving a re-run cycle.**
+2. **Front-loaded client-language instruction:** Baked the "no technical tokens, no jargon" requirement into the agent prompts _before_ they drafted (not as a separate post-pass rewrite). **Result: Token-leak gate passed clean on first run, saving a re-run cycle.**
 
 3. **Peer review accuracy spot-check:** Rather than generic structural review, the reviewer traced ~45 factual claims back to their source artifacts to catch both semantic errors and wording collisions. **Result: Caught the "assistant" collision that no regex could detect, plus the omitted UI element.**
 

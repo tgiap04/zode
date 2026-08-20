@@ -3419,7 +3419,10 @@ mod tests {
                 false,
                 sysinfo::ProcessRefreshKind::nothing().with_memory(),
             );
-            system.process(pid).map(|process| process.memory()).unwrap_or(0)
+            system
+                .process(pid)
+                .map(|process| process.memory())
+                .unwrap_or(0)
         }
 
         cx.update(|cx| {
@@ -3469,7 +3472,8 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let history_size_filled = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        let history_size_filled =
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
         let rss_after_fill = own_rss_bytes();
 
         assert_eq!(
@@ -3486,7 +3490,8 @@ mod tests {
             terminal.term.lock().set_options(config);
         });
 
-        let history_size_shrunk = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        let history_size_shrunk =
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
         let rss_after_shrink = own_rss_bytes();
 
         assert!(
@@ -3514,7 +3519,8 @@ mod tests {
             terminal.write_output(generated.as_bytes(), cx);
         });
         cx.run_until_parked();
-        let history_size_regrown = terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
+        let history_size_regrown =
+            terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
         let rss_after_regrow = own_rss_bytes();
 
         eprintln!(
@@ -3568,7 +3574,9 @@ mod tests {
         for line in 0..12_000 {
             generated.push_str(&format!("line {line}\n"));
         }
-        terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(generated.as_bytes(), cx)
+        });
         cx.run_until_parked();
         let original_history_size =
             terminal.update(cx, |terminal, _| terminal.term.lock().history_size());
@@ -3591,7 +3599,9 @@ mod tests {
         );
 
         terminal.update(cx, |terminal, _| terminal.restore_scroll_history_limit());
-        terminal.update(cx, |terminal, cx| terminal.write_output(generated.as_bytes(), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(generated.as_bytes(), cx)
+        });
         cx.run_until_parked();
         assert_eq!(
             terminal.update(cx, |terminal, _| terminal.term.lock().history_size()),

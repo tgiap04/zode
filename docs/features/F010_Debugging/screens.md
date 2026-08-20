@@ -7,15 +7,15 @@ backed by a distinct Rust view module under crates/debugger_ui/src/. No SCR### c
 
 ## Screen List
 
-| Screen Name | SCR### | What User Sees | What User Can Do |
-|-------------|--------|-----------------|-------------------|
-| New Process Modal | N/A (no screen-list artifact in this profile) | Tabbed picker (Task / Debug / Attach / Launch) for starting a new process or debug session | Switch tabs, pick a launch configuration or task, start a session |
-| Debugger Panel — Console | N/A | REPL-style console with debug output and a query bar | Type expressions, evaluate them, add to watch list |
-| Debugger Panel — Breakpoint List | N/A | List of source breakpoints across all open files, with condition/hit-count/log-message fields | Navigate between editable properties, enable/disable, clear all |
-| Debugger Panel — Variable List | N/A | Tree of in-scope variables and watched expressions for the paused stack frame | Expand/collapse entries, copy name/value, edit value, add watch |
-| Debugger Panel — Memory View | N/A | Hex/byte view of debuggee memory around a selected address | Jump to an address typed in the query bar |
-| Attach to Process Modal | N/A | Live list of local or remote candidate processes (pid, name, command) | Select a process to attach the debugger to |
-| Debug Adapter Log Viewer | N/A | Raw DAP protocol traffic for a session (request/response/event log) | Read protocol traffic for active or recently-ended sessions |
+| Screen Name                      | SCR###                                        | What User Sees                                                                                | What User Can Do                                                  |
+| -------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| New Process Modal                | N/A (no screen-list artifact in this profile) | Tabbed picker (Task / Debug / Attach / Launch) for starting a new process or debug session    | Switch tabs, pick a launch configuration or task, start a session |
+| Debugger Panel — Console         | N/A                                           | REPL-style console with debug output and a query bar                                          | Type expressions, evaluate them, add to watch list                |
+| Debugger Panel — Breakpoint List | N/A                                           | List of source breakpoints across all open files, with condition/hit-count/log-message fields | Navigate between editable properties, enable/disable, clear all   |
+| Debugger Panel — Variable List   | N/A                                           | Tree of in-scope variables and watched expressions for the paused stack frame                 | Expand/collapse entries, copy name/value, edit value, add watch   |
+| Debugger Panel — Memory View     | N/A                                           | Hex/byte view of debuggee memory around a selected address                                    | Jump to an address typed in the query bar                         |
+| Attach to Process Modal          | N/A                                           | Live list of local or remote candidate processes (pid, name, command)                         | Select a process to attach the debugger to                        |
+| Debug Adapter Log Viewer         | N/A                                           | Raw DAP protocol traffic for a session (request/response/event log)                           | Read protocol traffic for active or recently-ended sessions       |
 
 ## User Journey
 

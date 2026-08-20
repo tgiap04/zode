@@ -2468,7 +2468,11 @@ mod tests {
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
                     assert_eq!(workspace.worktrees(cx).count(), 2);
-                    assert!(workspace.right_dock().read(cx).is_open());
+                    // The left dock, not the right. Upstream's assistant panel opened on
+                    // the right, but this fork moved the agent out to a column of its own
+                    // and put the rail and tool dock on the left, so a fresh workspace now
+                    // comes up with the right dock closed and no panel wanting it.
+                    assert!(workspace.left_dock().read(cx).is_open());
                     assert!(
                         workspace
                             .active_pane()
@@ -5048,6 +5052,7 @@ mod tests {
                 "console",
                 "context_server",
                 "csv",
+                "database",
                 "debug_panel",
                 "debugger",
                 "dev",

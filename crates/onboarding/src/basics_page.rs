@@ -7,9 +7,8 @@ use terminal::terminal_settings::TerminalSettings;
 use theme::Appearance;
 use theme_settings::{ThemeAppearanceMode, ThemeSettings};
 use ui::{
-    Divider, PopoverMenu, SwitchField,
-    ToggleButtonGroup, ToggleButtonGroupSize, ToggleButtonSimple, ToggleButtonWithIcon, Tooltip,
-    prelude::*,
+    Divider, PopoverMenu, SwitchField, ToggleButtonGroup, ToggleButtonGroupSize,
+    ToggleButtonSimple, ToggleButtonWithIcon, Tooltip, prelude::*,
 };
 use vim_mode_setting::VimModeSetting;
 
@@ -44,11 +43,7 @@ fn render_theme_section(tab_index: &mut isize, cx: &mut App) -> impl IntoElement
                 ToggleButtonSimple::new(MODE_NAMES[mode as usize].clone(), move |_, _, cx| {
                     write_mode_change(mode, cx);
 
-                    telemetry::event!(
-                        "Welcome Theme mode Changed",
-                        from = theme_mode,
-                        to = mode
-                    );
+                    telemetry::event!("Welcome Theme mode Changed", from = theme_mode, to = mode);
                 })
             }),
         )

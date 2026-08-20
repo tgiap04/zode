@@ -6,11 +6,11 @@ below describes the GPUI panel/view surface in place of a web Screen List. -->
 
 ## Screen List
 
-| View Name | Owning File | What User Sees | What User Can Do |
-|-----------|-------------|-----------------|-------------------|
-| TerminalPanel | `crates/terminal_view/src/terminal_panel.rs:77` | A dockable panel (bottom/side, per workspace layout) hosting one or more terminal tabs/panes, splittable like an editor pane group | Toggle the panel open/closed (`Toggle`/`ToggleFocus`), open a new terminal, split terminal panes, focus a specific terminal tab |
-| TerminalView | `crates/terminal_view/src/terminal_view.rs:123` | A single terminal's live/scrollback content (the Alacritty grid), tab title (auto or custom-renamed), and a bell indicator while unread output has arrived | Type commands, copy/paste, clear the screen, send raw keystrokes/text programmatically, rerun the last task, rename the tab, search scrollback (Cmd-F), scroll |
-| Terminal search bar (via `SearchableItem`) | `crates/terminal_view/src/terminal_view.rs:1821-1904` | A find bar overlaying the active terminal, with match count/highlighting | Enter a regex query, jump to next/previous match (no replace option, no case/word-boundary toggles) |
+| View Name                                  | Owning File                                           | What User Sees                                                                                                                                             | What User Can Do                                                                                                                                               |
+| ------------------------------------------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TerminalPanel                              | `crates/terminal_view/src/terminal_panel.rs:77`       | A dockable panel (bottom/side, per workspace layout) hosting one or more terminal tabs/panes, splittable like an editor pane group                         | Toggle the panel open/closed (`Toggle`/`ToggleFocus`), open a new terminal, split terminal panes, focus a specific terminal tab                                |
+| TerminalView                               | `crates/terminal_view/src/terminal_view.rs:123`       | A single terminal's live/scrollback content (the Alacritty grid), tab title (auto or custom-renamed), and a bell indicator while unread output has arrived | Type commands, copy/paste, clear the screen, send raw keystrokes/text programmatically, rerun the last task, rename the tab, search scrollback (Cmd-F), scroll |
+| Terminal search bar (via `SearchableItem`) | `crates/terminal_view/src/terminal_view.rs:1821-1904` | A find bar overlaying the active terminal, with match count/highlighting                                                                                   | Enter a regex query, jump to next/previous match (no replace option, no case/word-boundary toggles)                                                            |
 
 ## User Journey
 

@@ -4,11 +4,11 @@
 
 ## Screen List
 
-| Surface Name | What User Sees | What User Can Do |
-|--------------|-----------------|-------------------|
-| Editor pane (Vim-enabled) | The normal code/text editor, with the cursor's shape/behavior and text-insertion rules changed by the current Vim mode | Navigate, select, insert, replace, and edit text entirely via keyboard commands instead of mouse + arrow keys |
-| Mode indicator (status bar) | A colored label at the bottom of the window showing the current mode ("NORMAL", "INSERT", "REPLACE", "VISUAL", "VISUAL LINE", "VISUAL BLOCK", "SELECT" for Helix), plus any in-progress keystroke count/operator/macro-recording indicator | Glance at the current mode and any pending multi-key command before typing the next key |
-| Ex command line | A `:`-prefixed input line that appears when the developer presses `:` in Normal mode | Type and submit a command-line instruction (save, search-and-replace, run a shell command, jump to a line) that acts on the buffer or a text range |
+| Surface Name                | What User Sees                                                                                                                                                                                                                             | What User Can Do                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Editor pane (Vim-enabled)   | The normal code/text editor, with the cursor's shape/behavior and text-insertion rules changed by the current Vim mode                                                                                                                     | Navigate, select, insert, replace, and edit text entirely via keyboard commands instead of mouse + arrow keys                                      |
+| Mode indicator (status bar) | A colored label at the bottom of the window showing the current mode ("NORMAL", "INSERT", "REPLACE", "VISUAL", "VISUAL LINE", "VISUAL BLOCK", "SELECT" for Helix), plus any in-progress keystroke count/operator/macro-recording indicator | Glance at the current mode and any pending multi-key command before typing the next key                                                            |
+| Ex command line             | A `:`-prefixed input line that appears when the developer presses `:` in Normal mode                                                                                                                                                       | Type and submit a command-line instruction (save, search-and-replace, run a shell command, jump to a line) that acts on the buffer or a text range |
 
 ## User Journey
 

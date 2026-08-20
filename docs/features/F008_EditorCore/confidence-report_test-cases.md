@@ -14,9 +14,9 @@ generated_by: derive_confidence_report.py
 
 Legend: `○` = cited (Source file:line present) · `△` = marker-tagged (uncertain, no citation).
 
-| Claim | Section | Evidence (file:line) | Status ○/△ |
-|---|---|---|---|
-| _(none detected -- no `**Source:**` citations or marker tags found)_ | — | — | — |
+| Claim                                                                | Section | Evidence (file:line) | Status ○/△ |
+| -------------------------------------------------------------------- | ------- | -------------------- | ---------- |
+| _(none detected -- no `**Source:**` citations or marker tags found)_ | —       | —                    | —          |
 
 ## Missing Info
 

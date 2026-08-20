@@ -145,7 +145,6 @@ impl UserStore {
             client.add_message_handler(cx.weak_entity(), Self::handle_show_contacts),
         ];
 
-
         Self {
             users: Default::default(),
             by_github_login: Default::default(),
@@ -708,4 +707,3 @@ impl Collaborator {
         })
     }
 }
-

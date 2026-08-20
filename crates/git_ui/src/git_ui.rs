@@ -52,7 +52,6 @@ pub mod worktree_names;
 pub mod worktree_picker;
 pub mod worktree_service;
 
-
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);

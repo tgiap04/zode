@@ -12,6 +12,12 @@ e2e = []
 [lints]
 workspace = true
 
+# No source references these: they are optional dependencies that exist so the
+# `test-support` feature above can switch them on. cargo-machete only reads source, so it
+# reports them as unused.
+[package.metadata.cargo-machete]
+ignored = ["env_logger", "gpui_tokio", "reqwest_client"]
+
 [lib]
 path = "src/agent_servers.rs"
 doctest = false
@@ -32,7 +38,6 @@ gpui.workspace = true
 feature_flags.workspace = true
 gpui_tokio = { workspace = true, optional = true }
 http_client.workspace = true
-indoc.workspace = true
 log.workspace = true
 project.workspace = true
 release_channel.workspace = true
@@ -43,14 +48,12 @@ serde_json.workspace = true
 settings.workspace = true
 smol.workspace = true
 task.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
 ui.workspace = true
 terminal.workspace = true
 uuid.workspace = true
 util.workspace = true
 watch.workspace = true
-zed_credentials_provider.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

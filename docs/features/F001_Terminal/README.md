@@ -15,11 +15,10 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| TerminalPanel | — | — |
-| TerminalView | — | — |
-| Terminal search bar (via `SearchableItem`) | — | — |
-
+| Screen                                     | SCR | Spec |
+| ------------------------------------------ | --- | ---- |
+| TerminalPanel                              | —   | —    |
+| TerminalView                               | —   | —    |
+| Terminal search bar (via `SearchableItem`) | —   | —    |
 
 <!-- end-generated -->

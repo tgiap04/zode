@@ -15,17 +15,16 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Welcome screen | — | — |
-| Project rail (always-visible sidebar) | — | — |
-| Sidebar panel (expanded) | — | — |
-| Project panel (file tree) | — | — |
-| Recent Projects picker (command-palette modal) | — | — |
-| Worktree picker (git worktrees) | — | — |
-| Dev Container modal | — | — |
-| Security/trust modal | — | — |
-| Tab switcher (quick-switcher modal) | — | — |
-
+| Screen                                         | SCR | Spec |
+| ---------------------------------------------- | --- | ---- |
+| Welcome screen                                 | —   | —    |
+| Project rail (always-visible sidebar)          | —   | —    |
+| Sidebar panel (expanded)                       | —   | —    |
+| Project panel (file tree)                      | —   | —    |
+| Recent Projects picker (command-palette modal) | —   | —    |
+| Worktree picker (git worktrees)                | —   | —    |
+| Dev Container modal                            | —   | —    |
+| Security/trust modal                           | —   | —    |
+| Tab switcher (quick-switcher modal)            | —   | —    |
 
 <!-- end-generated -->

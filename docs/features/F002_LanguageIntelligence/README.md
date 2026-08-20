@@ -15,14 +15,13 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| Language Selector (modal picker) | — | — |
-| Toolchain Selector (modal picker) | — | — |
-| LSP Tool status-bar button + menu | — | — |
-| Language Server Logs view | — | — |
-| Syntax Tree / Highlights Tree dev views | — | — |
-| Outline Panel | — | — |
-
+| Screen                                  | SCR | Spec |
+| --------------------------------------- | --- | ---- |
+| Language Selector (modal picker)        | —   | —    |
+| Toolchain Selector (modal picker)       | —   | —    |
+| LSP Tool status-bar button + menu       | —   | —    |
+| Language Server Logs view               | —   | —    |
+| Syntax Tree / Highlights Tree dev views | —   | —    |
+| Outline Panel                           | —   | —    |
 
 <!-- end-generated -->

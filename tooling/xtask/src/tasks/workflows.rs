@@ -19,7 +19,6 @@ mod extension_bump;
 mod extension_tests;
 mod extension_workflow_rollout;
 mod extensions;
-mod nix_build;
 mod publish_extension_cli;
 mod release_nightly;
 mod run_bundling;

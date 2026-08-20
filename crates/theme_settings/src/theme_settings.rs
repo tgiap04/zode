@@ -473,7 +473,7 @@ mod tests {
                 serde_json::Value::String(string) if string.starts_with('#') => {
                     assert!(
                         try_parse_color(string).is_ok(),
-                        "unparseable color {string:?} in {}",
+                        "unparsable color {string:?} in {}",
                         path.display()
                     );
                 }

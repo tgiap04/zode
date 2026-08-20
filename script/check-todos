@@ -4,10 +4,14 @@ set -euo pipefail
 
 # Brackets are used around characters so these don't show up in normal search.
 pattern='tod[o]!|FIXM[E]'
+# `plans/` is excluded because those are design documents: they quote code, including the
+# markers this looks for, when recording what was found and why. They are a record, not
+# something to be edited to satisfy a grep.
 result=$(git grep --no-color --ignore-case --line-number --extended-regexp -e $pattern -- \
   ':(exclude).github/workflows/ci.yml' \
   ':(exclude)*criteria.md' \
-  ':(exclude)*prompt.md' || true)
+  ':(exclude)*prompt.md' \
+  ':(exclude)plans/**' || true)
 if [[ -n "${result}" ]]; then
   echo "${result}"
   exit 1

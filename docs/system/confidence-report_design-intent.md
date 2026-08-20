@@ -14,19 +14,19 @@ generated_by: derive_confidence_report.py
 
 Legend: `○` = cited (Source file:line present) · `△` = marker-tagged (uncertain, no citation).
 
-| Claim | Section | Evidence (file:line) | Status ○/△ |
-|---|---|---|---|
-| why"), (c) `docs/system/architecture.md` / `business-rules.md`, or (d) `` tags. | Preamble | — | △ |
-| or doc found. — no commit message or doc states the business motive; inferred from | Architecture Choices | — | △ |
-| gap." — no ADR/comment resolves this; treated here as an open question, not settled | Architecture Choices | — | △ |
-| — no single comment states this as a project-wide rule, but the business-rules.md | Patterns & Trade-offs | — | △ |
-| The business motive for stripping collab/auth/AI/cloud (turning a multiplayer, | [INFERRED] Appendix | — | △ |
-| Whether the extension capability model's lack of a runtime grant/revoke UI is | [INFERRED] Appendix | — | △ |
-| Fire-and-forget background-task handling as intentional project-wide house style | [INFERRED] Appendix | — | △ |
-| anywhere found — see the tag above. If a non-technical driver exists (e.g. licensing, | Open Questions | — | △ |
-| ``. | Handoff Summary | — | △ |
-| ** ratio**: 3 of 13 total substantive claims (§ Architecture Choices: 6, § Patterns | Handoff Summary | — | △ |
-| are explicitly `` — roughly 23%. Every other claim carries a direct | Handoff Summary | — | △ |
+| Claim                                                                                 | Section               | Evidence (file:line) | Status ○/△ |
+| ------------------------------------------------------------------------------------- | --------------------- | -------------------- | ---------- |
+| why"), (c) `docs/system/architecture.md` / `business-rules.md`, or (d) `` tags.       | Preamble              | —                    | △          |
+| or doc found. — no commit message or doc states the business motive; inferred from    | Architecture Choices  | —                    | △          |
+| gap." — no ADR/comment resolves this; treated here as an open question, not settled   | Architecture Choices  | —                    | △          |
+| — no single comment states this as a project-wide rule, but the business-rules.md     | Patterns & Trade-offs | —                    | △          |
+| The business motive for stripping collab/auth/AI/cloud (turning a multiplayer,        | [INFERRED] Appendix   | —                    | △          |
+| Whether the extension capability model's lack of a runtime grant/revoke UI is         | [INFERRED] Appendix   | —                    | △          |
+| Fire-and-forget background-task handling as intentional project-wide house style      | [INFERRED] Appendix   | —                    | △          |
+| anywhere found — see the tag above. If a non-technical driver exists (e.g. licensing, | Open Questions        | —                    | △          |
+| ``.                                                                                   | Handoff Summary       | —                    | △          |
+| ** ratio**: 3 of 13 total substantive claims (§ Architecture Choices: 6, § Patterns   | Handoff Summary       | —                    | △          |
+| are explicitly `` — roughly 23%. Every other claim carries a direct                   | Handoff Summary       | —                    | △          |
 
 ## Missing Info
 

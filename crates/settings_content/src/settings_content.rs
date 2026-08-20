@@ -121,14 +121,12 @@ pub struct SettingsContent {
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
 
-
     /// This base keymap settings adjusts the default keybindings in Zed to be similar
     /// to other common code editors. By default, Zed's keymap closely follows VSCode's
     /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
     ///
     /// Default: VSCode
     pub base_keymap: Option<BaseKeymapContent>,
-
 
     pub debugger: Option<DebuggerSettingsContent>,
 
@@ -163,11 +161,9 @@ pub struct SettingsContent {
 
     pub line_indicator_format: Option<LineIndicatorFormat>,
 
-
     pub outline_panel: Option<OutlinePanelSettingsContent>,
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
-
 
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
@@ -193,7 +189,6 @@ pub struct SettingsContent {
     pub vim_mode: Option<bool>,
 
     // Settings related to calls in Zed
-
     /// Settings for the which-key popup.
     pub which_key: Option<WhichKeySettingsContent>,
 

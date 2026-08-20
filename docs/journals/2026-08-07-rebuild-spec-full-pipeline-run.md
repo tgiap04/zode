@@ -10,6 +10,7 @@
 Ran the complete `tkm:rebuild-spec` pipeline against the Zode fork (Rust/GPUI Zed editor, 180 crates, local-first desktop app) to reverse-engineer structured documentation from source. The pipeline ran four passes in sequence: core artifacts (W7a), feature specs (FS), process flows (FL), and glossary (GLS), each with its own review/validation cycle. All four passes reached PASS (0 critical issues) before promotion to live docs.
 
 **Output scope:**
+
 - Core pass: 9 promoted artifacts (system-overview.md, architecture.md, data-model.md, behavior-logic.md, permissions.md, permissions-matrix.md, user-stories.md, feature-list.md, plus confidence reports)
 - Feature specs pass: 11 features (F001, F002, F008–F016, each with technical-spec.md + business-context.md + screens.md + edge-cases.md = 44 files)
 - Flows pass: 1 FLOW file (FLOW001_ProjectActivityHibernationCascade, the fork's signature hibernation cascade)
@@ -26,12 +27,14 @@ Worse: midway through the session's own behavior-logic.md patch, a careless rege
 ### Fabricated Subsystems in Prior Artifacts
 
 Prior run's `system-overview.md` and `architecture.md` described:
+
 - `crates/agent` — does not exist (verify: `ls /Users/tgiap.dev/devs/zode/crates/ | grep agent` returns nothing)
 - `crates/collab` — does not exist; removed in commit `ad901af` per git log
 - LiveKit integration — zero references in codebase
 - `language_model` subsystem — never existed in fork
 
 **Corrected state (verified against Cargo.toml and actual filesystem):**
+
 - 180 workspace-member crate paths (179 top-level + 1 nested `refineable/derive_refineable`)
 - No agent/collab/livekit crates
 - Explicit note in current `system-overview.md` (line 5): "Local-first — no collaboration/multiplayer backend, no AI-agent subsystem (both removed in this fork)"
@@ -42,6 +45,7 @@ Prior run's `system-overview.md` and `architecture.md` described:
 User typed `/rebuild-spec --level max` → no such flag exists in the skill. Clarified and settled on running the documented four-pass sequence instead.
 
 Skill's auto-detection ran stack-profile detection and wrongly recommended `web-js-ts` (194 file hits), triggered by a handful of stray tooling files:
+
 - `docs-site/` assets (JS/TS but not the actual app)
 - `prettier_server.js` (tooling, not product code)
 
@@ -57,13 +61,14 @@ Mid-session, while patching a corrupted Index table in `behavior-logic.md` (from
 re.sub(pattern, replacement, content, flags=re.DOTALL)
 ```
 
-The `.` in the pattern — meant to match within a single bounded table — matched across *newlines* (re.DOTALL behavior), consumed everything from the start of the Index table through the end of the last BL detail block, and replaced it all with the new index. **Result: ~143KB deleted, 207 BL detail block definitions gone, plus Summary section, Cross-Reference section, Client-Side Logic section — all vanished.**
+The `.` in the pattern — meant to match within a single bounded table — matched across _newlines_ (re.DOTALL behavior), consumed everything from the start of the Index table through the end of the last BL detail block, and replaced it all with the new index. **Result: ~143KB deleted, 207 BL detail block definitions gone, plus Summary section, Cross-Reference section, Client-Side Logic section — all vanished.**
 
 **Catch:** Line-count check after the edit (`wc -l`) dropped from ~5400 to ~800 lines. Immediate "wait, that's not right" moment.
 
 **Recovery:** Did not re-run the whole codegen. Instead, retrieved the five fragment-writing subagents (`SendMessage` to each by agent ID) still in-session and asked them to re-emit the fragment they had already written (they held full context and could reproduce from memory without re-researching from source). All five complied; merged the fragments with a corrected regex (no DOTALL flag, explicit character range instead of `.*`). Final file reached 5230 lines, matching prior state.
 
 **The lesson:** Any regex-driven file edit meant to replace a small bounded region should:
+
 1. Test the regex against a representative excerpt first
 2. Measure input/output byte count before and after
 3. Never use re.DOTALL when editing a multi-section document unless the intent is genuinely to cross-section boundaries
@@ -72,6 +77,7 @@ The `.` in the pattern — meant to match within a single bounded table — matc
 ### Feature Spec SC-### Code Collision Wave (4 Rounds)
 
 FS.2 (deterministic feature-spec validator) flagged structural defects across all 11 generated specs:
+
 - Wrong H1 title format (validator wanted bare `F###_Name`, template showed `Technical Spec — F###_Name`, so every spec following the template literally failed the check — template/validator inconsistency, not authoring error)
 - Missing/blank required `### Business Rules`, `### Client-Side Logic` subsections
 - Missing `**Source:** path:N-M` citation lines per block
@@ -93,10 +99,12 @@ Fixed in bulk with a Python script across all 11 files rather than one-by-one.
 Wave FL.1 (process-flow synthesis) correctly emitted only 1 FLOW file (FLOW001_ProjectActivityHibernationCascade) out of ~7 candidates evaluated.
 
 Why only 1 output? The strict trigger gate requires:
+
 - ≥2 state transitions AND
 - ≥2 distinct trigger types (user action, scheduled timer, external event, etc.)
 
 Evaluated candidates:
+
 - **Project.activity hibernation cascade** (Active → Warm → Hibernated): 2 transitions (T1, T2), 2 trigger types (scheduled, user-action) — **QUALIFIED, EMITTED**
 - **Buffer.dirty / Editor.modified**: 1 transition → **FAILED gate**
 - **Workspace.pane layout changes**: 1 trigger type (user-action only) → **FAILED gate**
@@ -119,7 +127,7 @@ Evaluated candidates:
 
 ### Fabricated Subsystems
 
-The prior rebuild-spec run relied on LLM inference to fill gaps between scout findings and rendered specs. The scout correctly reported "no crates/agent directory" but the LLM, reasoning about a *Zed fork*, assumed "a Zed fork would have agent/collab infrastructure similar to upstream" and hallucinatedentries in the architecture and feature docs. The scout was right; inference was wrong. **Root:** No explicit source-compliance gate between inference and output in the prior run. The scout-vs-inference mismatch should have triggered a validation error ("found in inferred docs but not in source inventory") but wasn't checked.
+The prior rebuild-spec run relied on LLM inference to fill gaps between scout findings and rendered specs. The scout correctly reported "no crates/agent directory" but the LLM, reasoning about a _Zed fork_, assumed "a Zed fork would have agent/collab infrastructure similar to upstream" and hallucinatedentries in the architecture and feature docs. The scout was right; inference was wrong. **Root:** No explicit source-compliance gate between inference and output in the prior run. The scout-vs-inference mismatch should have triggered a validation error ("found in inferred docs but not in source inventory") but wasn't checked.
 
 ### DOTALL Incident
 
@@ -131,7 +139,7 @@ Feature specs are authored in multiple passes: Cross-Cutting Logic Verification 
 
 ## Lessons Learned
 
-1. **Fabricated subsystems from inference are a silent failure mode.** The scout (source-scanning) is authoritative. After inference generates specs, run an explicit "compare against source" validator that flags any entity, subsystem, crate, or integration mentioned in the output but absent from the source inventory. Don't assume LLM reasoning about "a fork of X" will correctly infer what's in *this* fork.
+1. **Fabricated subsystems from inference are a silent failure mode.** The scout (source-scanning) is authoritative. After inference generates specs, run an explicit "compare against source" validator that flags any entity, subsystem, crate, or integration mentioned in the output but absent from the source inventory. Don't assume LLM reasoning about "a fork of X" will correctly infer what's in _this_ fork.
 
 2. **re.DOTALL is a footgun in multi-section document editing.** Always test the regex against a representative snippet first. Use explicit character ranges (e.g., `[^\n]*` or `[\s\S]*?` with non-greedy matching) instead of `.` when you need to match-within-a-section. Cheaper to test twice than to delete 143KB by accident.
 
@@ -148,6 +156,7 @@ Feature specs are authored in multiple passes: Cross-Cutting Logic Verification 
 2. **Archive plan artifacts.** All intermediate review reports, validation summaries, and fragment outputs remain in `/Users/tgiap.dev/devs/zode/plans/260726-1400-rebuild-spec/artifacts/` for audit/reference.
 
 3. **Tooling feedback (out-of-scope this cycle, but noted):**
+
    - `validate_behavior_logic.py`'s inventory-counting regex counts indented sub-bullet lines as inventory entries, inflating the denominator. Tighten to match only top-level category lines.
    - Feature-spec template vs. FS.2 validator disagreement on H1 title format ("Technical Spec — F###" vs. bare "F###") — sync the two so template-generated specs don't fail deterministic checks.
    - `reading_guide_db_impact` validator vs. `specs` per-fcode rollup report different issue sets for the same file — trace why and unify the reporting surface.

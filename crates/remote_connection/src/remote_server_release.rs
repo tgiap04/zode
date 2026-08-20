@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn digest_comparison_detects_tampering() {
         let genuine = b"genuine remote server archive";
-        let tampered = b"tampered remote server archve";
+        let tampered = b"tampered remote server archive";
 
         let mut hasher = Sha256::new();
         hasher.update(genuine);
@@ -357,7 +357,10 @@ mod tests {
             let error = manifest_url(ReleaseChannel::Dev, None)
                 .expect_err("an unconfigured release host must be an error");
             let message = format!("{error}");
-            assert!(message.contains("no release host is configured"), "{message}");
+            assert!(
+                message.contains("no release host is configured"),
+                "{message}"
+            );
             assert!(message.contains("manually"), "{message}");
         }
     }
@@ -368,6 +371,9 @@ mod tests {
             asset_name("macos", "aarch64"),
             "zed-remote-server-macos-aarch64.gz"
         );
-        assert_ne!(asset_name("macos", "aarch64"), asset_name("linux", "x86_64"));
+        assert_ne!(
+            asset_name("macos", "aarch64"),
+            asset_name("linux", "x86_64")
+        );
     }
 }

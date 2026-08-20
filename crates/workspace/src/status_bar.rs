@@ -1,6 +1,4 @@
-use crate::{
-    ItemHandle, MultiWorkspace, Pane, SidebarSide,
-};
+use crate::{ItemHandle, MultiWorkspace, Pane, SidebarSide};
 use gpui::{
     AnyView, App, Context, Decorations, Entity, IntoElement, ParentElement, Render, Styled,
     Subscription, WeakEntity, Window,
@@ -111,7 +109,6 @@ impl StatusBar {
             .overflow_x_hidden()
             .children(self.right_items.iter().rev().map(|item| item.to_any()))
     }
-
 }
 
 impl StatusBar {

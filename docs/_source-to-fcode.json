@@ -1,349 +1,130 @@
 {
   "generated_at": "2026-08-07T09:59:05Z",
   "index": {
-    "crates/activity_indicator/src/activity_indicator.rs": [
-      "F009"
-    ],
+    "crates/activity_indicator/src/activity_indicator.rs": ["F009"],
     "crates/activity_indicator/src/activity_indicator.rs:280-295,608-628": [
       "F009"
     ],
-    "crates/command_palette/src/command_palette.rs": [
-      "F016"
-    ],
-    "crates/command_palette/src/persistence.rs": [
-      "F016"
-    ],
-    "crates/context_server/src/listener.rs": [
-      "F012"
-    ],
-    "crates/context_server/src/protocol.rs": [
-      "F012"
-    ],
-    "crates/debugger_tools/src/dap_log.rs": [
-      "F010"
-    ],
-    "crates/debugger_tools/src/dap_log.rs:151, 954-972": [
-      "F010"
-    ],
-    "crates/debugger_ui/src/attach_modal.rs": [
-      "F010"
-    ],
-    "crates/debugger_ui/src/debugger_panel.rs": [
-      "F010"
-    ],
-    "crates/debugger_ui/src/debugger_ui.rs": [
-      "F010"
-    ],
-    "crates/debugger_ui/src/session/running/console.rs": [
-      "F010"
-    ],
-    "crates/debugger_ui/src/session/running/stack_frame_list.rs": [
-      "F010"
-    ],
-    "crates/debugger_ui/src/session/running/variable_list.rs": [
-      "F010"
-    ],
+    "crates/command_palette/src/command_palette.rs": ["F016"],
+    "crates/command_palette/src/persistence.rs": ["F016"],
+    "crates/context_server/src/listener.rs": ["F012"],
+    "crates/context_server/src/protocol.rs": ["F012"],
+    "crates/debugger_tools/src/dap_log.rs": ["F010"],
+    "crates/debugger_tools/src/dap_log.rs:151, 954-972": ["F010"],
+    "crates/debugger_ui/src/attach_modal.rs": ["F010"],
+    "crates/debugger_ui/src/debugger_panel.rs": ["F010"],
+    "crates/debugger_ui/src/debugger_ui.rs": ["F010"],
+    "crates/debugger_ui/src/session/running/console.rs": ["F010"],
+    "crates/debugger_ui/src/session/running/stack_frame_list.rs": ["F010"],
+    "crates/debugger_ui/src/session/running/variable_list.rs": ["F010"],
     "crates/debugger_ui/src/session/running/variable_list.rs:565-598, 852-896": [
       "F010"
     ],
-    "crates/dev_container/src/devcontainer_api.rs": [
-      "F013"
-    ],
-    "crates/dev_container/src/devcontainer_json.rs": [
-      "F013"
-    ],
-    "crates/dev_container/src/docker.rs": [
-      "F013"
-    ],
-    "crates/dev_container/src/lib.rs": [
-      "F013"
-    ],
-    "crates/diagnostics/src/buffer_diagnostics.rs": [
-      "F009"
-    ],
-    "crates/diagnostics/src/diagnostics.rs": [
-      "F009"
-    ],
+    "crates/dev_container/src/devcontainer_api.rs": ["F013"],
+    "crates/dev_container/src/devcontainer_json.rs": ["F013"],
+    "crates/dev_container/src/docker.rs": ["F013"],
+    "crates/dev_container/src/lib.rs": ["F013"],
+    "crates/diagnostics/src/buffer_diagnostics.rs": ["F009"],
+    "crates/diagnostics/src/diagnostics.rs": ["F009"],
     "crates/diagnostics/src/diagnostics.rs:65-67,253-264,289-304,449-451": [
       "F009"
     ],
-    "crates/diagnostics/src/diagnostics.rs:93,239,371-380": [
-      "F009"
-    ],
-    "crates/diagnostics/src/toolbar_controls.rs": [
-      "F009"
-    ],
-    "crates/editor/src/actions.rs": [
-      "F008"
-    ],
-    "crates/editor/src/code_context_menus.rs": [
-      "F008"
-    ],
-    "crates/editor/src/editor.rs": [
-      "F008",
-      "F014"
-    ],
-    "crates/editor/src/inlays/inlay_hints.rs": [
-      "F008"
-    ],
+    "crates/diagnostics/src/diagnostics.rs:93,239,371-380": ["F009"],
+    "crates/diagnostics/src/toolbar_controls.rs": ["F009"],
+    "crates/editor/src/actions.rs": ["F008"],
+    "crates/editor/src/code_context_menus.rs": ["F008"],
+    "crates/editor/src/editor.rs": ["F008", "F014"],
+    "crates/editor/src/inlays/inlay_hints.rs": ["F008"],
     "crates/editor/src/inlays/inlay_hints.rs:230-241, 2921-2932 (behavior-logic.md BL126 cross-reference)": [
       "F008"
     ],
-    "crates/editor/src/items.rs": [
-      "F008"
-    ],
-    "crates/editor/src/persistence.rs": [
-      "F008"
-    ],
-    "crates/editor/src/split.rs": [
-      "F008"
-    ],
-    "crates/etw_tracing/etw_tracing.rs": [
-      "F009"
-    ],
-    "crates/extension/src/capabilities.rs": [
-      "F012"
-    ],
-    "crates/extension/src/capabilities/download_file_capability.rs": [
-      "F012"
-    ],
+    "crates/editor/src/items.rs": ["F008"],
+    "crates/editor/src/persistence.rs": ["F008"],
+    "crates/editor/src/split.rs": ["F008"],
+    "crates/etw_tracing/etw_tracing.rs": ["F009"],
+    "crates/extension/src/capabilities.rs": ["F012"],
+    "crates/extension/src/capabilities/download_file_capability.rs": ["F012"],
     "crates/extension/src/capabilities/npm_install_package_capability.rs": [
       "F012"
     ],
-    "crates/extension/src/extension_manifest.rs": [
-      "F012"
-    ],
-    "crates/extension_host/src/capability_granter.rs": [
-      "F012"
-    ],
-    "crates/extension_host/src/extension_host.rs": [
-      "F012"
-    ],
-    "crates/extension_host/src/extension_host.rs:188-223,403-418": [
-      "F012"
-    ],
-    "crates/extension_host/src/extension_settings.rs": [
-      "F012"
-    ],
+    "crates/extension/src/extension_manifest.rs": ["F012"],
+    "crates/extension_host/src/capability_granter.rs": ["F012"],
+    "crates/extension_host/src/extension_host.rs": ["F012"],
+    "crates/extension_host/src/extension_host.rs:188-223,403-418": ["F012"],
+    "crates/extension_host/src/extension_settings.rs": ["F012"],
     "crates/extension_host/src/wasm_host/wit/since_v0_8_0.rs:870-889,1043-1051,764-777": [
       "F012"
     ],
-    "crates/extensions_ui/src/extension_suggest.rs": [
-      "F012"
-    ],
-    "crates/extensions_ui/src/extensions_ui.rs:44-49,111-140": [
-      "F012"
-    ],
-    "crates/feature_flags/src/feature_flags.rs": [
-      "F015"
-    ],
-    "crates/feature_flags/src/store.rs": [
-      "F015"
-    ],
-    "crates/file_finder/src/file_finder.rs": [
-      "F016"
-    ],
-    "crates/git/src/repository.rs": [
-      "F011"
-    ],
-    "crates/git_graph/src/git_graph.rs": [
-      "F011"
-    ],
-    "crates/git_ui/src/branch_picker.rs": [
-      "F011"
-    ],
-    "crates/git_ui/src/commit_view.rs": [
-      "F011"
-    ],
-    "crates/git_ui/src/git_panel.rs": [
-      "F011"
-    ],
-    "crates/git_ui/src/project_diff.rs": [
-      "F011"
-    ],
-    "crates/git_ui/src/project_diff.rs:63-140,408": [
-      "F011"
-    ],
-    "crates/git_ui/src/worktree_picker.rs": [
-      "F013"
-    ],
-    "crates/language/src/buffer.rs": [
-      "F008"
-    ],
-    "crates/language_selector/src/language_selector.rs": [
-      "F002"
-    ],
-    "crates/lsp/src/lsp.rs": [
-      "F002"
-    ],
-    "crates/lsp/src/lsp.rs:61,1090-1110": [
-      "F002"
-    ],
-    "crates/multi_buffer/src/multi_buffer.rs": [
-      "F008"
-    ],
-    "crates/onboarding/src/base_keymap_picker.rs": [
-      "F015"
-    ],
-    "crates/project/src/context_server_store.rs": [
-      "F012"
-    ],
-    "crates/project/src/debugger/breakpoint_store.rs": [
-      "F010"
-    ],
-    "crates/project/src/debugger/dap_store.rs": [
-      "F010"
-    ],
-    "crates/project/src/debugger/session.rs": [
-      "F010"
-    ],
-    "crates/project/src/git_store.rs": [
-      "F011"
-    ],
-    "crates/project/src/lsp_store.rs": [
-      "F002",
-      "F009",
-      "F013"
-    ],
-    "crates/project/src/lsp_store/vue_language_server_ext.rs": [
-      "F002"
-    ],
-    "crates/project/src/prettier_store.rs": [
-      "F002",
-      "F013"
-    ],
-    "crates/project/src/project.rs": [
-      "F013"
-    ],
-    "crates/project/src/project.rs:342-357,4740-4807": [
-      "F013"
-    ],
-    "crates/project/src/project_search.rs": [
-      "F016"
-    ],
-    "crates/project/src/project_search.rs:154-155,566-572": [
-      "F016"
-    ],
-    "crates/project/src/project_settings.rs": [
-      "F009"
-    ],
-    "crates/project/src/search.rs": [
-      "F016"
-    ],
-    "crates/project/src/terminals.rs": [
-      "F001"
-    ],
-    "crates/project/src/trusted_worktrees.rs": [
-      "F013"
-    ],
-    "crates/project_panel/src/project_panel.rs": [
-      "F009",
-      "F013"
-    ],
-    "crates/recent_projects/src/recent_projects.rs": [
-      "F013"
-    ],
-    "crates/search/src/buffer_search.rs": [
-      "F016"
-    ],
-    "crates/settings/src/keymap_file.rs": [
-      "F015"
-    ],
-    "crates/settings/src/settings_file.rs": [
-      "F015"
-    ],
-    "crates/settings/src/settings_store.rs": [
-      "F015"
-    ],
-    "crates/sidebar/src/project_item.rs": [
-      "F013"
-    ],
-    "crates/sidebar/src/rail.rs": [
-      "F013"
-    ],
-    "crates/system_specs/src/system_specs.rs": [
-      "F009"
-    ],
-    "crates/terminal/src/terminal.rs": [
-      "F001"
-    ],
-    "crates/terminal_view/src/persistence.rs": [
-      "F001"
-    ],
-    "crates/terminal_view/src/terminal_panel.rs": [
-      "F001"
-    ],
-    "crates/terminal_view/src/terminal_view.rs": [
-      "F001"
-    ],
-    "crates/theme/src/theme.rs": [
-      "F015"
-    ],
-    "crates/toolchain_selector/src/toolchain_selector.rs": [
-      "F002"
-    ],
-    "crates/util/src/command.rs": [
-      "F001"
-    ],
-    "crates/vim/src/command.rs": [
-      "F014"
-    ],
-    "crates/vim/src/mode_indicator.rs": [
-      "F014"
-    ],
-    "crates/vim/src/motion.rs": [
-      "F014"
-    ],
-    "crates/vim/src/normal.rs": [
-      "F014"
-    ],
-    "crates/vim/src/normal/repeat.rs": [
-      "F014"
-    ],
-    "crates/vim/src/object.rs": [
-      "F014"
-    ],
-    "crates/vim/src/state.rs": [
-      "F014"
-    ],
-    "crates/vim/src/vim.rs": [
-      "F014"
-    ],
-    "crates/vim/src/visual.rs": [
-      "F014"
-    ],
-    "crates/workspace/src/multi_workspace.rs": [
-      "F013"
-    ],
-    "crates/workspace/src/persistence.rs": [
-      "F002"
-    ],
-    "crates/workspace/src/welcome.rs": [
-      "F013"
-    ],
-    "crates/workspace/src/workspace.rs": [
-      "F013"
-    ],
-    "crates/zed/src/zed.rs": [
-      "F015"
-    ],
-    "crates/zed/src/zed/migrate.rs": [
-      "F015"
-    ],
-    "crates/zed/src/zed/migrate.rs:288-299, 313-324": [
-      "F015"
-    ],
-    "devcontainer_json.rs": [
-      "F013"
-    ],
-    "docker.rs": [
-      "F013"
-    ],
-    "docs/system/business-rules.md": [
-      "F010"
-    ],
-    "tasks.json": [
-      "F001"
-    ]
+    "crates/extensions_ui/src/extension_suggest.rs": ["F012"],
+    "crates/extensions_ui/src/extensions_ui.rs:44-49,111-140": ["F012"],
+    "crates/feature_flags/src/feature_flags.rs": ["F015"],
+    "crates/feature_flags/src/store.rs": ["F015"],
+    "crates/file_finder/src/file_finder.rs": ["F016"],
+    "crates/git/src/repository.rs": ["F011"],
+    "crates/git_graph/src/git_graph.rs": ["F011"],
+    "crates/git_ui/src/branch_picker.rs": ["F011"],
+    "crates/git_ui/src/commit_view.rs": ["F011"],
+    "crates/git_ui/src/git_panel.rs": ["F011"],
+    "crates/git_ui/src/project_diff.rs": ["F011"],
+    "crates/git_ui/src/project_diff.rs:63-140,408": ["F011"],
+    "crates/git_ui/src/worktree_picker.rs": ["F013"],
+    "crates/language/src/buffer.rs": ["F008"],
+    "crates/language_selector/src/language_selector.rs": ["F002"],
+    "crates/lsp/src/lsp.rs": ["F002"],
+    "crates/lsp/src/lsp.rs:61,1090-1110": ["F002"],
+    "crates/multi_buffer/src/multi_buffer.rs": ["F008"],
+    "crates/onboarding/src/base_keymap_picker.rs": ["F015"],
+    "crates/project/src/context_server_store.rs": ["F012"],
+    "crates/project/src/debugger/breakpoint_store.rs": ["F010"],
+    "crates/project/src/debugger/dap_store.rs": ["F010"],
+    "crates/project/src/debugger/session.rs": ["F010"],
+    "crates/project/src/git_store.rs": ["F011"],
+    "crates/project/src/lsp_store.rs": ["F002", "F009", "F013"],
+    "crates/project/src/lsp_store/vue_language_server_ext.rs": ["F002"],
+    "crates/project/src/prettier_store.rs": ["F002", "F013"],
+    "crates/project/src/project.rs": ["F013"],
+    "crates/project/src/project.rs:342-357,4740-4807": ["F013"],
+    "crates/project/src/project_search.rs": ["F016"],
+    "crates/project/src/project_search.rs:154-155,566-572": ["F016"],
+    "crates/project/src/project_settings.rs": ["F009"],
+    "crates/project/src/search.rs": ["F016"],
+    "crates/project/src/terminals.rs": ["F001"],
+    "crates/project/src/trusted_worktrees.rs": ["F013"],
+    "crates/project_panel/src/project_panel.rs": ["F009", "F013"],
+    "crates/recent_projects/src/recent_projects.rs": ["F013"],
+    "crates/search/src/buffer_search.rs": ["F016"],
+    "crates/settings/src/keymap_file.rs": ["F015"],
+    "crates/settings/src/settings_file.rs": ["F015"],
+    "crates/settings/src/settings_store.rs": ["F015"],
+    "crates/sidebar/src/project_item.rs": ["F013"],
+    "crates/sidebar/src/rail.rs": ["F013"],
+    "crates/system_specs/src/system_specs.rs": ["F009"],
+    "crates/terminal/src/terminal.rs": ["F001"],
+    "crates/terminal_view/src/persistence.rs": ["F001"],
+    "crates/terminal_view/src/terminal_panel.rs": ["F001"],
+    "crates/terminal_view/src/terminal_view.rs": ["F001"],
+    "crates/theme/src/theme.rs": ["F015"],
+    "crates/toolchain_selector/src/toolchain_selector.rs": ["F002"],
+    "crates/util/src/command.rs": ["F001"],
+    "crates/vim/src/command.rs": ["F014"],
+    "crates/vim/src/mode_indicator.rs": ["F014"],
+    "crates/vim/src/motion.rs": ["F014"],
+    "crates/vim/src/normal.rs": ["F014"],
+    "crates/vim/src/normal/repeat.rs": ["F014"],
+    "crates/vim/src/object.rs": ["F014"],
+    "crates/vim/src/state.rs": ["F014"],
+    "crates/vim/src/vim.rs": ["F014"],
+    "crates/vim/src/visual.rs": ["F014"],
+    "crates/workspace/src/multi_workspace.rs": ["F013"],
+    "crates/workspace/src/persistence.rs": ["F002"],
+    "crates/workspace/src/welcome.rs": ["F013"],
+    "crates/workspace/src/workspace.rs": ["F013"],
+    "crates/zed/src/zed.rs": ["F015"],
+    "crates/zed/src/zed/migrate.rs": ["F015"],
+    "crates/zed/src/zed/migrate.rs:288-299, 313-324": ["F015"],
+    "devcontainer_json.rs": ["F013"],
+    "docker.rs": ["F013"],
+    "docs/system/business-rules.md": ["F010"],
+    "tasks.json": ["F001"]
   }
 }

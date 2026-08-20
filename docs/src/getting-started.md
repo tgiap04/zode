@@ -64,7 +64,6 @@ See [Languages](./languages.md) for language-specific setup instructions.
 
 Zode includes built-in AI assistance. Open the Agent Panel with `Cmd+Shift+A` (macOS) or `Ctrl+Shift+A` (Linux/Windows) to start a conversation, or use `Cmd+Enter` (macOS) / `Ctrl+Enter` (Linux/Windows) for inline assistance.
 
-
 ## Coming from Another Editor?
 
 We have dedicated guides for switching from other editors:

@@ -9,12 +9,12 @@ workspace, opened by dispatching actions rather than navigating to a URL.
 
 _Non-web adaptation: no `SCR###` codes — `generic-source` profile has no screen-list.md catalog._
 
-| Surface | Kind | What User Sees | What User Can Do |
-|---------|------|-----------------|-------------------|
-| Buffer Diagnostics Editor | Pane item (tab) | Excerpts of the focused buffer, showing only the ranges around that buffer's LSP diagnostics | Read inline diagnostic messages; jump between excerpts; edit the underlying buffer directly |
-| Project Diagnostics Editor | Pane item (tab) | An aggregated multibuffer of excerpts from every file across the project that has a diagnostic, plus (conditionally) a "re-indexing" banner | Toggle warning-level diagnostics on/off; stop/refresh the auto-updating excerpt list; click through to a "show N warnings" affordance when the list is otherwise empty |
-| Activity Indicator | Status-bar item | A compact per-language-server status label (binary status or health), optionally prefixed with the server name | Click to open a popover with the last queued error/warning message; dismiss the last recorded formatting failure |
-| Project Panel diagnostic badges | Sidebar (file tree) overlay | Per-file error/warning count badges next to file-tree entries; dimmed when the count is known-stale from a hibernated LSP generation | Use the badge as a visual cue only — clicking the file opens it, not the diagnostics view |
+| Surface                         | Kind                        | What User Sees                                                                                                                              | What User Can Do                                                                                                                                                       |
+| ------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Buffer Diagnostics Editor       | Pane item (tab)             | Excerpts of the focused buffer, showing only the ranges around that buffer's LSP diagnostics                                                | Read inline diagnostic messages; jump between excerpts; edit the underlying buffer directly                                                                            |
+| Project Diagnostics Editor      | Pane item (tab)             | An aggregated multibuffer of excerpts from every file across the project that has a diagnostic, plus (conditionally) a "re-indexing" banner | Toggle warning-level diagnostics on/off; stop/refresh the auto-updating excerpt list; click through to a "show N warnings" affordance when the list is otherwise empty |
+| Activity Indicator              | Status-bar item             | A compact per-language-server status label (binary status or health), optionally prefixed with the server name                              | Click to open a popover with the last queued error/warning message; dismiss the last recorded formatting failure                                                       |
+| Project Panel diagnostic badges | Sidebar (file tree) overlay | Per-file error/warning count badges next to file-tree entries; dimmed when the count is known-stale from a hibernated LSP generation        | Use the badge as a visual cue only — clicking the file opens it, not the diagnostics view                                                                              |
 
 ## User Journey
 

@@ -33,4 +33,3 @@ For more information, see:
 
 Zode has built-in support for predicting multiple edits at a time [via Zeta](https://huggingface.co/zed-industries/zeta), Zode's open-source and open-data model.
 Edit predictions appear as you type, and most of the time, you can accept them by pressing `tab`.
-
