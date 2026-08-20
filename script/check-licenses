@@ -35,12 +35,16 @@ check_license () {
     local allowed_licenses=()
 
     local is_agpl=false
-    for agpl_crate in "${AGPL_CRATES[@]}"; do
-        if [[ "$dir" == "crates/$agpl_crate" ]]; then
-            is_agpl=true
-            break
-        fi
-    done
+    # Guarded: this fork removed every AGPL crate, and bash 3.2 (macOS) treats an empty
+    # "${arr[@]}" as an unbound variable under `set -u`.
+    if [[ ${#AGPL_CRATES[@]} -gt 0 ]]; then
+        for agpl_crate in "${AGPL_CRATES[@]}"; do
+            if [[ "$dir" == "crates/$agpl_crate" ]]; then
+                is_agpl=true
+                break
+            fi
+        done
+    fi
 
     if [[ "$is_agpl" == true ]]; then
         allowed_licenses=("LICENSE-AGPL")
@@ -72,6 +76,11 @@ done
 
 
 # Make sure the AGPL server crates are included in the release tarball.
+if [[ ${#AGPL_CRATES[@]} -eq 0 ]]; then
+    echo "check-licenses succeeded (no AGPL crates to keep out of the release)"
+    exit 0
+fi
+
 for release_crate in "${RELEASE_CRATES[@]}"; do
     tree_output=$(cargo tree --package "$release_crate")
     for agpl_crate in "${AGPL_CRATES[@]}"; do
