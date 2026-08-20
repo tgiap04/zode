@@ -10,12 +10,20 @@ pub fn danger() -> Workflow {
 
     named::workflow()
         .on(
-            Event::default().pull_request(PullRequest::default().add_branch("main").types([
-                PullRequestType::Opened,
-                PullRequestType::Synchronize,
-                PullRequestType::Reopened,
-                PullRequestType::Edited,
-            ])),
+            // `develop` as well as `main`: feature branches land in `develop` first, so a
+            // check that only watches `main` never sees the pull request that introduces
+            // the change.
+            Event::default().pull_request(
+                PullRequest::default()
+                    .add_branch("main")
+                    .add_branch("develop")
+                    .types([
+                        PullRequestType::Opened,
+                        PullRequestType::Synchronize,
+                        PullRequestType::Reopened,
+                        PullRequestType::Edited,
+                    ]),
+            ),
         )
         .add_job(danger.name, danger.job)
 }

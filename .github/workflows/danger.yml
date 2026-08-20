@@ -10,6 +10,7 @@ on:
     - edited
     branches:
     - main
+    - develop
 jobs:
   danger:
     if: (github.repository_owner == 'tgiap04')

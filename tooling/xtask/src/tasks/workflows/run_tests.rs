@@ -507,7 +507,9 @@ fn check_workspace_binaries() -> NamedJob {
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
             .add_step(steps::setup_sccache(Platform::Linux))
-            .add_step(steps::script("cargo build -p collab"))
+            // `cargo build -p collab` was here. That crate went with the collaboration
+            // server, so the step could only ever fail; the workspace build below already
+            // covers everything this fork ships.
             .add_step(steps::script("cargo build --workspace --bins --examples"))
             .add_step(steps::show_sccache_stats(Platform::Linux))
             .add_step(steps::cleanup_cargo_config(Platform::Linux)),
@@ -543,6 +545,9 @@ pub(crate) fn clippy_on_ref(
             None => steps::checkout_repo(),
         })
         .add_step(steps::setup_cargo_config(platform))
+        .when(platform == Platform::Windows, |this| {
+            this.add_step(steps::windows_enable_long_paths())
+        })
         .when(
             platform == Platform::Linux || platform == Platform::Mac,
             |this| this.add_step(steps::cache_rust_dependencies_namespace()),
@@ -613,6 +618,9 @@ fn run_platform_tests_impl(
                 None => steps::checkout_repo(),
             })
             .add_step(steps::setup_cargo_config(platform))
+            .when(platform == Platform::Windows, |this| {
+                this.add_step(steps::windows_enable_long_paths())
+            })
             .when(platform == Platform::Mac, |this| {
                 this.add_step(steps::cache_rust_dependencies_namespace())
             })
