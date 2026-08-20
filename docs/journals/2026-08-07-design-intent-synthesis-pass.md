@@ -12,6 +12,7 @@ Completed the experimental `tkm:rebuild-spec --design-intent` pass (waves D.1 th
 **Output:** `docs/system/design-intent.md` (promoted), confidence-report sidecar, updated navigation READMEs.
 
 **Key metrics:**
+
 - INFERRED ratio: ~23% (3 of 13 substantive claims backed by formal citations; within ≤25% graduation target)
 - Validator round-trip: 1 failure cycle (3 critical issues), 1 fix, 1 pass
 - Reviewer round-trip: 1 pass with 2 warnings; 1 warning fixed (citation line range), 1 warning noted (acceptable density trade-off)
@@ -19,7 +20,7 @@ Completed the experimental `tkm:rebuild-spec --design-intent` pass (waves D.1 th
 
 ## The Brutal Truth
 
-The validator is carrying two real blind spots baked into its paragraph classifier that will recur every time the shipped template is used. Neither is a product-breaking mistake — both are contained workarounds — but the galling part is that they're template-shipped, not author-error. The validator skips fenced code, disclaimer banners, headings, table rows, and horizontal rules from its paragraph counting, but it does *not* skip arbitrary HTML comments or ignore blank-line separation within metadata blocks. This meant the template's own boilerplate cost me a validator re-run and a manual patch to work around a false-positive density check, not because the content was wrong, but because the tool's assumptions about the template didn't match the tool's own counting logic.
+The validator is carrying two real blind spots baked into its paragraph classifier that will recur every time the shipped template is used. Neither is a product-breaking mistake — both are contained workarounds — but the galling part is that they're template-shipped, not author-error. The validator skips fenced code, disclaimer banners, headings, table rows, and horizontal rules from its paragraph counting, but it does _not_ skip arbitrary HTML comments or ignore blank-line separation within metadata blocks. This meant the template's own boilerplate cost me a validator re-run and a manual patch to work around a false-positive density check, not because the content was wrong, but because the tool's assumptions about the template didn't match the tool's own counting logic.
 
 Worse: the tool's citation regex is incomplete by design. Git commit hashes are perfectly valid "why did we do this?" anchors in a codebase that removed formal ADRs (as this fork did), and this pass correctly used them. But the validator only recognizes `ADR-###`, `business-rules.md`, `architecture.md`, `business-context.md`, and `file:line` patterns — git commits are not a first-class citation form. This forced a second round of citation recovery: adding corroborating `file:line` cites alongside the commit-message quotes, even though the commit body already said exactly why the decision was made. Extra work that didn't improve the rationale, just satisfied the tool's regex.
 
@@ -50,6 +51,7 @@ Validator (`validate_design_intent_density.py`) returned 3 critical issues, all 
 Template line 1 contains: `<!-- Layout-exempt header. Do not contribute to citation density. -->`
 
 Validator counted this as an uncited prose paragraph (>12 words, no citation). The validator's skip rules:
+
 - Fenced code blocks ✓
 - Disclaimer banner ✓
 - Headings (H1–H6) ✓
@@ -60,6 +62,7 @@ Validator counted this as an uncited prose paragraph (>12 words, no citation). T
 **Issue 2: Metadata block collapsed into one un-cited paragraph**
 
 Template lines 2–4:
+
 ```
 **Project**: zode
 **Generated**: 2026-08-07 14:22
@@ -71,6 +74,7 @@ No blank lines between fields → validator's paragraph boundary is newline-deli
 **Issue 3: Git commit citation not recognized (genuine issue)**
 
 Draft cited commit `093f3e1` as `"Commit 093f3e1: 'sidebar: add an always-visible project rail'"`. Validator's citation regex pattern:
+
 ```
 ADR-\d{3} | business-rules\.md | architecture\.md | business-context\.md | file:[a-z_/\.]+:\d+(?:-\d+)?
 ```
@@ -84,13 +88,15 @@ Rather than edit the validator script (keeping the tool clean for future runs), 
 1. **Line 1 comment:** Trimmed from `<!-- Layout-exempt header. Do not contribute to citation density. -->` to `<!-- Layout-exempt -->` (now <12 words, no longer flagged as uncited prose).
 
 2. **Metadata block:** Added blank lines:
+
    ```
    **Project**: zode
-   
+
    **Generated**: 2026-08-07 14:22
-   
+
    **Status**: draft
    ```
+
    Each field now a separate ≤2-word "paragraph" (auto-skip for ≤2 words per validator rules).
 
 3. **Git commit citations:** Added a corroborating `file:line` citation alongside each commit-message quote. For the project-rail claim, added `crates/sidebar/src/rail.rs:10` (doc comment: `/// An always-visible rail for project switching`) and `:71-74` (state machine) alongside the existing commit `093f3e1` quote. Commit-message rationale is unchanged; citation regex now matches the `file:line` form.
@@ -111,7 +117,7 @@ Literal phrase at those lines: `"Worktree security gate: LSP operations disallow
 
 **Actual location of the exact quoted text:** `crates/project/src/multi_workspace.rs:269-270` (inside a comment block 15 lines above the cited range).
 
-Reviewer caught that the cited lines *paraphrase* the same requirement, but the literal phrase didn't live where cited. **Fix:** One-line edit, corrected citation to `:269-270`. No content change, no re-review needed (citation-text-only fix).
+Reviewer caught that the cited lines _paraphrase_ the same requirement, but the literal phrase didn't live where cited. **Fix:** One-line edit, corrected citation to `:269-270`. No content change, no re-review needed (citation-text-only fix).
 
 **Warning 2: Worktree-trust section thinner density than siblings**
 
@@ -124,6 +130,7 @@ Per the pass's design (F11b), this pass **never auto-promotes**. Generated a com
 ### Wave D.5 (Promotion Decision + Execution)
 
 Presented user with a confirmation gate via `AskUserQuestion`:
+
 - **Option A**: Promote to `docs/system/design-intent.md` (recommended)
 - **Option B**: Keep as draft, iterate further
 - **Option C**: Other
@@ -152,7 +159,7 @@ Executed promotion:
 
 ### Validator's HTML-Comment Blind Spot
 
-The validator's paragraph classifier walks the file line-by-line, skipping certain patterns (fenced code, disclaimer, headings, table rows, HR) and counting everything else as a "paragraph" for citation-density analysis. HTML comments are not in the skip list. **Root:** The validator was designed and tested against a narrower set of templates that don't use HTML comments for layout control. The shipped template added layout-exempt comments as a convention, but the validator's skip rules weren't updated in parallel. Not a bug per se — it's handling HTML correctly (a comment *is* text) — but a gap between shipped template and tool assumptions.
+The validator's paragraph classifier walks the file line-by-line, skipping certain patterns (fenced code, disclaimer, headings, table rows, HR) and counting everything else as a "paragraph" for citation-density analysis. HTML comments are not in the skip list. **Root:** The validator was designed and tested against a narrower set of templates that don't use HTML comments for layout control. The shipped template added layout-exempt comments as a convention, but the validator's skip rules weren't updated in parallel. Not a bug per se — it's handling HTML correctly (a comment _is_ text) — but a gap between shipped template and tool assumptions.
 
 ### Metadata-Block Concatenation
 
@@ -172,11 +179,12 @@ The pass's design document specifies four citation forms: ADR-###, business-rule
 
 4. **Citation-regex incompleteness surfaces in ADR-less codebases.** If a repo has formally removed ADRs (as this fork did), the pass's citation forms should broaden to include git commits as first-class, or document explicitly that they're not supported and commit-backed rationales should be re-cited via file:line anchors to the implementing code. Right now the pass is ambiguous on this — it acknowledges zero-signal sections but doesn't guide toward workarounds (like adding corroborating file:line cites).
 
-5. **Density ratios near the boundary are acceptable if the prose adds genuine "why."** The worktree-trust section sat at 25% density (the graduation boundary). Reviewer correctly distinguished between padding and genuine rationale: the 8 lines explain *why* the feature exists and *why* it's gated by trust, not just *what* it does. That's substance, not filler. Trust the review judgment over mechanical ratio thresholds near the boundary.
+5. **Density ratios near the boundary are acceptable if the prose adds genuine "why."** The worktree-trust section sat at 25% density (the graduation boundary). Reviewer correctly distinguished between padding and genuine rationale: the 8 lines explain _why_ the feature exists and _why_ it's gated by trust, not just _what_ it does. That's substance, not filler. Trust the review judgment over mechanical ratio thresholds near the boundary.
 
 ## Next Steps
 
 1. **Kit feedback (out-of-scope this cycle, but documented):**
+
    - Shipped `--design-intent` template's layout-exempt comment and metadata formatting trigger deterministic validator false positives. Update validator's skip rules or supply a pre-normalized template for future runs.
    - Citation regex for `--design-intent` pass should list git commit hashes as a first-class form (or explicitly document them as unsupported with guidance on adding file:line corroboration).
 

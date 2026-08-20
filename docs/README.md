@@ -17,42 +17,42 @@ This index lists the generated documentation in recommended reading order. Read 
 
 > Start here if you are new. This layer answers what the system is and how it is shaped, before any detail.
 
-| # | Document | What it answers |
-|---|---|---|
-| 1 | [overview.md](system/overview.md) | Product goals, scope, primary actors, and the big picture — read first — Read first — establishes the product's purpose, scope, and primary actors before any structural or behavioral detail. |
-| 2 | [architecture.md](system/architecture.md) | Layer diagram, tech stack, service boundaries, and the main data flow — Read after the overview because the layer diagram, tech stack, and data flow only make sense once you know what the system is for. |
-| 3 | [glossary.md](system/glossary.md) | Shared and ambiguous domain terms, each defined once — Read after the overview so the shared and ambiguous terms are pinned down before the deeper docs lean on them. |
+| #   | Document                                  | What it answers                                                                                                                                                                                            |
+| --- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | [overview.md](system/overview.md)         | Product goals, scope, primary actors, and the big picture — read first — Read first — establishes the product's purpose, scope, and primary actors before any structural or behavioral detail.             |
+| 2   | [architecture.md](system/architecture.md) | Layer diagram, tech stack, service boundaries, and the main data flow — Read after the overview because the layer diagram, tech stack, and data flow only make sense once you know what the system is for. |
+| 3   | [glossary.md](system/glossary.md)         | Shared and ambiguous domain terms, each defined once — Read after the overview so the shared and ambiguous terms are pinned down before the deeper docs lean on them.                                      |
 
 ## 2. Domain model — entities, features, and stories
 
 > The domain vocabulary — the entities, the feature catalogue, and the user stories that everything else refers back to.
 
-| # | Document | What it answers |
-|---|---|---|
-| 4 | [entities.md](generated/entities.md) | Core data entities, their key fields, and how they relate — Read after orientation — the core data entities are the vocabulary the feature list, stories, and APIs all refer back to. |
-| 5 | [feature-list.md](generated/feature-list.md) | The full F### feature catalogue, each with a one-line summary — Read after the entities because each feature is described by the data it touches; this is the catalogue everything else indexes into. |
-| 6 | [user-stories.md](generated/user-stories.md) | US### user stories grouped by feature and actor — Read after the feature list — the stories expand each F### into concrete actor goals and acceptance intent. |
+| #   | Document                                     | What it answers                                                                                                                                                                                       |
+| --- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4   | [entities.md](generated/entities.md)         | Core data entities, their key fields, and how they relate — Read after orientation — the core data entities are the vocabulary the feature list, stories, and APIs all refer back to.                 |
+| 5   | [feature-list.md](generated/feature-list.md) | The full F### feature catalogue, each with a one-line summary — Read after the entities because each feature is described by the data it touches; this is the catalogue everything else indexes into. |
+| 6   | [user-stories.md](generated/user-stories.md) | US### user stories grouped by feature and actor — Read after the feature list — the stories expand each F### into concrete actor goals and acceptance intent.                                         |
 
 ## 3. Interfaces & behavior — screens, APIs, rules, permissions
 
 > How the system behaves at its edges: the screens users touch, the API surface, the business rules it enforces, and who may do what.
 
-| # | Document | What it answers |
-|---|---|---|
-| 12 | [behavior-logic.md](generated/behavior-logic.md) | BL### background/async logic units and what triggers them — Read after the API surface because the BL### units describe the async and background logic those endpoints and jobs trigger. |
-| 13 | [business-rules.md](system/business-rules.md) | Invariants and constraints the system must always enforce — Read after behavior because the invariants here are the constraints all that behavior must always satisfy. |
-| 14 | [permissions-matrix.md](generated/permissions-matrix.md) | Which role may perform which action (RBAC matrix) — Read after the rules — it pins down which role may perform each action the rest of the system exposes. |
+| #   | Document                                                 | What it answers                                                                                                                                                                          |
+| --- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 12  | [behavior-logic.md](generated/behavior-logic.md)         | BL### background/async logic units and what triggers them — Read after the API surface because the BL### units describe the async and background logic those endpoints and jobs trigger. |
+| 13  | [business-rules.md](system/business-rules.md)            | Invariants and constraints the system must always enforce — Read after behavior because the invariants here are the constraints all that behavior must always satisfy.                   |
+| 14  | [permissions-matrix.md](generated/permissions-matrix.md) | Which role may perform which action (RBAC matrix) — Read after the rules — it pins down which role may perform each action the rest of the system exposes.                               |
 
 ## 4. Deep dives — flows, per-feature, and per-screen specs
 
 > Drill-downs for when you need depth on one specific flow, feature, or screen — read after the layers above give you the map.
 
-| # | Document | What it answers |
-|---|---|---|
-| 15 | [flows/](flows/) | Cross-cutting process flows that span more than one feature |
-| 16 | [features/](features/) | Per-feature deep specs — 4 files per feature (see note below) |
-| 18 | [job-list.md](generated/job-list.md) | JOB### batch/background-job inventory with schedule and retry detail |
-| 19 | [design-intent.md](system/design-intent.md) | EXPERIMENTAL — inferred rationale for why the system was built this way |
+| #   | Document                                    | What it answers                                                         |
+| --- | ------------------------------------------- | ----------------------------------------------------------------------- |
+| 15  | [flows/](flows/)                            | Cross-cutting process flows that span more than one feature             |
+| 16  | [features/](features/)                      | Per-feature deep specs — 4 files per feature (see note below)           |
+| 18  | [job-list.md](generated/job-list.md)        | JOB### batch/background-job inventory with schedule and retry detail    |
+| 19  | [design-intent.md](system/design-intent.md) | EXPERIMENTAL — inferred rationale for why the system was built this way |
 
 > How to read a feature: open its folder and read the 4 files in order — business-context (why) → screens (what the user sees) → technical-spec (how) → edge-cases (what breaks).
 > To go deeper on a screen listed in screens.md, follow the SCR### code in its row to docs/screens/SCR###/spec.md (the spec links back via its **Feature** header).

@@ -7,11 +7,11 @@
 
 ## Screen List
 
-| Panel / Surface | Trigger | What User Sees | What User Can Do |
-|------------------|---------|-----------------|-------------------|
-| Extensions page | Command palette "zed: extensions", or clicking "Install Dev Extension" prompt flow | A list of installed extensions (published and dev), a search box, and an empty-state/upsell view when none are installed | Search extensions, install a published extension, install a local dev extension (opens a directory picker), trigger a dev extension rebuild, uninstall an extension |
-| Language-extension suggestion banner | Opening a file whose type has no active language support, matched against a known extension | An inline notification: "Do you want to install the recommended '{id}' extension for '{ext}' files?" with Yes/No actions | Accept (installs and activates the extension) or dismiss (banner never reappears for that file type again) |
-| Context-server status view | Opening a context server's status/detail panel | The current connection state (starting, running, stopped, errored, needs authentication, authenticating) | Trigger "Restart" to tear down and re-establish the connection |
+| Panel / Surface                      | Trigger                                                                                     | What User Sees                                                                                                           | What User Can Do                                                                                                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Extensions page                      | Command palette "zed: extensions", or clicking "Install Dev Extension" prompt flow          | A list of installed extensions (published and dev), a search box, and an empty-state/upsell view when none are installed | Search extensions, install a published extension, install a local dev extension (opens a directory picker), trigger a dev extension rebuild, uninstall an extension |
+| Language-extension suggestion banner | Opening a file whose type has no active language support, matched against a known extension | An inline notification: "Do you want to install the recommended '{id}' extension for '{ext}' files?" with Yes/No actions | Accept (installs and activates the extension) or dismiss (banner never reappears for that file type again)                                                          |
+| Context-server status view           | Opening a context server's status/detail panel                                              | The current connection state (starting, running, stopped, errored, needs authentication, authenticating)                 | Trigger "Restart" to tear down and re-establish the connection                                                                                                      |
 
 ## User Journey
 

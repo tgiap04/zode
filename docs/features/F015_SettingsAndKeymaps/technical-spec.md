@@ -1,4 +1,5 @@
 # F015_SettingsAndKeymaps: Technical Spec
+
 **Priority**: P0
 **Type**: mixed
 **Generated**: 2026-08-07
@@ -19,13 +20,13 @@ data model and picker), `crates/onboarding` (base-keymap picker), `crates/featur
 
 ### DISC-010 — SettingsFile (precedence enum)
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
-| `Default` | Baseline shipped defaults shown as the lowest-precedence layer in Settings UI | Never user-editable directly | Bundled with the binary, not written by this feature |
-| `Global` | Org/device-wide overrides layer | Parsed same as user settings; errors surfaced per-file in `file_errors` | Written to `global_settings.json` via `set_global_settings` |
-| `User` | The file the Settings UI edits by default (`SettingsUiFile::User`) | Parsed via `SettingsStore::set_user_settings`; parse errors recorded, not fatal | Written to `settings.json` via `update_settings_file`/`update_settings_file_with_completion` |
-| `Server` | Remote-dev server-pushed overrides | Not user-editable from this client | Not written by this feature (received, not authored, locally) |
-| `Project((WorktreeId, RelPath))` | Per-directory `.zed/settings.json` layer, edited when `SettingsUiFile::Project` is selected in the Settings UI | Queued through `ProjectSettingsUpdateQueue` per worktree | Written to the project's `.zed/settings.json` via `update_project_setting_file` |
+| Value                            | Render                                                                                                         | Validation                                                                      | Persistence                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `Default`                        | Baseline shipped defaults shown as the lowest-precedence layer in Settings UI                                  | Never user-editable directly                                                    | Bundled with the binary, not written by this feature                                         |
+| `Global`                         | Org/device-wide overrides layer                                                                                | Parsed same as user settings; errors surfaced per-file in `file_errors`         | Written to `global_settings.json` via `set_global_settings`                                  |
+| `User`                           | The file the Settings UI edits by default (`SettingsUiFile::User`)                                             | Parsed via `SettingsStore::set_user_settings`; parse errors recorded, not fatal | Written to `settings.json` via `update_settings_file`/`update_settings_file_with_completion` |
+| `Server`                         | Remote-dev server-pushed overrides                                                                             | Not user-editable from this client                                              | Not written by this feature (received, not authored, locally)                                |
+| `Project((WorktreeId, RelPath))` | Per-directory `.zed/settings.json` layer, edited when `SettingsUiFile::Project` is selected in the Settings UI | Queued through `ProjectSettingsUpdateQueue` per worktree                        | Written to the project's `.zed/settings.json` via `update_project_setting_file`              |
 
 **Source:** `crates/settings/src/settings_store.rs:145` (struct), discriminator `Ord`/`SettingsFile`
 enum referenced in `permissions-matrix.md`/`data-model.md` DISC-010; write paths verified at
@@ -33,10 +34,10 @@ enum referenced in `permissions-matrix.md`/`data-model.md` DISC-010; write paths
 
 ### DISC-011 — Theme.appearance
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
+| Value   | Render                                                                                                                                                                                    | Validation                            | Persistence                                                                                                       |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `Light` | Theme selector and system tie this appearance to light-mode contrast defaults; auto-selected when the OS reports a light appearance and the user has an appearance-tracking theme setting | No extra validation beyond enum parse | No DB write — theme selection is stored as a name string in `settings.json` (`theme` key), not this enum directly |
-| `Dark` | Same mechanism for dark-mode contrast defaults | No extra validation beyond enum parse | Same — name string in `settings.json` |
+| `Dark`  | Same mechanism for dark-mode contrast defaults                                                                                                                                            | No extra validation beyond enum parse | Same — name string in `settings.json`                                                                             |
 
 **Source:** `crates/theme/src/theme.rs:54-59` (`Appearance` enum).
 
@@ -44,13 +45,13 @@ enum referenced in `permissions-matrix.md`/`data-model.md` DISC-010; write paths
 
 ### Requirements
 
-| Code | Description | Endpoint/Handler | Verifiable |
-|------|-------------|------------------|------------|
-| FR-001 | Apply a live settings change to the in-memory `SettingsStore` and re-render every registered `impl Settings` consumer | `SettingsStore::set_user_settings`/`watch_settings_files` | yes |
-| FR-002 | Watch the user/global settings files on disk and hot-reload on external edits | `SettingsStore::watch_settings_files` | yes |
-| FR-003 | Watch the keymap file (and base-keymap/vim/helix settings, and OS keyboard layout) and hot-reload keybindings | `handle_keymap_file_changes` | yes |
-| FR-004 | Back up then rewrite `settings.json`/`keymap.json` when a deprecated-schema field is detected | `write_settings_migration`/`write_keymap_migration` | yes |
-| FR-005 | Resolve a feature flag's on/off (or variant) value per staff/override/server precedence, and re-render observers on change | `FeatureFlagStore::try_flag_value`, `FeatureFlagAppExt::observe_flag` | yes |
+| Code   | Description                                                                                                                | Endpoint/Handler                                                      | Verifiable |
+| ------ | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------- |
+| FR-001 | Apply a live settings change to the in-memory `SettingsStore` and re-render every registered `impl Settings` consumer      | `SettingsStore::set_user_settings`/`watch_settings_files`             | yes        |
+| FR-002 | Watch the user/global settings files on disk and hot-reload on external edits                                              | `SettingsStore::watch_settings_files`                                 | yes        |
+| FR-003 | Watch the keymap file (and base-keymap/vim/helix settings, and OS keyboard layout) and hot-reload keybindings              | `handle_keymap_file_changes`                                          | yes        |
+| FR-004 | Back up then rewrite `settings.json`/`keymap.json` when a deprecated-schema field is detected                              | `write_settings_migration`/`write_keymap_migration`                   | yes        |
+| FR-005 | Resolve a feature flag's on/off (or variant) value per staff/override/server precedence, and re-render observers on change | `FeatureFlagStore::try_flag_value`, `FeatureFlagAppExt::observe_flag` | yes        |
 
 **Source:** `crates/settings/src/settings_store.rs:350-401` (FR-001/002), `crates/zed/src/zed.rs`
 (`handle_keymap_file_changes`, FR-003), `crates/zed/src/zed/migrate.rs:278-326` (FR-004),
@@ -61,6 +62,7 @@ enum referenced in `permissions-matrix.md`/`data-model.md` DISC-010; write paths
 _(See itemized entries below.)_
 
 ### BR-001_SettingsFilePrecedenceOrder
+
 **Linked FR:** FR-001
 **Source:** `crates/settings/src/settings_store.rs:432-441` (`merged_settings` field), `data-model.md` DISC-010
 **Applies to:** `SettingsStore::get<T>` — every settings read in the app
@@ -70,6 +72,7 @@ global override always beats the shipped default. This ordering is fixed by the 
 enum's `Ord` implementation, not user-configurable.
 
 **Pseudocode:**
+
 ```text
 fn merge_layers(default, global, user, server, project_for(worktree)):
     result = default
@@ -82,6 +85,7 @@ fn merge_layers(default, global, user, server, project_for(worktree)):
 ```
 
 ### BR-002_NonUserKeybindingReplaceBecomesAdd
+
 **Linked FR:** FR-003
 **Source:** `crates/settings/src/keymap_file.rs:867-901` (`KeymapFile::update_keybinding`)
 **Applies to:** `KeymapEditor::save`/`save_keybinding_update`
@@ -92,6 +96,7 @@ unbind (`suppression_unbind`) entry to suppress the original non-user binding �
 non-user source file itself is never touched.
 
 **Pseudocode:**
+
 ```text
 fn update_keybinding(op):
     if op is Replace and target_source != User:
@@ -102,6 +107,7 @@ fn update_keybinding(op):
 ```
 
 ### BR-003_BackupWrittenBeforeLiveFileIsRewritten
+
 **Linked FR:** FR-004
 **Source:** `crates/zed/src/zed/migrate.rs:283-299` (`write_keymap_migration`), `:308-324`
 (`write_settings_migration`)
@@ -114,6 +120,7 @@ individually errored via `.context(...)`, so a failure at the backup step aborts
 file is ever touched.
 
 **Pseudocode:**
+
 ```text
 fn write_X_migration(fs):
     old_text = load(fs)
@@ -127,6 +134,7 @@ fn write_X_migration(fs):
 ```
 
 ### BR-004_StaffFlagDefaultUnlessOverridden
+
 **Linked FR:** FR-005
 **Source:** `crates/feature_flags/src/feature_flags.rs:114-132` (`FeatureFlag` trait defaults),
 `crates/feature_flags/src/store.rs:155-176` (`try_flag_value`)
@@ -137,6 +145,7 @@ is staff (or a debug build) and `ZED_DISABLE_STAFF` is not set and `enabled_for_
 `true`) holds; else a server-pushed flag value; else `None`/off.
 
 **Pseudocode:**
+
 ```text
 fn try_flag_value(flag):
     if flag.enabled_for_all(): return on_variant
@@ -165,6 +174,7 @@ BR/ALG entries instead.
 _(See itemized entries below.)_
 
 ### ALG-001_SettingsAtomicFileUpdate
+
 **Linked FR:** FR-001
 **Source:** `crates/settings/src/settings_store.rs:552-607` (`update_settings_file_inner`)
 **Input:** current on-disk settings text + a caller-supplied `FnOnce(&mut SettingsContent, &App)` mutation
@@ -179,6 +189,7 @@ target is written through), calls `fs.atomic_write`, then updates the in-memory 
 `set_user_settings` before completing the caller's oneshot receiver.
 
 **Pseudocode:**
+
 ```text
 fn update_settings_file_inner(fs, update):
     enqueue(async {
@@ -196,6 +207,7 @@ fn update_settings_file_inner(fs, update):
 _(See itemized entries below.)_
 
 ### INT-001_ThemeAndKeymapFileWatch
+
 **Linked FR:** FR-002, FR-003
 **Source:** `crates/settings/src/settings_file.rs:165` (`watch_config_file`, BL137),
 `crates/zed/src/main.rs` (`watch_themes`, BL206), `crates/zed/src/zed.rs`
@@ -211,6 +223,7 @@ external editor
 subsequent valid write recovers automatically
 
 **Pseudocode:**
+
 ```text
 loop:
     batch = fs.watch(path).next()
@@ -263,6 +276,7 @@ immediately re-renders at the new size without restarting Zode.
    saved, **Then** the change is detected and applied the same way as a UI edit.
 
 **Requirements fulfilled:**
+
 - **FR-001** Apply a live settings change to `SettingsStore` and re-render consumers — via
   `SettingsStore::update_settings_file`/`update_settings_file_with_completion`
   **Source:** `crates/settings/src/settings_store.rs:552-635`
@@ -274,6 +288,7 @@ immediately re-renders at the new size without restarting Zode.
 precedence merge as any other settings read.
 
 **Verification:**
+
 - **SC-001** (see Cross-Cutting Logic)
 
 ---
@@ -302,6 +317,7 @@ triggers Save and `Cmd-S` no longer does, without restarting Zode.
    left untouched (BR-002).
 
 **Requirements fulfilled:**
+
 - **FR-003** Watch the keymap file and hot-reload keybindings — via `handle_keymap_file_changes`
   **Source:** `crates/zed/src/zed.rs` (`handle_keymap_file_changes`, symbol confirmed via
   `behavior-logic.md` BL143)
@@ -310,6 +326,7 @@ triggers Save and `Cmd-S` no longer does, without restarting Zode.
 place.
 
 **Verification:**
+
 - **SC-002** (see Cross-Cutting Logic)
 
 ---
@@ -335,6 +352,7 @@ bindings (e.g. `Ctrl-Shift-P`) become active immediately across all open windows
    layered under any custom user bindings.
 
 **Requirements fulfilled:**
+
 - **FR-001** (see Cross-Cutting Logic) — base keymap change goes through the same settings-write
   path as any other setting
   **Source:** `crates/onboarding/src/base_keymap_picker.rs:174-199`
@@ -343,6 +361,7 @@ bindings (e.g. `Ctrl-Shift-P`) become active immediately across all open windows
 the same precedence merge before `handle_keymap_file_changes` diffs it.
 
 **Verification:**
+
 - **SC-004** Selecting a base keymap preset applies its bindings across all open windows without
   restart (covers FR-001, FR-003)
 
@@ -370,12 +389,14 @@ before the live file changes.
    before the live file is touched.
 
 **Requirements fulfilled:**
+
 - **FR-004** (see Cross-Cutting Logic) — via `write_settings_migration`/`write_keymap_migration`
   **Source:** `crates/zed/src/zed/migrate.rs:278-326`
 
 **Rules enforced:** BR-003 (see Cross-Cutting Logic).
 
 **Verification:**
+
 - **SC-003** (see Cross-Cutting Logic)
 
 ---
@@ -399,6 +420,7 @@ confirm the live `settings.json` parses successfully under the current schema af
    current schema.
 
 **Requirements fulfilled:**
+
 - **FR-004** (see US061) — via `write_settings_migration`/`write_keymap_migration`
   **Source:** `crates/zed/src/zed/migrate.rs:288-299, 313-324`
 
@@ -406,39 +428,40 @@ confirm the live `settings.json` parses successfully under the current schema af
 write within the same function call, never independently.
 
 **Verification:**
+
 - **SC-003** (see Cross-Cutting Logic)
 
 ---
 
 ### Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Settings file has a parse error after an external hand-edit | Error recorded in `SettingsStore::file_errors` keyed by `SettingsFile`; watch loop keeps running rather than crashing (`crates/settings/src/settings_store.rs:443`) |
-| User edits a non-user-owned keybinding's keystrokes | Treated as an `Add` (not `Replace`) plus a suppression unbind if keystrokes changed — original non-user source file is never rewritten (BR-002) |
-| Backup write (`fs.atomic_write` to the backup path) fails | `.with_context(...)` wraps the error ("Failed to create settings backup in home directory"); the function returns early via `?` — the live file write in the same call never executes, so the live config is never corrupted by a partial migration |
-| Live settings/keymap file does not exist yet at migration time | `fs.is_file` check is false, so no backup is written and the migrated text is written directly to the (new) live path (`crates/zed/src/zed/migrate.rs:295-299, 320-324`) |
-| Staff account has `ZED_DISABLE_STAFF` set | Feature flags that default `enabled_for_staff() == true` resolve to off for that session, letting a developer verify the non-staff experience locally |
+| Scenario                                                       | Behavior                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Settings file has a parse error after an external hand-edit    | Error recorded in `SettingsStore::file_errors` keyed by `SettingsFile`; watch loop keeps running rather than crashing (`crates/settings/src/settings_store.rs:443`)                                                                                 |
+| User edits a non-user-owned keybinding's keystrokes            | Treated as an `Add` (not `Replace`) plus a suppression unbind if keystrokes changed — original non-user source file is never rewritten (BR-002)                                                                                                     |
+| Backup write (`fs.atomic_write` to the backup path) fails      | `.with_context(...)` wraps the error ("Failed to create settings backup in home directory"); the function returns early via `?` — the live file write in the same call never executes, so the live config is never corrupted by a partial migration |
+| Live settings/keymap file does not exist yet at migration time | `fs.is_file` check is false, so no backup is written and the migrated text is written directly to the (new) live path (`crates/zed/src/zed/migrate.rs:295-299, 320-324`)                                                                            |
+| Staff account has `ZED_DISABLE_STAFF` set                      | Feature flags that default `enabled_for_staff() == true` resolve to off for that session, letting a developer verify the non-staff experience locally                                                                                               |
 
 ## Key Entities
 
-| Entity | Table | Key Columns | Purpose |
-|--------|-------|-------------|---------|
-| SettingsStore (MODEL012) | in-memory only — not a DB table; backed by `settings.json`/`global_settings.json`/project `.zed/settings.json` files | `setting_values`, `user_settings`, `global_settings`, `local_settings`, `merged_settings`, `file_errors` | Central registry merging all settings layers; every `impl Settings` consumer reads through it |
-| Theme / ThemeFamily (MODEL013) | in-memory only — not a DB table; backed by theme JSON files under the theme extension/bundled path | `id`, `name`, `appearance`, `styles` | Color/typography data model selected by the theme selector and applied app-wide |
-| FeatureFlagStore | in-memory only — not a DB table | `staff`, `server_flags`, `server_flags_received` | Resolves each declared `FeatureFlag` type's on/off/variant value for the current session |
+| Entity                         | Table                                                                                                                | Key Columns                                                                                              | Purpose                                                                                       |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| SettingsStore (MODEL012)       | in-memory only — not a DB table; backed by `settings.json`/`global_settings.json`/project `.zed/settings.json` files | `setting_values`, `user_settings`, `global_settings`, `local_settings`, `merged_settings`, `file_errors` | Central registry merging all settings layers; every `impl Settings` consumer reads through it |
+| Theme / ThemeFamily (MODEL013) | in-memory only — not a DB table; backed by theme JSON files under the theme extension/bundled path                   | `id`, `name`, `appearance`, `styles`                                                                     | Color/typography data model selected by the theme selector and applied app-wide               |
+| FeatureFlagStore               | in-memory only — not a DB table                                                                                      | `staff`, `server_flags`, `server_flags_received`                                                         | Resolves each declared `FeatureFlag` type's on/off/variant value for the current session      |
 
 ## Artifact References
 
-| Artifact | File | Codes Used | Reviewed |
-|----------|------|------------|----------|
-| System Overview | [system-overview.md](../../system-overview.md) | — | [x] |
-| Feature List | [feature-list.md](../../feature-list.md) | F015 | [x] |
-| Entities | [entities.md](../../../../docs/generated/entities.md) | MODEL012, MODEL013 | [x] |
-| Behavior Logic | [behavior-logic.md](../../../../docs/generated/behavior-logic.md) | BL040, BL061, BL036, BL048, BL207, BL037, BL070, BL096, BL206, BL063, BL139, BL137, BL138, BL143, BL169, BL193, BL101, BL127 | [x] |
-| Permissions Matrix | [permissions-matrix.md](../../../../docs/generated/permissions-matrix.md) | PERM006 | [x] |
-| Permissions (curated) | [permissions.md](../../../../docs/system/permissions.md) | PERM006 | [x] |
-| User Stories | [user-stories.md](../../../../docs/generated/user-stories.md) | US058, US059, US060, US061, US062 | [x] |
+| Artifact              | File                                                                      | Codes Used                                                                                                                   | Reviewed |
+| --------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------- |
+| System Overview       | [system-overview.md](../../system-overview.md)                            | —                                                                                                                            | [x]      |
+| Feature List          | [feature-list.md](../../feature-list.md)                                  | F015                                                                                                                         | [x]      |
+| Entities              | [entities.md](../../../../docs/generated/entities.md)                     | MODEL012, MODEL013                                                                                                           | [x]      |
+| Behavior Logic        | [behavior-logic.md](../../../../docs/generated/behavior-logic.md)         | BL040, BL061, BL036, BL048, BL207, BL037, BL070, BL096, BL206, BL063, BL139, BL137, BL138, BL143, BL169, BL193, BL101, BL127 | [x]      |
+| Permissions Matrix    | [permissions-matrix.md](../../../../docs/generated/permissions-matrix.md) | PERM006                                                                                                                      | [x]      |
+| Permissions (curated) | [permissions.md](../../../../docs/system/permissions.md)                  | PERM006                                                                                                                      | [x]      |
+| User Stories          | [user-stories.md](../../../../docs/generated/user-stories.md)             | US058, US059, US060, US061, US062                                                                                            | [x]      |
 
 **Note (generic-source profile):** no `route-list.md`/`screen-list.md` exist for this Rust/GPUI
 codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather than fabricated.
@@ -460,17 +483,17 @@ codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather tha
 
 ## Source Code References
 
-| Order | Symbol | Path | Purpose |
-|-------|--------|------|---------|
-| 1 | `SettingsStore` | `crates/settings/src/settings_store.rs:145, 287-441` | Central settings registry; entity definition + layer precedence |
-| 2 | `SettingsStore::watch_settings_files`/`update_settings_file_inner` | `crates/settings/src/settings_store.rs:350-401, 552-635` | Live settings apply + file-watch reload path |
-| 3 | `SettingsWindow`/`update_settings_file` | `crates/settings_ui/src/settings_ui.rs:720-859, 3862-3887, 1906-1983` | Settings UI entry point, write dispatch by file target, search |
-| 4 | `KeymapEditor`/`save_keybinding_update` | `crates/keymap_editor/src/keymap_editor.rs:432-541, 3600-3672` | Keymap editor UI + keybinding write path |
-| 5 | `KeymapFile::update_keybinding` | `crates/settings/src/keymap_file.rs:867-905` | Replace-vs-add / suppression-unbind logic (BR-002) |
-| 6 | `MigrationBanner`/`write_settings_migration`/`write_keymap_migration` | `crates/zed/src/zed/migrate.rs:25-137, 262-326` | Backup-then-migrate flow (BR-003) |
-| 7 | `BaseKeymapSelectorDelegate::confirm` | `crates/onboarding/src/base_keymap_picker.rs:174-199` | Base keymap preset switch |
-| 8 | `Theme`/`ThemeFamily`/`Appearance` | `crates/theme/src/theme.rs:54-59, 192-220` | Theme data model + appearance discriminator |
-| 9 | `FeatureFlagStore`/`FeatureFlag` trait | `crates/feature_flags/src/feature_flags.rs:20-132`, `crates/feature_flags/src/store.rs:69-236` | Staff feature-flag resolution (PERM006, BR-004) |
+| Order | Symbol                                                                | Path                                                                                           | Purpose                                                         |
+| ----- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 1     | `SettingsStore`                                                       | `crates/settings/src/settings_store.rs:145, 287-441`                                           | Central settings registry; entity definition + layer precedence |
+| 2     | `SettingsStore::watch_settings_files`/`update_settings_file_inner`    | `crates/settings/src/settings_store.rs:350-401, 552-635`                                       | Live settings apply + file-watch reload path                    |
+| 3     | `SettingsWindow`/`update_settings_file`                               | `crates/settings_ui/src/settings_ui.rs:720-859, 3862-3887, 1906-1983`                          | Settings UI entry point, write dispatch by file target, search  |
+| 4     | `KeymapEditor`/`save_keybinding_update`                               | `crates/keymap_editor/src/keymap_editor.rs:432-541, 3600-3672`                                 | Keymap editor UI + keybinding write path                        |
+| 5     | `KeymapFile::update_keybinding`                                       | `crates/settings/src/keymap_file.rs:867-905`                                                   | Replace-vs-add / suppression-unbind logic (BR-002)              |
+| 6     | `MigrationBanner`/`write_settings_migration`/`write_keymap_migration` | `crates/zed/src/zed/migrate.rs:25-137, 262-326`                                                | Backup-then-migrate flow (BR-003)                               |
+| 7     | `BaseKeymapSelectorDelegate::confirm`                                 | `crates/onboarding/src/base_keymap_picker.rs:174-199`                                          | Base keymap preset switch                                       |
+| 8     | `Theme`/`ThemeFamily`/`Appearance`                                    | `crates/theme/src/theme.rs:54-59, 192-220`                                                     | Theme data model + appearance discriminator                     |
+| 9     | `FeatureFlagStore`/`FeatureFlag` trait                                | `crates/feature_flags/src/feature_flags.rs:20-132`, `crates/feature_flags/src/store.rs:69-236` | Staff feature-flag resolution (PERM006, BR-004)                 |
 
 ## Unresolved Questions
 

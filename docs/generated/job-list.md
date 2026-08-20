@@ -1,4 +1,5 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
+
 # Job List
 
 **Project**: Zode (Zed editor fork)
@@ -15,172 +16,172 @@
 
 ## Job Index
 
-| Code | Name | BL Ref | Type | Schedule/Trigger |
-|------|------|--------|------|-------------------|
-| JOB001 | ActivityIndicatorStatusActions | BL001 | custom-command | User-invoked via keybinding (keymap.json) or command palette, dispatched from th |
-| JOB002 | CsvPreviewOpenActions | BL002 | custom-command | User-invoked via command palette or editor tab context menu on `.csv` files; gat |
-| JOB003 | InitializeDevContainerAction | BL003 | custom-command | User-invoked via command palette; no automatic schedule. |
-| JOB004 | OpenDebugAdapterLogsAction | BL004 | custom-command | User-invoked via command palette (dev tools); no automatic schedule. |
-| JOB005 | DebuggerSessionControlActions | BL005 | custom-command | User-invoked via keybinding (keymap.json), command palette, or debugger toolbar  |
-| JOB006 | NewProcessModalTabActions | BL006 | custom-command | User-invoked via keybinding (keymap.json) while the New Process modal is open; n |
-| JOB007 | BreakpointListNavigationActions | BL007 | custom-command | User-invoked via keybinding while the breakpoint list panel is focused; no autom |
-| JOB008 | ConsoleWatchExpressionAction | BL008 | custom-command | User-invoked via keybinding or context menu while the debugger console is focuse |
-| JOB009 | MemoryViewGoToAddressAction | BL009 | custom-command | User-invoked via keybinding or query-bar submit inside the memory view; no autom |
-| JOB010 | VariableListActions | BL010 | custom-command | User-invoked via keybinding or context menu while the variable list is focused;  |
-| JOB011 | DeployCurrentFileDiagnosticsAction | BL011 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB012 | ProjectDiagnosticsActions | BL012 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB013 | EditorCoreActions | BL013 | custom-command | User-invoked via keybinding (keymap.json), the editor's primary command surface; |
-| JOB014 | ToggleSplitDiffAction | BL014 | custom-command | User-invoked via keybinding or toolbar toggle in a split editor; no automatic sc |
-| JOB015 | EncodingSelectorToggleAction | BL015 | custom-command | User-invoked via command palette or a click on the status-bar encoding indicator |
-| JOB016 | EtwTracingActions | BL016 | custom-command | User-invoked via command palette (Windows-only diagnostic tooling); no automatic |
-| JOB017 | ReloadExtensionsAction | BL017 | custom-command | User-invoked via command palette; no automatic schedule. |
-| JOB018 | InstallDevExtensionAction | BL018 | custom-command | User-invoked via command palette or the "Install Dev Extension" button on the Ex |
-| JOB019 | FeedbackActions | BL019 | custom-command | User-invoked via command palette or the Help menu; no automatic schedule. |
-| JOB020 | FileFinderActions | BL020 | custom-command | User-invoked via keybinding while the file finder modal is open; no automatic sc |
-| JOB021 | GitHunkStagingActions | BL021 | custom-command | User-invoked via keybinding or the git panel context menu on a hunk or status en |
-| JOB022 | GitGraphActions | BL022 | custom-command | User-invoked via keybinding or command palette from the Git Graph tab; no automa |
-| JOB023 | BranchPickerActions | BL023 | custom-command | User-invoked via keybinding while the branch picker is open; no automatic schedu |
-| JOB024 | CommitViewStashActions | BL024 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB025 | GitPanelActions | BL025 | custom-command | User-invoked via keybinding, or the git panel toolbar and context menu; no autom |
-| JOB026 | GitPickerTabActions | BL026 | custom-command | User-invoked via keybinding while the combined git picker is open; no automatic  |
-| JOB027 | ProjectDiffActions | BL027 | custom-command | User-invoked via keybinding or command palette; no automatic schedule. |
-| JOB028 | StashPickerActions | BL028 | custom-command | User-invoked via keybinding while the stash picker is open; no automatic schedul |
-| JOB029 | DeleteWorktreeAction | BL029 | custom-command | User-invoked via keybinding while the worktree picker is open; no automatic sche |
-| JOB030 | ActionsMacroDefinition | BL030 | custom-command | N/A — compile-time declarative macro, not an invokable command; no runtime trigg |
-| JOB031 | ImageViewerZoomActions | BL031 | custom-command | User-invoked via keybinding or toolbar buttons while viewing an image; no automa |
-| JOB032 | DumpInputLatencyHistogramAction | BL032 | custom-command | User-invoked via command palette (dev tools); no automatic schedule. |
-| JOB033 | InstallCliBinaryAction | BL033 | custom-command | User-invoked via command palette; no automatic schedule. |
-| JOB034 | RegisterZedSchemeAction | BL034_RegisterZedSchemeAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB035 | NewJournalEntryAction | BL035_NewJournalEntryAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB036 | KeymapEditorActions | BL036_KeymapEditorActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB037 | KeystrokeRecordingActions | BL037_KeystrokeRecordingActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB038 | LanguageSelectorToggleAction | BL038_LanguageSelectorToggleAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB039 | HighlightsTreeViewActions | BL039_HighlightsTreeViewActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB040 | OpenKeyContextViewAction | BL040_OpenKeyContextViewAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB041 | LspToolMenuToggleAction | BL041_LspToolMenuToggleAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB042 | OpenLanguageServerLogsAction | BL042_OpenLanguageServerLogsAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB043 | SyntaxTreeViewActions | BL043_SyntaxTreeViewActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB044 | LineEndingSelectorToggleAction | BL044_LineEndingSelectorToggleAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB045 | MarkdownCopyActions | BL045_MarkdownCopyActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB046 | MarkdownPreviewScrollActions | BL046_MarkdownPreviewScrollActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB047 | MenuNavigationActions | BL047_MenuNavigationActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB048 | ToggleBaseKeymapSelectorAction | BL048_ToggleBaseKeymapSelectorAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB049 | OnboardingFlowActions | BL049_OnboardingFlowActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB050 | OutlinePanelActions | BL050_OutlinePanelActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB051 | PanelTabNavigationActions | BL051_PanelTabNavigationActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB052 | PickerConfirmActions | BL052_PickerConfirmActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB053 | WindowTabManagementActions | BL053_WindowTabManagementActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB054 | ContextServerRestartAction | BL054_ContextServerRestartAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB055 | ProjectPanelActions | BL055_ProjectPanelActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB056 | RecentProjectsMenuActions | BL056_RecentProjectsMenuActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB057 | OpenWslPathAction | BL057_OpenWslPathAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. (In this  |
-| JOB058 | ReplSessionActions | BL058_ReplSessionActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB059 | ProjectSearchActions | BL059_ProjectSearchActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB060 | BufferSearchActions | BL060_BufferSearchActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB061 | SettingsEditorActions | BL061_SettingsEditorActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB062 | FocusSidebarFilterAction | BL062_FocusSidebarFilterAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB063 | SnippetsConfigActions | BL063_SnippetsConfigActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB064 | SvgOpenFollowingPreviewAction | BL064_SvgOpenFollowingPreviewAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB065 | CopySystemSpecsAction | BL065_CopySystemSpecsAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB066 | TabSwitcherActions | BL066_TabSwitcherActions | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB067 | TerminalCoreActions | BL067 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB068 | TerminalPanelToggleActions | BL068 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB069 | TerminalViewTextActions | BL069 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB070 | ThemeSelectorReloadAction | BL070 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB071 | ApplicationMenuActivationActions | BL071 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB072 | TitleBarProjectMenuActions | BL072 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB073 | ToolchainSelectorActions | BL073 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB074 | VimChangeListNavigationActions | BL074 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB075 | VimExCommandActions | BL075 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB076 | VimDigraphLiteralAction | BL076 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB077 | VimHelixModeActions | BL077 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB078 | VimHelixPasteAction | BL078 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB079 | VimIndentActions | BL079 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB080 | VimInsertModeActions | BL080 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB081 | VimMotionActions | BL081 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB082 | VimNormalModeInsertActions | BL082 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB083 | VimIncrementDecrementActions | BL083 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB084 | VimPasteAction | BL084 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB085 | VimRepeatMacroActions | BL085 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB086 | VimScrollActions | BL086 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB087 | VimSearchActions | BL087 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB088 | VimSubstituteActions | BL088 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB089 | VimTextObjectActions | BL089 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB090 | VimReplaceModeActions | BL090 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB091 | VimRewrapAction | BL091 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB092 | VimOperatorPendingPushActions | BL092 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB093 | VimVisualModeActions | BL093 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB094 | MultiWorkspaceSidebarActions | BL094 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB095 | PaneItemManagementActions | BL095 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB096 | OpenThemePreviewAction | BL096 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB097 | WelcomeScreenActions | BL097 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB098 | WorkspacePaneNavigationActions | BL098 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB099 | ZedApplicationWindowActions | BL099 | custom-command | User-invoked via command palette, keybinding, or native application menu; no aut |
-| JOB100 | ZedActionsSharedRegistry | BL100 | custom-command | User-invoked via command palette or keybinding; no automatic schedule. |
-| JOB101 | Debounced Delay Timer | BL144 | scheduled-job | Re-armed on every `fire_new` call with a caller-supplied `Duration`; previous pe |
-| JOB102 | Git Diff Debounced Recalculation | BL145 | scheduled-job | Debounced via the `git_diff_debouncer` (`DebouncedDelay<Project>`, JOB101) using |
-| JOB103 | Log Command Invocation | BL146 | queue-worker | Dispatched via a detached background task from `CommandPalette::confirm` immedia |
-| JOB104 | Save Component Preview Active Page | BL147 | queue-worker | Dispatched via `cx.background_spawn` when the workspace's item-serialization pas |
-| JOB105 | Mcp Serve Connection | BL148 | queue-worker | Dispatched and detached for the duration of the connection each time an MCP clie |
-| JOB106 | Db Write And Log | BL149 | queue-worker | Dispatched via `cx.background_spawn` whenever a call site invokes `db::write_and |
-| JOB107 | Fetch Remote Process List For Attach | BL150 | queue-worker | Dispatched as a background task when the user opens the Attach-to-Process modal  |
-| JOB108 | Forward Spawned Terminal Pid | BL151 | queue-worker | Dispatched as a background task when a debug session spawns an integrated termin |
-| JOB109 | Persist Stack Frame Filter Preference | BL152 | queue-worker | Dispatched as a detached background task each time the user toggles the stack-fr |
-| JOB110 | Compute Completion Menu Filter Matches | BL153 | queue-worker | Dispatched via `cx.background_spawn` each time the editor's completion menu need |
-| JOB111 | Serialize Editor Selections | BL154 | queue-worker | Debounced via a background timer, re-armed on each selection change for editors  |
-| JOB112 | Serialize Editor Folds | BL155 | queue-worker | Dispatched as a background task from an async closure when a workspace item requ |
-| JOB113 | Compute Runnable Ranges | BL156 | queue-worker | Dispatched via `cx.spawn_in` from `refresh_runnables` whenever the visible multi |
-| JOB114 | Compile Dev Extension | BL157 | queue-worker | Dispatched when the user triggers a rebuild of a locally-installed dev extension |
-| JOB115 | Dismiss Language Extension Suggestion | BL158 | queue-worker | Dispatched as a detached background task from the banner's `secondary_on_click`  |
-| JOB116 | Check Recent History Path Exists | BL159 | queue-worker | Dispatched per untracked recent-history entry as a background filesystem check ( |
-| JOB117 | Read Global Git Committer Identity | BL160 | queue-worker | Dispatched on the background executor whenever a call site needs the committer i |
-| JOB118 | Save Git Graph Serialization | BL161 | queue-worker | Dispatched in the background when the workspace's item-serialization pass reache |
-| JOB119 | Create Git Remote | BL162 | queue-worker | Dispatched and detached when the user confirms adding a new remote in the branch |
-| JOB120 | Commit Staged Changes | BL163 | queue-worker | Dispatched as a background-spawned task when the user triggers commit in the git |
-| JOB121 | Save Project Diff Base | BL164 | queue-worker | Dispatched in the background when the workspace's item-serialization pass reache |
-| JOB122 | Detach And Log Err Task | BL165 | queue-worker | Dispatched on the foreground executor whenever a call site holding a `Task<Resul |
-| JOB123 | Save Image Viewer Path | BL166 | queue-worker | Dispatched in the background when the workspace's item-serialization pass reache |
-| JOB124 | Prompt Cli Install On Linux | BL167 | queue-worker | Dispatched and detached when the user runs "Install CLI" on a platform requiring |
-| JOB125 | Create Journal Entry File | BL168 | queue-worker | Dispatched as a background task when the user invokes "New Journal Entry". |
-| JOB126 | Debounce Keymap Action Search | BL169 | queue-worker | Dispatched as a background task on each query change in the keymap editor's sear |
-| JOB127 | Send Lsp Initialize Request | BL170 | queue-worker | Dispatched on the background executor immediately after a language server proces |
-| JOB128 | Parse Markdown Source | BL171 | queue-worker | Dispatched via `start_background_parse` whenever the markdown source content cha |
-| JOB129 | Search Markdown Preview Source | BL172 | queue-worker | Dispatched on the background executor each time the user runs an in-buffer searc |
-| JOB130 | Export Miniprofiler Report | BL173 | queue-worker | Dispatched as a detached background task after the user picks a save path in the |
-| JOB131 | Save Onboarding Active Page | BL174 | queue-worker | Dispatched in the background when the workspace's item-serialization pass reache |
-| JOB132 | Serialize Outline Panel State | BL175 | queue-worker | Dispatched as a background task whenever the outline panel's active/visible stat |
-| JOB133 | Load Buffer Contents Off Thread | BL176 | queue-worker | Dispatched via `cx.background_spawn` whenever a buffer is requested (`BufferStor |
-| JOB134 | Forward Breakpoint Toggle To Remote | BL177 | queue-worker | Dispatched from `BreakpointStore::toggle_breakpoint` (`crates/project/src/debugg |
-| JOB135 | Prune Stale Js Debug Companion Versions | BL178 | queue-worker | Dispatched via `cx.background_spawn` inside `DapStore::new` (`crates/project/src |
-| JOB136 | Install Latest Js Debug Companion | BL179 | queue-worker | Dispatched via `cx.background_spawn(install_latest_version(...))` (`crates/proje |
-| JOB137 | Restore Git Checkpoints | BL180 | queue-worker | Dispatched via the background executor from `GitStore::restore_checkpoint` (`cra |
-| JOB138 | Wait For Image Load | BL181 | queue-worker | Dispatched via `cx.background_spawn` from `ImageStore::open_image` (`crates/proj |
-| JOB139 | Restart Language Servers For Buffers | BL182 | queue-worker | Dispatched from `LspStore::restart_language_servers_for_buffers` (`crates/projec |
-| JOB140 | Forward Vue Ts Request To Typescript Server | BL183 | queue-worker | Dispatched via `cx.background_spawn` inside `register_requests` (`crates/project |
-| JOB141 | Clear Prettier Caches On Settings Change | BL184 | queue-worker | Dispatched via the background executor from `PrettierStore::update_prettier_sett |
-| JOB142 | Forward Buffer Update To Remote Server | BL185 | queue-worker | Dispatched via a detached background request from `Project::handle_update_buffer |
-| JOB143 | Copy Worktree Entry Off Thread | BL186 | queue-worker | Dispatched via the background executor from `WorktreeStore::copy_entry` (`crates |
-| JOB144 | Dismiss Dev Container Suggestion | BL187 | queue-worker | Dispatched via `cx.background_spawn` inside `suggest_on_worktree_updated` (`crat |
-| JOB145 | Forward Buffer Update On Headless Project | BL188 | queue-worker | Dispatched via a detached background request from `HeadlessProject::on_buffer_ev |
-| JOB146 | Read Remote Server Stdin Loop | BL189 | queue-worker | Dispatched via `cx.background_spawn` inside `start_server` (`crates/remote_serve |
-| JOB147 | Route Jupyter Messages To Channels | BL190 | queue-worker | Dispatched via the background executor from `start_kernel_tasks` (`crates/repl/s |
-| JOB148 | Refresh Python Kernelspecs | BL191 | queue-worker | Dispatched via `NotebookEditor::refresh_kernelspecs` (`crates/repl/src/notebook/ |
-| JOB149 | Install Ipykernel Package | BL192 | queue-worker | Dispatched via the background executor from `install_ipykernel_and_assign` (`cra |
-| JOB150 | Compute Settings Exact Search Matches | BL193 | queue-worker | Dispatched via the background executor from `SettingsWindow::update_matches` (`c |
-| JOB151 | Build Task Contexts Off Thread | BL194 | queue-worker | Dispatched via the background executor from `task_contexts` (`crates/tasks_ui/sr |
-| JOB152 | Search Terminal Scrollback | BL195 | queue-worker | Dispatched via the background executor from `Terminal::find_matches` (`crates/te |
-| JOB153 | Serialize Terminal Panel Layout | BL196 | queue-worker | Dispatched via a background task from `TerminalPanel::serialize` (`crates/termin |
-| JOB154 | Save Terminal Working Directory And Title | BL197 | queue-worker | Dispatched via the background executor from `TerminalView::serialize` (`crates/t |
-| JOB155 | Pipe Vim Filter Command Stdin | BL198 | queue-worker | Dispatched via `cx.background_spawn` inside the `:!` filter-command handler (`cr |
-| JOB156 | Delete Vim Mark From Db | BL199 | queue-worker | Dispatched via a detached background DB delete from `VimGlobals::delete_mark` (` |
-| JOB157 | Clone Item On Split Off Thread | BL200 | queue-worker | Dispatched via a background-spawned wrapper around the `ItemHandle::clone_on_spl |
-| JOB158 | Bind Session To Window On Flush | BL201 | queue-worker | Dispatched as queued background tasks from `MultiWorkspace::flush_all_serializat |
-| JOB159 | Await Spawned Task Process Output | BL202 | queue-worker | Dispatched via the background executor from `Workspace::schedule_resolved_task`  |
-| JOB160 | Update Workspace Activation Timestamp | BL203 | queue-worker | Dispatched via a detached background DB write from `Workspace::on_window_activat |
-| JOB161 | Save Workspace Welcome Page State | BL204 | queue-worker | Dispatched via the background executor from `WelcomePage::serialize` (`crates/wo |
-| JOB162 | Create Worktree Entry On Disk | BL205 | queue-worker | Dispatched via the background executor from `Worktree::create_entry` (`crates/wo |
-| JOB163 | Watch Theme File Changes | BL206 | queue-worker | Dispatched and detached as a background loop from `watch_themes` (`crates/zed/sr |
-| JOB164 | Run Keymap Or Settings Migration | BL207 | queue-worker | Dispatched via `cx.background_spawn(write_keymap_migration(...))` / `write_setti |
+| Code   | Name                                        | BL Ref                               | Type           | Schedule/Trigger                                                                 |
+| ------ | ------------------------------------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------- |
+| JOB001 | ActivityIndicatorStatusActions              | BL001                                | custom-command | User-invoked via keybinding (keymap.json) or command palette, dispatched from th |
+| JOB002 | CsvPreviewOpenActions                       | BL002                                | custom-command | User-invoked via command palette or editor tab context menu on `.csv` files; gat |
+| JOB003 | InitializeDevContainerAction                | BL003                                | custom-command | User-invoked via command palette; no automatic schedule.                         |
+| JOB004 | OpenDebugAdapterLogsAction                  | BL004                                | custom-command | User-invoked via command palette (dev tools); no automatic schedule.             |
+| JOB005 | DebuggerSessionControlActions               | BL005                                | custom-command | User-invoked via keybinding (keymap.json), command palette, or debugger toolbar  |
+| JOB006 | NewProcessModalTabActions                   | BL006                                | custom-command | User-invoked via keybinding (keymap.json) while the New Process modal is open; n |
+| JOB007 | BreakpointListNavigationActions             | BL007                                | custom-command | User-invoked via keybinding while the breakpoint list panel is focused; no autom |
+| JOB008 | ConsoleWatchExpressionAction                | BL008                                | custom-command | User-invoked via keybinding or context menu while the debugger console is focuse |
+| JOB009 | MemoryViewGoToAddressAction                 | BL009                                | custom-command | User-invoked via keybinding or query-bar submit inside the memory view; no autom |
+| JOB010 | VariableListActions                         | BL010                                | custom-command | User-invoked via keybinding or context menu while the variable list is focused;  |
+| JOB011 | DeployCurrentFileDiagnosticsAction          | BL011                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB012 | ProjectDiagnosticsActions                   | BL012                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB013 | EditorCoreActions                           | BL013                                | custom-command | User-invoked via keybinding (keymap.json), the editor's primary command surface; |
+| JOB014 | ToggleSplitDiffAction                       | BL014                                | custom-command | User-invoked via keybinding or toolbar toggle in a split editor; no automatic sc |
+| JOB015 | EncodingSelectorToggleAction                | BL015                                | custom-command | User-invoked via command palette or a click on the status-bar encoding indicator |
+| JOB016 | EtwTracingActions                           | BL016                                | custom-command | User-invoked via command palette (Windows-only diagnostic tooling); no automatic |
+| JOB017 | ReloadExtensionsAction                      | BL017                                | custom-command | User-invoked via command palette; no automatic schedule.                         |
+| JOB018 | InstallDevExtensionAction                   | BL018                                | custom-command | User-invoked via command palette or the "Install Dev Extension" button on the Ex |
+| JOB019 | FeedbackActions                             | BL019                                | custom-command | User-invoked via command palette or the Help menu; no automatic schedule.        |
+| JOB020 | FileFinderActions                           | BL020                                | custom-command | User-invoked via keybinding while the file finder modal is open; no automatic sc |
+| JOB021 | GitHunkStagingActions                       | BL021                                | custom-command | User-invoked via keybinding or the git panel context menu on a hunk or status en |
+| JOB022 | GitGraphActions                             | BL022                                | custom-command | User-invoked via keybinding or command palette from the Git Graph tab; no automa |
+| JOB023 | BranchPickerActions                         | BL023                                | custom-command | User-invoked via keybinding while the branch picker is open; no automatic schedu |
+| JOB024 | CommitViewStashActions                      | BL024                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB025 | GitPanelActions                             | BL025                                | custom-command | User-invoked via keybinding, or the git panel toolbar and context menu; no autom |
+| JOB026 | GitPickerTabActions                         | BL026                                | custom-command | User-invoked via keybinding while the combined git picker is open; no automatic  |
+| JOB027 | ProjectDiffActions                          | BL027                                | custom-command | User-invoked via keybinding or command palette; no automatic schedule.           |
+| JOB028 | StashPickerActions                          | BL028                                | custom-command | User-invoked via keybinding while the stash picker is open; no automatic schedul |
+| JOB029 | DeleteWorktreeAction                        | BL029                                | custom-command | User-invoked via keybinding while the worktree picker is open; no automatic sche |
+| JOB030 | ActionsMacroDefinition                      | BL030                                | custom-command | N/A — compile-time declarative macro, not an invokable command; no runtime trigg |
+| JOB031 | ImageViewerZoomActions                      | BL031                                | custom-command | User-invoked via keybinding or toolbar buttons while viewing an image; no automa |
+| JOB032 | DumpInputLatencyHistogramAction             | BL032                                | custom-command | User-invoked via command palette (dev tools); no automatic schedule.             |
+| JOB033 | InstallCliBinaryAction                      | BL033                                | custom-command | User-invoked via command palette; no automatic schedule.                         |
+| JOB034 | RegisterZedSchemeAction                     | BL034_RegisterZedSchemeAction        | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB035 | NewJournalEntryAction                       | BL035_NewJournalEntryAction          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB036 | KeymapEditorActions                         | BL036_KeymapEditorActions            | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB037 | KeystrokeRecordingActions                   | BL037_KeystrokeRecordingActions      | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB038 | LanguageSelectorToggleAction                | BL038_LanguageSelectorToggleAction   | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB039 | HighlightsTreeViewActions                   | BL039_HighlightsTreeViewActions      | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB040 | OpenKeyContextViewAction                    | BL040_OpenKeyContextViewAction       | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB041 | LspToolMenuToggleAction                     | BL041_LspToolMenuToggleAction        | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB042 | OpenLanguageServerLogsAction                | BL042_OpenLanguageServerLogsAction   | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB043 | SyntaxTreeViewActions                       | BL043_SyntaxTreeViewActions          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB044 | LineEndingSelectorToggleAction              | BL044_LineEndingSelectorToggleAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB045 | MarkdownCopyActions                         | BL045_MarkdownCopyActions            | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB046 | MarkdownPreviewScrollActions                | BL046_MarkdownPreviewScrollActions   | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB047 | MenuNavigationActions                       | BL047_MenuNavigationActions          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB048 | ToggleBaseKeymapSelectorAction              | BL048_ToggleBaseKeymapSelectorAction | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB049 | OnboardingFlowActions                       | BL049_OnboardingFlowActions          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB050 | OutlinePanelActions                         | BL050_OutlinePanelActions            | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB051 | PanelTabNavigationActions                   | BL051_PanelTabNavigationActions      | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB052 | PickerConfirmActions                        | BL052_PickerConfirmActions           | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB053 | WindowTabManagementActions                  | BL053_WindowTabManagementActions     | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB054 | ContextServerRestartAction                  | BL054_ContextServerRestartAction     | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB055 | ProjectPanelActions                         | BL055_ProjectPanelActions            | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB056 | RecentProjectsMenuActions                   | BL056_RecentProjectsMenuActions      | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB057 | OpenWslPathAction                           | BL057_OpenWslPathAction              | custom-command | User-invoked via command palette or keybinding; no automatic schedule. (In this  |
+| JOB058 | ReplSessionActions                          | BL058_ReplSessionActions             | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB059 | ProjectSearchActions                        | BL059_ProjectSearchActions           | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB060 | BufferSearchActions                         | BL060_BufferSearchActions            | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB061 | SettingsEditorActions                       | BL061_SettingsEditorActions          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB062 | FocusSidebarFilterAction                    | BL062_FocusSidebarFilterAction       | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB063 | SnippetsConfigActions                       | BL063_SnippetsConfigActions          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB064 | SvgOpenFollowingPreviewAction               | BL064_SvgOpenFollowingPreviewAction  | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB065 | CopySystemSpecsAction                       | BL065_CopySystemSpecsAction          | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB066 | TabSwitcherActions                          | BL066_TabSwitcherActions             | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB067 | TerminalCoreActions                         | BL067                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB068 | TerminalPanelToggleActions                  | BL068                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB069 | TerminalViewTextActions                     | BL069                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB070 | ThemeSelectorReloadAction                   | BL070                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB071 | ApplicationMenuActivationActions            | BL071                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB072 | TitleBarProjectMenuActions                  | BL072                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB073 | ToolchainSelectorActions                    | BL073                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB074 | VimChangeListNavigationActions              | BL074                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB075 | VimExCommandActions                         | BL075                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB076 | VimDigraphLiteralAction                     | BL076                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB077 | VimHelixModeActions                         | BL077                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB078 | VimHelixPasteAction                         | BL078                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB079 | VimIndentActions                            | BL079                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB080 | VimInsertModeActions                        | BL080                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB081 | VimMotionActions                            | BL081                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB082 | VimNormalModeInsertActions                  | BL082                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB083 | VimIncrementDecrementActions                | BL083                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB084 | VimPasteAction                              | BL084                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB085 | VimRepeatMacroActions                       | BL085                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB086 | VimScrollActions                            | BL086                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB087 | VimSearchActions                            | BL087                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB088 | VimSubstituteActions                        | BL088                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB089 | VimTextObjectActions                        | BL089                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB090 | VimReplaceModeActions                       | BL090                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB091 | VimRewrapAction                             | BL091                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB092 | VimOperatorPendingPushActions               | BL092                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB093 | VimVisualModeActions                        | BL093                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB094 | MultiWorkspaceSidebarActions                | BL094                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB095 | PaneItemManagementActions                   | BL095                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB096 | OpenThemePreviewAction                      | BL096                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB097 | WelcomeScreenActions                        | BL097                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB098 | WorkspacePaneNavigationActions              | BL098                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB099 | ZedApplicationWindowActions                 | BL099                                | custom-command | User-invoked via command palette, keybinding, or native application menu; no aut |
+| JOB100 | ZedActionsSharedRegistry                    | BL100                                | custom-command | User-invoked via command palette or keybinding; no automatic schedule.           |
+| JOB101 | Debounced Delay Timer                       | BL144                                | scheduled-job  | Re-armed on every `fire_new` call with a caller-supplied `Duration`; previous pe |
+| JOB102 | Git Diff Debounced Recalculation            | BL145                                | scheduled-job  | Debounced via the `git_diff_debouncer` (`DebouncedDelay<Project>`, JOB101) using |
+| JOB103 | Log Command Invocation                      | BL146                                | queue-worker   | Dispatched via a detached background task from `CommandPalette::confirm` immedia |
+| JOB104 | Save Component Preview Active Page          | BL147                                | queue-worker   | Dispatched via `cx.background_spawn` when the workspace's item-serialization pas |
+| JOB105 | Mcp Serve Connection                        | BL148                                | queue-worker   | Dispatched and detached for the duration of the connection each time an MCP clie |
+| JOB106 | Db Write And Log                            | BL149                                | queue-worker   | Dispatched via `cx.background_spawn` whenever a call site invokes `db::write_and |
+| JOB107 | Fetch Remote Process List For Attach        | BL150                                | queue-worker   | Dispatched as a background task when the user opens the Attach-to-Process modal  |
+| JOB108 | Forward Spawned Terminal Pid                | BL151                                | queue-worker   | Dispatched as a background task when a debug session spawns an integrated termin |
+| JOB109 | Persist Stack Frame Filter Preference       | BL152                                | queue-worker   | Dispatched as a detached background task each time the user toggles the stack-fr |
+| JOB110 | Compute Completion Menu Filter Matches      | BL153                                | queue-worker   | Dispatched via `cx.background_spawn` each time the editor's completion menu need |
+| JOB111 | Serialize Editor Selections                 | BL154                                | queue-worker   | Debounced via a background timer, re-armed on each selection change for editors  |
+| JOB112 | Serialize Editor Folds                      | BL155                                | queue-worker   | Dispatched as a background task from an async closure when a workspace item requ |
+| JOB113 | Compute Runnable Ranges                     | BL156                                | queue-worker   | Dispatched via `cx.spawn_in` from `refresh_runnables` whenever the visible multi |
+| JOB114 | Compile Dev Extension                       | BL157                                | queue-worker   | Dispatched when the user triggers a rebuild of a locally-installed dev extension |
+| JOB115 | Dismiss Language Extension Suggestion       | BL158                                | queue-worker   | Dispatched as a detached background task from the banner's `secondary_on_click`  |
+| JOB116 | Check Recent History Path Exists            | BL159                                | queue-worker   | Dispatched per untracked recent-history entry as a background filesystem check ( |
+| JOB117 | Read Global Git Committer Identity          | BL160                                | queue-worker   | Dispatched on the background executor whenever a call site needs the committer i |
+| JOB118 | Save Git Graph Serialization                | BL161                                | queue-worker   | Dispatched in the background when the workspace's item-serialization pass reache |
+| JOB119 | Create Git Remote                           | BL162                                | queue-worker   | Dispatched and detached when the user confirms adding a new remote in the branch |
+| JOB120 | Commit Staged Changes                       | BL163                                | queue-worker   | Dispatched as a background-spawned task when the user triggers commit in the git |
+| JOB121 | Save Project Diff Base                      | BL164                                | queue-worker   | Dispatched in the background when the workspace's item-serialization pass reache |
+| JOB122 | Detach And Log Err Task                     | BL165                                | queue-worker   | Dispatched on the foreground executor whenever a call site holding a `Task<Resul |
+| JOB123 | Save Image Viewer Path                      | BL166                                | queue-worker   | Dispatched in the background when the workspace's item-serialization pass reache |
+| JOB124 | Prompt Cli Install On Linux                 | BL167                                | queue-worker   | Dispatched and detached when the user runs "Install CLI" on a platform requiring |
+| JOB125 | Create Journal Entry File                   | BL168                                | queue-worker   | Dispatched as a background task when the user invokes "New Journal Entry".       |
+| JOB126 | Debounce Keymap Action Search               | BL169                                | queue-worker   | Dispatched as a background task on each query change in the keymap editor's sear |
+| JOB127 | Send Lsp Initialize Request                 | BL170                                | queue-worker   | Dispatched on the background executor immediately after a language server proces |
+| JOB128 | Parse Markdown Source                       | BL171                                | queue-worker   | Dispatched via `start_background_parse` whenever the markdown source content cha |
+| JOB129 | Search Markdown Preview Source              | BL172                                | queue-worker   | Dispatched on the background executor each time the user runs an in-buffer searc |
+| JOB130 | Export Miniprofiler Report                  | BL173                                | queue-worker   | Dispatched as a detached background task after the user picks a save path in the |
+| JOB131 | Save Onboarding Active Page                 | BL174                                | queue-worker   | Dispatched in the background when the workspace's item-serialization pass reache |
+| JOB132 | Serialize Outline Panel State               | BL175                                | queue-worker   | Dispatched as a background task whenever the outline panel's active/visible stat |
+| JOB133 | Load Buffer Contents Off Thread             | BL176                                | queue-worker   | Dispatched via `cx.background_spawn` whenever a buffer is requested (`BufferStor |
+| JOB134 | Forward Breakpoint Toggle To Remote         | BL177                                | queue-worker   | Dispatched from `BreakpointStore::toggle_breakpoint` (`crates/project/src/debugg |
+| JOB135 | Prune Stale Js Debug Companion Versions     | BL178                                | queue-worker   | Dispatched via `cx.background_spawn` inside `DapStore::new` (`crates/project/src |
+| JOB136 | Install Latest Js Debug Companion           | BL179                                | queue-worker   | Dispatched via `cx.background_spawn(install_latest_version(...))` (`crates/proje |
+| JOB137 | Restore Git Checkpoints                     | BL180                                | queue-worker   | Dispatched via the background executor from `GitStore::restore_checkpoint` (`cra |
+| JOB138 | Wait For Image Load                         | BL181                                | queue-worker   | Dispatched via `cx.background_spawn` from `ImageStore::open_image` (`crates/proj |
+| JOB139 | Restart Language Servers For Buffers        | BL182                                | queue-worker   | Dispatched from `LspStore::restart_language_servers_for_buffers` (`crates/projec |
+| JOB140 | Forward Vue Ts Request To Typescript Server | BL183                                | queue-worker   | Dispatched via `cx.background_spawn` inside `register_requests` (`crates/project |
+| JOB141 | Clear Prettier Caches On Settings Change    | BL184                                | queue-worker   | Dispatched via the background executor from `PrettierStore::update_prettier_sett |
+| JOB142 | Forward Buffer Update To Remote Server      | BL185                                | queue-worker   | Dispatched via a detached background request from `Project::handle_update_buffer |
+| JOB143 | Copy Worktree Entry Off Thread              | BL186                                | queue-worker   | Dispatched via the background executor from `WorktreeStore::copy_entry` (`crates |
+| JOB144 | Dismiss Dev Container Suggestion            | BL187                                | queue-worker   | Dispatched via `cx.background_spawn` inside `suggest_on_worktree_updated` (`crat |
+| JOB145 | Forward Buffer Update On Headless Project   | BL188                                | queue-worker   | Dispatched via a detached background request from `HeadlessProject::on_buffer_ev |
+| JOB146 | Read Remote Server Stdin Loop               | BL189                                | queue-worker   | Dispatched via `cx.background_spawn` inside `start_server` (`crates/remote_serve |
+| JOB147 | Route Jupyter Messages To Channels          | BL190                                | queue-worker   | Dispatched via the background executor from `start_kernel_tasks` (`crates/repl/s |
+| JOB148 | Refresh Python Kernelspecs                  | BL191                                | queue-worker   | Dispatched via `NotebookEditor::refresh_kernelspecs` (`crates/repl/src/notebook/ |
+| JOB149 | Install Ipykernel Package                   | BL192                                | queue-worker   | Dispatched via the background executor from `install_ipykernel_and_assign` (`cra |
+| JOB150 | Compute Settings Exact Search Matches       | BL193                                | queue-worker   | Dispatched via the background executor from `SettingsWindow::update_matches` (`c |
+| JOB151 | Build Task Contexts Off Thread              | BL194                                | queue-worker   | Dispatched via the background executor from `task_contexts` (`crates/tasks_ui/sr |
+| JOB152 | Search Terminal Scrollback                  | BL195                                | queue-worker   | Dispatched via the background executor from `Terminal::find_matches` (`crates/te |
+| JOB153 | Serialize Terminal Panel Layout             | BL196                                | queue-worker   | Dispatched via a background task from `TerminalPanel::serialize` (`crates/termin |
+| JOB154 | Save Terminal Working Directory And Title   | BL197                                | queue-worker   | Dispatched via the background executor from `TerminalView::serialize` (`crates/t |
+| JOB155 | Pipe Vim Filter Command Stdin               | BL198                                | queue-worker   | Dispatched via `cx.background_spawn` inside the `:!` filter-command handler (`cr |
+| JOB156 | Delete Vim Mark From Db                     | BL199                                | queue-worker   | Dispatched via a detached background DB delete from `VimGlobals::delete_mark` (` |
+| JOB157 | Clone Item On Split Off Thread              | BL200                                | queue-worker   | Dispatched via a background-spawned wrapper around the `ItemHandle::clone_on_spl |
+| JOB158 | Bind Session To Window On Flush             | BL201                                | queue-worker   | Dispatched as queued background tasks from `MultiWorkspace::flush_all_serializat |
+| JOB159 | Await Spawned Task Process Output           | BL202                                | queue-worker   | Dispatched via the background executor from `Workspace::schedule_resolved_task`  |
+| JOB160 | Update Workspace Activation Timestamp       | BL203                                | queue-worker   | Dispatched via a detached background DB write from `Workspace::on_window_activat |
+| JOB161 | Save Workspace Welcome Page State           | BL204                                | queue-worker   | Dispatched via the background executor from `WelcomePage::serialize` (`crates/wo |
+| JOB162 | Create Worktree Entry On Disk               | BL205                                | queue-worker   | Dispatched via the background executor from `Worktree::create_entry` (`crates/wo |
+| JOB163 | Watch Theme File Changes                    | BL206                                | queue-worker   | Dispatched and detached as a background loop from `watch_themes` (`crates/zed/sr |
+| JOB164 | Run Keymap Or Settings Migration            | BL207                                | queue-worker   | Dispatched via `cx.background_spawn(write_keymap_migration(...))` / `write_setti |
 
 ---
 
@@ -4120,7 +4121,6 @@ N/A — no persisted data touched (via app database); reads/writes the user's on
 ### Failure / Retry Behavior
 
 N/A — no retry policy found in source; the migration result (success/failure) is surfaced to the workspace once, not retried automatically.
-
 
 ---
 

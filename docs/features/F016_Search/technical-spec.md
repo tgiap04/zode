@@ -1,4 +1,5 @@
 # F016_Search: Technical Spec
+
 **Priority**: P0
 **Type**: ui
 **Generated**: 2026-08-07
@@ -34,12 +35,12 @@ entities only).
 
 ### Requirements
 
-| Code | Description | Endpoint/Handler | Verifiable |
-|------|-------------|-------------------|------------|
-| FR-001 | Fuzzy-match the typed query against all files in visible worktrees, ranked, capped at 100 results | `FileFinderDelegate::spawn_search` | yes |
-| FR-002 | Fall back to regex search automatically when a case-insensitive text query contains non-ASCII characters | `SearchQuery::text` | yes |
-| FR-003 | Cap whole-project search at 5,000 matched files / 10,000 total ranges and flag when the cap is hit | `project::project_search::Search` | yes |
-| FR-004 | Log every confirmed command-palette invocation (command name + query text) to a capped SQLite table | `CommandPalette::confirm`, `CommandPaletteDB::write_command_invocation_internal` | yes |
+| Code   | Description                                                                                              | Endpoint/Handler                                                                 | Verifiable |
+| ------ | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ---------- |
+| FR-001 | Fuzzy-match the typed query against all files in visible worktrees, ranked, capped at 100 results        | `FileFinderDelegate::spawn_search`                                               | yes        |
+| FR-002 | Fall back to regex search automatically when a case-insensitive text query contains non-ASCII characters | `SearchQuery::text`                                                              | yes        |
+| FR-003 | Cap whole-project search at 5,000 matched files / 10,000 total ranges and flag when the cap is hit       | `project::project_search::Search`                                                | yes        |
+| FR-004 | Log every confirmed command-palette invocation (command name + query text) to a capped SQLite table      | `CommandPalette::confirm`, `CommandPaletteDB::write_command_invocation_internal` | yes        |
 
 **Source:** `crates/file_finder/src/file_finder.rs:865-921`, `crates/project/src/search.rs:93-119`, `crates/project/src/project_search.rs:154-155,566-572`, `crates/command_palette/src/persistence.rs:74-123`
 
@@ -48,12 +49,14 @@ entities only).
 _(See itemized entries below.)_
 
 ### BR-001_FileFinderResultCap
+
 **Linked FR:** FR-001
 **Source:** `crates/file_finder/src/file_finder.rs:900-910`
 **Applies to:** `FileFinderDelegate::spawn_search`
 **Rule:** `fuzzy_nucleo::match_path_sets` is invoked with a hard-coded limit of 100 results per search; results beyond that rank are never computed/returned, so the picker list never exceeds 100 fuzzy matches regardless of project size.
 
 **Pseudocode:**
+
 ```text
 spawn_search(query):
   candidate_sets = one PathMatchCandidateSet per visible worktree
@@ -64,12 +67,14 @@ spawn_search(query):
 ---
 
 ### BR-002_NonAsciiCaseInsensitiveFallbackToRegex
+
 **Linked FR:** FR-002
 **Source:** `crates/project/src/search.rs:93-119`
 **Applies to:** `SearchQuery::text`
 **Rule:** `AhoCorasickBuilder::ascii_case_insensitive` cannot do case-insensitive matching on non-ASCII text, so `SearchQuery::text` detects `!case_sensitive && !query.is_ascii()` and transparently re-dispatches to `SearchQuery::regex` with the literal query escaped (`regex::escape`), preserving the other flags (whole_word, include_ignored) but forcing `multiline=false`.
 
 **Pseudocode:**
+
 ```text
 text(query, case_sensitive, ...):
   if not case_sensitive and query has non-ascii chars:
@@ -82,12 +87,14 @@ text(query, case_sensitive, ...):
 ---
 
 ### BR-003_ProjectSearchResultCapWithFlag
+
 **Linked FR:** FR-003
 **Source:** `crates/project/src/project_search.rs:154-155,566-572`, `crates/search/src/project_search.rs:428-486`
 **Applies to:** `project::project_search::Search::search`, `ProjectSearchView`
 **Rule:** A project-wide search stops accumulating once it has matched more than 5,000 files (`MAX_SEARCH_RESULT_FILES`) or 10,000 total ranges (`MAX_SEARCH_RESULT_RANGES`), sending a `SearchResult::LimitReached` marker instead of further buffer results. The view sets `limit_reached = true` and renders the match counter as `"{index}/{count}+"` (trailing `+`) instead of the exact count.
 
 **Pseudocode:**
+
 ```text
 on each search result batch:
   if matched_buffers > 5000 or matches > 10000:
@@ -100,12 +107,14 @@ on view update:
 ---
 
 ### BR-004_BufferSearchInvalidRegexBlocksUpdate
+
 **Linked FR:** —
 **Source:** `crates/search/src/buffer_search.rs:1584-1631`
 **Applies to:** `BufferSearchBar::update_matches`
 **Rule:** When the regex-mode query fails to compile (`SearchQuery::regex` returns `Err`), the bar records the error string in `self.query_error`, clears any existing highlighted matches on the active searchable item, and returns without running a search — it never falls back to a text search or crashes. The same fallback happens for a malformed text-mode query (also fallible, since it can internally re-dispatch to regex per BR-002).
 
 **Pseudocode:**
+
 ```text
 update_matches():
   if query is empty: clear matches; return
@@ -118,12 +127,14 @@ update_matches():
 ---
 
 ### BR-005_CommandInvocationLogCappedAt1000
+
 **Linked FR:** FR-004
 **Source:** `crates/command_palette/src/persistence.rs:118-123`
 **Applies to:** `CommandPaletteDB::write_command_invocation_internal`
 **Rule:** Every confirmed command palette selection inserts one row into `command_invocations` (command_name, user_query, default `last_invoked = unixepoch()`), then immediately deletes the oldest row(s) whenever more than 1,000 rows exist in total, keeping the table capped near 1,000 entries. Both statements run in the same query, and errors from either are logged rather than surfaced (`crates/command_palette/src/command_palette.rs` calls this from a detached background task per BL146).
 
 **Pseudocode:**
+
 ```text
 write_command_invocation(command_name, user_query):
   INSERT INTO command_invocations (command_name, user_query) VALUES (?, ?)
@@ -138,8 +149,8 @@ N/A — no user-facing decision logic beyond DISC-### Polymorphic Behavior. The 
 `SearchQuery::Text`/`Regex` dispatch — are each single-field/type-driven branches with no
 multi-predicate render, no interaction-driven reveal, and no in-feature flow/step routing; they
 are documented instead as BR-002/FR-002 (query-type dispatch) and edge-case rows (finder-match
-kind) since they change *what data feeds the result*, not *where the user navigates or what panel
-they see*.
+kind) since they change _what data feeds the result_, not _where the user navigates or what panel
+they see_.
 
 ### State Machines
 
@@ -154,6 +165,7 @@ rules above rather than becoming SM-### blocks.
 _(See itemized entries below.)_
 
 ### ALG-001_BufferTextSearchStream
+
 **Linked FR:** FR-002
 **Source:** `crates/project/src/search.rs:427-479`
 **Input:** `SearchQuery` (Text or Regex variant) + a `BufferSnapshot` + optional byte-range subrange
@@ -163,6 +175,7 @@ _(See itemized entries below.)_
 **Description:** Runs an `AhoCorasick` (Text variant) or compiled `Regex` (Regex variant) scan over the buffer's rope, optionally restricted to a subrange (used for search-within-selection). For whole-word mode, each candidate match is boundary-checked against the buffer's `CharKind` classifier (word/non-word) on both edges before being accepted.
 
 **Pseudocode:**
+
 ```text
 search(query, buffer, subrange):
   if query text is empty: return []
@@ -208,6 +221,7 @@ Impact per Event`, not an external service integration.
 2. **Given** the highlighted result is `src/main.rs`, **When** the developer confirms, **Then** the file opens in the active pane (or split, if confirmed with the secondary modifier).
 
 **Requirements fulfilled:**
+
 - **FR-001** Fuzzy-match the typed query against all files in visible worktrees, ranked, capped at 100 results — `FileFinderDelegate::spawn_search`
   **Source:** `crates/file_finder/src/file_finder.rs:865-921`
 
@@ -216,6 +230,7 @@ Impact per Event`, not an external service integration.
 **State transitions:** N/A — see Cross-Cutting Logic § State Machines.
 
 **Verification:**
+
 - **SC-001** (see Cross-Cutting Logic, Verification)
 - **SC-005** — Typing a query with no existing-file match surfaces a `Match::CreateNew` candidate at the bottom of the list, and confirming it creates/opens that path (covers BL159, `crates/file_finder/src/file_finder.rs:991-1002`).
 
@@ -234,6 +249,7 @@ Impact per Event`, not an external service integration.
 3. **Given** the query text fails to compile as a regex (regex mode on), **When** the developer submits it, **Then** the Query panel is marked with an inline error and no search runs.
 
 **Requirements fulfilled:**
+
 - **FR-002** Fall back to regex search automatically when a case-insensitive text query contains non-ASCII characters — `SearchQuery::text`
   **Source:** `crates/project/src/search.rs:93-119`
 - **FR-003** Cap whole-project search at 5,000 matched files / 10,000 total ranges and flag when the cap is hit — `project::project_search::Search`
@@ -244,6 +260,7 @@ Impact per Event`, not an external service integration.
 **State transitions:** N/A — see Cross-Cutting Logic § State Machines.
 
 **Verification:**
+
 - **SC-002** (see Cross-Cutting Logic, Verification)
 - **SC-003** (see Cross-Cutting Logic, Verification)
 - **SC-006** — Submitting an invalid regex in the project search Query field marks that field with `panels_with_errors[Query]` and does not dispatch a search (covers `crates/search/src/project_search.rs:1414-1445`).
@@ -263,6 +280,7 @@ Impact per Event`, not an external service integration.
 3. **Given** the developer types an unbalanced/invalid regex with `ToggleRegex` on, **When** the query updates, **Then** the search bar shows an inline error and clears any stale highlights rather than crashing.
 
 **Requirements fulfilled:**
+
 - **FR-002** (see Cross-Cutting Logic) — regex/text dispatch applies identically to buffer search via `BufferSearchBar::update_matches`
   **Source:** `crates/search/src/buffer_search.rs:1584-1631`
 
@@ -271,6 +289,7 @@ Impact per Event`, not an external service integration.
 **State transitions:** N/A — see Cross-Cutting Logic § State Machines.
 
 **Verification:**
+
 - **SC-007** — An invalid regex query in the buffer search bar sets `query_error` and clears active matches without a panic (covers BR-004).
 
 ---
@@ -282,32 +301,34 @@ Impact per Event`, not an external service integration.
 **Independent Test:** Confirm a command in the palette, then query `command_invocations` (or re-open the palette and observe ranking) to confirm the row was written and old rows are pruned once >1,000 accumulate.
 
 **Requirements fulfilled:**
+
 - **FR-004** (see Cross-Cutting Logic) — `CommandPalette::confirm`, `CommandPaletteDB::write_command_invocation_internal`
   **Source:** `crates/command_palette/src/command_palette.rs` (confirm handler spawns the write), `crates/command_palette/src/persistence.rs:74-123`
 
 **Rules enforced:** BR-005 (see Cross-Cutting Logic)
 
 **Verification:**
+
 - **SC-004** (see Cross-Cutting Logic, Verification)
 
 ### Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Fuzzy file-finder query matches no existing file and doesn't end in a path separator | A `Match::CreateNew` candidate is appended for that path, always sorted last (BR-001, `crates/file_finder/src/file_finder.rs:627-630,991-1002`) |
-| Project search query fails to compile as a valid regex | The Query input panel is flagged in `panels_with_errors`, no search dispatches, and the error clears once the query becomes valid (`crates/search/src/project_search.rs:1414-1445`) |
-| Project search matches more than 5,000 files or 10,000 ranges | Search stops accumulating further results and the UI shows a `+`-suffixed, possibly-undercount match total (BR-003) |
-| Buffer search query is empty | All existing highlighted matches are cleared and no search runs (`crates/search/src/buffer_search.rs:1580-1583`) |
-| A recent-history candidate's on-disk path no longer exists | `FileFinderDelegate::new`'s background `fs.is_file` check (BL159) drops the stale entry before it's offered as a match candidate |
-| Command palette invocation logging write fails (DB error) | The error is logged, not surfaced to the user; the confirmed action itself still executes normally |
+| Scenario                                                                             | Behavior                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fuzzy file-finder query matches no existing file and doesn't end in a path separator | A `Match::CreateNew` candidate is appended for that path, always sorted last (BR-001, `crates/file_finder/src/file_finder.rs:627-630,991-1002`)                                     |
+| Project search query fails to compile as a valid regex                               | The Query input panel is flagged in `panels_with_errors`, no search dispatches, and the error clears once the query becomes valid (`crates/search/src/project_search.rs:1414-1445`) |
+| Project search matches more than 5,000 files or 10,000 ranges                        | Search stops accumulating further results and the UI shows a `+`-suffixed, possibly-undercount match total (BR-003)                                                                 |
+| Buffer search query is empty                                                         | All existing highlighted matches are cleared and no search runs (`crates/search/src/buffer_search.rs:1580-1583`)                                                                    |
+| A recent-history candidate's on-disk path no longer exists                           | `FileFinderDelegate::new`'s background `fs.is_file` check (BL159) drops the stale entry before it's offered as a match candidate                                                    |
+| Command palette invocation logging write fails (DB error)                            | The error is logged, not surfaced to the user; the confirmed action itself still executes normally                                                                                  |
 
 ## Key Entities
 
-| Entity | Table | Key Columns | Purpose |
-|--------|-------|-------------|---------|
-| MultiBuffer (MODEL009) | N/A — in-memory struct, not a DB table | snapshot, buffers, singleton, capability | Backs the rendered project-search results view: one excerpt per matched range, anchored into a single addressable editable buffer |
-| SearchQuery (in-memory) | N/A — in-memory struct, not a DB table | Text{search, whole_word, case_sensitive}, Regex{regex, multiline, ...} | The compiled matcher (AhoCorasick or Regex) driving both buffer-local and project-wide search execution |
-| command_invocations | `command_invocations` | id, command_name, user_query, last_invoked | The one persisted table this feature writes — logs confirmed command-palette selections for future ranking, capped at ~1,000 rows |
+| Entity                  | Table                                  | Key Columns                                                            | Purpose                                                                                                                           |
+| ----------------------- | -------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| MultiBuffer (MODEL009)  | N/A — in-memory struct, not a DB table | snapshot, buffers, singleton, capability                               | Backs the rendered project-search results view: one excerpt per matched range, anchored into a single addressable editable buffer |
+| SearchQuery (in-memory) | N/A — in-memory struct, not a DB table | Text{search, whole_word, case_sensitive}, Regex{regex, multiline, ...} | The compiled matcher (AhoCorasick or Regex) driving both buffer-local and project-wide search execution                           |
+| command_invocations     | `command_invocations`                  | id, command_name, user_query, last_invoked                             | The one persisted table this feature writes — logs confirmed command-palette selections for future ranking, capped at ~1,000 rows |
 
 **Note:** `generic-source` profile (Rust/GPUI desktop app) — `MultiBuffer` and `SearchQuery` are
 runtime structs, not database tables; `command_invocations` is the feature's only actual SQLite
@@ -315,14 +336,14 @@ table. See `## DB Impact per Event` below.
 
 ## Artifact References
 
-| Artifact | File | Codes Used | Reviewed |
-|----------|------|------------|----------|
-| System Overview | [system-overview.md](../../system-overview.md) | — | [x] |
-| Feature List | [feature-list.md](../../feature-list.md) | F016 | [x] |
-| Entities | [entities.md](../../../../../docs/generated/entities.md) | MODEL009 | [x] |
-| User Stories | [user-stories.md](../../user-stories.md) | US063, US064, US065 | [x] |
-| Behavior Logic | [behavior-logic.md](../../behavior-logic.md) | BL020, BL059, BL060, BL146, BL159 | [x] |
-| Business Rules | [business-rules.md](../../../../../docs/system/business-rules.md) | — | [x] |
+| Artifact        | File                                                              | Codes Used                        | Reviewed |
+| --------------- | ----------------------------------------------------------------- | --------------------------------- | -------- |
+| System Overview | [system-overview.md](../../system-overview.md)                    | —                                 | [x]      |
+| Feature List    | [feature-list.md](../../feature-list.md)                          | F016                              | [x]      |
+| Entities        | [entities.md](../../../../../docs/generated/entities.md)          | MODEL009                          | [x]      |
+| User Stories    | [user-stories.md](../../user-stories.md)                          | US063, US064, US065               | [x]      |
+| Behavior Logic  | [behavior-logic.md](../../behavior-logic.md)                      | BL020, BL059, BL060, BL146, BL159 | [x]      |
+| Business Rules  | [business-rules.md](../../../../../docs/system/business-rules.md) | —                                 | [x]      |
 
 **Rule:** Every code listed in Codes Used exists in its source artifact; `generic-source` profile
 has no `route-list.md`/`screen-list.md`, so no `ROUTE###`/`SCR###` rows are included per
@@ -336,19 +357,19 @@ session-context instruction.
 
 ## Source Code References
 
-| Order | Symbol | Path | Purpose |
-|-------|--------|------|---------|
-| 1 | `SearchQuery` | `crates/project/src/search.rs:61-479` | Core matcher construction (Text/Regex) + async per-buffer execution engine (ALG-001) |
-| 2 | `Search` (project-wide) | `crates/project/src/project_search.rs:154-572` | Project-wide search orchestration, result-count caps (BR-003) |
-| 3 | `ProjectSearchView` / `ProjectSearchBar` | `crates/search/src/project_search.rs:230-500,750-2200` | UI: query/include/exclude inputs, results MultiBuffer, replace-all, error panels |
-| 4 | `BufferSearchBar` | `crates/search/src/buffer_search.rs:63-1650` | In-buffer find/replace bar: query handling, option toggles, next/prev match, replace |
-| 5 | `FileFinderDelegate` | `crates/file_finder/src/file_finder.rs:390-1450` | Fuzzy file-finder picker delegate: search dispatch, history matching, confirm/open |
-| 6 | `CommandPalette` / `CommandPaletteDB` | `crates/command_palette/src/command_palette.rs`, `crates/command_palette/src/persistence.rs:58-141` | Command palette confirm handler + capped invocation-log SQLite table |
+| Order | Symbol                                   | Path                                                                                                | Purpose                                                                              |
+| ----- | ---------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 1     | `SearchQuery`                            | `crates/project/src/search.rs:61-479`                                                               | Core matcher construction (Text/Regex) + async per-buffer execution engine (ALG-001) |
+| 2     | `Search` (project-wide)                  | `crates/project/src/project_search.rs:154-572`                                                      | Project-wide search orchestration, result-count caps (BR-003)                        |
+| 3     | `ProjectSearchView` / `ProjectSearchBar` | `crates/search/src/project_search.rs:230-500,750-2200`                                              | UI: query/include/exclude inputs, results MultiBuffer, replace-all, error panels     |
+| 4     | `BufferSearchBar`                        | `crates/search/src/buffer_search.rs:63-1650`                                                        | In-buffer find/replace bar: query handling, option toggles, next/prev match, replace |
+| 5     | `FileFinderDelegate`                     | `crates/file_finder/src/file_finder.rs:390-1450`                                                    | Fuzzy file-finder picker delegate: search dispatch, history matching, confirm/open   |
+| 6     | `CommandPalette` / `CommandPaletteDB`    | `crates/command_palette/src/command_palette.rs`, `crates/command_palette/src/persistence.rs:58-141` | Command palette confirm handler + capped invocation-log SQLite table                 |
 
 ## Unresolved Questions
 
 1. **Fuzzy-finder 100-result cap tunability**: not confirmed whether any settings surface can raise/lower `fuzzy_nucleo::match_path_sets`'s hard-coded `100` limit, or whether it is intentionally fixed.
-2. **Project-search cap user feedback beyond the `+` suffix**: the UI shows `{count}+` when the cap is hit, but this spec did not confirm whether any explicit toast/banner also explains *why* results stopped accumulating.
+2. **Project-search cap user feedback beyond the `+` suffix**: the UI shows `{count}+` when the cap is hit, but this spec did not confirm whether any explicit toast/banner also explains _why_ results stopped accumulating.
 3. **Command-invocation log consumption**: `list_commands_used`/`list_recent_queries` (persistence.rs) clearly feed future command-palette ranking, but the exact ranking-weight formula that combines this history with static fuzzy-match score was not traced in this pass.
 
 ## Source Walkthrough
@@ -375,10 +396,10 @@ FocusSearch/Deploy/SearchInNew action
 
 ## DB Impact per Event
 
-| Event/Endpoint | Table | Columns | Operation | Value Derivation | Source |
-|----------------|-------|---------|-----------|-------------------|--------|
-| Command palette confirm (Enter on a selected command) | `command_invocations` | command_name, user_query | INSERT | `command_name` from the invoked action's display name; `user_query` from the palette's current query editor text; `last_invoked` defaults to `unixepoch()` | `crates/command_palette/src/persistence.rs:118-123` |
-| Command palette confirm (prune step, same transaction) | `command_invocations` | id | DELETE | Deletes the row(s) with the minimum `id` whenever the table's total row count exceeds 1,000 | `crates/command_palette/src/persistence.rs:121` |
+| Event/Endpoint                                         | Table                 | Columns                  | Operation | Value Derivation                                                                                                                                           | Source                                              |
+| ------------------------------------------------------ | --------------------- | ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Command palette confirm (Enter on a selected command)  | `command_invocations` | command_name, user_query | INSERT    | `command_name` from the invoked action's display name; `user_query` from the palette's current query editor text; `last_invoked` defaults to `unixepoch()` | `crates/command_palette/src/persistence.rs:118-123` |
+| Command palette confirm (prune step, same transaction) | `command_invocations` | id                       | DELETE    | Deletes the row(s) with the minimum `id` whenever the table's total row count exceeds 1,000                                                                | `crates/command_palette/src/persistence.rs:121`     |
 
 Project search, buffer search, and the file finder itself perform no database writes — they only
 read worktree snapshots and buffer content in memory (fuzzy-finder recent-history entries are

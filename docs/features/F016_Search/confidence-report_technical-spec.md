@@ -14,19 +14,19 @@ generated_by: derive_confidence_report.py
 
 Legend: `○` = cited (Source file:line present) · `△` = marker-tagged (uncertain, no citation).
 
-| Claim | Section | Evidence (file:line) | Status ○/△ |
-|---|---|---|---|
-| , `crates/project/src/search.rs:93-119`, `crates/project/src/project_search.rs:154-155,566-572`, `c… | Cross-Cutting Logic | crates/file_finder/src/file_finder.rs:865-921 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/file_finder/src/file_finder.rs:900-910 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/project/src/search.rs:93-119 | ○ |
-| ,566-572`, `crates/search/src/project_search.rs:428-486` | Cross-Cutting Logic | crates/project/src/project_search.rs:154-155 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/search/src/buffer_search.rs:1584-1631 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/command_palette/src/persistence.rs:118-123 | ○ |
-| (unlabeled claim) | Cross-Cutting Logic | crates/project/src/search.rs:427-479 | ○ |
-| (unlabeled claim) | User Stories | crates/file_finder/src/file_finder.rs:865-921 | ○ |
-| (unlabeled claim) | User Stories | crates/project/src/search.rs:93-119 | ○ |
-| ,566-572` | User Stories | crates/project/src/project_search.rs:154-155 | ○ |
-| (unlabeled claim) | User Stories | crates/search/src/buffer_search.rs:1584-1631 | ○ |
+| Claim                                                                                                | Section             | Evidence (file:line)                              | Status ○/△ |
+| ---------------------------------------------------------------------------------------------------- | ------------------- | ------------------------------------------------- | ---------- |
+| , `crates/project/src/search.rs:93-119`, `crates/project/src/project_search.rs:154-155,566-572`, `c… | Cross-Cutting Logic | crates/file_finder/src/file_finder.rs:865-921     | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/file_finder/src/file_finder.rs:900-910     | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/project/src/search.rs:93-119               | ○          |
+| ,566-572`, `crates/search/src/project_search.rs:428-486`                                             | Cross-Cutting Logic | crates/project/src/project_search.rs:154-155      | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/search/src/buffer_search.rs:1584-1631      | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/command_palette/src/persistence.rs:118-123 | ○          |
+| (unlabeled claim)                                                                                    | Cross-Cutting Logic | crates/project/src/search.rs:427-479              | ○          |
+| (unlabeled claim)                                                                                    | User Stories        | crates/file_finder/src/file_finder.rs:865-921     | ○          |
+| (unlabeled claim)                                                                                    | User Stories        | crates/project/src/search.rs:93-119               | ○          |
+| ,566-572`                                                                                            | User Stories        | crates/project/src/project_search.rs:154-155      | ○          |
+| (unlabeled claim)                                                                                    | User Stories        | crates/search/src/buffer_search.rs:1584-1631      | ○          |
 
 ## Missing Info
 

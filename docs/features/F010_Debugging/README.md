@@ -15,15 +15,14 @@ Read this feature's files in order, then open any screen's full spec from the ta
 
 ## Screens in this feature
 
-| Screen | SCR | Spec |
-|---|---|---|
-| New Process Modal | N/A (no screen-list artifact in this profile) | [spec.md](../../screens/N/A (no screen-list artifact in this profile)/spec.md) |
-| Debugger Panel — Console | N/A | [spec.md](../../screens/N/A/spec.md) |
-| Debugger Panel — Breakpoint List | N/A | [spec.md](../../screens/N/A/spec.md) |
-| Debugger Panel — Variable List | N/A | [spec.md](../../screens/N/A/spec.md) |
-| Debugger Panel — Memory View | N/A | [spec.md](../../screens/N/A/spec.md) |
-| Attach to Process Modal | N/A | [spec.md](../../screens/N/A/spec.md) |
-| Debug Adapter Log Viewer | N/A | [spec.md](../../screens/N/A/spec.md) |
-
+| Screen                           | SCR                                           | Spec                                                                           |
+| -------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------ |
+| New Process Modal                | N/A (no screen-list artifact in this profile) | [spec.md](../../screens/N/A (no screen-list artifact in this profile)/spec.md) |
+| Debugger Panel — Console         | N/A                                           | [spec.md](../../screens/N/A/spec.md)                                           |
+| Debugger Panel — Breakpoint List | N/A                                           | [spec.md](../../screens/N/A/spec.md)                                           |
+| Debugger Panel — Variable List   | N/A                                           | [spec.md](../../screens/N/A/spec.md)                                           |
+| Debugger Panel — Memory View     | N/A                                           | [spec.md](../../screens/N/A/spec.md)                                           |
+| Attach to Process Modal          | N/A                                           | [spec.md](../../screens/N/A/spec.md)                                           |
+| Debug Adapter Log Viewer         | N/A                                           | [spec.md](../../screens/N/A/spec.md)                                           |
 
 <!-- end-generated -->

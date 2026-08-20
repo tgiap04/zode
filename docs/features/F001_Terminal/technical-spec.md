@@ -1,4 +1,5 @@
 # F001_Terminal: Technical Spec
+
 **Priority**: P0
 **Type**: mixed
 **Generated**: 2026-08-07
@@ -17,10 +18,10 @@ environment resolution, remote-vs-local routing).
 
 ### DISC-012 — Terminal.terminal_type
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
-| `Pty { pty_tx, info }` | Live PTY-backed session; renders streamed output, accepts keyboard input, shows a real child-process PID | `client_side_working_directory()` returns the live process's cwd from `info.current` | `TerminalView::serialize` persists cwd/title to `terminals` table (only when `task().is_none()`, see BR-003) |
-| `DisplayOnly` | Renders fixed content injected via `write_output` (used e.g. for display-only integrations that feed text without a live process); no PTY event loop | `client_side_working_directory()` always returns `None` — no live process to query | Never has a working directory to persist; `custom_title` may still be saved |
+| Value                  | Render                                                                                                                                               | Validation                                                                           | Persistence                                                                                                  |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `Pty { pty_tx, info }` | Live PTY-backed session; renders streamed output, accepts keyboard input, shows a real child-process PID                                             | `client_side_working_directory()` returns the live process's cwd from `info.current` | `TerminalView::serialize` persists cwd/title to `terminals` table (only when `task().is_none()`, see BR-003) |
+| `DisplayOnly`          | Renders fixed content injected via `write_output` (used e.g. for display-only integrations that feed text without a live process); no PTY event loop | `client_side_working_directory()` always returns `None` — no live process to query   | Never has a working directory to persist; `custom_title` may still be saved                                  |
 
 **Source:** `crates/terminal/src/terminal.rs:846-852` (enum definition), `:2178-2187` (`client_side_working_directory` match)
 
@@ -28,11 +29,11 @@ environment resolution, remote-vs-local routing).
 
 ### Requirements
 
-| Code | Description | Endpoint/Handler | Verifiable |
-|------|-------------|------------------|------------|
-| FR-001 | Spawn a shell or task process cross-platform (macOS/Linux/Windows) via a single `Command`/`Child` abstraction | `util::command::new_command`/`new_std_command` | yes |
-| FR-002 | Capture the user's real login-shell environment (PATH, PYENV, NVM, etc.) so GUI-launched terminals match a real shell session | `util::shell_env::capture` | yes |
-| FR-003 | Guarantee cleanup of a spawned process and all its descendants when Zode exits, by running each child in its own process group | `util::process::Child::spawn` | yes |
+| Code   | Description                                                                                                                    | Endpoint/Handler                               | Verifiable |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- | ---------- |
+| FR-001 | Spawn a shell or task process cross-platform (macOS/Linux/Windows) via a single `Command`/`Child` abstraction                  | `util::command::new_command`/`new_std_command` | yes        |
+| FR-002 | Capture the user's real login-shell environment (PATH, PYENV, NVM, etc.) so GUI-launched terminals match a real shell session  | `util::shell_env::capture`                     | yes        |
+| FR-003 | Guarantee cleanup of a spawned process and all its descendants when Zode exits, by running each child in its own process group | `util::process::Child::spawn`                  | yes        |
 
 **Source:** `crates/util/src/command.rs:1-40` (BL118), `crates/util/src/shell_env.rs` (BL122), `crates/util/src/process.rs` (BL120)
 
@@ -41,6 +42,7 @@ environment resolution, remote-vs-local routing).
 _(See itemized entries below.)_
 
 ### BR-001_NoDoubleShrinkOnRepeatHibernate
+
 **Linked FR:** FR-001
 **Source:** `crates/terminal/src/terminal.rs:1328-1335`
 **Applies to:** `Terminal::limit_scroll_history` (fork-specific hibernation path)
@@ -50,6 +52,7 @@ hibernate request from overwriting the real original cap with the already-reduce
 would corrupt what `restore_scroll_history_limit` restores to on wake.
 
 **Pseudocode:**
+
 ```text
 fn limit_scroll_history(lines):
     if pre_hibernate_scroll_history.is_some():
@@ -60,6 +63,7 @@ fn limit_scroll_history(lines):
 ```
 
 ### BR-002_TaskSpawnEnvMergesOverInteractiveShell
+
 **Linked FR:** FR-002
 **Source:** `crates/project/src/terminals.rs:63-160` (`Project::create_terminal_task`), `crates/project/src/terminals.rs:318-457` (`create_terminal_shell_internal`)
 **Applies to:** `Project::create_terminal_task` vs `Project::create_terminal_shell`/`create_local_terminal`
@@ -70,6 +74,7 @@ including Python-toolchain venv activation), but a task spawn additionally merge
 no task `env` to merge and always reveals per its caller.
 
 **Pseudocode:**
+
 ```text
 env = resolve_directory_environment(shell, cwd, remote_client)
 if is_task_spawn:
@@ -78,6 +83,7 @@ spawn(shell_or_task_command, env, cwd)
 ```
 
 ### BR-003_TaskTerminalsAreNotSerialized
+
 **Linked FR:** FR-001
 **Source:** `crates/terminal_view/src/terminal_view.rs:1724-1756` (`TerminalView::serialize`)
 **Applies to:** workspace tab persistence for terminal items
@@ -88,6 +94,7 @@ task terminals are ephemeral by design (rerunning the task, not restoring old ou
 expected recovery path).
 
 **Pseudocode:**
+
 ```text
 fn serialize():
     if terminal.task().is_some():
@@ -108,6 +115,7 @@ not a multi-predicate render/interaction/flow branch authored in this feature's 
 _(See itemized entries below.)_
 
 ### SM-001_TaskExecutionStatus
+
 **kind:** entity
 **Linked FR:** FR-001
 **Source:** `crates/terminal/src/terminal.rs:918-928`
@@ -125,6 +133,7 @@ stateDiagram-v2
 ```
 
 **Transition rules:**
+
 - `Running → Completed{success:true}`: guard = exit code is `0`; side effect = terminal prints "Task `<label>` finished successfully" (`task_summary`, `crates/terminal/src/terminal.rs:2398-2436`)
 - `Running → Completed{success:false}`: guard = non-zero exit code or killed by signal; side effect = terminal prints "finished with exit code: N" or "terminated by signal: N"
 - `Running → Unknown`: guard = terminal event loop torn down before an exit status is observed; no summary line is guaranteed
@@ -138,6 +147,7 @@ None.
 _(See itemized entries below.)_
 
 ### INT-001_CrossPlatformProcessSpawn
+
 **Linked FR:** FR-001
 **Source:** `crates/util/src/command.rs:1-40` (dispatch), `crates/util/src/command/darwin.rs` (macOS `posix_spawnp` path)
 **Type:** api-call (OS process spawn, not a network integration)
@@ -150,6 +160,7 @@ logged via `detach_and_log_err` with no user-facing toast (see Edge Cases), whil
 failures surface a `Toast` ("Task spawn failed: {e}") via `Workspace::schedule_resolved_task`.
 
 **Pseudocode:**
+
 ```text
 result = spawn(shell_or_task_cmd, cwd, env)
 match result:
@@ -186,12 +197,14 @@ match result:
 2. **Given** the project is a remote (SSH) project, **When** the developer requests a "local terminal" break-out, **Then** the shell spawns locally in Zode's own directory rather than on the remote host.
 
 **Requirements fulfilled:**
+
 - **FR-001** Spawn a shell or task process cross-platform via a single `Command`/`Child` abstraction — via `Project::create_terminal_shell_internal`
   **Source:** `crates/project/src/terminals.rs:318-457`
 
 **Rules enforced:** BR-002 (see Cross-Cutting Logic) — interactive shell spawn merges the resolved directory environment but no task `env`.
 
 **Verification:**
+
 - **SC-001** (see Cross-Cutting Logic)
 
 ---
@@ -208,12 +221,14 @@ match result:
 2. **Given** the terminal panel is focused, **When** the developer triggers Toggle again, **Then** the panel closes (`Workspace::close_panel::<TerminalPanel>`).
 
 **Requirements fulfilled:**
+
 - **FR-001** (see US045) — panel show/hide does not spawn or kill terminals, it only changes visibility/focus
   **Source:** `crates/terminal_view/src/terminal_panel.rs:45-72`
 
 **Rules enforced:** None beyond the `is_enabled_in_workspace` gate (panel action is a no-op if the terminal feature is disabled for the workspace).
 
 **Verification:**
+
 - **SC-002** (see Cross-Cutting Logic)
 
 ---
@@ -230,6 +245,7 @@ match result:
 2. **Given** a task fails to spawn (e.g. invalid command), **When** the spawn error occurs, **Then** a toast reading "Task spawn failed: {error}" is shown (unlike an interactive-terminal spawn failure, which is only logged).
 
 **Requirements fulfilled:**
+
 - **FR-001** (see Cross-Cutting Logic) — via `Project::create_terminal_task`
   **Source:** `crates/project/src/terminals.rs:63-160`
 
@@ -238,6 +254,7 @@ match result:
 **State transitions:** SM-001 (see Cross-Cutting Logic) — Running → Completed{success}/Unknown on this task's own process.
 
 **Verification:**
+
 - **SC-003** A resolved task's exit status is surfaced as a terminal summary line and, on spawn failure, as a toast (covers FR-001, SM-001)
 
 ---
@@ -254,45 +271,47 @@ match result:
 2. **Given** the developer wants to replace matched text, **When** they look for a replace option, **Then** none is offered — `supported_options()` reports `replacement: false` (terminal search is find-only).
 
 **Requirements fulfilled:**
+
 - **FR-001** (see Cross-Cutting Logic) — search runs off-thread via `Terminal::find_matches`
   **Source:** `crates/terminal/src/terminal.rs:2148-2159`, `crates/terminal_view/src/terminal_view.rs:1821-1904`
 
 **Rules enforced:** None beyond `supported_options()`'s fixed capability set (regex: true; case/word/replace/select_all/find_in_results: false).
 
 **Verification:**
+
 - **SC-004** A scrollback search highlights all matches and supports next/previous navigation without freezing terminal rendering (covers FR-001)
 
 ---
 
 ### Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Interactive terminal shell fails to spawn | Error is logged via `detach_and_log_err` (`TerminalView::deploy`, `crates/terminal_view/src/terminal_view.rs:205-221`); no toast shown to the user |
-| Configured task fails to spawn | A toast is shown: "Task spawn failed: {e}" (`Workspace::schedule_resolved_task`, `crates/workspace/src/tasks.rs:101-107`) |
-| Task terminal's underlying process exits by signal rather than exit code | Summary line reads "terminated by signal: {signal}" instead of an exit code (`task_summary`, `crates/terminal/src/terminal.rs:2414-2424`) |
-| Project hibernates twice in a row without waking in between | `limit_scroll_history` no-ops on the second call (BR-001) — the original scrollback cap is not corrupted |
-| Terminal is `DisplayOnly` (no live PTY) | `working_directory()`/`client_side_working_directory()` always return `None`; nothing is written to the `terminals` table's `working_directory` column for that item |
-| User searches terminal scrollback expecting find-and-replace | Not supported — `SearchOptions.replacement` is `false` for `TerminalView` (`crates/terminal_view/src/terminal_view.rs:1824-1834`) |
+| Scenario                                                                 | Behavior                                                                                                                                                             |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Interactive terminal shell fails to spawn                                | Error is logged via `detach_and_log_err` (`TerminalView::deploy`, `crates/terminal_view/src/terminal_view.rs:205-221`); no toast shown to the user                   |
+| Configured task fails to spawn                                           | A toast is shown: "Task spawn failed: {e}" (`Workspace::schedule_resolved_task`, `crates/workspace/src/tasks.rs:101-107`)                                            |
+| Task terminal's underlying process exits by signal rather than exit code | Summary line reads "terminated by signal: {signal}" instead of an exit code (`task_summary`, `crates/terminal/src/terminal.rs:2414-2424`)                            |
+| Project hibernates twice in a row without waking in between              | `limit_scroll_history` no-ops on the second call (BR-001) — the original scrollback cap is not corrupted                                                             |
+| Terminal is `DisplayOnly` (no live PTY)                                  | `working_directory()`/`client_side_working_directory()` always return `None`; nothing is written to the `terminals` table's `working_directory` column for that item |
+| User searches terminal scrollback expecting find-and-replace             | Not supported — `SearchOptions.replacement` is `false` for `TerminalView` (`crates/terminal_view/src/terminal_view.rs:1824-1834`)                                    |
 
 ## Key Entities
 
-| Entity | Table | Key Columns | Purpose |
-|--------|-------|-------------|---------|
-| Terminal (MODEL016) | in-memory only — not a DB table | `terminal_type`, `term`, `task`, `pre_hibernate_scroll_history` | Runtime state for one Alacritty-backed terminal instance; owned by `Project::terminals: Terminals` |
-| TerminalDb `terminals` | `terminals` | `workspace_id`, `item_id`, `working_directory`, `working_directory_path`, `custom_title` | Persists cwd + custom title per open interactive-terminal tab so it restores on relaunch (BR-003 excludes task terminals) |
-| KeyValueStore (`TerminalPanel` layout) | `kv_store` (generic KV table, keyed by `TERMINAL_PANEL_KEY`/serialization key) | key, value (JSON blob: `SerializedTerminalPanel { items, active_item_id }`) | Persists the terminal panel's pane-group layout (splits, active pane), debounced 50ms (BL196) |
+| Entity                                 | Table                                                                          | Key Columns                                                                              | Purpose                                                                                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Terminal (MODEL016)                    | in-memory only — not a DB table                                                | `terminal_type`, `term`, `task`, `pre_hibernate_scroll_history`                          | Runtime state for one Alacritty-backed terminal instance; owned by `Project::terminals: Terminals`                        |
+| TerminalDb `terminals`                 | `terminals`                                                                    | `workspace_id`, `item_id`, `working_directory`, `working_directory_path`, `custom_title` | Persists cwd + custom title per open interactive-terminal tab so it restores on relaunch (BR-003 excludes task terminals) |
+| KeyValueStore (`TerminalPanel` layout) | `kv_store` (generic KV table, keyed by `TERMINAL_PANEL_KEY`/serialization key) | key, value (JSON blob: `SerializedTerminalPanel { items, active_item_id }`)              | Persists the terminal panel's pane-group layout (splits, active pane), debounced 50ms (BL196)                             |
 
 ## Artifact References
 
-| Artifact | File | Codes Used | Reviewed |
-|----------|------|------------|----------|
-| System Overview | [system-overview.md](../../system-overview.md) | — | [x] |
-| Feature List | [feature-list.md](../../feature-list.md) | F001 | [x] |
-| Entities | [entities.md](../../../../docs/generated/entities.md) | MODEL016 | [x] |
-| Behavior Logic | [behavior-logic.md](../../../../docs/generated/behavior-logic.md) | BL067, BL068, BL069, BL113, BL114, BL118, BL119, BL120, BL121, BL122, BL151, BL194, BL195, BL196, BL197, BL202 | [x] |
-| Business Rules | [business-rules.md](../../../../docs/system/business-rules.md) | Hibernation Lifecycle | [x] |
-| User Stories | [user-stories.md](../../../../docs/generated/user-stories.md) | US045, US046, US047, US048 | [x] |
+| Artifact        | File                                                              | Codes Used                                                                                                     | Reviewed |
+| --------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------- |
+| System Overview | [system-overview.md](../../system-overview.md)                    | —                                                                                                              | [x]      |
+| Feature List    | [feature-list.md](../../feature-list.md)                          | F001                                                                                                           | [x]      |
+| Entities        | [entities.md](../../../../docs/generated/entities.md)             | MODEL016                                                                                                       | [x]      |
+| Behavior Logic  | [behavior-logic.md](../../../../docs/generated/behavior-logic.md) | BL067, BL068, BL069, BL113, BL114, BL118, BL119, BL120, BL121, BL122, BL151, BL194, BL195, BL196, BL197, BL202 | [x]      |
+| Business Rules  | [business-rules.md](../../../../docs/system/business-rules.md)    | Hibernation Lifecycle                                                                                          | [x]      |
+| User Stories    | [user-stories.md](../../../../docs/generated/user-stories.md)     | US045, US046, US047, US048                                                                                     | [x]      |
 
 **Note (generic-source profile):** no `route-list.md`/`screen-list.md` exist for this Rust/GPUI
 codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather than fabricated.
@@ -305,14 +324,14 @@ codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather tha
 
 ## Source Code References
 
-| Order | Symbol | Path | Purpose |
-|-------|--------|------|---------|
-| 1 | `Terminal` struct + `TerminalType` enum | `crates/terminal/src/terminal.rs:846-898` | Core in-memory entity; defines the Pty/DisplayOnly discriminator |
-| 2 | `Project::create_terminal_shell`/`create_local_terminal`/`create_terminal_shell_internal` | `crates/project/src/terminals.rs:290-457` | Interactive shell spawn orchestration (env, cwd, remote routing) |
-| 3 | `Project::create_terminal_task` | `crates/project/src/terminals.rs:63-288` | Task-spawn orchestration (`tasks.json` command/args/cwd/env resolution) |
-| 4 | `TerminalPanel` (actions, serialize, Panel impl) | `crates/terminal_view/src/terminal_panel.rs:45-53, 947-980, 1540` | Panel toggle actions + debounced layout persistence |
-| 5 | `TerminalView` (actions, SearchableItem, SerializableItem) | `crates/terminal_view/src/terminal_view.rs:77-98, 1709-1904` | View-level actions (SendText/SendKeystroke/RerunTask/RenameTerminal), search, tab persistence |
-| 6 | `TerminalDb` | `crates/terminal_view/src/persistence.rs:375-500` | SQLite-backed cwd/title persistence for interactive terminal tabs |
+| Order | Symbol                                                                                    | Path                                                              | Purpose                                                                                       |
+| ----- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 1     | `Terminal` struct + `TerminalType` enum                                                   | `crates/terminal/src/terminal.rs:846-898`                         | Core in-memory entity; defines the Pty/DisplayOnly discriminator                              |
+| 2     | `Project::create_terminal_shell`/`create_local_terminal`/`create_terminal_shell_internal` | `crates/project/src/terminals.rs:290-457`                         | Interactive shell spawn orchestration (env, cwd, remote routing)                              |
+| 3     | `Project::create_terminal_task`                                                           | `crates/project/src/terminals.rs:63-288`                          | Task-spawn orchestration (`tasks.json` command/args/cwd/env resolution)                       |
+| 4     | `TerminalPanel` (actions, serialize, Panel impl)                                          | `crates/terminal_view/src/terminal_panel.rs:45-53, 947-980, 1540` | Panel toggle actions + debounced layout persistence                                           |
+| 5     | `TerminalView` (actions, SearchableItem, SerializableItem)                                | `crates/terminal_view/src/terminal_view.rs:77-98, 1709-1904`      | View-level actions (SendText/SendKeystroke/RerunTask/RenameTerminal), search, tab persistence |
+| 6     | `TerminalDb`                                                                              | `crates/terminal_view/src/persistence.rs:375-500`                 | SQLite-backed cwd/title persistence for interactive terminal tabs                             |
 
 ## Unresolved Questions
 
@@ -345,10 +364,10 @@ User action (keybinding / task run / panel toggle)
 
 ## DB Impact per Event
 
-| Event/Endpoint | Table | Columns | Operation | Value Derivation | Source |
-|----------------|-------|---------|-----------|-------------------|--------|
-| Interactive terminal tab closes/serializes (workspace item serialization pass) | `terminals` | `item_id`, `workspace_id`, `working_directory`, `working_directory_path`, `custom_title` | INSERT ... ON CONFLICT DO UPDATE (upsert) | `working_directory` from `Terminal::working_directory()` (live PTY cwd); `custom_title` from user-set tab rename | `crates/terminal_view/src/persistence.rs:436-466` |
-| Terminal panel pane-group layout changes (split/resize/close pane) | `kv_store` (generic KeyValueStore table) | key = `TerminalPanel` serialization key; value = JSON `SerializedTerminalPanel` | INSERT/UPDATE (KV upsert), 50ms debounced | Pane-group tree serialized via `serialize_pane_group` from live `PaneGroup`/`Pane` state | `crates/terminal_view/src/terminal_panel.rs:947-980` |
+| Event/Endpoint                                                                 | Table                                    | Columns                                                                                  | Operation                                 | Value Derivation                                                                                                 | Source                                               |
+| ------------------------------------------------------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Interactive terminal tab closes/serializes (workspace item serialization pass) | `terminals`                              | `item_id`, `workspace_id`, `working_directory`, `working_directory_path`, `custom_title` | INSERT ... ON CONFLICT DO UPDATE (upsert) | `working_directory` from `Terminal::working_directory()` (live PTY cwd); `custom_title` from user-set tab rename | `crates/terminal_view/src/persistence.rs:436-466`    |
+| Terminal panel pane-group layout changes (split/resize/close pane)             | `kv_store` (generic KeyValueStore table) | key = `TerminalPanel` serialization key; value = JSON `SerializedTerminalPanel`          | INSERT/UPDATE (KV upsert), 50ms debounced | Pane-group tree serialized via `serialize_pane_group` from live `PaneGroup`/`Pane` state                         | `crates/terminal_view/src/terminal_panel.rs:947-980` |
 
 Task-spawned terminals never reach either write path (BR-003) — `TerminalView::serialize`
 returns `None` whenever `terminal.task().is_some()`.

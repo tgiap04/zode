@@ -49,7 +49,7 @@ You can configure most settings in the Settings Editor ({#kb zed::OpenSettings})
 
 Settings PyCharm users typically configure first:
 
-| Zode Setting             | What it does                                                                    |
+| Zode Setting            | What it does                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------- |
 | `format_on_save`        | Auto-format when saving. Set to `"on"` to enable.                               |
 | `soft_wrap`             | Wrap long lines. Options: `"none"`, `"editor_width"`, `"preferred_line_length"` |
@@ -107,7 +107,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 
 ### Different Keybindings (PyCharm → Zode)
 
-| Action                 | PyCharm     | Zode (JetBrains keymap)   |
+| Action                 | PyCharm     | Zode (JetBrains keymap)  |
 | ---------------------- | ----------- | ------------------------ |
 | File Structure         | `Cmd + F12` | `Cmd + F12` (outline)    |
 | Navigate to Next Error | `F2`        | `F2`                     |
@@ -252,13 +252,13 @@ Zode has none of this. The language server sees Python code as Python code—it 
 PyCharm organizes auxiliary views into numbered tool windows (Project = 1, Python Console = 4, Terminal = Alt+F12, etc.). Zode uses a similar concept called "docks":
 
 | PyCharm Tool Window | Zode Equivalent | Shortcut (JetBrains keymap) |
-| ------------------- | -------------- | --------------------------- |
-| Project (1)         | Project Panel  | `Cmd + 1`                   |
-| Git (9 or Cmd+0)    | Git Panel      | `Cmd + 0`                   |
-| Terminal (Alt+F12)  | Terminal Panel | `Alt + F12`                 |
-| Structure (7)       | Outline Panel  | `Cmd + 7`                   |
-| Problems (6)        | Diagnostics    | `Cmd + 6`                   |
-| Debug (5)           | Debug Panel    | `Cmd + 5`                   |
+| ------------------- | --------------- | --------------------------- |
+| Project (1)         | Project Panel   | `Cmd + 1`                   |
+| Git (9 or Cmd+0)    | Git Panel       | `Cmd + 0`                   |
+| Terminal (Alt+F12)  | Terminal Panel  | `Alt + F12`                 |
+| Structure (7)       | Outline Panel   | `Cmd + 7`                   |
+| Problems (6)        | Diagnostics     | `Cmd + 6`                   |
+| Debug (5)           | Debug Panel     | `Cmd + 5`                   |
 
 Zode has three dock positions: left, bottom, and right. Panels can be moved between docks by dragging or through settings.
 

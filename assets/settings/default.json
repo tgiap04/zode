@@ -200,7 +200,7 @@
     "background_scroll_history_lines": null,
     // Which side of the window the project switcher sidebar docks to.
     // "left" or "right".
-    "sidebar_side": "right"
+    "sidebar_side": "right",
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
@@ -2394,7 +2394,7 @@
     "show_turn_stats": false,
     // Whether the agent's edits open one file at a time for review, rather than
     // all of them together in the diff pane.
-    "single_file_review": true
+    "single_file_review": true,
   },
   // Configures agent servers available in the agent panel.
   "agent_servers": {},

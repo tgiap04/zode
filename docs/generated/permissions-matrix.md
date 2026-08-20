@@ -1,4 +1,5 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
+
 # Permissions Matrix
 
 **Project**: Zode (Zed fork)
@@ -39,14 +40,14 @@ locale-conditioned access-control branch found in the scout inventory.
 
 ## Permissions Index
 
-| Code | Name | Type | Enforced At |
-|------|------|------|-------------|
-| PERM001_ExtensionProcessExecCapability | ExtensionProcessExecCapability | action-permission | `crates/extension/src/extension_manifest.rs:168` (`allow_exec`) |
-| PERM002_ExtensionDownloadFileCapability | ExtensionDownloadFileCapability | action-permission | `crates/extension/src/extension_manifest.rs` (`ExtensionCapability::DownloadFile` match arm, mirrors `allow_exec`) |
-| PERM003_ExtensionNpmInstallCapability | ExtensionNpmInstallCapability | action-permission | `crates/extension/src/extension_manifest.rs` (`ExtensionCapability::NpmInstallPackage` match arm, mirrors `allow_exec`) |
-| PERM004_BufferCapabilityGate | BufferCapabilityGate | data-permission | `crates/language/src/buffer.rs:78-89` (`enum Capability`, `editable()`) |
-| PERM005_WorktreeTrustGate | WorktreeTrustGate | action-permission | `crates/project/src/trusted_worktrees.rs` (`TrustedWorktreesStore::can_trust`), consumed at `crates/project/src/lsp_store.rs:449` and `crates/project/src/git_store.rs:1595` |
-| PERM006_StaffFeatureFlagGate | StaffFeatureFlagGate | feature-flag | `crates/feature_flags/src/feature_flags.rs:114-124` (`FeatureFlag::enabled_for_staff`), individual flags declared in `crates/feature_flags/src/flags.rs` |
+| Code                                    | Name                            | Type              | Enforced At                                                                                                                                                                  |
+| --------------------------------------- | ------------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PERM001_ExtensionProcessExecCapability  | ExtensionProcessExecCapability  | action-permission | `crates/extension/src/extension_manifest.rs:168` (`allow_exec`)                                                                                                              |
+| PERM002_ExtensionDownloadFileCapability | ExtensionDownloadFileCapability | action-permission | `crates/extension/src/extension_manifest.rs` (`ExtensionCapability::DownloadFile` match arm, mirrors `allow_exec`)                                                           |
+| PERM003_ExtensionNpmInstallCapability   | ExtensionNpmInstallCapability   | action-permission | `crates/extension/src/extension_manifest.rs` (`ExtensionCapability::NpmInstallPackage` match arm, mirrors `allow_exec`)                                                      |
+| PERM004_BufferCapabilityGate            | BufferCapabilityGate            | data-permission   | `crates/language/src/buffer.rs:78-89` (`enum Capability`, `editable()`)                                                                                                      |
+| PERM005_WorktreeTrustGate               | WorktreeTrustGate               | action-permission | `crates/project/src/trusted_worktrees.rs` (`TrustedWorktreesStore::can_trust`), consumed at `crates/project/src/lsp_store.rs:449` and `crates/project/src/git_store.rs:1595` |
+| PERM006_StaffFeatureFlagGate            | StaffFeatureFlagGate            | feature-flag      | `crates/feature_flags/src/feature_flags.rs:114-124` (`FeatureFlag::enabled_for_staff`), individual flags declared in `crates/feature_flags/src/flags.rs`                     |
 
 ---
 
@@ -69,10 +70,10 @@ extension-authoring time — not a runtime user role and not user-prompted at in
 
 ### Permission Rules
 
-| Role | Allow | Conditions |
-|------|-------|------------|
-| Extension with a declared `ProcessExec` capability matching command+args | ✓ | Requested command+args match an allowlisted entry (exact or wildcard) |
-| Extension with no matching capability declared | ✗ | Rejected before the process is spawned |
+| Role                                                                     | Allow | Conditions                                                            |
+| ------------------------------------------------------------------------ | ----- | --------------------------------------------------------------------- |
+| Extension with a declared `ProcessExec` capability matching command+args | ✓     | Requested command+args match an allowlisted entry (exact or wildcard) |
+| Extension with no matching capability declared                           | ✗     | Rejected before the process is spawned                                |
 
 ### Related Modules
 
@@ -95,10 +96,10 @@ before the sandboxed fetch is permitted.
 
 ### Permission Rules
 
-| Role | Allow | Conditions |
-|------|-------|------------|
-| Extension with a declared `DownloadFile` capability matching the requested host | ✓ | Host matches an allowlisted entry |
-| Extension with no matching capability declared | ✗ | Fetch rejected |
+| Role                                                                            | Allow | Conditions                        |
+| ------------------------------------------------------------------------------- | ----- | --------------------------------- |
+| Extension with a declared `DownloadFile` capability matching the requested host | ✓     | Host matches an allowlisted entry |
+| Extension with no matching capability declared                                  | ✗     | Fetch rejected                    |
 
 ### Related Modules
 
@@ -119,10 +120,10 @@ extension may only install npm packages it declared in its manifest's `capabilit
 
 ### Permission Rules
 
-| Role | Allow | Conditions |
-|------|-------|------------|
-| Extension with a declared `NpmInstallPackage` capability matching the requested package | ✓ | Package matches an allowlisted entry |
-| Extension with no matching capability declared | ✗ | Install rejected |
+| Role                                                                                    | Allow | Conditions                           |
+| --------------------------------------------------------------------------------------- | ----- | ------------------------------------ |
+| Extension with a declared `NpmInstallPackage` capability matching the requested package | ✓     | Package matches an allowlisted entry |
+| Extension with no matching capability declared                                          | ✗     | Install rejected                     |
 
 ### Related Modules
 
@@ -148,10 +149,10 @@ handle to — not a remote collaborator's role grant.
 
 ### Permission Rules
 
-| Role | Allow | Conditions |
-|------|-------|------------|
-| Buffer with `Capability::ReadWrite` | ✓ | Edits accepted |
-| Buffer with `Capability::Read` or `Capability::ReadOnly` | ✗ | Edit operations rejected |
+| Role                                                     | Allow | Conditions               |
+| -------------------------------------------------------- | ----- | ------------------------ |
+| Buffer with `Capability::ReadWrite`                      | ✓     | Edits accepted           |
+| Buffer with `Capability::Read` or `Capability::ReadOnly` | ✗     | Edit operations rejected |
 
 ### Related Modules
 
@@ -185,13 +186,13 @@ is the interactive prompt that lets the user grant or decline trust for a restri
 
 ### Permission Rules
 
-| Role | Allow | Conditions |
-|------|-------|------------|
-| Worktree/path explicitly trusted (persisted or session-granted via `SecurityModal`) | ✓ | Language server / git-integration operations proceed |
-| Worktree/path covered by a trusted parent-directory override | ✓ | Transitive trust via path hierarchy |
-| `trust_all_worktrees` setting enabled | ✓ | All worktrees auto-trusted, bypassing the check entirely |
-| Untrusted, not-yet-decided worktree | ✗ | Restricted — language server spawn deferred/blocked until user decides via `SecurityModal` |
-| Invisible (internally-created, e.g. tmp dirs for `keymap_editor.rs`) worktree | ✓ | Trust check is skipped entirely — not user-facing |
+| Role                                                                                | Allow | Conditions                                                                                 |
+| ----------------------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------ |
+| Worktree/path explicitly trusted (persisted or session-granted via `SecurityModal`) | ✓     | Language server / git-integration operations proceed                                       |
+| Worktree/path covered by a trusted parent-directory override                        | ✓     | Transitive trust via path hierarchy                                                        |
+| `trust_all_worktrees` setting enabled                                               | ✓     | All worktrees auto-trusted, bypassing the check entirely                                   |
+| Untrusted, not-yet-decided worktree                                                 | ✗     | Restricted — language server spawn deferred/blocked until user decides via `SecurityModal` |
+| Invisible (internally-created, e.g. tmp dirs for `keymap_editor.rs`) worktree       | ✓     | Trust check is skipped entirely — not user-facing                                          |
 
 ### Related Modules
 
@@ -221,12 +222,12 @@ server-pushed change to staff status or flag values re-renders dependent views w
 
 ### Permission Rules
 
-| Role | Allow | Conditions |
-|------|-------|------------|
-| Zode staff account, flag has `enabled_for_staff() == true` (the default) | ✓ | Feature visible/active |
-| Non-staff account, flag has `enabled_for_all() == true` | ✓ | Feature visible/active for everyone |
-| Non-staff account, neither condition holds | ✗ | Feature hidden/inactive |
-| Staff account with `ZED_DISABLE_STAFF` env var set | ✗ (treated as non-staff) | Used to locally test the disabled-for-non-staff path |
+| Role                                                                     | Allow                    | Conditions                                           |
+| ------------------------------------------------------------------------ | ------------------------ | ---------------------------------------------------- |
+| Zode staff account, flag has `enabled_for_staff() == true` (the default) | ✓                        | Feature visible/active                               |
+| Non-staff account, flag has `enabled_for_all() == true`                  | ✓                        | Feature visible/active for everyone                  |
+| Non-staff account, neither condition holds                               | ✗                        | Feature hidden/inactive                              |
+| Staff account with `ZED_DISABLE_STAFF` env var set                       | ✗ (treated as non-staff) | Used to locally test the disabled-for-non-staff path |
 
 ### Related Modules
 

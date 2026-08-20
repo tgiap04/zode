@@ -1,4 +1,5 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
+
 # Business Rules (DRAFT)
 
 **Project**: Zode (Zed fork)
@@ -147,6 +148,6 @@ on-disk or in-memory version.
   above but not individually enumerated here — see behavior-logic.md directly for per-item detail
   if a specific background-worker rule is needed.
 - This draft should be reviewed against `docs/decisions/ADR-*.md` (human-authored), if/when those
-  exist, since ADRs often encode the *why* behind a rule that source alone cannot show — in
+  exist, since ADRs often encode the _why_ behind a rule that source alone cannot show — in
   particular, why the fork-specific hibernation lifecycle and worktree-trust model were added on
   top of upstream Zed.

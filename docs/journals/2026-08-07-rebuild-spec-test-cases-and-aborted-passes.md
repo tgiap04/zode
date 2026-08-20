@@ -30,6 +30,7 @@ This hit ~40 rows across 6 features (F002, F008, F009, F010, F011, F012) on the 
 The deterministic validator rejected test-cases.md from F002, F008, F009, F010, F011, F012 with `citation_source_mismatch` errors across ~40 rows total. Root cause: slugged vs. bare code format in the citation regex.
 
 **Example, F002_LanguageIntelligence TC003:**
+
 - Researcher wrote: `**Traces-to:** BR-001_ServerBootstrapOncePerWorkspace`
 - Validator regex `\b(BR|SM|DEC|DISC)-\d{3}\b` does NOT match (underscore after `001` blocks the word boundary)
 - Validator error: citation format invalid
@@ -76,6 +77,7 @@ Peer-review fan-out was dispatched as two batches (features 1–5 and 6–10), i
 ### Validator-Contract Mismatch (Systemic)
 
 The shipped validator's regex and the shipped test-case contract point in opposite directions:
+
 - **Validator:** Bare code format, `\b(BR|SM|DEC|DISC)-\d{3}\b`
 - **Contract:** "Copy citations verbatim from technical-spec.md headers"
 - **technical-spec.md:** Headers in full slugged form, `### BR-001_SlugName`
@@ -119,6 +121,7 @@ Parallel peer-review batches (5 features per batch) make sense for scaling, but 
 3. **Regenerate navigation READMEs.** The feature docs tree now includes test-cases.md files. Update `docs/features/README.md` and `docs/features/F###/README.md` files to include links to test-cases.md and confidence reports in the navigation index.
 
 4. **Flag validator-contract mismatch for upstream kit maintainers.** Document the citation-format gap:
+
    - Validator requires bare `BR-###` format
    - Contract says "copy verbatim from technical-spec.md"
    - technical-spec.md headers are in slugged form

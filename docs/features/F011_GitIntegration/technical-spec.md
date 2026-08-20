@@ -1,6 +1,7 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 
 # F011_GitIntegration: Technical Spec
+
 **Priority**: P0
 **Type**: mixed
 **Generated**: 2026-08-07
@@ -24,16 +25,16 @@ discriminator (`WorkDirectory`) to the `Worktree` entity, which is outside this 
 
 ### Requirements
 
-| Code | Description | Endpoint/Handler | Verifiable |
-|------|-------------|------------------|------------|
-| FR-001 | Stage/unstage a single hunk, a directory, or all files via `update-index`/`reset` | `Repository::stage_paths`/`unstage_paths` via `git.rs::ToggleStaged` | yes |
-| FR-002 | Switch to an existing local/remote branch (`git checkout <branch>`) | `Repository::change_branch` | yes |
-| FR-003 | Create a new branch from HEAD or a chosen base (`git switch -c`) | `Repository::create_branch` | yes |
-| FR-004 | Stash all uncommitted changes (`git stash push --include-untracked`) | `Repository::stash_all`/`stash_entries` | yes |
-| FR-005 | Discard (checkout from HEAD) or trash a file's uncommitted changes | `GitPanel::revert_entry`/`perform_checkout` → `Repository::checkout_files` | yes |
-| FR-006 | Commit staged changes with a message, optional amend/signoff | `GitPanel::commit_changes` → `Repository::commit` | yes |
-| FR-007 | View a combined diff of every changed file in the project | `ProjectDiff::deploy_at`/`deploy_branch_diff` | yes |
-| FR-008 | Render the repository's commit graph with parent/child edges | `GitGraph::new` + `Repository::graph_data` | yes |
+| Code   | Description                                                                       | Endpoint/Handler                                                           | Verifiable |
+| ------ | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------- |
+| FR-001 | Stage/unstage a single hunk, a directory, or all files via `update-index`/`reset` | `Repository::stage_paths`/`unstage_paths` via `git.rs::ToggleStaged`       | yes        |
+| FR-002 | Switch to an existing local/remote branch (`git checkout <branch>`)               | `Repository::change_branch`                                                | yes        |
+| FR-003 | Create a new branch from HEAD or a chosen base (`git switch -c`)                  | `Repository::create_branch`                                                | yes        |
+| FR-004 | Stash all uncommitted changes (`git stash push --include-untracked`)              | `Repository::stash_all`/`stash_entries`                                    | yes        |
+| FR-005 | Discard (checkout from HEAD) or trash a file's uncommitted changes                | `GitPanel::revert_entry`/`perform_checkout` → `Repository::checkout_files` | yes        |
+| FR-006 | Commit staged changes with a message, optional amend/signoff                      | `GitPanel::commit_changes` → `Repository::commit`                          | yes        |
+| FR-007 | View a combined diff of every changed file in the project                         | `ProjectDiff::deploy_at`/`deploy_branch_diff`                              | yes        |
+| FR-008 | Render the repository's commit graph with parent/child edges                      | `GitGraph::new` + `Repository::graph_data`                                 | yes        |
 
 **Source:** `crates/git/src/repository.rs:2205-2405`, `crates/git_ui/src/git_panel.rs:1489-1946,2127-2369`, `crates/git_ui/src/branch_picker.rs:827-895,1999-2033`, `crates/project/src/git_store.rs:5429-5470`, `crates/git_ui/src/project_diff.rs:88-140`, `crates/git_graph/src/git_graph.rs:993-1160`
 
@@ -42,12 +43,14 @@ discriminator (`WorkDirectory`) to the `Worktree` entity, which is outside this 
 _(See itemized entries below.)_
 
 ### BR-001_NoStagedCommitBlocked
+
 **Linked FR:** FR-006
 **Source:** `crates/git_ui/src/git_panel.rs:2317-2335`
 **Applies to:** commit action
 **Rule:** If there are no staged entries and the caller is not amending, the commit is refused with `"No changes to commit"` rather than silently producing an empty commit. If nothing is staged but tracked files changed, all non-created (tracked) files are auto-staged before the commit runs.
 
 **Pseudocode:**
+
 ```text
 if has_staged_changes:
     commit(message, options)
@@ -59,12 +62,14 @@ else:
 ```
 
 ### BR-002_ConflictsMustBeResolvedBeforeCommit
+
 **Linked FR:** FR-006
 **Source:** `crates/git_ui/src/git_panel.rs:2297-2304`
 **Applies to:** commit action
 **Rule:** If the repository has unresolved (unstaged) merge conflicts, the commit is blocked with `"There are still conflicts. You must stage these before committing"`.
 
 **Pseudocode:**
+
 ```text
 if has_unstaged_conflicts():
     warn("There are still conflicts. You must stage these before committing")
@@ -72,12 +77,14 @@ if has_unstaged_conflicts():
 ```
 
 ### BR-003_AmendRequiresHeadCommit
+
 **Linked FR:** FR-006
 **Source:** `crates/git_ui/src/git_panel.rs:2165-2197`
 **Applies to:** amend action
 **Rule:** Amend is a two-stage gesture: the first invocation only loads the last commit message into the editor (no git call) and requires a HEAD commit to exist; the second invocation performs the actual `git commit --amend`.
 
 **Pseudocode:**
+
 ```text
 if head_commit.is_none(): return false
 if not amend_pending:
@@ -87,12 +94,14 @@ else:
 ```
 
 ### BR-004_StashRaceCheckedBeforeApply
+
 **Linked FR:** FR-004
 **Source:** `crates/git_ui/src/commit_view.rs:520-599`
 **Applies to:** stash apply/pop/drop
 **Rule:** Before applying, popping, or dropping a stash entry selected in Commit View, the code re-verifies the target stash's SHA still matches its expected index (`stash_matches_index`); if the stash list has changed underneath the user, the operation is aborted with an explicit error instead of acting on the wrong stash.
 
 **Pseudocode:**
+
 ```text
 if not stash_matches_index(sha, stash_index, repo):
     error("Stash has changed, not applying/pop/drop aborted"); return
@@ -100,24 +109,28 @@ repo.stash_apply(stash_index) # or stash_pop / stash_drop
 ```
 
 ### BR-005_CheckoutRefusedOnConflictingUncommittedChanges
+
 **Linked FR:** FR-002
 **Source:** `crates/git/src/repository.rs:1956-1997`
 **Applies to:** branch switch
 **Rule:** `change_branch` shells out to `git checkout <branch>`; git itself refuses the checkout (non-zero exit propagated as an error, surfaced via `detach_and_prompt_err("Failed to change branch", ...)`) when uncommitted local changes would be overwritten — the app does not pre-empt this with its own dirty-check, it relies on and surfaces the underlying git error.
 
 **Pseudocode:**
+
 ```text
 result = repo.change_branch(branch.name())
 if result.is_err(): show_error_dialog("Failed to change branch", result.error)
 ```
 
 ### BR-006_DiscardCreatedFilesGoToTrashNotCheckout
+
 **Linked FR:** FR-005
 **Source:** `crates/git_ui/src/git_panel.rs:1489-1535`
 **Applies to:** discard/revert action
 **Rule:** Reverting a status entry unstages it first if staged, then branches on whether the file is newly created: tracked files are reverted via `checkout_files("HEAD", ...)`; untracked/newly-created files are instead sent through a confirmation prompt ("Trash {filename}?") and deleted via `project.delete_file`, never checked out.
 
 **Pseudocode:**
+
 ```text
 if entry.status.has_staged(): unstage(entry)
 if not entry.status.is_created():
@@ -138,6 +151,7 @@ multi-predicate render/interaction/flow decision per the contract's DEC scope.
 _(See itemized entries below.)_
 
 ### SM-001_AmendGesture
+
 **kind:** ui
 **Linked FR:** FR-006
 **Source:** `crates/git_ui/src/git_panel.rs:2165-2197`
@@ -151,6 +165,7 @@ stateDiagram-v2
 ```
 
 **Transition rules:**
+
 - `idle → amend_pending`: guard = `head_commit(cx).is_some()`; side effect = loads the last commit message into the commit editor, no git write yet.
 - `amend_pending → idle`: guard = commit editor still focused; side effect = runs `commit_changes(amend: true)` and clears `amend_pending` on success.
 
@@ -163,6 +178,7 @@ None.
 _(See itemized entries below.)_
 
 ### INT-001_GitCliAndLibgit2DualPath
+
 **Linked FR:** FR-001, FR-002, FR-003, FR-004, FR-005, FR-006, FR-007, FR-008
 **Source:** `crates/git/src/repository.rs:2205-2405`
 **Type:** api-call (local process/library, not network)
@@ -172,6 +188,7 @@ _(See itemized entries below.)_
 **Failure handling:** non-zero exit status is turned into an `anyhow::Error` carrying `stderr`; UI call sites surface it via `detach_and_prompt_err(...)` (a dialog) rather than retrying automatically. No queue/DLQ — a failed operation simply does not mutate repository state.
 
 **Pseudocode:**
+
 ```text
 output = git_binary.build_command(args).envs(env).output().await
 if not output.status.success():
@@ -210,15 +227,18 @@ git index via `git update-index --add --remove --`.
 should appear under staged changes.
 
 **Acceptance Scenarios:**
+
 1. **Given** a file has 2 unstaged hunks, **When** the developer stages hunk 1 from the gutter, **Then** `git status` shows hunk 1 staged and hunk 2 still unstaged.
 
 **Requirements fulfilled:**
+
 - **FR-001** Stage a single hunk via `update-index` — `BL021_GitHunkStagingActions`
   **Source:** `crates/git/src/repository.rs:2205-2230`
 
 **Rules enforced:** none specific to this US (see Cross-Cutting Logic).
 
 **Verification:**
+
 - **SC-001** (covers FR-001)
 
 ---
@@ -233,13 +253,16 @@ only part of a file's changes.
 byte-identical to before.
 
 **Acceptance Scenarios:**
+
 1. **Given** a hunk is currently staged, **When** the developer unstages it, **Then** it returns to "unstaged changes" with file content unchanged.
 
 **Requirements fulfilled:**
+
 - **FR-001** Unstage a single hunk via `reset` — `BL021_GitHunkStagingActions`
   **Source:** `crates/git/src/repository.rs:2232-2259`
 
 **Verification:**
+
 - **SC-001** (covers FR-001)
 
 ---
@@ -254,16 +277,19 @@ Git panel branch label.
 the new branch.
 
 **Acceptance Scenarios:**
+
 1. **Given** working tree is clean on `main` and `feature-x` exists, **When** the developer selects `feature-x`, **Then** the repo checks out `feature-x` and the status bar reflects it.
 2. **Given** the working tree has uncommitted changes conflicting with the target branch, **When** the developer selects a different branch, **Then** checkout is refused/errors rather than silently discarding the changes.
 
 **Requirements fulfilled:**
+
 - **FR-002** Checkout an existing branch — `BL023_BranchPickerActions`
   **Source:** `crates/git/src/repository.rs:1956-1997`
 
 **Rules enforced:** BR-005_CheckoutRefusedOnConflictingUncommittedChanges
 
 **Verification:**
+
 - **SC-003** (covers FR-002, BR-005)
 
 ---
@@ -279,13 +305,16 @@ an external terminal, but doing it inline keeps them in the editor.
 reselectable in the picker on reopen.
 
 **Acceptance Scenarios:**
+
 1. **Given** the developer types a novel branch name in the picker's create flow, **When** they confirm, **Then** a new branch is created at current HEAD (or chosen base) and checked out.
 
 **Requirements fulfilled:**
+
 - **FR-003** Create and checkout a new branch — `BL023_BranchPickerActions`
   **Source:** `crates/git_ui/src/branch_picker.rs:466-490`, `crates/git/src/repository.rs:1999-2033`
 
 **Verification:**
+
 - **SC-004** (see Cross-Cutting Logic — covers FR-003)
 
 ---
@@ -301,15 +330,18 @@ stage/commit loop.
 entry and the working tree is clean.
 
 **Acceptance Scenarios:**
+
 1. **Given** 3 files have uncommitted edits, **When** the developer triggers stash, **Then** a stash entry is created and the working tree matches HEAD.
 
 **Requirements fulfilled:**
+
 - **FR-004** Stash all uncommitted changes — `BL024_CommitViewStashActions`
   **Source:** `crates/project/src/git_store.rs:5429-5470`, `crates/git/src/repository.rs:2261-2285`
 
 **Rules enforced:** BR-004_StashRaceCheckedBeforeApply (applies to apply/pop/drop, not the initial stash-all push)
 
 **Verification:**
+
 - **SC-005** (see Cross-Cutting Logic — covers FR-004)
 
 ---
@@ -326,15 +358,18 @@ in-editor way to revert unwanted local edits.
 and it disappears from the changed-files list.
 
 **Acceptance Scenarios:**
+
 1. **Given** a file has unstaged edits, **When** the developer triggers "Discard" from the git panel, **Then** the file's content reverts to HEAD and it disappears from the changed-files list.
 
 **Requirements fulfilled:**
+
 - **FR-005** Discard/trash uncommitted file changes — `BL025_GitPanelActions`
   **Source:** `crates/git_ui/src/git_panel.rs:1489-1535`, `crates/git/src/repository.rs:1408-1435`
 
 **Rules enforced:** BR-006_DiscardCreatedFilesGoToTrashNotCheckout
 
 **Verification:**
+
 - **SC-006** (see Cross-Cutting Logic — covers FR-005, BR-006)
 
 ---
@@ -351,10 +386,12 @@ tracked changed files before committing (see BR-001). The commit shells out to
 commit containing exactly those hunks.
 
 **Acceptance Scenarios:**
+
 1. **Given** 2 hunks are staged and a commit message is entered, **When** the developer confirms commit, **Then** a new commit is created containing exactly those 2 hunks.
 2. **Given** nothing is staged, **When** the developer attempts to commit, **Then** the commit is blocked/no-ops rather than silently creating an empty commit.
 
 **Requirements fulfilled:**
+
 - **FR-006** Commit staged changes with a message — `BL163_CommitStagedChanges`, `BL025_GitPanelActions`
   **Source:** `crates/git_ui/src/git_panel.rs:2280-2369`, `crates/git/src/repository.rs:2362-2405`
 
@@ -363,6 +400,7 @@ commit containing exactly those hunks.
 **State transitions:** SM-001_AmendGesture (amend flow only)
 
 **Verification:**
+
 - **SC-002** (covers FR-006, BR-001)
 
 ---
@@ -379,13 +417,16 @@ commit, but the panel alone covers the "must" workflow.
 files' diffs are listed in one view.
 
 **Acceptance Scenarios:**
+
 1. **Given** 4 files across the project have uncommitted changes, **When** the developer opens Project Diff, **Then** all 4 files' diffs are listed in one view.
 
 **Requirements fulfilled:**
+
 - **FR-007** Render a combined multi-file diff view — `BL027_ProjectDiffActions`
   **Source:** `crates/git_ui/src/project_diff.rs:63-140,408`
 
 **Verification:**
+
 - **SC-007** (see Cross-Cutting Logic — covers FR-007)
 
 ---
@@ -402,49 +443,52 @@ the core edit/stage/commit loop.
 point and both parent branches render.
 
 **Acceptance Scenarios:**
+
 1. **Given** a repository has 3 branches with a recent merge, **When** the developer opens Git Graph, **Then** the merge point and both parent branches are rendered.
 
 **Requirements fulfilled:**
+
 - **FR-008** Render the commit graph with parent/child edges — `BL022_GitGraphActions`
   **Source:** `crates/git_graph/src/git_graph.rs:993-1170`
 
 **Verification:**
+
 - **SC-008** (see Cross-Cutting Logic — covers FR-008)
 
 ---
 
 ### Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Commit attempted with unresolved conflicts | Blocked with `"There are still conflicts. You must stage these before committing"` (BR-002) |
-| Commit attempted with nothing staged and no tracked changes | Blocked with `"No changes to commit"` (BR-001) |
-| Stash apply/pop/drop after the stash list changed underneath the user | Operation aborted with `"Stash has changed, not applying"`/`"...pop aborted"`/`"...drop aborted"` (BR-004) |
-| Branch checkout would overwrite conflicting uncommitted changes | git itself refuses the checkout; error surfaced as `"Failed to change branch"` dialog (BR-005) |
-| Discard triggered on a newly-created (untracked) file | Routed to a trash-confirmation prompt and `project.delete_file`, not `checkout_files` (BR-006) |
-| Any git CLI/libgit2 call exits non-zero | Wrapped as `anyhow::Error` with stderr; surfaced via `detach_and_prompt_err` dialog, no automatic retry (INT-001) |
+| Scenario                                                              | Behavior                                                                                                          |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Commit attempted with unresolved conflicts                            | Blocked with `"There are still conflicts. You must stage these before committing"` (BR-002)                       |
+| Commit attempted with nothing staged and no tracked changes           | Blocked with `"No changes to commit"` (BR-001)                                                                    |
+| Stash apply/pop/drop after the stash list changed underneath the user | Operation aborted with `"Stash has changed, not applying"`/`"...pop aborted"`/`"...drop aborted"` (BR-004)        |
+| Branch checkout would overwrite conflicting uncommitted changes       | git itself refuses the checkout; error surfaced as `"Failed to change branch"` dialog (BR-005)                    |
+| Discard triggered on a newly-created (untracked) file                 | Routed to a trash-confirmation prompt and `project.delete_file`, not `checkout_files` (BR-006)                    |
+| Any git CLI/libgit2 call exits non-zero                               | Wrapped as `anyhow::Error` with stderr; surfaced via `detach_and_prompt_err` dialog, no automatic retry (INT-001) |
 
 ## Key Entities
 
-| Entity | Table | Key Columns | Purpose |
-|--------|-------|-------------|---------|
-| GitStore | (in-memory, not a DB table) | `repositories: HashMap<RepositoryId, Entity<Repository>>`, `active_repo_id` | Owns every detected `Repository` within a `Project`'s worktrees; tracks which one the Git panel shows |
-| RepositorySnapshot | (in-memory) | `statuses_by_path`, `branch`, `branch_list`, `head_commit`, `merge`, `stash_entries`, `linked_worktrees` | Immutable, cheaply-cloned read view of a repo's status/branch/history state |
-| Repository | (in-memory) | `commit_message_buffer`, `pending_ops`, `job_sender`/`active_jobs` | Live, mutable repo handle that dispatches git operations as background jobs |
-| project_diffs | `project_diffs` (SQLite, `WorkspaceDb`) | `workspace_id`, `item_id`, `diff_base` | Persists which diff base (HEAD/branch) an open Project Diff tab was showing, for restore-on-relaunch |
-| git_graphs | `git_graphs` (SQLite, `WorkspaceDb`) | `workspace_id`, `item_id`, `is_open`, `repo_working_path` | Persists which repository an open Git Graph tab was pointed at, for restore-on-relaunch |
+| Entity             | Table                                   | Key Columns                                                                                              | Purpose                                                                                               |
+| ------------------ | --------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| GitStore           | (in-memory, not a DB table)             | `repositories: HashMap<RepositoryId, Entity<Repository>>`, `active_repo_id`                              | Owns every detected `Repository` within a `Project`'s worktrees; tracks which one the Git panel shows |
+| RepositorySnapshot | (in-memory)                             | `statuses_by_path`, `branch`, `branch_list`, `head_commit`, `merge`, `stash_entries`, `linked_worktrees` | Immutable, cheaply-cloned read view of a repo's status/branch/history state                           |
+| Repository         | (in-memory)                             | `commit_message_buffer`, `pending_ops`, `job_sender`/`active_jobs`                                       | Live, mutable repo handle that dispatches git operations as background jobs                           |
+| project_diffs      | `project_diffs` (SQLite, `WorkspaceDb`) | `workspace_id`, `item_id`, `diff_base`                                                                   | Persists which diff base (HEAD/branch) an open Project Diff tab was showing, for restore-on-relaunch  |
+| git_graphs         | `git_graphs` (SQLite, `WorkspaceDb`)    | `workspace_id`, `item_id`, `is_open`, `repo_working_path`                                                | Persists which repository an open Git Graph tab was pointed at, for restore-on-relaunch               |
 
 ## Artifact References
 
-| Artifact | File | Codes Used | Reviewed |
-|----------|------|------------|----------|
-| System Overview | [system-overview.md](../../system-overview.md) | — | [x] |
-| Architecture | [business-rules.md](../../business-rules.md) | — | [x] |
-| Feature List | [feature-list.md](../../feature-list.md) | F011 | [x] |
-| Entities | [data-model.md](../../data-model.md) | MODEL014 | [x] |
-| Screens | [screens.md](screens.md) | N/A — no screen-list.md in this generic-source profile | [x] |
-| Behavior Logic | [behavior-logic.md](../../behavior-logic.md) | BL021, BL022, BL023, BL024, BL025, BL026, BL027, BL028, BL106, BL132, BL144, BL145, BL160, BL161, BL162, BL163, BL164, BL180 | [x] |
-| User Stories | [user-stories.md](../../user-stories.md) | US019, US006, US007, US008, US020, US021, US022, US023, US024 | [x] |
+| Artifact        | File                                           | Codes Used                                                                                                                   | Reviewed |
+| --------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------- |
+| System Overview | [system-overview.md](../../system-overview.md) | —                                                                                                                            | [x]      |
+| Architecture    | [business-rules.md](../../business-rules.md)   | —                                                                                                                            | [x]      |
+| Feature List    | [feature-list.md](../../feature-list.md)       | F011                                                                                                                         | [x]      |
+| Entities        | [data-model.md](../../data-model.md)           | MODEL014                                                                                                                     | [x]      |
+| Screens         | [screens.md](screens.md)                       | N/A — no screen-list.md in this generic-source profile                                                                       | [x]      |
+| Behavior Logic  | [behavior-logic.md](../../behavior-logic.md)   | BL021, BL022, BL023, BL024, BL025, BL026, BL027, BL028, BL106, BL132, BL144, BL145, BL160, BL161, BL162, BL163, BL164, BL180 | [x]      |
+| User Stories    | [user-stories.md](../../user-stories.md)       | US019, US006, US007, US008, US020, US021, US022, US023, US024                                                                | [x]      |
 
 **Rule:** Every code listed in Codes Used exists in its source artifact (verified by grep against
 each artifact above). This is a `generic-source` profile (no routes/screens); ROUTE###/SCR### are
@@ -464,14 +508,14 @@ omitted per session context rather than left as unresolved placeholders.
 
 ## Source Code References
 
-| Order | Symbol | Path | Purpose |
-|-------|--------|------|---------|
-| 1 | `MODEL014_Repository` / `GitStore` | `crates/project/src/git_store.rs:95-517` | Entity that owns all detected repos and their status/branch/stash state |
-| 2 | `GitPanel` | `crates/git_ui/src/git_panel.rs:1489-2369` | Stage/unstage, discard, commit, amend UI actions |
-| 3 | `BranchList` | `crates/git_ui/src/branch_picker.rs:37-895` | Branch checkout/create/delete UI actions |
-| 4 | `RealGitRepository` | `crates/git/src/repository.rs:1408-2405` | libgit2 + git-CLI backend for checkout/stage/stash/commit |
-| 5 | `ProjectDiff` | `crates/git_ui/src/project_diff.rs:63-140` | Project-wide combined diff view |
-| 6 | `GitGraph` | `crates/git_graph/src/git_graph.rs:898-1170` | Commit-graph visualization |
+| Order | Symbol                             | Path                                         | Purpose                                                                 |
+| ----- | ---------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------- |
+| 1     | `MODEL014_Repository` / `GitStore` | `crates/project/src/git_store.rs:95-517`     | Entity that owns all detected repos and their status/branch/stash state |
+| 2     | `GitPanel`                         | `crates/git_ui/src/git_panel.rs:1489-2369`   | Stage/unstage, discard, commit, amend UI actions                        |
+| 3     | `BranchList`                       | `crates/git_ui/src/branch_picker.rs:37-895`  | Branch checkout/create/delete UI actions                                |
+| 4     | `RealGitRepository`                | `crates/git/src/repository.rs:1408-2405`     | libgit2 + git-CLI backend for checkout/stage/stash/commit               |
+| 5     | `ProjectDiff`                      | `crates/git_ui/src/project_diff.rs:63-140`   | Project-wide combined diff view                                         |
+| 6     | `GitGraph`                         | `crates/git_graph/src/git_graph.rs:898-1170` | Commit-graph visualization                                              |
 
 ## Unresolved Questions
 
@@ -506,10 +550,10 @@ ProjectDiff / GitGraph (read) --/        |
 
 ## DB Impact per Event
 
-| Event/Endpoint | Table | Columns | Operation | Value Derivation | Source |
-|----------------|-------|---------|-----------|-------------------|--------|
-| Project Diff tab serialization (workspace close/save) | `project_diffs` | `workspace_id, item_id, diff_base` | INSERT OR REPLACE | `diff_base` is the in-memory `DiffBase` (HEAD or branch name) of the open tab | `crates/git_ui/src/project_diff.rs:1166-1184,1201-1220` |
-| Git Graph tab serialization (workspace close/save) | `git_graphs` | `workspace_id, item_id, is_open, repo_working_path` | INSERT OR REPLACE | `repo_working_path` derived from the graph's currently bound `RepositoryId`'s working directory | `crates/git_graph/src/git_graph.rs:3050-3085` (`save_git_graph`) |
+| Event/Endpoint                                        | Table           | Columns                                             | Operation         | Value Derivation                                                                                | Source                                                           |
+| ----------------------------------------------------- | --------------- | --------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Project Diff tab serialization (workspace close/save) | `project_diffs` | `workspace_id, item_id, diff_base`                  | INSERT OR REPLACE | `diff_base` is the in-memory `DiffBase` (HEAD or branch name) of the open tab                   | `crates/git_ui/src/project_diff.rs:1166-1184,1201-1220`          |
+| Git Graph tab serialization (workspace close/save)    | `git_graphs`    | `workspace_id, item_id, is_open, repo_working_path` | INSERT OR REPLACE | `repo_working_path` derived from the graph's currently bound `RepositoryId`'s working directory | `crates/git_graph/src/git_graph.rs:3050-3085` (`save_git_graph`) |
 
 Note: the actual git-history mutations themselves (stage/unstage/commit/stash/checkout/branch
 create) write to the `.git` directory on disk via the external `git`/`libgit2` process, not to

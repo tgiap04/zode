@@ -1,6 +1,7 @@
 <!-- layout-exempt: rebuild-spec owns all docs/system|features|generated|flows paths -->
 
 # F008_EditorCore: Technical Spec
+
 **Priority**: P0
 **Type**: mixed
 **Generated**: 2026-08-07
@@ -13,40 +14,40 @@ Editor Core is the text-editing surface every other panel in Zode ultimately ren
 
 ### DISC-007 — Buffer.capability
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
-| ReadWrite | Normal editable rendering; cursor/edit affordances active | `Capability::editable()` returns true (`crates/language/src/buffer.rs:86-89`); all edit actions proceed | Edits recorded in `TextBuffer.history` (undo log) and, for file-backed buffers, eventually saved to disk |
-| Read | Same visual rendering as ReadWrite, but edit calls are rejected | `editable()` returns false; `Editor::read_only(cx)` (`crates/editor/src/editor.rs:3572-3574`) short-circuits mutation methods (e.g. `crates/editor/src/editor.rs:4130,4144,4163,4785,5288,5527,10313,11211` guard on `self.read_only(cx)`) | No edit-derived writes; buffer stays unchanged |
-| ReadOnly | Same as Read for rendering | Structurally rejects edits at the API layer — same `editable()`/`read_only(cx)` gates as Read; no UI dialog on rejection (silent no-op per `docs/system/permissions.md` PERM004) | No edit-derived writes |
+| Value     | Render                                                          | Validation                                                                                                                                                                                                                                 | Persistence                                                                                              |
+| --------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| ReadWrite | Normal editable rendering; cursor/edit affordances active       | `Capability::editable()` returns true (`crates/language/src/buffer.rs:86-89`); all edit actions proceed                                                                                                                                    | Edits recorded in `TextBuffer.history` (undo log) and, for file-backed buffers, eventually saved to disk |
+| Read      | Same visual rendering as ReadWrite, but edit calls are rejected | `editable()` returns false; `Editor::read_only(cx)` (`crates/editor/src/editor.rs:3572-3574`) short-circuits mutation methods (e.g. `crates/editor/src/editor.rs:4130,4144,4163,4785,5288,5527,10313,11211` guard on `self.read_only(cx)`) | No edit-derived writes; buffer stays unchanged                                                           |
+| ReadOnly  | Same as Read for rendering                                      | Structurally rejects edits at the API layer — same `editable()`/`read_only(cx)` gates as Read; no UI dialog on rejection (silent no-op per `docs/system/permissions.md` PERM004)                                                           | No edit-derived writes                                                                                   |
 
 **Source:** `crates/language/src/buffer.rs:76-89`; consumer gates verified at `crates/editor/src/editor.rs:3564-3577`.
 
 ### DISC-008 — Buffer.parse_status
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
-| Idle | Syntax highlighting/tree-sitter-dependent features (folding, structural motions) use the current committed tree | None additional | No persistence effect |
-| Parsing | Same features fall back to the last-committed (stale) tree until the in-flight parse completes | `unverified` — exact fallback mechanics not traced in this pass beyond the field's existence at `crates/language/src/buffer.rs` (`parse_status: watch::Sender/Receiver<ParseStatus>`, referenced in data-model.md) | No persistence effect |
+| Value   | Render                                                                                                          | Validation                                                                                                                                                                                                         | Persistence           |
+| ------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- |
+| Idle    | Syntax highlighting/tree-sitter-dependent features (folding, structural motions) use the current committed tree | None additional                                                                                                                                                                                                    | No persistence effect |
+| Parsing | Same features fall back to the last-committed (stale) tree until the in-flight parse completes                  | `unverified` — exact fallback mechanics not traced in this pass beyond the field's existence at `crates/language/src/buffer.rs` (`parse_status: watch::Sender/Receiver<ParseStatus>`, referenced in data-model.md) | No persistence effect |
 
 **Source:** `crates/language/src/buffer.rs` (field declaration; exact line for `ParseStatus` enum body not individually re-verified this pass — see Unresolved Questions).
 
 ### DISC-009 — Editor.mode
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
-| SingleLine | No gutter/breadcrumbs/minimap; single-line input widget (e.g. `ProjectPanel.filename_editor`) | `mode.is_single_line()` gates soft-wrap-stop behavior in motion code (e.g. `crates/editor/src/editor.rs:15482` `!self.mode.is_single_line()`) | N/A |
-| AutoHeight { min_lines, max_lines } | Grows vertically with content between the two bounds; no full chrome | Height computed from content, clamped to bounds | N/A |
-| Full { scale_ui_elements_with_buffer_font_size, show_active_line_background, sizing_behavior } | Full chrome: gutter, breadcrumbs, minimap, active-line background per flag | Multi-line editing permitted | N/A |
-| Minimap { parent } | Renders as a zoomed-out overview bound to a parent `Editor`, not independently editable content | `unverified` — this variant exists in current source (`crates/editor/src/editor.rs:507-513`) but is not enumerated in `data-model.md`'s DISC-009 table (documents only SingleLine/AutoHeight/Full) | N/A |
+| Value                                                                                          | Render                                                                                          | Validation                                                                                                                                                                                         | Persistence |
+| ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| SingleLine                                                                                     | No gutter/breadcrumbs/minimap; single-line input widget (e.g. `ProjectPanel.filename_editor`)   | `mode.is_single_line()` gates soft-wrap-stop behavior in motion code (e.g. `crates/editor/src/editor.rs:15482` `!self.mode.is_single_line()`)                                                      | N/A         |
+| AutoHeight { min_lines, max_lines }                                                            | Grows vertically with content between the two bounds; no full chrome                            | Height computed from content, clamped to bounds                                                                                                                                                    | N/A         |
+| Full { scale_ui_elements_with_buffer_font_size, show_active_line_background, sizing_behavior } | Full chrome: gutter, breadcrumbs, minimap, active-line background per flag                      | Multi-line editing permitted                                                                                                                                                                       | N/A         |
+| Minimap { parent }                                                                             | Renders as a zoomed-out overview bound to a parent `Editor`, not independently editable content | `unverified` — this variant exists in current source (`crates/editor/src/editor.rs:507-513`) but is not enumerated in `data-model.md`'s DISC-009 table (documents only SingleLine/AutoHeight/Full) | N/A         |
 
 **Source:** `crates/editor/src/editor.rs:498-513` (enum definition, 4 variants — see discrepancy noted in Unresolved Questions: data-model.md's DISC-009 table only lists 3).
 
 ### DISC — SplittableEditor.diff_view_style (local to this feature; not a data-model.md DISC-### code — see Assumptions)
 
-| Value | Render | Validation | Persistence |
-|-------|--------|------------|-------------|
-| Unified | Single pane shows inline diff markers | `toggle_split` collapses the split via `self.unsplit(...)` if currently split | Held only on the in-memory `SplittableEditor` struct; not persisted to DB |
-| Split | Two side-by-side panes (lhs/rhs); `self.split(...)` runs unless `too_narrow_for_split` | Skips actually splitting if the pane is below the narrow-width threshold, but the style flag still flips | Same — in-memory only |
+| Value   | Render                                                                                 | Validation                                                                                               | Persistence                                                               |
+| ------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Unified | Single pane shows inline diff markers                                                  | `toggle_split` collapses the split via `self.unsplit(...)` if currently split                            | Held only on the in-memory `SplittableEditor` struct; not persisted to DB |
+| Split   | Two side-by-side panes (lhs/rhs); `self.split(...)` runs unless `too_narrow_for_split` | Skips actually splitting if the pane is below the narrow-width threshold, but the style flag still flips | Same — in-memory only                                                     |
 
 **Source:** `crates/editor/src/split.rs:869-887` (`SplittableEditor::toggle_split`); enum defined at `crates/settings_content/src/editor.rs:835-841` (`DiffViewStyle`).
 
@@ -54,12 +55,12 @@ Editor Core is the text-editing surface every other panel in Zode ultimately ren
 
 ### Requirements
 
-| Code | Description | Endpoint/Handler | Verifiable |
-|------|-------------|------------------|------------|
-| FR-001 | Register the bulk cursor/selection/edit keymap action set (`SelectNext`, `SelectPrevious`, `MoveToBeginningOfLine`, `DeleteToBeginningOfLine`, `MovePageUp`/`MovePageDown`, dozens more) via `#[derive(Action)]` under namespace `editor` | N/A (desktop keybinding, no HTTP surface) via `Editor` action handlers | yes |
-| FR-002 | Gate every edit-mutating method on `Editor`/`Buffer`/`MultiBuffer` capability (`Capability::ReadWrite` required) | N/A via `Editor::read_only(cx)` | yes |
-| FR-003 | Debounce and re-query inlay hints from the LSP semantics provider on buffer edit, scroll, settings change, or LSP server removal | N/A via `Editor::refresh_inlay_hints` | yes |
-| FR-004 | Serialize editor selections and folds to the local SQLite `EditorDb` for session restore | N/A via `Editor::serialize_selections` / `Editor::serialize` (items.rs) | yes |
+| Code   | Description                                                                                                                                                                                                                               | Endpoint/Handler                                                        | Verifiable |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------- |
+| FR-001 | Register the bulk cursor/selection/edit keymap action set (`SelectNext`, `SelectPrevious`, `MoveToBeginningOfLine`, `DeleteToBeginningOfLine`, `MovePageUp`/`MovePageDown`, dozens more) via `#[derive(Action)]` under namespace `editor` | N/A (desktop keybinding, no HTTP surface) via `Editor` action handlers  | yes        |
+| FR-002 | Gate every edit-mutating method on `Editor`/`Buffer`/`MultiBuffer` capability (`Capability::ReadWrite` required)                                                                                                                          | N/A via `Editor::read_only(cx)`                                         | yes        |
+| FR-003 | Debounce and re-query inlay hints from the LSP semantics provider on buffer edit, scroll, settings change, or LSP server removal                                                                                                          | N/A via `Editor::refresh_inlay_hints`                                   | yes        |
+| FR-004 | Serialize editor selections and folds to the local SQLite `EditorDb` for session restore                                                                                                                                                  | N/A via `Editor::serialize_selections` / `Editor::serialize` (items.rs) | yes        |
 
 **Source:** `crates/editor/src/actions.rs:1-90`; `crates/editor/src/editor.rs:3564-3577`; `crates/editor/src/inlays/inlay_hints.rs:230-241`; `crates/editor/src/persistence.rs:288-354`.
 
@@ -68,12 +69,14 @@ Editor Core is the text-editing surface every other panel in Zode ultimately ren
 _(See itemized entries below.)_
 
 ### BR-001_BufferCapabilityGatesEdits
+
 **Linked FR:** FR-002
 **Source:** `crates/language/src/buffer.rs:76-89`
 **Applies to:** every edit-mutating method on `Editor` (delete, insert, backspace, indent, etc.)
 **Rule:** A `Buffer` (and the `MultiBuffer` wrapping it) carries a `Capability` (`ReadWrite`/`Read`/`ReadOnly`). Edit operations check `Editor::read_only(cx)`, which is true if either the editor's own `read_only` flag is set OR the underlying buffer's capability is not `ReadWrite`. A rejected edit is a silent no-op — there is no user-facing dialog.
 
 **Pseudocode:**
+
 ```text
 fn read_only(editor, cx) -> bool:
     return editor.read_only OR NOT buffer(cx).capability.editable()
@@ -84,12 +87,14 @@ fn delete_to_beginning_of_line(editor, action, window, cx):
 ```
 
 ### BR-002_SplitTooNarrowSuppressesActualSplit
+
 **Linked FR:** N/A (feature-local UI rule)
 **Source:** `crates/editor/src/split.rs:869-887`
 **Applies to:** `ToggleSplitDiff` action on `SplittableEditor`
 **Rule:** Toggling from `Unified` to `Split` always flips the stored style flag, but the pane is only physically split (`self.split(...)` invoked) if `too_narrow_for_split` is false; toggling back to `Unified` always calls `self.unsplit(...)` if currently split, unconditionally.
 
 **Pseudocode:**
+
 ```text
 fn toggle_split(editor):
     match editor.diff_view_style:
@@ -100,12 +105,14 @@ fn toggle_split(editor):
 ```
 
 ### BR-003_HotExitDirtyBufferSerialization
+
 **Linked FR:** FR-004
 **Source:** `crates/editor/src/items.rs:1346-1367`
 **Applies to:** workspace-item close/quit serialization for singleton-buffer editors
 **Rule:** Dirty buffers are always serialized (even for worktree-less/scratch windows) when `BufferSerialization::All`; if the policy is `NonDirtyBuffers` and the item is closing, serialization is skipped entirely rather than partially writing state.
 
 **Pseudocode:**
+
 ```text
 fn serialize(editor, closing):
     if closing and policy == NonDirtyBuffers: return None
@@ -123,6 +130,7 @@ fn serialize(editor, closing):
 _(See itemized entries below.)_
 
 ### SM-001_ParseStatus
+
 **kind:** entity
 **Linked FR:** N/A (cross-cutting to all syntax-dependent editor features)
 **Source:** `crates/language/src/buffer.rs:120` (field declaration; enum at `crates/language/src/buffer.rs:174`; referenced in data-model.md MODEL008)
@@ -136,6 +144,7 @@ stateDiagram-v2
 ```
 
 **Transition rules:**
+
 - `Idle → Parsing`: guard = buffer content changed since last committed tree; side effect = background tree-sitter task spawned
 - `Parsing → Idle`: guard = parse task resolves; side effect = syntax-dependent consumers (folding, structural motions, inlay hints) notified to use the fresh tree
 
@@ -144,6 +153,7 @@ stateDiagram-v2
 _(See itemized entries below.)_
 
 ### ALG-001_InlayHintRefreshDecision
+
 **Linked FR:** FR-003
 **Source:** `crates/editor/src/inlays/inlay_hints.rs:230-241, 2921-2932 (behavior-logic.md BL126 cross-reference)`
 **Input:** `InlayHintRefreshReason` (one of: `ModifiersChanged`, `Toggle`, `SettingsChange`, `NewLinesShown`, `BufferEdited(BufferId)`, `ServerRemoved`, `RefreshRequested{server_id, request_id}`, `BuffersRemoved(Vec<BufferId>)`)
@@ -153,6 +163,7 @@ _(See itemized entries below.)_
 **Description:** Given the fired reason, decides whether to invalidate the entire cached hint set or only append newly-revealed hints, applies an edit-vs-scroll-specific debounce, then re-queries the LSP semantics provider for the affected buffer ranges.
 
 **Pseudocode:**
+
 ```text
 fn refresh_inlay_hints(reason):
     match reason:
@@ -166,6 +177,7 @@ fn refresh_inlay_hints(reason):
 ```
 
 ### ALG-002_CompletionMenuFuzzyFilter
+
 **Linked FR:** N/A (feature-local — completions UX)
 **Source:** `crates/editor/src/code_context_menus.rs:1156-1176`
 **Input:** current query string, candidate identifier list from the completion provider
@@ -175,6 +187,7 @@ fn refresh_inlay_hints(reason):
 **Description:** Runs candidate fuzzy-matching against the query on `cx.background_executor()`, returning a cancellable `Task<Vec<StringMatch>>` so keystroke-driven re-filtering never blocks typing.
 
 **Pseudocode:**
+
 ```text
 fn do_async_filtering(query, query_end, buffer):
     snapshot = buffer.snapshot()
@@ -187,7 +200,7 @@ fn do_async_filtering(query, query_end, buffer):
 
 ### External Integrations
 
-`N/A — no external (network/API) integrations in Editor Core proper; LSP semantics/completion providers are pluggable in-process traits (`CompletionProvider`, `SemanticsProvider` on `Editor`, MODEL010) consumed via Diagnostics/Language Intelligence features, not owned here.`
+`N/A — no external (network/API) integrations in Editor Core proper; LSP semantics/completion providers are pluggable in-process traits (`CompletionProvider`, `SemanticsProvider`on`Editor`, MODEL010) consumed via Diagnostics/Language Intelligence features, not owned here.`
 
 ### Verification
 
@@ -217,12 +230,14 @@ fn do_async_filtering(query, query_end, buffer):
 2. **Given** the viewport is scrolled to a specific position, **When** the developer triggers `MovePageUp`/`MovePageDown`, **Then** the cursor stays within the newly-visible viewport bounds.
 
 **Requirements fulfilled:**
+
 - **FR-001** Register cursor motion actions — via `Editor::move_to_beginning_of_line`
   **Source:** `crates/editor/src/editor.rs:15476-15497`
 
 **Rules enforced:** BR-001 (applies — motions never mutate text, so the capability gate is not exercised on this path, but the same `Editor` struct is shared with edit paths that are gated)
 
 **Verification:**
+
 - **SC-004** Motion actions never alter `MultiBuffer` content (covers FR-001)
 
 ---
@@ -239,12 +254,14 @@ fn do_async_filtering(query, query_end, buffer):
 2. **Given** an active multi-occurrence selection state, **When** the developer triggers `SelectPrevious`, **Then** the newest selection is walked backward symmetrically.
 
 **Requirements fulfilled:**
+
 - **FR-001** `SelectNext`/`SelectPrevious` actions — via `Editor::select_next` / `Editor::select_previous`
   **Source:** `crates/editor/src/editor.rs:16616-16654`
 
 **Rules enforced:** BR-001 (see US001) — selection extension does not mutate text either, same non-gated path.
 
 **Verification:**
+
 - **SC-005** `SelectNext` result set strictly grows by one selection per invocation until no further matches exist (covers FR-001)
 
 ---
@@ -261,6 +278,7 @@ fn do_async_filtering(query, query_end, buffer):
 2. **Given** the buffer's `Capability` is not `ReadWrite`, **When** the developer triggers `DeleteToBeginningOfLine`, **Then** nothing is deleted (BR-001 gate).
 
 **Requirements fulfilled:**
+
 - **FR-001** `DeleteToBeginningOfLine` action — via `Editor::delete_to_beginning_of_line`
   **Source:** `crates/editor/src/editor.rs:15522-15546`
 - **FR-002** Capability gate applied before any mutation proceeds
@@ -269,12 +287,14 @@ fn do_async_filtering(query, query_end, buffer):
 **Rules enforced:**
 
 ### BR-004_DeleteIsSingleTransaction
+
 **Linked FR:** FR-001
 **Source:** `crates/editor/src/editor.rs:15522-15546`
 **Applies to:** `DeleteToBeginningOfLine`
 **Rule:** The reverse-selection, extend-to-boundary, and backspace steps are wrapped in one `self.transact(...)` block, so `Undo` reverts the entire deletion atomically rather than in three separate undo steps.
 
 **Pseudocode:**
+
 ```text
 fn delete_to_beginning_of_line(editor, action):
     editor.transact(|this| {
@@ -285,6 +305,7 @@ fn delete_to_beginning_of_line(editor, action):
 ```
 
 **Verification:**
+
 - **SC-006** A single `Undo` after `DeleteToBeginningOfLine` fully restores the deleted text (covers FR-001, BR-004)
 - **SC-007** No deletion occurs when the buffer is not `ReadWrite` (covers FR-002, BR-001)
 
@@ -302,45 +323,47 @@ fn delete_to_beginning_of_line(editor, action):
 2. **Given** a split editor currently split (`Split` style), **When** the developer triggers `ToggleSplitDiff` again, **Then** `diff_view_style` reverts to `Unified` and the split collapses if one exists.
 
 **Requirements fulfilled:**
+
 - **FR-001** `ToggleSplitDiff` action — via `SplittableEditor::toggle_split`
   **Source:** `crates/editor/src/split.rs:869-887`
 
 **Rules enforced:** BR-002_SplitTooNarrowSuppressesActualSplit (see Cross-Cutting Logic)
 
 **Verification:**
+
 - **SC-008** Toggling twice returns `diff_view_style` to its original value and, if the pane started unsplit, ends unsplit again (covers FR-001, BR-002)
 
 ### Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Edit attempted on a `Read`/`ReadOnly` buffer | `Editor::read_only(cx)` returns true; the mutating method returns early with no buffer change and no error dialog (silent no-op per PERM004) |
-| `ToggleSplitDiff` triggered while pane width is below `too_narrow_for_split` threshold | `diff_view_style` flag still flips to `Split`, but `self.split(...)` is skipped — UI stays single-pane despite the internal style now being `Split` |
-| `SelectNext` triggered with no further occurrences of the current selection in the buffer | `select_next_match_internal` returns without adding a new selection (existing selection set unchanged) — `unverified` exact no-match return value; confirmed only that the function signature returns `Result<()>` |
-| Inlay hints refresh fires with `BufferEdited` while a prior refresh for the same buffer is still debounced | Later `InlayHintRefreshReason` supersedes the pending debounce timer per BL126 description ("debounces (edit vs scroll debounce)") — exact cancel-vs-coalesce semantics not traced to source line level this pass |
+| Scenario                                                                                                   | Behavior                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Edit attempted on a `Read`/`ReadOnly` buffer                                                               | `Editor::read_only(cx)` returns true; the mutating method returns early with no buffer change and no error dialog (silent no-op per PERM004)                                                                       |
+| `ToggleSplitDiff` triggered while pane width is below `too_narrow_for_split` threshold                     | `diff_view_style` flag still flips to `Split`, but `self.split(...)` is skipped — UI stays single-pane despite the internal style now being `Split`                                                                |
+| `SelectNext` triggered with no further occurrences of the current selection in the buffer                  | `select_next_match_internal` returns without adding a new selection (existing selection set unchanged) — `unverified` exact no-match return value; confirmed only that the function signature returns `Result<()>` |
+| Inlay hints refresh fires with `BufferEdited` while a prior refresh for the same buffer is still debounced | Later `InlayHintRefreshReason` supersedes the pending debounce timer per BL126 description ("debounces (edit vs scroll debounce)") — exact cancel-vs-coalesce semantics not traced to source line level this pass  |
 
 ## Key Entities
 
-| Entity | Table | Key Columns | Purpose |
-|--------|-------|-------------|---------|
-| TextBuffer (MODEL007) | N/A — in-memory CRDT rope, not a DB table | `snapshot`, `history`, `lamport_clock`, `BufferId` | Raw undoable/replicated text storage every `Buffer` wraps |
-| Buffer (MODEL008) | N/A — in-memory; persisted indirectly via `editors` table (contents/language columns) | `capability`, `parse_status`, `diagnostics`, `file` | Language-aware text + syntax + diagnostics layer the Editor renders |
-| MultiBuffer (MODEL009) | N/A — in-memory | `buffers` (BTreeMap<BufferId,BufferState>), `singleton`, `capability` | Combines one-or-more Buffer excerpts into one addressable view; every Editor owns exactly one |
-| Editor (MODEL010) | `editors`, `editor_selections`, `editor_folds`, `file_folds` (SQLite, via `EditorDb`) | `item_id`, `workspace_id`, `path`, `contents`, `scroll_top_row`, selection `start`/`end`, fold `start`/`end` | The visual editor view; source of the session-restore DB writes covered below |
-| Pane (MODEL011) | N/A — in-memory; item metadata persisted via each `Item::serialize` impl (Editor's included) | `items`, `active_item_index`, `preview_item_id` | Tab-strip container hosting `Editor` (and other `Item`) instances |
+| Entity                 | Table                                                                                        | Key Columns                                                                                                  | Purpose                                                                                       |
+| ---------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| TextBuffer (MODEL007)  | N/A — in-memory CRDT rope, not a DB table                                                    | `snapshot`, `history`, `lamport_clock`, `BufferId`                                                           | Raw undoable/replicated text storage every `Buffer` wraps                                     |
+| Buffer (MODEL008)      | N/A — in-memory; persisted indirectly via `editors` table (contents/language columns)        | `capability`, `parse_status`, `diagnostics`, `file`                                                          | Language-aware text + syntax + diagnostics layer the Editor renders                           |
+| MultiBuffer (MODEL009) | N/A — in-memory                                                                              | `buffers` (BTreeMap<BufferId,BufferState>), `singleton`, `capability`                                        | Combines one-or-more Buffer excerpts into one addressable view; every Editor owns exactly one |
+| Editor (MODEL010)      | `editors`, `editor_selections`, `editor_folds`, `file_folds` (SQLite, via `EditorDb`)        | `item_id`, `workspace_id`, `path`, `contents`, `scroll_top_row`, selection `start`/`end`, fold `start`/`end` | The visual editor view; source of the session-restore DB writes covered below                 |
+| Pane (MODEL011)        | N/A — in-memory; item metadata persisted via each `Item::serialize` impl (Editor's included) | `items`, `active_item_index`, `preview_item_id`                                                              | Tab-strip container hosting `Editor` (and other `Item`) instances                             |
 
 ## Artifact References
 
-| Artifact | File | Codes Used | Reviewed |
-|----------|------|------------|----------|
-| System Overview | [system-overview.md](../../system-overview.md) | — | [x] |
-| Architecture | N/A (not read this pass — see Unresolved Questions) | — | [ ] |
-| Feature List | [feature-list.md](../../feature-list.md) | F008_EditorCore | [x] |
-| Entities | [data-model.md](../../data-model.md) | MODEL006, MODEL007, MODEL008, MODEL009, MODEL010, MODEL011 | [x] |
-| Screens | N/A — `generic-source` profile, no screen-list upstream | — | [ ] |
-| Behavior Logic | [behavior-logic.md](../../behavior-logic.md) | BL013, BL014, BL015, BL044, BL126, BL153, BL154, BL155, BL156, BL176, BL181, BL200, BL030, BL052, BL002, BL031, BL045, BL046, BL064, BL165, BL166, BL171, BL172 | [x] |
-| Permissions Matrix | [permissions-matrix.md](../../permissions-matrix.md) | PERM004 | [x] |
-| User Stories | [user-stories.md](../../user-stories.md) | US001, US009, US010, US011 | [x] |
+| Artifact           | File                                                    | Codes Used                                                                                                                                                      | Reviewed |
+| ------------------ | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| System Overview    | [system-overview.md](../../system-overview.md)          | —                                                                                                                                                               | [x]      |
+| Architecture       | N/A (not read this pass — see Unresolved Questions)     | —                                                                                                                                                               | [ ]      |
+| Feature List       | [feature-list.md](../../feature-list.md)                | F008_EditorCore                                                                                                                                                 | [x]      |
+| Entities           | [data-model.md](../../data-model.md)                    | MODEL006, MODEL007, MODEL008, MODEL009, MODEL010, MODEL011                                                                                                      | [x]      |
+| Screens            | N/A — `generic-source` profile, no screen-list upstream | —                                                                                                                                                               | [ ]      |
+| Behavior Logic     | [behavior-logic.md](../../behavior-logic.md)            | BL013, BL014, BL015, BL044, BL126, BL153, BL154, BL155, BL156, BL176, BL181, BL200, BL030, BL052, BL002, BL031, BL045, BL046, BL064, BL165, BL166, BL171, BL172 | [x]      |
+| Permissions Matrix | [permissions-matrix.md](../../permissions-matrix.md)    | PERM004                                                                                                                                                         | [x]      |
+| User Stories       | [user-stories.md](../../user-stories.md)                | US001, US009, US010, US011                                                                                                                                      | [x]      |
 
 **Rule:** Every code listed in Codes Used MUST exist in its source artifact. Orphan refs = reviewer critical.
 
@@ -352,18 +375,18 @@ fn delete_to_beginning_of_line(editor, action):
 
 ## Source Code References
 
-| Order | Symbol | Path | Purpose |
-|-------|--------|------|---------|
-| 1 | `Capability` enum | `crates/language/src/buffer.rs:76-89` | Read/write gate every edit operation checks |
-| 2 | `Buffer` struct | `crates/language/src/buffer.rs:98-` | Language-aware text/syntax/diagnostics layer |
-| 3 | `MultiBuffer` struct | `crates/multi_buffer/src/multi_buffer.rs:73-` | Excerpt-combining view backing every Editor |
-| 4 | `Editor` struct + `EditorMode` | `crates/editor/src/editor.rs:1131`, `:498-513` | The visual editor view and its 4 rendering modes |
-| 5 | Editor core actions | `crates/editor/src/actions.rs:1-90` | `SelectNext`/`SelectPrevious`/`MoveToBeginningOfLine`/`DeleteToBeginningOfLine`/`MovePageUp`/`MovePageDown` action structs |
-| 6 | Motion/selection/delete handlers | `crates/editor/src/editor.rs:15476-15546, 16616-16654` | Implementation of the US001/US009/US010 actions |
-| 7 | `SplittableEditor` + `ToggleSplitDiff` | `crates/editor/src/split.rs:400-418, 869-887` | US011 split-diff toggle |
-| 8 | `EditorDb` persistence | `crates/editor/src/persistence.rs:130-360` | Session-restore SQLite schema + selection/fold save/load queries |
-| 9 | Inlay hint refresh | `crates/editor/src/inlays/inlay_hints.rs:230-241` | `InlayHintRefreshReason` and the refresh decision (BL126) |
-| 10 | Completion filtering | `crates/editor/src/code_context_menus.rs:1156-1176` | Background fuzzy-match for completion menu (BL153) |
+| Order | Symbol                                 | Path                                                   | Purpose                                                                                                                    |
+| ----- | -------------------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| 1     | `Capability` enum                      | `crates/language/src/buffer.rs:76-89`                  | Read/write gate every edit operation checks                                                                                |
+| 2     | `Buffer` struct                        | `crates/language/src/buffer.rs:98-`                    | Language-aware text/syntax/diagnostics layer                                                                               |
+| 3     | `MultiBuffer` struct                   | `crates/multi_buffer/src/multi_buffer.rs:73-`          | Excerpt-combining view backing every Editor                                                                                |
+| 4     | `Editor` struct + `EditorMode`         | `crates/editor/src/editor.rs:1131`, `:498-513`         | The visual editor view and its 4 rendering modes                                                                           |
+| 5     | Editor core actions                    | `crates/editor/src/actions.rs:1-90`                    | `SelectNext`/`SelectPrevious`/`MoveToBeginningOfLine`/`DeleteToBeginningOfLine`/`MovePageUp`/`MovePageDown` action structs |
+| 6     | Motion/selection/delete handlers       | `crates/editor/src/editor.rs:15476-15546, 16616-16654` | Implementation of the US001/US009/US010 actions                                                                            |
+| 7     | `SplittableEditor` + `ToggleSplitDiff` | `crates/editor/src/split.rs:400-418, 869-887`          | US011 split-diff toggle                                                                                                    |
+| 8     | `EditorDb` persistence                 | `crates/editor/src/persistence.rs:130-360`             | Session-restore SQLite schema + selection/fold save/load queries                                                           |
+| 9     | Inlay hint refresh                     | `crates/editor/src/inlays/inlay_hints.rs:230-241`      | `InlayHintRefreshReason` and the refresh decision (BL126)                                                                  |
+| 10    | Completion filtering                   | `crates/editor/src/code_context_menus.rs:1156-1176`    | Background fuzzy-match for completion menu (BL153)                                                                         |
 
 ## Unresolved Questions
 
@@ -398,9 +421,9 @@ keymap.json binding -> Action dispatch (e.g. DeleteToBeginningOfLine)
 
 ## DB Impact per Event
 
-| Event/Endpoint | Table | Columns | Operation | Value Derivation | Source |
-|----------------|-------|---------|-----------|-------------------|--------|
-| Editor item serialize (tab close / workspace flush, BL155) | `editors` | `item_id, workspace_id, path, buffer_path, contents, language, mtime_seconds, mtime_nanos` | INSERT ... ON CONFLICT DO UPDATE | `contents`/`language` from the live dirty buffer snapshot; `mtime_*` from `buffer.saved_mtime()`; `path`/`buffer_path` from the resolved absolute file path | `crates/editor/src/persistence.rs:244-260` |
-| Selection change debounce-flush (BL154) | `editor_selections` | `editor_id, workspace_id, start, end` | DELETE (existing rows for editor_id/workspace_id) then INSERT OR IGNORE (batched) | `start`/`end` are the current `Selections` collection's offsets, chunked to respect `MAX_QUERY_PLACEHOLDERS` | `crates/editor/src/persistence.rs:322-354` |
-| Fold state change for file-backed buffer (BL155/items.rs serialize) | `editor_folds`, `file_folds` | `item_id/editor_id/workspace_id, start, end, start_fingerprint, end_fingerprint` (editor_folds); `workspace_id, path, start, end, start_fingerprint, end_fingerprint` (file_folds) | INSERT | Fold ranges taken from the editor's current fold state at serialize time; fingerprints computed for drift-tolerant restore | `crates/editor/src/persistence.rs:193-224` (schema); write-site query not individually re-verified — `[INFERRED]` for the exact save call |
-| Scroll position persist | `editors` | `scroll_top_row, scroll_horizontal_offset, scroll_vertical_offset` | UPDATE OR IGNORE | Current viewport scroll state at time of save | `crates/editor/src/persistence.rs:271-286` |
+| Event/Endpoint                                                      | Table                        | Columns                                                                                                                                                                            | Operation                                                                         | Value Derivation                                                                                                                                            | Source                                                                                                                                    |
+| ------------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Editor item serialize (tab close / workspace flush, BL155)          | `editors`                    | `item_id, workspace_id, path, buffer_path, contents, language, mtime_seconds, mtime_nanos`                                                                                         | INSERT ... ON CONFLICT DO UPDATE                                                  | `contents`/`language` from the live dirty buffer snapshot; `mtime_*` from `buffer.saved_mtime()`; `path`/`buffer_path` from the resolved absolute file path | `crates/editor/src/persistence.rs:244-260`                                                                                                |
+| Selection change debounce-flush (BL154)                             | `editor_selections`          | `editor_id, workspace_id, start, end`                                                                                                                                              | DELETE (existing rows for editor_id/workspace_id) then INSERT OR IGNORE (batched) | `start`/`end` are the current `Selections` collection's offsets, chunked to respect `MAX_QUERY_PLACEHOLDERS`                                                | `crates/editor/src/persistence.rs:322-354`                                                                                                |
+| Fold state change for file-backed buffer (BL155/items.rs serialize) | `editor_folds`, `file_folds` | `item_id/editor_id/workspace_id, start, end, start_fingerprint, end_fingerprint` (editor_folds); `workspace_id, path, start, end, start_fingerprint, end_fingerprint` (file_folds) | INSERT                                                                            | Fold ranges taken from the editor's current fold state at serialize time; fingerprints computed for drift-tolerant restore                                  | `crates/editor/src/persistence.rs:193-224` (schema); write-site query not individually re-verified — `[INFERRED]` for the exact save call |
+| Scroll position persist                                             | `editors`                    | `scroll_top_row, scroll_horizontal_offset, scroll_vertical_offset`                                                                                                                 | UPDATE OR IGNORE                                                                  | Current viewport scroll state at time of save                                                                                                               | `crates/editor/src/persistence.rs:271-286`                                                                                                |

@@ -1,4 +1,5 @@
 # F002_LanguageIntelligence: Technical Spec
+
 **Priority**: P0
 **Type**: mixed
 **Generated**: 2026-08-07
@@ -15,12 +16,12 @@ N/A — no discriminator fields in Key Entities. `MODEL017_LanguageServer` has n
 
 ### Requirements
 
-| Code | Description | Endpoint/Handler | Verifiable |
-|------|-------------|-------------------|------------|
-| FR-001 | A worktree only gets a language server once trusted AND a buffer in that language is opened/reassigned | `LspStore::start_language_server` | yes |
-| FR-002 | Language-server processes communicate over `Content-Length:`-framed JSON-RPC on stdio and are killed on drop | `LanguageServer::new` | yes |
-| FR-003 | Server shutdown is graceful with a fixed timeout before a hard kill | `LanguageServer` (constant) | yes |
-| FR-004 | Toolchain selection is persisted to the per-workspace SQLite database and re-applied to the active project | `ToolchainSelectorDelegate::confirm` → `WorkspaceDb::set_toolchain` | yes |
+| Code   | Description                                                                                                  | Endpoint/Handler                                                    | Verifiable |
+| ------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- | ---------- |
+| FR-001 | A worktree only gets a language server once trusted AND a buffer in that language is opened/reassigned       | `LspStore::start_language_server`                                   | yes        |
+| FR-002 | Language-server processes communicate over `Content-Length:`-framed JSON-RPC on stdio and are killed on drop | `LanguageServer::new`                                               | yes        |
+| FR-003 | Server shutdown is graceful with a fixed timeout before a hard kill                                          | `LanguageServer` (constant)                                         | yes        |
+| FR-004 | Toolchain selection is persisted to the per-workspace SQLite database and re-applied to the active project   | `ToolchainSelectorDelegate::confirm` → `WorkspaceDb::set_toolchain` | yes        |
 
 **Source:** `crates/project/src/lsp_store.rs:423-500`, `crates/lsp/src/lsp.rs:61,1098-1105`, `crates/toolchain_selector/src/toolchain_selector.rs:909-951`
 
@@ -29,12 +30,14 @@ N/A — no discriminator fields in Key Entities. `MODEL017_LanguageServer` has n
 _(See itemized entries below.)_
 
 ### BR-001_WorktreeTrustGatesServerSpawn
+
 **Linked FR:** FR-001
 **Source:** `crates/project/src/lsp_store.rs:448-486`
 **Applies to:** `LspStore::start_language_server`
 **Rule:** If the worktree is not yet trusted (`TrustedWorktrees::can_trust` returns false), the binary lookup/spawn is deferred behind a `watch` channel keyed by `worktree_id`; a subscription resolves the deferral once a `TrustedWorktreesEvent::Trusted` event includes that worktree's path. Only once trust resolves does `get_language_server_binary` run and the process actually spawn.
 
 **Pseudocode:**
+
 ```text
 fn start_language_server(worktree, adapter, ...):
     if not TrustedWorktrees.can_trust(worktree_id):
@@ -45,12 +48,14 @@ fn start_language_server(worktree, adapter, ...):
 ```
 
 ### BR-002_GracefulShutdownWithHardKillFallback
+
 **Linked FR:** FR-003
 **Source:** `crates/lsp/src/lsp.rs:61,1090-1110`
 **Applies to:** `LanguageServer` shutdown path
 **Rule:** On shutdown, the server is given `SERVER_SHUTDOWN_TIMEOUT` (5 seconds, `crates/lsp/src/lsp.rs:61`) to exit gracefully via the LSP `shutdown`/`exit` handshake; if the timer elapses first, the child process is killed forcibly.
 
 **Pseudocode:**
+
 ```text
 send_shutdown_and_exit_notifications()
 race:
@@ -60,12 +65,14 @@ if timer wins: child_process.kill()
 ```
 
 ### BR-003_ToolchainChoicePersistsAndReactivates
+
 **Linked FR:** FR-004
 **Source:** `crates/toolchain_selector/src/toolchain_selector.rs:909-951`, `crates/workspace/src/persistence.rs:2388-2423`
 **Applies to:** `ToolchainSelectorDelegate::confirm`
 **Rule:** Confirming a toolchain in the picker only proceeds if the workspace has a `database_id`; it writes an upsert (`INSERT ... ON CONFLICT DO UPDATE`) into the `toolchains` table keyed by `(workspace_id, worktree_root_path, relative_worktree_path, language_name)`, then calls `Project::activate_toolchain` to apply it live. A database write failure is logged (`.log_err()`) but does not block toolchain activation.
 
 **Pseudocode:**
+
 ```text
 on confirm(selected_toolchain):
   if workspace.database_id is None: return  # no-op, dismiss only
@@ -74,12 +81,14 @@ on confirm(selected_toolchain):
 ```
 
 ### BR-004_LanguageOverrideFailsSilentlyOnLookupError
+
 **Linked FR:** N/A (UI-only correction path)
 **Source:** `crates/language_selector/src/language_selector.rs:209-227`
 **Applies to:** `LanguageSelectorDelegate::confirm`
 **Rule:** Selecting a language resolves it via `LanguageRegistry::language_for_name` (async — may involve loading a grammar); if that resolution errors (project or buffer dropped, language load failure), the error is logged via `detach_and_log_err` and no language change is applied — the buffer keeps its prior language.
 
 **Pseudocode:**
+
 ```text
 on confirm(selected_language_name):
   spawn:
@@ -105,6 +114,7 @@ None.
 _(See itemized entries below.)_
 
 ### INT-001_VueLanguageServerTsServerBridge
+
 **Linked FR:** N/A (cross-cutting protocol bridge)
 **Source:** `crates/project/src/lsp_store/vue_language_server_ext.rs:1-133` (full file; per `behavior-logic.md:2507-2532`, `BL111_VueLanguageServerTsServerBridge`)
 **Type:** event-publish (LSP custom notification proxy)
@@ -114,6 +124,7 @@ _(See itemized entries below.)_
 **Failure handling:** if no sibling TS server is registered under `LspStore.language_server_ids` for that worktree, the forward silently has nothing to route to (no error surfaced to the Vue server; behavior documented, not independently verified beyond the BL entry)
 
 **Pseudocode:**
+
 ```text
 on vue_server.notification("tsserver/request", params):
   ts_server = lsp_store.find_running_server_by_name(worktree, "vtsls" | "typescript-language-server")
@@ -121,6 +132,7 @@ on vue_server.notification("tsserver/request", params):
 ```
 
 ### INT-002_PrettierProcessAsFormatterServer
+
 **Linked FR:** N/A
 **Source:** `crates/project/src/prettier_store.rs:336-420`
 **Type:** queue-job (background process lifecycle, not a network call)
@@ -130,6 +142,7 @@ on vue_server.notification("tsserver/request", params):
 **Failure handling:** if the default-Prettier install task fails, the attempt counter increments and `anyhow::bail!` propagates a formatted error ("Cannot start default prettier due to its installation failure: …") to the formatting caller
 
 **Pseudocode:**
+
 ```text
 if default_prettier.state == NotInstalled:
   await installation_task
@@ -166,6 +179,7 @@ else:
 1. **Given** two Python interpreters are detected for the project, **When** the developer selects the non-default one from the toolchain picker, **Then** the Python language server reconfigures to use the selected interpreter and the choice is persisted for that worktree path.
 
 **Requirements fulfilled:**
+
 - **FR-004** Toolchain selection persists to `toolchains` table and reactivates — via `BL073_ToolchainSelectorActions`
   **Source:** `crates/toolchain_selector/src/toolchain_selector.rs:909-951`
 
@@ -174,6 +188,7 @@ else:
 ### BR-003 (see Cross-Cutting Logic) — applies directly to this US's confirm handler.
 
 **Verification:**
+
 - **SC-003** (covers FR-004, BR-003)
 
 ---
@@ -189,12 +204,14 @@ else:
 1. **Given** a `.txt` file actually contains Rust code, **When** the developer sets its language to Rust via the status-bar selector, **Then** Rust syntax highlighting and the Rust language server activate for that buffer.
 
 **Requirements fulfilled:**
+
 - **FR-005** Buffer language reassignment invokes `Project::set_language_for_buffer` after async grammar resolution — via `Toggle` action
   **Source:** `crates/language_selector/src/language_selector.rs:209-227`
 
 **Rules enforced:** BR-004_LanguageOverrideFailsSilentlyOnLookupError (see Cross-Cutting Logic).
 
 **Verification:**
+
 - **SC-004** Selecting a language in the picker results in `Buffer.language` changing to the selected grammar within the same render pass (covers FR-005, BR-004)
 
 ---
@@ -210,49 +227,51 @@ else:
 1. **Given** the rust-analyzer process for a project has become unresponsive, **When** the developer triggers "Restart Language Servers", **Then** rust-analyzer respawns and diagnostics resume within the affected buffers.
 
 **Requirements fulfilled:**
+
 - **FR-002** Server processes are torn down and re-initialized on restart — via `LspStore::restart_language_servers_for_buffers`
   **Source:** `crates/project/src/lsp_store.rs:11717-11766`
 
 **Rules enforced:** BR-002_GracefulShutdownWithHardKillFallback (see Cross-Cutting Logic) — applies to the teardown half of restart.
 
 **Verification:**
+
 - **SC-002** (covers FR-002, US051)
 
 ---
 
 ### Edge Cases
 
-| Scenario | Behavior |
-|----------|----------|
-| Toolchain confirmed while workspace has no `database_id` yet | The picker skips the DB write entirely and only dismisses — `crates/toolchain_selector/src/toolchain_selector.rs:912-917` |
-| `db.set_toolchain` fails (e.g. locked/corrupt DB) | Error is swallowed via `.log_err()`; `activate_toolchain` still runs against the in-memory project so the session's behavior is correct even though persistence silently failed — `crates/workspace/src/persistence.rs:2388-2423` |
-| Selected language fails to load (`language_for_name` errors) | Error is logged via `detach_and_log_err`; buffer's language is left unchanged, no dialog shown — `crates/language_selector/src/language_selector.rs:215-224` |
-| Worktree not yet trusted when a buffer needing a server is opened | Server spawn is deferred on a `watch` channel until a `TrustedWorktreesEvent::Trusted` event covers that worktree; no server process exists in the interim — `crates/project/src/lsp_store.rs:448-486` |
-| Restart requested while connected to a remote project | Restart is proxied as a `proto::RestartLanguageServers` RPC to the remote host rather than torn down locally — `crates/project/src/lsp_store.rs:11723-11752` |
-| Default Prettier install fails | `install_default_prettier`'s failure increments an attempt counter and `bail!`s a formatted error string up to the formatting caller rather than retrying silently — `crates/project/src/prettier_store.rs:352-373` |
+| Scenario                                                          | Behavior                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Toolchain confirmed while workspace has no `database_id` yet      | The picker skips the DB write entirely and only dismisses — `crates/toolchain_selector/src/toolchain_selector.rs:912-917`                                                                                                         |
+| `db.set_toolchain` fails (e.g. locked/corrupt DB)                 | Error is swallowed via `.log_err()`; `activate_toolchain` still runs against the in-memory project so the session's behavior is correct even though persistence silently failed — `crates/workspace/src/persistence.rs:2388-2423` |
+| Selected language fails to load (`language_for_name` errors)      | Error is logged via `detach_and_log_err`; buffer's language is left unchanged, no dialog shown — `crates/language_selector/src/language_selector.rs:215-224`                                                                      |
+| Worktree not yet trusted when a buffer needing a server is opened | Server spawn is deferred on a `watch` channel until a `TrustedWorktreesEvent::Trusted` event covers that worktree; no server process exists in the interim — `crates/project/src/lsp_store.rs:448-486`                            |
+| Restart requested while connected to a remote project             | Restart is proxied as a `proto::RestartLanguageServers` RPC to the remote host rather than torn down locally — `crates/project/src/lsp_store.rs:11723-11752`                                                                      |
+| Default Prettier install fails                                    | `install_default_prettier`'s failure increments an attempt counter and `bail!`s a formatted error string up to the formatting caller rather than retrying silently — `crates/project/src/prettier_store.rs:352-373`               |
 
 ## Key Entities
 
-| Entity | Table | Key Columns | Purpose |
-|--------|-------|--------------|---------|
-| LanguageServer | *(in-memory only, no DB table)* | server_id, name, binary, capabilities, server (Child handle) | The running LSP process and JSON-RPC channel this feature spawns/supervises — `crates/lsp/src/lsp.rs:99` |
-| Toolchain (persisted selection) | `toolchains` | workspace_id, worktree_root_path, relative_worktree_path, language_name, name, path, raw_json | Per-worktree, per-language toolchain override selected via US049 — `crates/workspace/src/persistence.rs:2401-2419` |
-| user_toolchains | `user_toolchains` | remote_connection_id, workspace_id, relative_worktree_path, language_name, name, path, raw_json | Companion table (schema migration at `crates/workspace/src/persistence.rs:954-1017`) tracking toolchain choices scoped by remote connection; read/written by the same toolchain-persistence path |
+| Entity                          | Table                           | Key Columns                                                                                     | Purpose                                                                                                                                                                                          |
+| ------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| LanguageServer                  | _(in-memory only, no DB table)_ | server_id, name, binary, capabilities, server (Child handle)                                    | The running LSP process and JSON-RPC channel this feature spawns/supervises — `crates/lsp/src/lsp.rs:99`                                                                                         |
+| Toolchain (persisted selection) | `toolchains`                    | workspace_id, worktree_root_path, relative_worktree_path, language_name, name, path, raw_json   | Per-worktree, per-language toolchain override selected via US049 — `crates/workspace/src/persistence.rs:2401-2419`                                                                               |
+| user_toolchains                 | `user_toolchains`               | remote_connection_id, workspace_id, relative_worktree_path, language_name, name, path, raw_json | Companion table (schema migration at `crates/workspace/src/persistence.rs:954-1017`) tracking toolchain choices scoped by remote connection; read/written by the same toolchain-persistence path |
 
 **Note:** `MODEL017_LanguageServer` (`data-model.md:587-611`) is process/session state, not a persisted database row — the only DB-backed entity this feature owns is the `toolchains`/`user_toolchains` pair.
 
 ## Artifact References
 
-| Artifact | File | Codes Used | Reviewed |
-|----------|------|------------|----------|
-| System Overview | [system-overview.md](../../system-overview.md) | — | [x] |
-| Architecture | [architecture.md](../../architecture.md) | — | [x] |
-| Feature List | [feature-list.md](../../feature-list.md) | F002 | [x] |
-| Entities | [entities.md](../../entities.md) | MODEL017 | [x] |
-| Screens | [screens.md](./screens.md) | N/A (no SCR### in this profile) | [x] |
-| Behavior Logic | [behavior-logic.md](../../behavior-logic.md) | BL038, BL039, BL041, BL042, BL043, BL050, BL058, BL073, BL107, BL108, BL109, BL110, BL111, BL112, BL115, BL116, BL131, BL136, BL142, BL170, BL175, BL182, BL183, BL184, BL190, BL191, BL192 | [x] |
-| Permissions Matrix | [permissions-matrix.md](../../permissions-matrix.md) | N/A — no PERM### rows reference Language Intelligence | [x] |
-| User Stories | [user-stories.md](../../user-stories.md) | US049, US050, US051 | [x] |
+| Artifact           | File                                                 | Codes Used                                                                                                                                                                                  | Reviewed |
+| ------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| System Overview    | [system-overview.md](../../system-overview.md)       | —                                                                                                                                                                                           | [x]      |
+| Architecture       | [architecture.md](../../architecture.md)             | —                                                                                                                                                                                           | [x]      |
+| Feature List       | [feature-list.md](../../feature-list.md)             | F002                                                                                                                                                                                        | [x]      |
+| Entities           | [entities.md](../../entities.md)                     | MODEL017                                                                                                                                                                                    | [x]      |
+| Screens            | [screens.md](./screens.md)                           | N/A (no SCR### in this profile)                                                                                                                                                             | [x]      |
+| Behavior Logic     | [behavior-logic.md](../../behavior-logic.md)         | BL038, BL039, BL041, BL042, BL043, BL050, BL058, BL073, BL107, BL108, BL109, BL110, BL111, BL112, BL115, BL116, BL131, BL136, BL142, BL170, BL175, BL182, BL183, BL184, BL190, BL191, BL192 | [x]      |
+| Permissions Matrix | [permissions-matrix.md](../../permissions-matrix.md) | N/A — no PERM### rows reference Language Intelligence                                                                                                                                       | [x]      |
+| User Stories       | [user-stories.md](../../user-stories.md)             | US049, US050, US051                                                                                                                                                                         | [x]      |
 
 **Rule:** Every code listed in Codes Used exists in its source artifact. This `generic-source` profile has no `route-list.md`/`screen-list.md` — the `API Map`/`Screens` rows above are adapted accordingly (no ROUTE###/SCR### fabricated).
 
@@ -264,15 +283,15 @@ else:
 
 ## Source Code References
 
-| Order | Symbol | Path | Purpose |
-|-------|--------|------|---------|
-| 1 | `LanguageServer` (struct) | `crates/lsp/src/lsp.rs:99` | Entity definition — one running LSP process + JSON-RPC channel |
-| 2 | `LspStore::start_language_server` | `crates/project/src/lsp_store.rs:423-500` | Entry point — decides when/whether to spawn a server for a worktree+language, gated by trust |
-| 3 | `LspStore::restart_language_servers_for_buffers` | `crates/project/src/lsp_store.rs:11717-11766` | Restart flow — local teardown+respawn vs. remote RPC proxy |
-| 4 | `ToolchainSelectorDelegate::confirm` | `crates/toolchain_selector/src/toolchain_selector.rs:909-951` | UI confirm handler — persists + activates toolchain choice |
-| 5 | `LanguageSelectorDelegate::confirm` | `crates/language_selector/src/language_selector.rs:209-227` | UI confirm handler — reassigns buffer language |
-| 6 | `PrettierStore::start_default_prettier` | `crates/project/src/prettier_store.rs:336-420` | Formatter process lifecycle (install + spawn) |
-| 7 | `WorkspaceDb::set_toolchain` | `crates/workspace/src/persistence.rs:2388-2423` | Persistence layer — writes the `toolchains` table |
+| Order | Symbol                                           | Path                                                          | Purpose                                                                                      |
+| ----- | ------------------------------------------------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| 1     | `LanguageServer` (struct)                        | `crates/lsp/src/lsp.rs:99`                                    | Entity definition — one running LSP process + JSON-RPC channel                               |
+| 2     | `LspStore::start_language_server`                | `crates/project/src/lsp_store.rs:423-500`                     | Entry point — decides when/whether to spawn a server for a worktree+language, gated by trust |
+| 3     | `LspStore::restart_language_servers_for_buffers` | `crates/project/src/lsp_store.rs:11717-11766`                 | Restart flow — local teardown+respawn vs. remote RPC proxy                                   |
+| 4     | `ToolchainSelectorDelegate::confirm`             | `crates/toolchain_selector/src/toolchain_selector.rs:909-951` | UI confirm handler — persists + activates toolchain choice                                   |
+| 5     | `LanguageSelectorDelegate::confirm`              | `crates/language_selector/src/language_selector.rs:209-227`   | UI confirm handler — reassigns buffer language                                               |
+| 6     | `PrettierStore::start_default_prettier`          | `crates/project/src/prettier_store.rs:336-420`                | Formatter process lifecycle (install + spawn)                                                |
+| 7     | `WorkspaceDb::set_toolchain`                     | `crates/workspace/src/persistence.rs:2388-2423`               | Persistence layer — writes the `toolchains` table                                            |
 
 ## Unresolved Questions
 
@@ -304,8 +323,8 @@ else:
 
 ## DB Impact per Event
 
-| Event/Endpoint | Table | Columns | Operation | Value Derivation | Source |
-|----------------|-------|---------|-----------|-------------------|--------|
+| Event/Endpoint                      | Table        | Columns                                                                                       | Operation                        | Value Derivation                                                                                                                                       | Source                                          |
+| ----------------------------------- | ------------ | --------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
 | Confirm toolchain selection (US049) | `toolchains` | workspace_id, worktree_root_path, relative_worktree_path, language_name, name, path, raw_json | INSERT ... ON CONFLICT DO UPDATE | `workspace_id`/paths from the active workspace+worktree context; `name`/`path`/`raw_json` copied verbatim from the picker's selected `Toolchain` value | `crates/workspace/src/persistence.rs:2399-2422` |
 
 All other events in this feature (language switch, server start/restart, Prettier lifecycle) are read/process-state-only — no other DB writes were found.
