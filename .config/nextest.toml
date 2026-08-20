@@ -40,3 +40,13 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter =  'package(editor) and test(test_random_blocks)'
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Randomized tests whose run length scales with the machine. They finish inside 60s on a
+# 32-core runner and time out on the 4-core hosted one this project builds on.
+[[profile.default.overrides]]
+filter = 'package(worktree) and test(test_random_worktree_changes)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(multi_buffer) and test(test_random_multibuffer)'
+slow-timeout = { period = "300s", terminate-after = 1 }
