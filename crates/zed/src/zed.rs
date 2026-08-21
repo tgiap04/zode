@@ -640,12 +640,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let database_panel =
             database_ui::DatabasePanel::load(workspace_handle.clone(), cx.clone());
-        // Built holding nothing. It reopens the agents this workspace had
-        // running — and starts them — only once it is in the workspace, which is
-        // why it does not go through `add_panel_when_ready` below: putting the
-        // column back reaches through the workspace handle, and the workspace
-        // does not hold this panel while `load` is still resolving.
-        let agent_panel = agent_ui::AgentPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -663,32 +657,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             }
         }
 
-        async fn add_agent_panel(
-            panel_task: impl Future<Output = anyhow::Result<Entity<agent_ui::AgentPanel>>> + 'static,
-            workspace_handle: WeakEntity<Workspace>,
-            mut cx: gpui::AsyncWindowContext,
-        ) {
-            let Some(panel) = panel_task
-                .await
-                .context("failed to load the agent panel")
-                .log_err()
-            else {
-                return;
-            };
-            workspace_handle
-                .update_in(&mut cx, |workspace, window, cx| {
-                    workspace.add_panel(panel.clone(), window, cx);
-                })
-                .log_err();
-            // Second, and separately: the panel has to be findable through the
-            // workspace before it can open its own column.
-            panel
-                .update_in(&mut cx, |panel, window, cx| {
-                    panel.restore_tabs(window, cx);
-                })
-                .log_err();
-        }
-
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
@@ -696,7 +664,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            add_agent_panel(agent_panel, workspace_handle.clone(), cx.clone()),
         );
 
         anyhow::Ok(())
@@ -2469,9 +2436,9 @@ mod tests {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
                     assert_eq!(workspace.worktrees(cx).count(), 2);
                     // The left dock, not the right. Upstream's assistant panel opened on
-                    // the right, but this fork moved the agent out to a column of its own
-                    // and put the rail and tool dock on the left, so a fresh workspace now
-                    // comes up with the right dock closed and no panel wanting it.
+                    // the right, but this fork put the rail and tool dock on the left and
+                    // the agent among the editor's tabs, so a fresh workspace now comes up
+                    // with the right dock closed and no panel wanting it.
                     assert!(workspace.left_dock().read(cx).is_open());
                     assert!(
                         workspace

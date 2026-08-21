@@ -68,14 +68,6 @@ async fn the_panel_lands_in_the_database_column(cx: &mut TestAppContext) {
                     .is_none(),
             "and never in the tool dock its position names"
         );
-        assert!(
-            workspace
-                .agent_dock()
-                .read(cx)
-                .panel::<DatabasePanel>()
-                .is_none(),
-            "nor in the other own column"
-        );
     });
 }
 

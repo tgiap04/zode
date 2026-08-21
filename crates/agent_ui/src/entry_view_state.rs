@@ -471,6 +471,7 @@ fn diff_editor_text_style_refinement(cx: &mut App) -> TextStyleRefinement {
 }
 
 // The tests upstream kept here reached through `conversation_view::tests` for a
-// harness that built an `AgentPanel`, and through the native agent for a thread
-// store. Both are gone, so this coverage has to be rebuilt against the
+// harness that built an assistant dock panel, and through the native agent for a
+// thread store. Both are gone -- the agent is an item of the editor's panes now,
+// with no panel to construct -- so this coverage has to be rebuilt against the
 // centre-pane view rather than ported.

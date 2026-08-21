@@ -78,27 +78,13 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
-    /// Whether this panel wants the editor's space as well as its own.
-    ///
-    /// Deliberately not `is_zoomed`, which drives the window-wide zoom overlay:
-    /// that keys off `DockPosition`, and the agent column shares its position
-    /// with the tool dock beside it — so zooming the agent that way would take
-    /// the git panel down with it, and cover the docks the request asks to keep.
-    /// Read only, never written to, so a panel answering it cannot reach back
-    /// into the workspace mid-update.
-    fn fills_the_center(&self, _window: &Window, _cx: &App) -> bool {
-        false
-    }
     /// Whether this panel wants the whole window: the centre, the docks, and
     /// the rail beside them.
     ///
-    /// A step past [`Self::fills_the_center`], and separate from it because the
-    /// two answer different requests -- one is "give me the editor's room", the
-    /// other is "get everything out of the way". Neither is `is_zoomed`: that
-    /// drives an overlay whose bookkeeping is keyed by `DockPosition`, which an
-    /// own column shares with the tool dock beside it, and it draws inside the
-    /// `Workspace` element -- so it could not cover the rail, which
-    /// `MultiWorkspace` draws as its sibling.
+    /// Not `is_zoomed`: that drives an overlay whose bookkeeping is keyed by
+    /// `DockPosition`, which an own column shares with the tool dock beside it,
+    /// and it draws inside the `Workspace` element -- so it could not cover the
+    /// rail, which `MultiWorkspace` draws as its sibling.
     ///
     /// Read only, never written to, so a panel answering it cannot reach back
     /// into the workspace mid-update.
@@ -138,7 +124,6 @@ pub trait PanelHandle: Send + Sync {
     fn position_is_valid(&self, position: DockPosition, cx: &App) -> bool;
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
-    fn fills_the_center(&self, window: &Window, cx: &App) -> bool;
     fn fills_the_window(&self, window: &Window, cx: &App) -> bool;
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
@@ -207,10 +192,6 @@ where
 
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool {
         self.read(cx).is_zoomed(window, cx)
-    }
-
-    fn fills_the_center(&self, window: &Window, cx: &App) -> bool {
-        self.read(cx).fills_the_center(window, cx)
     }
 
     fn fills_the_window(&self, window: &Window, cx: &App) -> bool {
@@ -369,7 +350,6 @@ impl Focusable for Dock {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DockColumn {
     Tool,
-    Agent,
     Database,
 }
 
@@ -386,7 +366,6 @@ impl DockColumn {
     fn storage_key(self) -> Option<&'static str> {
         match self {
             DockColumn::Tool => None,
-            DockColumn::Agent => Some("agent"),
             DockColumn::Database => Some("database"),
         }
     }
@@ -396,8 +375,7 @@ impl DockColumn {
     fn element_basis_offset(self) -> Option<usize> {
         match self {
             DockColumn::Tool => None,
-            DockColumn::Agent => Some(DockPosition::COUNT),
-            DockColumn::Database => Some(DockPosition::COUNT + 1),
+            DockColumn::Database => Some(DockPosition::COUNT),
         }
     }
 }
@@ -758,9 +736,8 @@ impl Dock {
                     // An own column is the panel's home at either rail side:
                     // the column itself moves (`set_own_column_position`), so
                     // there is no dock to migrate to. Without this the panel is
-                    // hauled into a tool dock the moment the rail flips —
-                    // exactly where the agent appeared before it had a column —
-                    // and whether that happens comes down to which of the two
+                    // hauled into a tool dock the moment the rail flips, and
+                    // whether that happens comes down to which of the two
                     // settings observers fires first.
                     if this.column.is_own_column() {
                         return;
@@ -1003,12 +980,6 @@ impl Dock {
     /// list of panels — the project rail's panel switcher — goes through here.
     pub fn panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
         self.panel_entries.iter().map(|entry| &entry.panel)
-    }
-
-    pub fn has_agent_panel(&self, cx: &App) -> bool {
-        self.panel_entries
-            .iter()
-            .any(|entry| entry.panel.own_column(cx) == Some(DockColumn::Agent))
     }
 
     /// Shows `panel_ix` and puts every other panel in this dock away.
@@ -1775,8 +1746,7 @@ impl Render for Dock {
                 // Every dock is a card, the way the centre group is: inset by
                 // the same margin, rounded by the same radius. Drawn here
                 // rather than in each panel so no panel can be the one that
-                // forgets — and so the agent column, which used to carry this
-                // recipe itself, no longer needs to be an exception.
+                // forgets, and so no panel has to be an exception.
                 //
                 // The inset is padding on a `size_full` box, not a margin: a
                 // 100% box plus a margin exceeds its parent and the parent
@@ -2144,10 +2114,6 @@ pub mod test {
                 own_column: Some(column),
                 ..Self::new(position, activation_priority, cx)
             }
-        }
-
-        pub fn new_agent(position: DockPosition, activation_priority: u32, cx: &mut App) -> Self {
-            Self::new_in_column(DockColumn::Agent, position, activation_priority, cx)
         }
 
         pub fn new_database(

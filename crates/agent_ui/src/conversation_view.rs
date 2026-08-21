@@ -2404,16 +2404,23 @@ impl ConversationView {
                                             // Upstream revealed its dock panel and asked
                                             // it to load the notified thread. Agents are
                                             // pane items here, so accepting the
-                                            // notification brings the agent's own tab
-                                            // forward instead.
-                                            let _ = (
-                                                &agent,
-                                                &root_session_id,
-                                                &root_work_dirs,
-                                                &root_title,
-                                            );
+                                            // notification brings this agent's own tab
+                                            // forward instead — by id, because a tab is
+                                            // one item and the wrong one would surface
+                                            // silently.
+                                            //
+                                            // The session and title are still unused: a
+                                            // notification names an agent, not which of
+                                            // its sessions, so there is nothing here to
+                                            // disambiguate two tabs of the same agent
+                                            // with.
+                                            let _ =
+                                                (&root_session_id, &root_work_dirs, &root_title);
                                             crate::AgentView::activate_for_agent(
-                                                workspace, window, cx,
+                                                workspace,
+                                                &agent.id(),
+                                                window,
+                                                cx,
                                             );
                                         }
                                     })
@@ -2685,8 +2692,9 @@ fn plan_label_markdown_style(
     }
 }
 
-// Upstream's tests for this view drove it through `AgentPanel` — constructing the
-// dock panel, asserting its visibility, loading native threads into it. None of
-// that survives a centre-pane port, and rewriting them was not part of getting
-// the view to compile. The view is therefore untested here: phase 04's own draw
-// tests and phase 05's end-to-end pass are where that coverage has to come from.
+// Upstream's tests for this view drove it through an assistant dock panel —
+// constructing the panel, asserting its visibility, loading native threads into
+// it. None of that survived the port to a centre-pane item, and rewriting them
+// was not part of getting the view to compile. The view is therefore untested
+// here; `AgentView`'s own tests cover the tab it lives in, not the conversation
+// inside it.
