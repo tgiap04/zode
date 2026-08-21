@@ -373,6 +373,18 @@ pub(crate) fn release_job(deps: &[&NamedJob]) -> Job {
         .timeout_minutes(RELEASE_JOB_TIMEOUT_MINUTES)
 }
 
+/// Lets a job create a release, attach an asset to one, or move a tag.
+///
+/// Upstream declares this nowhere, because an organisation-wide setting hands every
+/// workflow a writable token. A plain repository gets GitHub's own default instead --
+/// `default_workflow_permissions: read` -- under which `gh release create` fails with
+/// `HTTP 403: Resource not accessible by integration` and nothing in the job output
+/// says the word "permission". Asked for per job rather than per workflow, so a test or
+/// bundle job never carries write it has no use for.
+pub(crate) fn writes_to_releases(job: Job) -> Job {
+    job.permissions(Permissions::default().contents(Level::Write))
+}
+
 /// GitHub's own hard ceiling for a hosted job. Upstream used 60, which is generous on a
 /// 32-core machine and fatal on a 4-core one: a cold Zode build gets cut at minute 60 and
 /// looks exactly like a hang.
