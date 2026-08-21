@@ -358,6 +358,43 @@ impl AgentView {
         view
     }
 
+    /// A view that never starts its agent.
+    ///
+    /// `Self::new` calls `start`, which resolves the agent's CLI against the real
+    /// `PATH` and — when it finds one — runs it under a pty. In a test that is a
+    /// live child process doing real I/O the deterministic test scheduler cannot
+    /// account for, which it reports as a non-determinism failure. It is also
+    /// machine-dependent: the same test passes or fails depending on whether the
+    /// developer happens to have `claude` installed.
+    ///
+    /// So tests whose claim is about the *tab* — which one is in front, what its
+    /// label says, what gets written down — build the view this way and never
+    /// touch a process. Tests whose claim is about the open path itself still go
+    /// through `AgentView::open`.
+    #[cfg(test)]
+    pub(crate) fn test_new(
+        agent: AgentId,
+        mode: AgentViewMode,
+        project: Entity<Project>,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            display_name: display_name(&agent),
+            agent,
+            custom_name: None,
+            rename_editor: None,
+            _rename_subscription: None,
+            mode,
+            state: State::Starting,
+            project,
+            workspace,
+            focus_handle: cx.focus_handle(),
+            self_handle: cx.entity().downgrade(),
+            _startup: None,
+        }
+    }
+
     /// The open rename editor, if the tab is being renamed.
     #[cfg(test)]
     pub(crate) fn rename_editor(&self) -> Option<&Entity<Editor>> {
@@ -1714,26 +1751,30 @@ mod tests {
     /// front, so taking whichever `AgentView` iterates first would answer a Codex
     /// notification with a Claude Code tab — silently, and only when two different
     /// agents happen to be open, which is why no earlier test caught it.
+    ///
+    /// Built with `test_new` rather than opened: the claim is about which tab comes
+    /// forward, and starting two agents for it would run two real CLIs.
     #[gpui::test]
     async fn a_notification_surfaces_the_agent_that_raised_it(cx: &mut TestAppContext) {
-        let (workspace, _project, cx) = workspace_with_agents(cx).await;
-
-        // Claude first, so it is the one an unfiltered `.next()` would reach for.
-        open_claude(&workspace, cx);
-        workspace.update_in(cx, |workspace, window, cx| {
-            AgentView::open(
-                workspace,
-                project::CODEX_AGENT_ID,
-                Some(AgentViewMode::Terminal),
-                window,
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        assert_eq!(agent_tabs(&workspace, cx), 2, "both agents must be open");
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
 
         let claude = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
         let codex = AgentId::new(project::CODEX_AGENT_ID.to_string());
+
+        // Claude added first, so it is the one an unfiltered `.next()` reaches for.
+        for agent in [&claude, &codex] {
+            let agent = agent.clone();
+            let project = project.clone();
+            workspace.update_in(cx, |workspace, window, cx| {
+                let handle = workspace.weak_handle();
+                let view = cx.new(|cx| {
+                    AgentView::test_new(agent, AgentViewMode::Terminal, project, handle, cx)
+                });
+                workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+            });
+        }
+        cx.run_until_parked();
+        assert_eq!(agent_tabs(&workspace, cx), 2, "both agents must be open");
 
         // Codex is in front; a Claude notification has to reach past it.
         cx.update(|window, cx| {
