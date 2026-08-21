@@ -52,6 +52,7 @@ tuyệt đối.
 | [04](phase-04-the-chevron-and-what-it-opens.md) | Submenu chi tiết từng cửa sổ | Mũi tên `>` mở ra |
 | [05](phase-05-the-right-click-menu.md) | `right_click_menu` + ghi setting | Ảnh #4 |
 | [06](phase-06-finish-the-feature.md) | Suite + fmt + docs | — |
+| [07](phase-07-the-panel-had-no-background.md) | **Sửa lỗi:** panel không có nền, tag mất tên model | Panel đọc được |
 
 Phase 01 vô hình có chủ đích: nó đổi kiểu dữ liệu mà 03/04 dựa vào, nên nó phải xanh
 trước khi có gì được vẽ. Phase 02 gom **cả ba** setting vào một lượt sửa 4 file, để 03 và
@@ -88,7 +89,7 @@ im lặng.
 
 ## Đã forge (2026-08-21)
 
-**61 test** trong `agent_usage` (từ 36 trước feature này). Clippy 0 warning trên
+**66 test** trong `agent_usage` (từ 36 trước feature này; 61 khi forge xong, +5 ở phase 07). Clippy 0 warning trên
 `agent_usage` / `workspace` / `settings_content` / `zode`. `cargo build --bin zode` exit 0.
 
 ### Phase 01 tưởng là kiểu dữ liệu, thực ra là chỗ feature này sẽ nói dối

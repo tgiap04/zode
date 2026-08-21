@@ -143,25 +143,44 @@ impl UsagePanel {
         }
     }
 
+    /// The short tag that names one window on the collapsed row.
+    ///
+    /// **The same precedence as the status bar, deliberately:** a window with a
+    /// reset instant is named by its kind, and only a window *without* one is
+    /// named by its label. `crate::render_window` decides the bar's text the same
+    /// way, and the two must agree — the panel exists to explain the bar, so a
+    /// panel that names a window differently is worse than no panel.
+    ///
+    /// Shipped wrong once in each direction. First the kind won unconditionally,
+    /// so a model-scoped weekly window read `wk` and lost `Fable` — two adjacent
+    /// rows both tagged `wk`. Fixing that by letting the label win
+    /// *unconditionally* was also wrong, and reachable: `codex::parse_windows`
+    /// clones one account-level `limitName` onto **both** of its windows, so two
+    /// Codex rows that each have their own countdown would both have taken the
+    /// same label. Checking `resets_at` first is what makes it agree with the bar
+    /// in every shape, not just in the one the recorded fixture happens to have.
+    pub(crate) fn window_tag(window: &UsageWindow) -> String {
+        match (&window.resets_at, &window.label) {
+            (None, Some(label)) => label.to_string(),
+            _ => window.kind.short_tag(),
+        }
+    }
+
     fn render_window(window: &UsageWindow, cx: &App) -> AnyElement {
-        let tag = window.kind.short_tag();
-        // The model name earns the tag's place when the kind has nothing short to
-        // say -- which is exactly the model-scoped window, where "Fable" is more
-        // use than "wk".
-        let tag = if tag.is_empty() {
-            window
-                .label
-                .as_ref()
-                .map(|label| label.to_string())
-                .unwrap_or_default()
-        } else {
-            tag
-        };
+        let tag = Self::window_tag(window);
 
         h_flex()
             .gap_1()
             .when(!tag.is_empty(), |row| {
-                row.child(Label::new(tag).size(LabelSize::Small).color(Color::Muted))
+                row.child(
+                    // Truncated because the tag slot no longer holds only
+                    // `short_tag()`'s two or three characters: a label reaches it
+                    // too, and a label is whatever the vendor called the thing.
+                    Label::new(tag)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate(),
+                )
             })
             .child(
                 // Two nested divs and an explicit width, because the filled part
@@ -360,6 +379,12 @@ impl Render for UsagePanel {
             .unwrap_or_default();
 
         v_flex()
+            // A `ManagedView` is drawn straight into a deferred layer with nothing
+            // behind it, so without this the panel is transparent and the editor,
+            // the git log and the sidebar all read through it -- which looks like
+            // washed-out text rather than like a missing background. `elevation_2`
+            // is what `ContextMenu` uses for the same job.
+            .elevation_2(cx)
             .w(PANEL_WIDTH)
             .p_2()
             .gap_1p5()
@@ -607,6 +632,142 @@ mod tests {
             UsagePanel::window_detail(&odd, &utc),
             "Window  61%  no reset window"
         );
+    }
+
+    /// A model-scoped window is tagged with the model, not with `wk`.
+    ///
+    /// Shipped wrong once: the tag preferred the kind, so the weekly allowance and
+    /// the Fable slice of it both rendered as `wk` — two identical tags on adjacent
+    /// rows, and the model name gone.
+    #[test]
+    fn a_model_scoped_window_is_tagged_with_the_model() {
+        let scoped = UsageWindow {
+            percent: 0,
+            resets_at: None,
+            label: Some("Fable".into()),
+            kind: WindowKind::Weekly,
+        };
+
+        assert_eq!(UsagePanel::window_tag(&scoped), "Fable");
+        assert_ne!(
+            UsagePanel::window_tag(&scoped),
+            "wk",
+            "the kind must not win over a name the source actually gave"
+        );
+    }
+
+    /// A window with no name falls back to its kind.
+    #[test]
+    fn an_unnamed_window_is_tagged_with_its_kind() {
+        let weekly = UsageWindow {
+            percent: 12,
+            resets_at: Some("2026-08-27T09:00:00+00:00".parse().unwrap()),
+            label: None,
+            kind: WindowKind::Weekly,
+        };
+        assert_eq!(UsagePanel::window_tag(&weekly), "wk");
+    }
+
+    /// A window with both a countdown and a name is tagged by its kind.
+    ///
+    /// The shape no fixture had, and the one that made "label always wins" wrong:
+    /// `codex::parse_windows` clones a single account-level `limitName` onto both
+    /// of its windows, so two rows that each have their own `resetsAt` would both
+    /// have been tagged with the same string — the exact collision the previous
+    /// fix was for, moved to the other agent.
+    #[test]
+    fn a_window_with_both_a_countdown_and_a_name_is_tagged_by_its_kind() {
+        let both = UsageWindow {
+            percent: 42,
+            resets_at: Some("2026-08-27T09:00:00+00:00".parse().unwrap()),
+            label: Some("Codex Cloud".into()),
+            kind: WindowKind::Span(std::time::Duration::from_secs(43_200 * 60)),
+        };
+
+        assert_eq!(UsagePanel::window_tag(&both), "30d");
+        assert_ne!(
+            UsagePanel::window_tag(&both),
+            "Codex Cloud",
+            "a shared account-level name must not become two identical row tags"
+        );
+    }
+
+    /// Two Codex windows sharing one `limitName` still read as two distinct rows.
+    ///
+    /// This is the collision itself, asserted end to end rather than as a rule.
+    #[test]
+    fn two_windows_sharing_one_name_do_not_collide() {
+        let shared: SharedString = "Codex Cloud".into();
+        let primary = UsageWindow {
+            percent: 10,
+            resets_at: Some("2026-08-22T09:00:00+00:00".parse().unwrap()),
+            label: Some(shared.clone()),
+            kind: WindowKind::Span(std::time::Duration::from_secs(300 * 60)),
+        };
+        let secondary = UsageWindow {
+            percent: 40,
+            resets_at: Some("2026-09-20T09:00:00+00:00".parse().unwrap()),
+            label: Some(shared),
+            kind: WindowKind::Span(std::time::Duration::from_secs(43_200 * 60)),
+        };
+
+        assert_ne!(
+            UsagePanel::window_tag(&primary),
+            UsagePanel::window_tag(&secondary),
+            "two rows must not read the same"
+        );
+    }
+
+    /// The panel and the status bar must not disagree about one window.
+    ///
+    /// They render the same data through different code, so they can drift. The bar
+    /// showed `0% used Fable` while the panel showed `wk 0%` — same window, two
+    /// answers, and the panel's was the less informative one.
+    /// Covers **every** combination of `resets_at` and `label`, not just the one
+    /// the recorded fixture happens to have. Testing only the no-countdown case is
+    /// what let "label always wins" look correct.
+    #[test]
+    fn the_panel_and_the_status_bar_name_a_window_the_same_way() {
+        let now: DateTime<Utc> = "2026-08-21T11:00:00+00:00".parse().unwrap();
+        let reset: DateTime<Utc> = "2026-08-21T12:00:00+00:00".parse().unwrap();
+
+        let cases = [
+            // The Fable row: a name and no countdown. The bar prints the name, so
+            // the panel must tag it with the name.
+            ("named, no countdown", None, Some("Fable")),
+            // A countdown and a name at once -- Codex's shared `limitName`. The bar
+            // prints the countdown and never the name, so the panel must not tag it
+            // with the name either.
+            ("named, with countdown", Some(reset), Some("Codex Cloud")),
+            ("unnamed, with countdown", Some(reset), None),
+        ];
+
+        for (what, resets_at, label) in cases {
+            let window = UsageWindow {
+                percent: 12,
+                resets_at,
+                label: label.map(SharedString::from),
+                kind: WindowKind::Weekly,
+            };
+
+            let bar = crate::render_window(&window, now);
+            let tag = UsagePanel::window_tag(&window);
+
+            if let Some(label) = label {
+                // The decisive assertion: whichever of the two the panel shows, the
+                // bar must be showing the same one.
+                assert_eq!(
+                    tag == label,
+                    bar.contains(label),
+                    "{what}: bar says {bar:?}, panel tags it {tag:?} -- they disagree \
+                     about whether this window is called {label:?}"
+                );
+            }
+            assert!(
+                !tag.is_empty(),
+                "{what}: every window gets some tag on the collapsed row"
+            );
+        }
     }
 
     /// The toggle writes the setting the click names, and nothing else.
