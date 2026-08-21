@@ -167,7 +167,9 @@ fn publish_nightly_job(bundle: &ReleaseBundleJobs) -> NamedJob {
 
     NamedJob {
         name: "publish_nightly".to_owned(),
-        job: steps::release_job(&bundle.jobs())
+        // Moves the `nightly` tag as well as writing the release, and both need the same
+        // write the default read-only token does not carry.
+        job: steps::writes_to_releases(steps::release_job(&bundle.jobs()))
             .runs_on(runners::LINUX_MEDIUM)
             .add_step(steps::checkout_repo().with_full_history().with_ref("main"))
             .add_step(download_workflow_artifacts())
