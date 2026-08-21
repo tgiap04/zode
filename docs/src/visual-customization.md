@@ -313,7 +313,7 @@ TBD: Centered layout related settings
 
 ### Status Bar
 
-`claude_usage_button`, `codex_usage_button`, and `agent_usage_display` are also reachable by right-clicking the status bar's usage indicator — see [Agent Usage Indicator](./agent-usage.md) for the panel and menu that go with them.
+`claude_usage_button` and `codex_usage_button` are also reachable by right-clicking the status bar's usage indicator; `agent_usage_display` is reachable from the Detailed/Compact switch in the usage panel (left-click the indicator to open it) — see [Agent Usage Indicator](./agent-usage.md) for the panel and menu that go with them.
 
 ```json [settings]
   "status_bar": {

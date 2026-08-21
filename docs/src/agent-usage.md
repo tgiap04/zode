@@ -17,7 +17,7 @@ Each `·`-separated group is one quota window — a percentage, and either a cou
 
 ## Usage panel
 
-Left-clicking the indicator opens a panel:
+Left-clicking the indicator opens a panel. It closes as soon as you click anywhere outside it.
 
 - A header reading "Usage", a scope label (`all agents`, `Claude only`, `Codex only`, or `none on the bar`, depending on which agents are switched on), and a refresh glyph that re-reads both agents immediately.
 - A **Detailed** / **Compact** toggle. This writes the `agent_usage_display` setting — the same one described in [Status Bar settings](./visual-customization.md#status-bar) — so the choice persists across restarts rather than reverting when the panel closes.
@@ -29,12 +29,11 @@ Opening the panel, expanding a row, and switching Detailed/Compact all read stat
 
 ## Right-click menu
 
-Right-clicking the indicator opens a menu of tick-boxes for which status-bar items are shown: **Claude Usage**, **Codex Usage**, then a separator, then **Active File Name**, **Active Language**, **Cursor Position**, **Line Endings**, and **Active Encoding**. Each box writes straight to the matching `status_bar.*` setting (see [Status Bar settings](./visual-customization.md#status-bar)).
+Right-clicking the indicator opens a menu of two tick-boxes: **Claude Usage** and **Codex Usage**. Each writes straight to the matching `status_bar.*` setting (see [Status Bar settings](./visual-customization.md#status-bar)).
 
-Two things worth knowing before you use it:
+This menu is only about the two usage indicators — it doesn't cover the other `status_bar.*` items (active file name, active language, cursor position, line endings, active encoding). Those are still fully settable, just from the Settings Editor or the settings file directly, not from here.
 
-- **Switching off both Claude Usage and Codex Usage removes the indicator from the status bar entirely** — and with it, the only way to right-click your way back to this menu. This is a known, accepted limitation rather than a bug. If that happens, reopen the menu from the Settings Editor ({#kb zed::OpenSettings}) or by editing `claude_usage_button` / `codex_usage_button` back to `true` in your settings file — see [Settings Files](./configuring-zed.md#settings-files).
-- **The Active Encoding row is a two-state tick-box for a setting that has three states.** Ticking it writes `enabled`; clearing it writes `disabled`. The shipped default is `non_utf8` (show the button only for non-UTF-8 files), which the tick-box reads as "on" — but switching it off and back on lands on `enabled`, not back on `non_utf8`. `non_utf8` is only reachable by editing the setting directly.
+One thing worth knowing before you use it: **switching off both Claude Usage and Codex Usage removes the indicator from the status bar entirely** — and with it, the only right-click target this menu has. This is a known, accepted limitation rather than a bug, and it matters more now that the menu has nothing else to right-click onto. If that happens, get back to `true` from the Settings Editor ({#kb zed::OpenSettings}) or by editing `claude_usage_button` / `codex_usage_button` back to `true` in your settings file — see [Settings Files](./configuring-zed.md#settings-files).
 
 ## Where the numbers come from
 

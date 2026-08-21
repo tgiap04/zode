@@ -24,7 +24,8 @@ Chép nguyên hai ảnh là ship bốn dòng menu dẫn tới chỗ trống. Ng�
 | Câu hỏi | Chốt |
 |---|---|
 | Footer panel | Bỏ *history* + *Manage Accounts* |
-| Menu chuột phải | Claude/Codex Usage **+** 5 status item sẵn có |
+| Menu chuột phải | ~~Claude/Codex Usage **+** 5 status item sẵn có~~ → **chỉ Claude/Codex**
+  (người dùng đảo lại sau khi xem thật — xem [phase 08](phase-08-two-rows-a-real-tick-and-a-panel-that-closes.md)) |
 | Detailed/Compact | Đổi **dòng trên thanh status**; Compact = chỉ cửa sổ căng nhất |
 | Mũi tên `>` | Submenu chi tiết từng cửa sổ (tên đầy đủ, mốc reset tuyệt đối, lý do im) |
 
@@ -53,6 +54,7 @@ tuyệt đối.
 | [05](phase-05-the-right-click-menu.md) | `right_click_menu` + ghi setting | Ảnh #4 |
 | [06](phase-06-finish-the-feature.md) | Suite + fmt + docs | — |
 | [07](phase-07-the-panel-had-no-background.md) | **Sửa lỗi:** panel không có nền, tag mất tên model | Panel đọc được |
+| [08](phase-08-two-rows-a-real-tick-and-a-panel-that-closes.md) | **Sửa lỗi:** menu còn 2 dòng, tick thật, panel biết đóng | Menu đọc được, click ra ngoài đóng |
 
 Phase 01 vô hình có chủ đích: nó đổi kiểu dữ liệu mà 03/04 dựa vào, nên nó phải xanh
 trước khi có gì được vẽ. Phase 02 gom **cả ba** setting vào một lượt sửa 4 file, để 03 và

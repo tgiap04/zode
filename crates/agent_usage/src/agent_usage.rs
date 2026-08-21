@@ -25,8 +25,8 @@ use project::AgentId;
 use settings::AgentUsageDisplay;
 use ui::prelude::*;
 use ui::{
-    ButtonLike, ContextMenu, ContextMenuEntry, IconPosition, PopoverMenu, PopoverMenuHandle,
-    Tooltip, right_click_menu,
+    ButtonLike, ContextMenu, IconPosition, PopoverMenu, PopoverMenuHandle, Tooltip,
+    right_click_menu,
 };
 use workspace::{ItemHandle, StatusBarSettings, StatusItemView, item::Settings as _};
 
@@ -559,8 +559,7 @@ impl AgentUsageIndicator {
         PopoverMenu::new("agent-usage")
             .menu(move |window, cx| {
                 let indicator = indicator.clone();
-                let _ = window;
-                Some(cx.new(|cx| UsagePanel::new(indicator, cx)))
+                Some(cx.new(|cx| UsagePanel::new(indicator, window, cx)))
             })
             // Above and left-aligned: the item lives on a bar at the bottom of
             // the window, so anywhere below it is off-screen.
@@ -595,43 +594,41 @@ impl AgentUsageIndicator {
             )
     }
 
-    /// The right-click menu: which status-bar items are shown.
+    /// The right-click menu: which agents' usage is shown.
     ///
     /// Built fresh on every open rather than kept around, so the ticks are read
     /// from the settings in force at that moment. A menu cached across opens would
     /// show yesterday's answer.
+    ///
+    /// `toggleable_entry` and no icon, deliberately: `ContextMenu` draws a toggled
+    /// row as `Icon::new(icon.unwrap_or(IconName::Check))`, so an icon *replaces*
+    /// the checkmark rather than joining it. Passing both shipped a menu where
+    /// every row showed its own glyph twice and no row showed whether it was on.
     fn build_toggle_menu(window: &mut Window, cx: &mut App) -> Entity<ContextMenu> {
         ContextMenu::build(window, cx, |mut menu, _window, cx| {
             let settings = StatusBarSettings::get_global(cx);
             for item in status_bar_items::TOGGLEABLE_ITEMS {
-                if item.starts_group {
-                    menu = menu.separator();
-                }
-                let showing = (item.read)(settings);
                 let read = item.read;
                 let write = item.write;
-                // `ContextMenuEntry` rather than `toggleable_entry`, because the
-                // latter takes a tick or an icon and this menu needs both -- the
-                // tick says whether it is on, the glyph says which item it is.
-                menu = menu.item(
-                    ContextMenuEntry::new(item.label)
-                        .icon(item.icon)
-                        .icon_position(IconPosition::End)
-                        .toggleable(IconPosition::Start, showing)
-                        .handler(move |_window, cx| {
-                            // Re-read rather than invert the `showing` captured
-                            // above: that value is as old as the menu, and a
-                            // handler that flipped a stale reading would write the
-                            // setting the user had two states ago.
-                            let now_showing = read(StatusBarSettings::get_global(cx));
-                            settings::update_settings_file(
-                                <dyn fs::Fs>::global(cx),
-                                cx,
-                                move |content, _| {
-                                    write(content.status_bar.get_or_insert_default(), !now_showing);
-                                },
-                            );
-                        }),
+                menu = menu.toggleable_entry(
+                    item.label,
+                    (item.read)(settings),
+                    IconPosition::Start,
+                    None,
+                    move |_window, cx| {
+                        // Re-read rather than invert a value captured when the menu
+                        // was built: that reading is as old as the menu, and a
+                        // handler that flipped it would write the setting the user
+                        // had two states ago.
+                        let now_showing = read(StatusBarSettings::get_global(cx));
+                        settings::update_settings_file(
+                            <dyn fs::Fs>::global(cx),
+                            cx,
+                            move |content, _| {
+                                write(content.status_bar.get_or_insert_default(), !now_showing);
+                            },
+                        );
+                    },
                 );
             }
             menu

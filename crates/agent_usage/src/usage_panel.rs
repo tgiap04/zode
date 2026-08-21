@@ -25,7 +25,8 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use gpui::{
-    DismissEvent, EventEmitter, FocusHandle, Focusable, WeakEntity, prelude::FluentBuilder as _,
+    DismissEvent, EventEmitter, FocusHandle, Focusable, Subscription, WeakEntity,
+    prelude::FluentBuilder as _,
 };
 use project::AgentId;
 use settings::AgentUsageDisplay;
@@ -57,14 +58,33 @@ pub struct UsagePanel {
     /// next click anywhere, so a disclosure that persisted would be remembering a
     /// gesture nobody made twice.
     expanded: HashSet<AgentId>,
+    /// Closes the panel when focus leaves it.
+    ///
+    /// Without this the panel stays open over the editor until it is clicked again,
+    /// which is what shipped first. `PopoverMenu` does not do it: its only mouse
+    /// handler covers the *trigger*, so that clicking the button while the panel is
+    /// open closes rather than re-opens it -- outside clicks are left to the
+    /// content. `ContextMenu` handles them with exactly this subscription, set up in
+    /// its own constructor, which is why menus dismiss and this panel did not.
+    _blur: Subscription,
 }
 
 impl UsagePanel {
-    pub fn new(indicator: WeakEntity<AgentUsageIndicator>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        indicator: WeakEntity<AgentUsageIndicator>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+        let _blur = cx.on_blur(&focus_handle, window, |_, _, cx| {
+            cx.emit(DismissEvent);
+        });
+
         Self {
             indicator,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             expanded: HashSet::default(),
+            _blur,
         }
     }
 
@@ -379,6 +399,9 @@ impl Render for UsagePanel {
             .unwrap_or_default();
 
         v_flex()
+            // Focus has to land somewhere for `on_blur` to ever fire, and
+            // `PopoverMenu` focuses this view's handle on the frame after it opens.
+            .track_focus(&self.focus_handle)
             // A `ManagedView` is drawn straight into a deferred layer with nothing
             // behind it, so without this the panel is transparent and the editor,
             // the git log and the sidebar all read through it -- which looks like
