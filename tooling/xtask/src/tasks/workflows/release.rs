@@ -1,16 +1,13 @@
-use gh_workflow::{Event, Expression, Push, Run, Step, Use, Workflow, ctx::Context};
+use gh_workflow::{Event, Push, Run, Step, Use, Workflow, ctx::Context};
 use indoc::formatdoc;
 
 use crate::tasks::workflows::{
-    run_bundling::{bundle_linux, bundle_mac, bundle_windows, upload_artifact},
+    run_bundling::{bundle_linux, bundle_mac, bundle_windows},
     run_tests,
     runners::{self, Arch, Platform},
     steps::{self, FluentBuilder, NamedJob, dependant_job, named, release_job},
-    vars::{self, StepOutput, assets},
+    vars::{self, assets},
 };
-
-const CURRENT_ACTION_RUN_URL: &str =
-    "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}";
 
 pub(crate) fn release() -> Workflow {
     // Gate on Linux only. Upstream blocks bundling on tests plus clippy across all three
@@ -88,115 +85,6 @@ impl ReleaseBundleJobs {
             self.windows_x86_64,
         ]
     }
-}
-
-pub(crate) fn create_sentry_release() -> Step<Use> {
-    named::uses(
-        "getsentry",
-        "action-release",
-        "526942b68292201ac6bbb99b9a0747d4abee354c", // v3
-    )
-    .add_env(("SENTRY_ORG", "zed-dev"))
-    .add_env(("SENTRY_PROJECT", "zed"))
-    .add_env(("SENTRY_AUTH_TOKEN", vars::SENTRY_AUTH_TOKEN))
-    .add_with(("environment", "production"))
-}
-
-pub(crate) const COMPLIANCE_REPORT_PATH: &str = "compliance-report-${GITHUB_REF_NAME}.md";
-pub(crate) const COMPLIANCE_REPORT_ARTIFACT_PATH: &str =
-    "compliance-report-${{ github.ref_name }}.md";
-pub(crate) const COMPLIANCE_STEP_ID: &str = "run-compliance-check";
-const NEEDS_REVIEW_PULLS_URL: &str = "https://github.com/zed-industries/zed/pulls?q=is%3Apr+is%3Aclosed+label%3A%22PR+state%3Aneeds+review%22";
-
-/// Only the scheduled variant survives here: this fork's release path no longer runs a
-/// compliance check, because it needs a GitHub App and a Slack webhook that belong to
-/// upstream. `compliance_check.rs` still uses this.
-pub(crate) enum ComplianceContext {
-    Scheduled { tag_source: StepOutput },
-}
-
-impl ComplianceContext {
-    fn tag_source(&self) -> Option<&StepOutput> {
-        match self {
-            ComplianceContext::Scheduled { tag_source } => Some(tag_source),
-        }
-    }
-}
-
-pub(crate) fn add_compliance_steps(
-    job: gh_workflow::Job,
-    context: ComplianceContext,
-) -> (gh_workflow::Job, StepOutput) {
-    fn run_compliance_check(context: &ComplianceContext) -> (Step<Run>, StepOutput) {
-        let job = named::bash(
-            formatdoc! {r#"
-                cargo xtask compliance version {target} --report-path "{COMPLIANCE_REPORT_PATH}"
-                "#,
-                target = if context.tag_source().is_some() { r#""$LATEST_TAG" --branch main"# } else { r#""$GITHUB_REF_NAME""# },
-            }
-        )
-        .id(COMPLIANCE_STEP_ID)
-        .add_env(("GITHUB_APP_ID", vars::ZED_ZIPPY_APP_ID))
-        .add_env(("GITHUB_APP_KEY", vars::ZED_ZIPPY_APP_PRIVATE_KEY))
-        .when_some(context.tag_source(), |step, tag_source| {
-            step.add_env(("LATEST_TAG", tag_source.to_string()))
-        })
-        .continue_on_error(true);
-
-        let result = StepOutput::new_unchecked(&job, "outcome");
-        (job, result)
-    }
-
-    let upload_step =
-        upload_artifact(COMPLIANCE_REPORT_ARTIFACT_PATH).if_condition(Expression::new("always()"));
-
-    let (success_prefix, failure_prefix) = (
-        "✅ Scheduled compliance check passed",
-        "⚠️ Scheduled compliance check failed",
-    );
-
-    let script = formatdoc! {r#"
-        if [ "$COMPLIANCE_OUTCOME" == "success" ]; then
-            STATUS="{success_prefix} for $COMPLIANCE_TAG"
-            MESSAGE=$(printf "%s\n\nReport: %s" "$STATUS" "$ARTIFACT_URL")
-        else
-            STATUS="{failure_prefix} for $COMPLIANCE_TAG"
-            MESSAGE=$(printf "%s\n\nReport: %s\nPRs needing review: %s" "$STATUS" "$ARTIFACT_URL" "{NEEDS_REVIEW_PULLS_URL}")
-        fi
-
-        curl -X POST -H 'Content-type: application/json' \
-            --data "$(jq -n --arg text "$MESSAGE" '{{"text": $text}}')" \
-            "$SLACK_WEBHOOK"
-        "#,
-    };
-
-    let notification_step = Step::new("send_compliance_slack_notification")
-        .run(&script)
-        .if_condition(Expression::new("always()"))
-        .add_env(("SLACK_WEBHOOK", vars::SLACK_WEBHOOK_WORKFLOW_FAILURES))
-        .add_env((
-            "COMPLIANCE_OUTCOME",
-            format!("${{{{ steps.{COMPLIANCE_STEP_ID}.outcome }}}}"),
-        ))
-        .add_env((
-            "COMPLIANCE_TAG",
-            match &context {
-                ComplianceContext::Scheduled { tag_source } => tag_source.to_string(),
-            },
-        ))
-        .add_env((
-            "ARTIFACT_URL",
-            format!("{CURRENT_ACTION_RUN_URL}#artifacts"),
-        ));
-
-    let (compliance_step, check_result) = run_compliance_check(&context);
-
-    (
-        job.add_step(compliance_step)
-            .add_step(upload_step)
-            .add_step(notification_step),
-        check_result,
-    )
 }
 
 /// Guards against the failure mode where a bundle succeeds but its artifact filename does
@@ -311,35 +199,4 @@ fn create_draft_release() -> NamedJob {
             .add_step(generate_release_notes())
             .add_step(create_release()),
     )
-}
-
-pub(crate) fn notify_on_failure(deps: &[&NamedJob]) -> NamedJob {
-    let failure_message = format!("❌ ${{{{ github.workflow }}}} failed: {CURRENT_ACTION_RUN_URL}");
-
-    let mut job = dependant_job(deps)
-        .runs_on(runners::LINUX_SMALL)
-        .cond(Expression::new("failure()"));
-
-    for step in notify_slack(MessageType::Static(failure_message)) {
-        job = job.add_step(step);
-    }
-    named::job(job)
-}
-
-pub(crate) enum MessageType {
-    Static(String),
-}
-
-fn notify_slack(message: MessageType) -> Vec<Step<Run>> {
-    match message {
-        MessageType::Static(message) => vec![send_slack_message(message)],
-    }
-}
-
-fn send_slack_message(message: String) -> Step<Run> {
-    named::bash(
-        r#"curl -X POST -H 'Content-type: application/json' --data "$(jq -n --arg text "$SLACK_MESSAGE" '{"text": $text}')" "$SLACK_WEBHOOK""#
-    )
-    .add_env(("SLACK_WEBHOOK", vars::SLACK_WEBHOOK_WORKFLOW_FAILURES))
-    .add_env(("SLACK_MESSAGE", message))
 }
