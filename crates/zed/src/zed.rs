@@ -494,12 +494,22 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
+        let agent_usage = cx.new(|cx| agent_usage::AgentUsageIndicator::new(window, cx));
+        let agent_usage_panel_handle = agent_usage.read(cx).panel_handle();
+        workspace.register_action(move |_, _: &agent_usage::ToggleUsagePanel, window, cx| {
+            agent_usage_panel_handle.toggle(window, cx);
+        });
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            // Beside the activity indicator rather than among the right-hand
+            // items: quota is something happening to your account over time, the
+            // way indexing and downloads are, not a property of the buffer in
+            // front of you.
+            status_bar.add_left_item(agent_usage, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);
@@ -5006,6 +5016,7 @@ mod tests {
                 "action",
                 "activity_indicator",
                 "agent",
+                "agent_usage",
                 "agents_sidebar",
                 "app_menu",
                 "assistant",

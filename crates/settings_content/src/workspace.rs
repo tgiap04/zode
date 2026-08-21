@@ -487,6 +487,47 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: non_utf8
     pub active_encoding_button: Option<EncodingDisplayOptions>,
+    /// Whether to show Claude Code's subscription quota in the status bar.
+    ///
+    /// Default: true
+    pub claude_usage_button: Option<bool>,
+    /// Whether to show Codex's subscription quota in the status bar.
+    ///
+    /// Default: true
+    pub codex_usage_button: Option<bool>,
+    /// How much of an agent's quota to show in the status bar.
+    ///
+    /// Default: detailed
+    pub agent_usage_display: Option<AgentUsageDisplay>,
+}
+
+/// How much of an agent's quota the status bar shows.
+///
+/// Two agents reporting several windows each is five numbers on one line, which
+/// is a lot of status bar. `Compact` keeps only the window closest to running
+/// out — the one that will actually stop you — and the rest stay one click away
+/// in the usage panel.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantNames,
+    strum::VariantArray,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUsageDisplay {
+    /// Every window each agent reports.
+    #[default]
+    Detailed,
+    /// Only the window closest to running out, per agent.
+    Compact,
 }
 
 #[derive(

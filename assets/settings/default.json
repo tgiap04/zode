@@ -1509,6 +1509,16 @@
     "line_endings_button": false,
     // Control when to show the active encoding in the status bar.
     "active_encoding_button": "non_utf8",
+    // Whether to show Claude Code's subscription quota in the status bar.
+    "claude_usage_button": true,
+    // Whether to show Codex's subscription quota in the status bar.
+    "codex_usage_button": true,
+    // How much of an agent's quota to show in the status bar. May take 2 values:
+    // 1. Every window the agent reports:
+    //      "agent_usage_display": "detailed"
+    // 2. Only the window closest to running out:
+    //      "agent_usage_display": "compact"
+    "agent_usage_display": "detailed",
   },
   // Settings specific to the terminal
   "terminal": {

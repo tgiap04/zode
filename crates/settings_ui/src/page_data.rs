@@ -3345,7 +3345,7 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn status_bar_section() -> [SettingsPageItem; 10] {
+    fn status_bar_section() -> [SettingsPageItem; 13] {
         [
             SettingsPageItem::SectionHeader("Status Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3507,6 +3507,72 @@ fn window_and_layout_page() -> SettingsPage {
                             .status_bar
                             .get_or_insert_default()
                             .show_active_file = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Claude Usage",
+                description: "Show Claude Code's subscription quota in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.claude_usage_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .claude_usage_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .claude_usage_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Codex Usage",
+                description: "Show Codex's subscription quota in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.codex_usage_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .codex_usage_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .codex_usage_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Usage Detail",
+                description: "How much of an agent's quota to show in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.agent_usage_display"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .agent_usage_display
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .agent_usage_display = value;
                     },
                 }),
                 metadata: None,

@@ -315,6 +315,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_usage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "log",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "ui",
+ "util",
+ "which 6.0.3",
+ "workspace",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19581,6 +19603,7 @@ version = "0.1.0"
 dependencies = [
  "activity_indicator",
  "agent_ui",
+ "agent_usage",
  "anyhow",
  "ashpd",
  "askpass",

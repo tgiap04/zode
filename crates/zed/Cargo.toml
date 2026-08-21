@@ -36,6 +36,7 @@ path = "src/main.rs"
 [dependencies]
 activity_indicator.workspace = true
 agent_ui.workspace = true
+agent_usage.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true
@@ -194,6 +195,7 @@ image.workspace = true
 pkg-config = "0.3.22"
 
 [dev-dependencies]
+agent_usage = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["input-latency-histogram", "test-support"] }
 image_viewer = { workspace = true, features = ["test-support"] }
