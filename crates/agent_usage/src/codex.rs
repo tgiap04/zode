@@ -552,7 +552,7 @@ mod tests {
     }
 
     /// Sending anything before `initialize` earns this, and it is a refusal rather
-    /// than an unreadable payload — the distinction the tooltip depends on.
+    /// than an unreadable payload — the distinction the usage panel depends on.
     #[test]
     fn the_not_initialized_refusal_is_reported_as_one() {
         let refused = r#"{"error":{"code":-32600,"message":"Not initialized"},"id":1}"#;

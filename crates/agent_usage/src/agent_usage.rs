@@ -24,10 +24,7 @@ use gpui::{Anchor, Context, Entity, IntoElement, Render, Subscription, Task, Win
 use project::AgentId;
 use settings::AgentUsageDisplay;
 use ui::prelude::*;
-use ui::{
-    ButtonLike, ContextMenu, IconPosition, PopoverMenu, PopoverMenuHandle, Tooltip,
-    right_click_menu,
-};
+use ui::{ButtonLike, ContextMenu, IconPosition, PopoverMenu, PopoverMenuHandle, right_click_menu};
 use workspace::{ItemHandle, StatusBarSettings, StatusItemView, item::Settings as _};
 
 use crate::usage_panel::UsagePanel;
@@ -460,30 +457,6 @@ impl AgentUsageIndicator {
     pub(crate) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_polling(window, cx);
     }
-
-    /// What the tooltip says. Never a token, never a URL — just the reasons.
-    fn tooltip_text(&self) -> String {
-        let mut lines = Vec::new();
-
-        for source in &self.sources {
-            let name = agent_display_name(&source.agent);
-            match (&source.reason, source.fetched_at) {
-                // Something to say and numbers to date it against: both.
-                (Some(reason), Some(at)) => {
-                    lines.push(format!("{name}: read {}, then {reason}", at.to_rfc3339()));
-                }
-                (Some(reason), None) => lines.push(format!("{name}: {reason}")),
-                (None, Some(at)) => lines.push(format!("{name}: read {}", at.to_rfc3339())),
-                (None, None) => {}
-            }
-        }
-
-        if lines.is_empty() {
-            return "Reading agent usage…".into();
-        }
-        lines.push("Click for details.".into());
-        lines.join("\n")
-    }
 }
 
 impl Render for AgentUsageIndicator {
@@ -497,7 +470,6 @@ impl Render for AgentUsageIndicator {
         }
 
         let now = Utc::now();
-        let tooltip = self.tooltip_text();
         let fetching = self.fetching;
         let compact = settings.agent_usage_display == AgentUsageDisplay::Compact;
         let groups = self
@@ -541,7 +513,7 @@ impl Render for AgentUsageIndicator {
                 .anchor(Anchor::BottomLeft)
                 .attach(Anchor::TopLeft)
                 .trigger(move |_open, _window, _cx| {
-                    Self::render_trigger(indicator, groups, fetching, tooltip, panel_handle)
+                    Self::render_trigger(indicator, groups, fetching, panel_handle)
                 }),
         )
     }
@@ -553,7 +525,6 @@ impl AgentUsageIndicator {
         indicator: gpui::WeakEntity<Self>,
         groups: Vec<impl IntoElement + 'static>,
         fetching: bool,
-        tooltip: String,
         panel_handle: PopoverMenuHandle<UsagePanel>,
     ) -> impl IntoElement {
         PopoverMenu::new("agent-usage")
@@ -569,7 +540,11 @@ impl AgentUsageIndicator {
             // has to be able to show itself pressed while the panel is open --
             // and it is the only button in this repo that takes arbitrary
             // children, which is what a row of numbers is.
-            .trigger_with_tooltip(
+            // `trigger`, not `trigger_with_tooltip`: the panel behind this click
+            // already says every one of the things a tooltip could -- which agent,
+            // when it was read, and why one is silent -- so a tooltip would be a
+            // second copy of the panel that appears whether you asked for it or not.
+            .trigger(
                 ButtonLike::new("agent-usage-trigger")
                     .style(ButtonStyle::Subtle)
                     .child(
@@ -590,7 +565,6 @@ impl AgentUsageIndicator {
                                     }),
                             ),
                     ),
-                move |_window, cx| Tooltip::simple(tooltip.clone(), cx),
             )
     }
 
@@ -1095,12 +1069,12 @@ mod tests {
         );
         assert!(
             indicator.has_anything_to_show(&all_agents_shown()),
-            "a transient failure must not empty the bar -- the tooltip carries the reason"
+            "a transient failure must not empty the bar -- the panel carries the reason"
         );
-        assert!(
-            indicator.tooltip_text().contains("could not be reached"),
-            "and the reason has to be readable: {}",
-            indicator.tooltip_text()
+        assert_eq!(
+            indicator.sources[0].reason.as_ref().map(|r| r.as_ref()),
+            Some("the endpoint could not be reached"),
+            "and the reason is kept verbatim for the panel to show"
         );
 
         indicator.apply(
@@ -1114,7 +1088,7 @@ mod tests {
         );
         assert_eq!(
             indicator.sources[0].fetched_at, None,
-            "and the read time goes with it, or the tooltip would date absent data"
+            "and the read time goes with it, or the panel would date absent data"
         );
     }
 
@@ -1169,7 +1143,7 @@ mod tests {
     ///
     /// The likely real-world state on most machines: Claude signed in, Codex not
     /// installed. Codex's absence has to be silent in the bar and explained in the
-    /// tooltip, without touching Claude's row.
+    /// panel, without touching Claude's row.
     #[test]
     fn one_agent_being_absent_does_not_hide_the_other() {
         let mut indicator = AgentUsageIndicator::test_new();
@@ -1187,14 +1161,14 @@ mod tests {
             indicator.sources[1].windows.is_empty(),
             "and Codex contributes no row rather than an empty icon"
         );
-        let tooltip = indicator.tooltip_text();
-        assert!(
-            tooltip.contains("Codex") && tooltip.contains("not installed"),
-            "the tooltip has to say why Codex is missing: {tooltip}"
+        assert_eq!(
+            indicator.sources[1].reason.as_ref().map(|r| r.as_ref()),
+            Some("the codex CLI is not installed"),
+            "the reason has to survive for the panel to explain the absence"
         );
         assert!(
-            tooltip.contains("Claude Code"),
-            "and still date Claude's numbers: {tooltip}"
+            indicator.sources[0].fetched_at.is_some(),
+            "and Claude's read time is untouched by Codex failing"
         );
     }
 
@@ -1235,9 +1209,9 @@ mod tests {
         }
     }
 
-    /// Whatever the tooltip says, it must not be credential-shaped.
+    /// Whatever reaches the screen, it must not be credential-shaped.
     #[test]
-    fn the_tooltip_never_carries_anything_credential_shaped() {
+    fn no_reason_reaching_the_screen_is_credential_shaped() {
         let mut indicator = AgentUsageIndicator::test_new();
         indicator.apply(
             Outcome::Clear("no Claude Code sign-in was found on this machine".into()),
@@ -1245,21 +1219,19 @@ mod tests {
             Utc::now(),
         );
 
-        let text = indicator.tooltip_text();
-        assert!(!text.is_empty());
-        for forbidden in ["Bearer", "sk-", "accessToken", "Authorization"] {
-            assert!(
-                !text.contains(forbidden),
-                "a tooltip is user-visible text; `{forbidden}` has no business in it"
-            );
+        let now = Utc::now();
+        for source in &indicator.sources {
+            // Through the panel's own renderer, because that is the only surface a
+            // reason reaches now that the status bar has no tooltip.
+            let shown = crate::usage_panel::UsagePanel::source_status(source, now);
+            assert!(!shown.is_empty(), "a silent agent still says why");
+            for forbidden in ["Bearer", "sk-", "accessToken", "Authorization"] {
+                assert!(
+                    !shown.contains(forbidden),
+                    "this is user-visible text; `{forbidden}` has no business in it"
+                );
+            }
         }
-    }
-
-    /// With nothing read and nothing wrong, the tooltip says it is still working.
-    #[test]
-    fn a_fresh_indicator_says_it_is_still_reading() {
-        let indicator = AgentUsageIndicator::test_new();
-        assert_eq!(indicator.tooltip_text(), "Reading agent usage…");
     }
 
     /// An indicator holding nothing must not reserve space.

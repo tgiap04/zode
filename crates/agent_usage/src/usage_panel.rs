@@ -92,8 +92,7 @@ impl UsagePanel {
     ///
     /// Takes the offset rather than reading the system zone, so this is assertable:
     /// a function that consulted the machine's timezone would pass here and fail on
-    /// a CI box in another one. The tooltip keeps RFC 3339 in UTC -- two renderings
-    /// for two purposes.
+    /// a CI box in another one.
     pub(crate) fn format_reset_at(at: DateTime<Utc>, offset: &FixedOffset) -> String {
         at.with_timezone(offset).format("%d/%m %H:%M").to_string()
     }

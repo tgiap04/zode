@@ -62,7 +62,7 @@ The indicator draws no icon and reserves no space for a source with nothing to s
 - the `codex` CLI isn't installed
 - Codex answered, but this build couldn't find the expected fields in the response
 
-Hover the indicator for the specific reason. A request that simply failed keeps showing the last numbers it had rather than clearing them — clearing only happens for the reasons above, where the old numbers would no longer be a true answer.
+Open the panel for the specific reason — it keeps a row for a silent agent and says why it is silent, which is the one thing the status bar itself cannot tell you. A request that simply failed keeps showing the last numbers it had rather than clearing them — clearing only happens for the reasons above, where the old numbers would no longer be a true answer.
 
 ## Polling
 
