@@ -47,7 +47,23 @@ makes deliberate outbound requests, and it is worth being precise about them:
   not already on your machine.
 - **Remote development**, when you connect to a host you chose yourself.
 
-These are downloads and connections you initiate. None of them carry usage data.
+These are downloads and connections you initiate, and none of them carry usage
+data. One more outbound connection does not fit that description, so it gets
+its own section below.
+
+## Agent subscription quota
+
+The status bar can show your Claude Code and/or Codex subscription usage — see
+[Agent Usage Indicator](./agent-usage.md) for the full picture. Unlike the
+requests above, this one is not triggered by an explicit action: it polls
+automatically every 60 seconds while the window is focused.
+
+It carries no editor telemetry and never touches this build's (removed)
+telemetry pipeline. What it does send: your Claude OAuth access token, read
+fresh from the keychain or `~/.claude/.credentials.json` for each request to
+Anthropic's own usage endpoint. For Codex, nothing credential-shaped leaves
+this editor at all — a separate `codex app-server` subprocess holds its own
+session.
 
 ## Verifying this yourself
 

@@ -113,7 +113,7 @@ Adjust line spacing with `buffer_line_height`:
 Zode provides extensive control over UI elements including:
 
 - **Tab bar** — Show/hide, navigation buttons, file icons, git status
-- **Status bar** — Language selector, cursor position, line endings
+- **Status bar** — Language selector, cursor position, line endings, [agent usage](./agent-usage.md)
 - **Scrollbar** — Visibility, git diff indicators, search results
 - **Minimap** — Code overview display
 - **Gutter** — Line numbers, fold indicators, breakpoints

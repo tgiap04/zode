@@ -69,6 +69,8 @@ Zode includes built-in AI assistance. An agent opens as a tab beside your files 
 
 For inline assistance, use `Ctrl+Enter` (macOS, Linux, and Windows all use the same key here).
 
+The status bar also shows each signed-in agent's subscription quota — see [Agent Usage Indicator](./agent-usage.md).
+
 ## Coming from Another Editor?
 
 We have dedicated guides for switching from other editors:

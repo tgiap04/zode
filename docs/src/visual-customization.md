@@ -313,6 +313,8 @@ TBD: Centered layout related settings
 
 ### Status Bar
 
+`claude_usage_button`, `codex_usage_button`, and `agent_usage_display` are also reachable by right-clicking the status bar's usage indicator — see [Agent Usage Indicator](./agent-usage.md) for the panel and menu that go with them.
+
 ```json [settings]
   "status_bar": {
     // Show/hide a button that displays the active buffer's language.
@@ -330,7 +332,17 @@ TBD: Centered layout related settings
     // Show/hide a button that displays the buffer's character encoding.
     // If set to "non_utf8", the button is hidden only for UTF-8 without BOM.
     // Defaults to "non_utf8".
-    "active_encoding_button": "non_utf8"
+    "active_encoding_button": "non_utf8",
+    // Show/hide Claude Code's subscription quota in the status bar.
+    // Defaults to true.
+    "claude_usage_button": true,
+    // Show/hide Codex's subscription quota in the status bar.
+    // Defaults to true.
+    "codex_usage_button": true,
+    // How much of an agent's quota the status bar and usage panel show.
+    // "detailed" shows every window the agent reports; "compact" shows only
+    // the window closest to running out. Defaults to "detailed".
+    "agent_usage_display": "detailed"
   },
   "global_lsp_settings": {
     // Show/hide the LSP button in the status bar.
