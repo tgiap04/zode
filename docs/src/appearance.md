@@ -117,7 +117,7 @@ Zode provides extensive control over UI elements including:
 - **Scrollbar** — Visibility, git diff indicators, search results
 - **Minimap** — Code overview display
 - **Gutter** — Line numbers, fold indicators, breakpoints
-- **Panels** — Project Panel, Terminal, Agent Panel sizing and docking
+- **Panels** — Project Panel, Terminal, Database Panel sizing and docking
 
 → [Visual Customization documentation](./visual-customization.md) for all UI element settings
 
