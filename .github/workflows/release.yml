@@ -470,6 +470,8 @@ jobs:
     needs:
     - upload_release_assets
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
     - name: release::validate_release_assets
       run: |
@@ -477,6 +479,12 @@ jobs:
         TAG="$GITHUB_REF_NAME"
 
         ACTUAL_ASSETS=$(gh release view "$TAG" --repo="$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')
+
+        if [ -z "$ACTUAL_ASSETS" ]; then
+            echo "Error: could not read release $TAG. It exists only as a draft until someone"
+            echo "publishes it, and a draft is invisible to a token without write on contents."
+            exit 1
+        fi
 
         MISSING_ASSETS=$(echo "$EXPECTED_ASSETS" | jq -r --argjson actual "$ACTUAL_ASSETS" '. - $actual | .[]')
 
