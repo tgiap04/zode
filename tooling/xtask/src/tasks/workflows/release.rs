@@ -94,11 +94,21 @@ fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
     let expected_assets: Vec<String> = assets::all().iter().map(|a| format!("\"{a}\"")).collect();
     let expected_assets_json = format!("[{}]", expected_assets.join(", "));
 
+    // The empty-`ACTUAL_ASSETS` guard is not defensive padding. Without it, a release this
+    // job cannot read leaves the variable empty, `jq --argjson actual ""` dies on invalid
+    // JSON, and the job reports a jq parse error -- which reads as a broken check rather
+    // than an unreadable release, and sends the next reader looking in the wrong place.
     let validation_script = formatdoc! {r#"
         EXPECTED_ASSETS='{expected_assets_json}'
         TAG="$GITHUB_REF_NAME"
 
         ACTUAL_ASSETS=$(gh release view "$TAG" --repo="$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')
+
+        if [ -z "$ACTUAL_ASSETS" ]; then
+            echo "Error: could not read release $TAG. It exists only as a draft until someone"
+            echo "publishes it, and a draft is invisible to a token without write on contents."
+            exit 1
+        fi
 
         MISSING_ASSETS=$(echo "$EXPECTED_ASSETS" | jq -r --argjson actual "$ACTUAL_ASSETS" '. - $actual | .[]')
 
@@ -112,10 +122,16 @@ fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
         "#,
     };
 
+    // Write, for a job that only reads. GitHub shows a draft release solely to callers with
+    // push access, so a `contents: read` token gets `release not found` for a release that
+    // is plainly there -- which is exactly how v0.1.0 failed here after all six bundles and
+    // the upload had already succeeded.
     named::job(
-        dependant_job(deps).runs_on(runners::LINUX_SMALL).add_step(
-            named::bash(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
-        ),
+        steps::writes_to_releases(dependant_job(deps))
+            .runs_on(runners::LINUX_SMALL)
+            .add_step(
+                named::bash(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
+            ),
     )
 }
 
