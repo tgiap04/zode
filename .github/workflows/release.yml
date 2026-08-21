@@ -146,6 +146,8 @@ jobs:
   create_draft_release:
     if: (github.repository_owner == 'tgiap04')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -441,6 +443,8 @@ jobs:
     - bundle_windows_aarch64
     - bundle_windows_x86_64
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
     - name: release::download_workflow_artifacts
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53

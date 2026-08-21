@@ -143,7 +143,7 @@ fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> Name
     deps.extend(bundle.jobs());
 
     named::job(
-        dependant_job(&deps)
+        steps::writes_to_releases(dependant_job(&deps))
             .runs_on(runners::LINUX_MEDIUM)
             .add_step(download_workflow_artifacts())
             .add_step(steps::script("ls -lR ./artifacts"))
@@ -185,7 +185,7 @@ fn create_draft_release() -> NamedJob {
     }
 
     named::job(
-        release_job(&[])
+        steps::writes_to_releases(release_job(&[]))
             .runs_on(runners::LINUX_SMALL)
             // Full history, not a fixed depth: `git describe --tags` has to be able to
             // reach the previous tag, and a shallow clone does not carry the tags.
