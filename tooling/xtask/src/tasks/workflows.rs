@@ -6,12 +6,10 @@ use std::path::{Path, PathBuf};
 
 use crate::tasks::workflow_checks::{self};
 
-mod after_release;
 mod autofix_pr;
 mod bump_patch_version;
 mod cherry_pick;
 mod compare_perf;
-mod compliance_check;
 mod danger;
 mod deploy_collab;
 mod extension_auto_bump;
@@ -192,12 +190,10 @@ pub fn run_workflows(args: GenerateWorkflowArgs) -> Result<()> {
     }
 
     let workflows = [
-        WorkflowFile::zed(after_release::after_release),
         WorkflowFile::zed(autofix_pr::autofix_pr),
         WorkflowFile::zed(bump_patch_version::bump_patch_version),
         WorkflowFile::zed(cherry_pick::cherry_pick),
         WorkflowFile::zed(compare_perf::compare_perf),
-        WorkflowFile::zed(compliance_check::compliance_check),
         WorkflowFile::zed(danger::danger),
         WorkflowFile::zed(deploy_collab::deploy_collab),
         WorkflowFile::zed(extension_bump::extension_bump),

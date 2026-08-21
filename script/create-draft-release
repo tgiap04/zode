@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+
+# Prerelease is decided the same way `script/determine-release-channel` decides the
+# channel: any tag carrying a suffix after the version is a preview. Upstream keyed this
+# on a literal `-pre` ending, which disagreed with the channel script the moment a tag
+# looked like `v0.1.0-beta.1` -- that built as preview but was published as a full
+# release. One rule, read off the tag, in both places.
+#
+#   v0.1.0        -> stable,  full release
+#   v0.1.0-beta.1 -> preview, prerelease
 preview=""
-if [[ "$GITHUB_REF_NAME" == *"-pre" ]]; then
+if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
     preview="-p"
 fi
 
-gh release view "$GITHUB_REF_NAME" ||\
+gh release view "$GITHUB_REF_NAME" ||
     gh release create -t "$GITHUB_REF_NAME" -d "$GITHUB_REF_NAME" -F "$1" $preview
