@@ -457,7 +457,7 @@ pub mod settings_profile_selector {
 }
 
 pub mod agent {
-    use gpui::Action;
+    use gpui::{Action, actions};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
@@ -525,6 +525,18 @@ pub mod agent {
         pub mode: Option<AgentViewMode>,
     }
 
+
+    actions!(
+        agent,
+        [
+            /// Shows the history of past agent sessions, or puts it away.
+            ///
+            /// In the `agent` namespace rather than one of its own: the history is
+            /// another face of the same feature, and a namespace exists to group
+            /// what a user would look for together.
+            ToggleHistory,
+        ]
+    );
 }
 
 pub mod assistant {
@@ -539,6 +551,7 @@ pub mod assistant {
     pub struct InlineAssist {
         pub prompt: Option<String>,
     }
+
 }
 
 /// Opens the recent projects interface.
@@ -788,18 +801,7 @@ pub mod database {
 }
 
 pub mod agents_sidebar {
-    use gpui::{Action, actions};
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Toggles the thread switcher popup when the sidebar is focused.
-    #[derive(PartialEq, Clone, Deserialize, JsonSchema, Default, Action)]
-    #[action(namespace = agents_sidebar)]
-    #[serde(deny_unknown_fields)]
-    pub struct ToggleThreadSwitcher {
-        #[serde(default)]
-        pub select_last: bool,
-    }
+    use gpui::actions;
 
     actions!(
         agents_sidebar,

@@ -26,6 +26,9 @@ pub fn agent_icon(agent: &str) -> IconName {
 }
 
 pub struct AgentView {
+    /// Set only for a view opened from the history: the CLI arguments and working
+    /// directory that continue an existing session.
+    resume: Option<ResumeTarget>,
     agent: AgentId,
     display_name: SharedString,
     /// What the user called this session, if they named it. Two Claude Code tabs
@@ -175,7 +178,15 @@ impl AgentView {
                     }
 
                     let view = cx.new(|cx| {
-                        Self::new(agent_id, mode, project, workspace.weak_handle(), window, cx)
+                        Self::new(
+                            agent_id,
+                            mode,
+                            project,
+                            workspace.weak_handle(),
+                            None,
+                            window,
+                            cx,
+                        )
                     });
                     // The active pane, so the agent arrives beside whatever is
                     // being read rather than in a place of its own. The other
@@ -275,10 +286,12 @@ impl AgentView {
         mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
+        resume: Option<ResumeTarget>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
+            resume,
             display_name: display_name(&agent),
             agent,
             custom_name: None,
@@ -294,6 +307,45 @@ impl AgentView {
         };
         view.start(window, cx);
         view
+    }
+
+    /// Opens a session that already exists, in the directory it ran in.
+    ///
+    /// Always a new tab: resuming is not "show me the agent", it is "run this
+    /// conversation again", and the session it continues may have nothing to do
+    /// with whatever tab is already open.
+    pub fn open_resumed(
+        workspace: &mut Workspace,
+        agent: &str,
+        resume: ResumeTarget,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let agent_id = AgentId::new(agent.to_string());
+        let project = workspace.project().clone();
+        let weak_workspace = workspace.weak_handle();
+        // Deferred for the reason `open_inner` is: this runs under a handler that
+        // holds the workspace leased, and reaching back through the handle while
+        // it is leased aborts the process.
+        cx.spawn_in(window, async move |workspace, cx| {
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    let view = cx.new(|cx| {
+                        Self::new(
+                            agent_id,
+                            AgentViewMode::Terminal,
+                            project,
+                            weak_workspace,
+                            Some(resume),
+                            window,
+                            cx,
+                        )
+                    });
+                    workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                })
+                .log_err();
+        })
+        .detach();
     }
 
     /// A view that never starts its agent.
@@ -318,6 +370,7 @@ impl AgentView {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            resume: None,
             display_name: display_name(&agent),
             agent,
             custom_name: None,
@@ -509,6 +562,7 @@ impl AgentView {
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
+        let resume = self.resume.clone();
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
@@ -545,7 +599,10 @@ impl AgentView {
 
             let terminal = project
                 .update(cx, |project, cx| {
-                    project.create_terminal_task(agent_task(&agent, binary, project, cx), cx)
+                    project.create_terminal_task(
+                        agent_task(&agent, binary, resume.as_ref(), project, cx),
+                        cx,
+                    )
                 })
                 .await;
 
@@ -611,9 +668,18 @@ fn remember_mode(agent: &AgentId, mode: AgentViewMode, cx: &mut App) {
 /// holds the agent itself: closing the tab ends the session, and no stray shell
 /// outlives it. The summary, command echo and rerun button are all off — this is
 /// an interactive program, not a build step whose exit code the user waits on.
+/// A session to pick up where it left off: the CLI arguments that resume it and
+/// the directory it ran in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumeTarget {
+    pub args: Vec<String>,
+    pub cwd: std::path::PathBuf,
+}
+
 fn agent_task(
     agent: &AgentId,
     binary: std::path::PathBuf,
+    resume: Option<&ResumeTarget>,
     project: &Project,
     cx: &App,
 ) -> SpawnInTerminal {
@@ -627,11 +693,15 @@ fn agent_task(
         label,
         command_label: binary.to_string_lossy().into_owned(),
         command: Some(binary.to_string_lossy().into_owned()),
-        args: Vec::new(),
-        cwd: project
-            .visible_worktrees(cx)
-            .next()
-            .map(|worktree| worktree.read(cx).abs_path().to_path_buf()),
+        args: resume.map(|resume| resume.args.clone()).unwrap_or_default(),
+        // A resumed session runs where it ran before, not where this window
+        // happens to be pointed: the conversation's context is that directory.
+        cwd: resume.map(|resume| resume.cwd.clone()).or_else(|| {
+            project
+                .visible_worktrees(cx)
+                .next()
+                .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        }),
         reveal: RevealStrategy::Never,
         hide: HideStrategy::Never,
         show_summary: false,
@@ -789,8 +859,15 @@ impl workspace::item::SerializableItem for AgentView {
                     // No width to restore: a workspace comes back with its own
                     // serialized pane flexes, and forcing a remembered width on
                     // top of them would fight the layout the user actually left.
-                    let mut view =
-                        Self::new(AgentId::new(agent), mode, project, workspace, window, cx);
+                    let mut view = Self::new(
+                        AgentId::new(agent),
+                        mode,
+                        project,
+                        workspace,
+                        None,
+                        window,
+                        cx,
+                    );
                     // Set directly rather than through `restore_custom_name`,
                     // which notifies: nothing is watching a view that is still
                     // being constructed.
@@ -844,12 +921,9 @@ impl Render for AgentView {
                 None,
                 cx,
             ),
-            State::MissingBinary(missing) => crate::missing_binary::render(
-                &cx.entity(),
-                &self.display_name,
-                missing,
-                cx,
-            ),
+            State::MissingBinary(missing) => {
+                crate::missing_binary::render(&cx.entity(), &self.display_name, missing, cx)
+            }
             State::Failed(error) => centered_message(IconName::Warning, error.clone(), None, cx),
         };
         let colors = cx.theme().colors();
@@ -968,6 +1042,7 @@ mod tests {
         });
 
         let agent_view = cx.new_window_entity(|_window, cx| AgentView {
+            resume: None,
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
             custom_name: None,
@@ -1253,6 +1328,7 @@ mod tests {
                     AgentViewMode::Terminal,
                     project.clone(),
                     workspace.downgrade(),
+                    None,
                     window,
                     cx,
                 )

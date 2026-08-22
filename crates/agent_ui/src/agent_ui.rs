@@ -9,9 +9,11 @@
 mod actions;
 mod agent_view;
 mod missing_binary;
+mod session_history;
 
 pub use actions::*;
 pub use agent_view::{AgentView, agent_icon};
+pub use session_history::AgentHistoryPanel;
 
 use gpui::App;
 use project::AgentId;
@@ -25,6 +27,42 @@ pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<AgentView>(cx);
 
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        // Shows or hides the history, taking the tool column turn by turn with
+        // whatever else lives there.
+        //
+        // Written out rather than handed to `toggle_panel_focus`, which routes
+        // through `Dock::show_panel` and therefore *stacks*: the history and the
+        // project tree would split the column's height between them, and two
+        // vertical lists in half a column each serves neither. `activate_panel`
+        // is the call that makes one panel the only visible one.
+        workspace.register_action(
+            |workspace, _: &zed_actions::agent::ToggleHistory, window, cx| {
+                let dock = workspace.right_dock().clone();
+                let Some(index) = dock.read(cx).panel_index_for_type::<AgentHistoryPanel>() else {
+                    return;
+                };
+                // Already up means: the dock is open and the panel it is drawing
+                // is this one.
+                let showing = {
+                    let dock = dock.read(cx);
+                    dock.is_open()
+                        && dock
+                            .visible_panel()
+                            .and_then(|panel| panel.to_any().downcast::<AgentHistoryPanel>().ok())
+                            .is_some()
+                };
+                dock.update(cx, |dock, cx| {
+                    if showing {
+                        // Put away, not closed: the dock keeps the panel, so its
+                        // search text and expanded rows survive the round trip.
+                        dock.set_open(false, window, cx);
+                    } else {
+                        dock.activate_panel(index, window, cx);
+                        dock.set_open(true, window, cx);
+                    }
+                });
+            },
+        );
         workspace.register_action(|workspace, action: &OpenAgent, window, cx| {
             AgentView::open(workspace, action.agent.as_str(), action.mode, window, cx);
         });

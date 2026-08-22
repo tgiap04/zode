@@ -10567,6 +10567,11 @@ async fn the_indent_guides_wait_for_the_pointer(cx: &mut gpui::TestAppContext) {
 
 /// The button that opens this panel stands on top of it, and only there.
 ///
+/// Only this panel's button: the agent-history panel lives in `agent_ui`, which
+/// this crate cannot see, and this test builds its workspace by hand rather than
+/// through `zed::initialize_panels`. That the header lists *several* panels is
+/// proven in `workspace::a_stack_under_a_header_still_divides_the_dock`.
+///
 /// Measured on a real frame for the same reason as the test above: a header the
 /// layout drops, or one drawn below the panel it names, reads as correct
 /// everywhere except on screen. The two selectors are the whole point -- asserting
@@ -10622,24 +10627,5 @@ async fn the_panels_button_moves_into_the_docks_own_header(cx: &mut gpui::TestAp
         dock_bounds.origin.y,
         dock_bounds.bottom()
     );
-
-    // The pending agent-history entry, beside the panel's own button rather than
-    // somewhere else in the window. It has nothing behind it yet, so the only
-    // thing worth asserting is that it is drawn and where.
-    let history_bounds = cx
-        .debug_bounds("dock-header-agent-history")
-        .expect("the header must carry the pending agent-history entry");
-    assert!(
-        history_bounds.origin.x >= header_bounds.right(),
-        "the agent-history entry must sit beside the panel's button, not before \
-         it: entry at {:?}, button ending at {:?}",
-        history_bounds.origin.x,
-        header_bounds.right()
-    );
-    assert!(
-        history_bounds.origin.y < dock_bounds.origin.y + dock_bounds.size.height / 2.
-            && history_bounds.right() <= dock_bounds.right() + px(1.),
-        "and must share the strip at the top of the dock, got {history_bounds:?} \
-         in {dock_bounds:?}"
-    );
 }
+

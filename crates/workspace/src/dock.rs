@@ -1701,10 +1701,7 @@ impl Dock {
 
         // No strip at all rather than an empty one: an empty header still costs
         // its padding and its border, which reads as a stray rule above the
-        // panel. The pending entry below rides with the buttons rather than
-        // holding the strip open by itself -- a header carrying nothing but a
-        // disabled icon would be a rule across the top of the panel for no
-        // reason.
+        // panel.
         if buttons.is_empty() {
             return None;
         }
@@ -1724,7 +1721,6 @@ impl Dock {
                 .border_b_1()
                 .border_color(cx.theme().colors().border)
                 .children(buttons)
-                .child(render_pending_agent_history_button())
                 .into_any_element(),
         )
     }
@@ -2028,30 +2024,6 @@ fn panel_button(
             .and_then(|label| label.parse::<usize>().ok()),
         |this, count| this.child(CountBadge::new(count)),
     )
-}
-
-/// The agent-history entry in the dock header, which has nothing behind it yet.
-///
-/// Drawn disabled and says so on hover. Nothing is wired because there is nothing
-/// to wire: no agent-history view exists, and the one action that names anything
-/// like it -- `zed_actions::agents_sidebar::ToggleThreadSwitcher` -- has no
-/// handler anywhere in the tree. A disabled button keeps its tooltip and drops
-/// its click handlers, so this cannot be mistaken for a control that works.
-///
-/// It is here because the strip is meant to carry it and leaving the gap silent
-/// hides that from the only people who could ask for it. When the history does
-/// exist it should be a `Panel` docked to this side like any other, which puts
-/// its button in this strip through `panel_entries` on its own -- and this
-/// function goes away rather than growing an action.
-fn render_pending_agent_history_button() -> Div {
-    div()
-        .debug_selector(|| "dock-header-agent-history".into())
-        .child(
-            IconButton::new("dock-header-agent-history", IconName::HistoryRerun)
-                .icon_size(IconSize::Small)
-                .disabled(true)
-                .tooltip(|_window, cx| Tooltip::simple("Agent History — not built yet", cx)),
-        )
 }
 
 /// Where a dock's buttons are drawn.
