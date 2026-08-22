@@ -10492,6 +10492,79 @@ async fn the_project_panel_draws_in_the_right_half_of_the_window(cx: &mut gpui::
     );
 }
 
+/// The guides wait for the pointer, and arrive when it does.
+///
+/// Measured on real frames: the whole mechanism is `Visibility::Hidden` on a
+/// wrapper, which no state assertion can see. The selector is deliberately on a
+/// child of that wrapper -- `Div` records its own debug bounds even when hidden,
+/// so a probe up there would report the guides as drawn while nothing was
+/// painted.
+///
+/// Both halves matter. Absence alone would pass for guides that never come back,
+/// and presence alone for guides that were never hidden.
+#[gpui::test]
+async fn the_indent_guides_wait_for_the_pointer(cx: &mut gpui::TestAppContext) {
+    let fs = FakeFs::new(cx.executor());
+    // Nested, so there is an indent to guide at all: a flat root draws no guides
+    // and the test would pass on an empty claim.
+    fs.insert_tree("/root", json!({ "dir": { "a.txt": "" } }))
+        .await;
+    init_test(cx);
+
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    panel.update_in(cx, |panel, window, cx| {
+        panel.select_first(&SelectFirst {}, window, cx);
+        panel.expand_selected_entry(&ExpandSelectedEntry, window, cx);
+    });
+    cx.run_until_parked();
+
+    // The pointer starts at the window origin, which is the far side of the
+    // window from a right dock -- asserted rather than assumed, because the whole
+    // test rests on it.
+    let dock_bounds = cx
+        .debug_bounds("dock-panel")
+        .expect("the docked panel must be drawn once the dock is open");
+    let pointer = cx.update(|window, _| window.mouse_position());
+    assert!(
+        !dock_bounds.contains(&pointer),
+        "the pointer must start outside the panel for this test to mean anything, \
+         was at {pointer:?} inside {dock_bounds:?}"
+    );
+    assert!(
+        cx.debug_bounds("indent-guides").is_none(),
+        "the guides must not be painted while the pointer is elsewhere"
+    );
+
+    // Over the tree itself, not the panel's geometric centre. The blank area
+    // below the last entry declares `block_mouse_except_scroll`, which takes the
+    // panel's own hitbox out of the hovered set -- so the pointer sitting there
+    // reads as "not on the panel" to every hover affordance this panel has, the
+    // guides included. Aiming at the centre would test that quirk rather than
+    // this behaviour.
+    let over_the_tree = dock_bounds.origin + point(px(40.), px(60.));
+    cx.simulate_mouse_move(over_the_tree, None, gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("indent-guides").is_some(),
+        "and must be painted once it arrives"
+    );
+}
+
 /// The button that opens this panel stands on top of it, and only there.
 ///
 /// Measured on a real frame for the same reason as the test above: a header the

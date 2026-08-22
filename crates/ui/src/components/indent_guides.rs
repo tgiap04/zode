@@ -43,6 +43,7 @@ pub struct IndentGuides {
         >,
     >,
     on_click: Option<Rc<dyn Fn(&IndentGuideLayout, &mut Window, &mut App)>>,
+    hover_group: Option<SharedString>,
 }
 
 pub fn indent_guides(indent_size: Pixels, colors: IndentGuideColors) -> IndentGuides {
@@ -52,8 +53,11 @@ pub fn indent_guides(indent_size: Pixels, colors: IndentGuideColors) -> IndentGu
         compute_indents_fn: None,
         render_fn: None,
         on_click: None,
+        hover_group: None,
     }
 }
+
+impl gpui::prelude::FluentBuilder for IndentGuides {}
 
 impl IndentGuides {
     /// Sets the callback that will be called when the user clicks on an indent guide.
@@ -62,6 +66,33 @@ impl IndentGuides {
         on_click: impl Fn(&IndentGuideLayout, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Rc::new(on_click));
+        self
+    }
+
+    /// Draws the guides only while the named element group is hovered.
+    ///
+    /// The caller declares the group with `Styled::group` on whatever counts as
+    /// "inside" -- usually the panel's own root, so the guides answer to the
+    /// panel rather than to the list they decorate.
+    ///
+    /// Left to gpui rather than tracked as state: `visible_on_hover` hides the
+    /// subtree, and the group's own handler notifies the view on every enter and
+    /// every leave, so there is no flag to keep in step and no extra frame to
+    /// request. It also sidesteps `InteractiveElement::on_hover`, which reports
+    /// "not hovered" while a mouse button is held or a drag is live -- that would
+    /// blink the guides off on every click and hide them through the whole of a
+    /// drag into a nested folder, which is when they are most worth having.
+    ///
+    /// "Hovered" is gpui's answer rather than geometry: a region that blocks the
+    /// mouse (`occlude`, `block_mouse_except_scroll`) takes the group's hitbox
+    /// out of the hovered set while the pointer is over it, so the guides hide
+    /// there even though the pointer is inside the group's bounds. That is the
+    /// same answer every other hover affordance in the panel gets, which is the
+    /// point -- but it does mean a deliberately mouse-inert region reads as
+    /// outside. In the project panel that is the blank area below the last entry,
+    /// which is zero-height whenever the tree fills the panel.
+    pub fn visible_on_group_hover(mut self, group: impl Into<SharedString>) -> Self {
+        self.hover_group = Some(group.into());
         self
     }
 
@@ -147,7 +178,26 @@ impl IndentGuides {
             colors: self.colors.clone(),
             on_hovered_indent_guide_click: self.on_click.clone(),
         };
-        indent_guides.into_any_element()
+        // The selector sits on a child of the visibility wrapper below rather
+        // than on the wrapper itself: `Div` records its own debug bounds before
+        // it returns on `Visibility::Hidden`, so a selector up there would report
+        // the guides as painted while they are not. A child is reached only when
+        // the wrapper paints.
+        let indent_guides = div()
+            .debug_selector(|| "indent-guides".into())
+            .child(indent_guides.into_any_element());
+        match self.hover_group.clone() {
+            // Laid out but not painted while the group is cold -- `Div`'s paint
+            // returns on `Visibility::Hidden` before it reaches its children, and
+            // the guides paint at absolute bounds of their own, so wrapping them
+            // costs no layout and cannot clip them (a default `Div` masks
+            // nothing).
+            Some(group) => div()
+                .visible_on_hover(group)
+                .child(indent_guides)
+                .into_any_element(),
+            None => indent_guides.into_any_element(),
+        }
     }
 }
 

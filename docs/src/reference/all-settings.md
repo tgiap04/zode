@@ -4642,7 +4642,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
     "sticky_scroll": true,
     "show_diagnostics": "all",
     "indent_guides": {
-      "show": "always"
+      "show": "on_hover"
     },
     "sort_mode": "directories_first",
     "hide_root": false,
@@ -4815,7 +4815,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 ### Indent Guides: Show
 
-- Description: Whether to show indent guides in the project panel.
+- Description: When to show indent guides in the project panel.
 - Setting: `indent_guides`
 - Default:
 
@@ -4823,7 +4823,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 {
   "project_panel": {
     "indent_guides": {
-      "show": "always"
+      "show": "on_hover"
     }
   }
 }
@@ -4831,7 +4831,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 **Options**
 
-1. Show indent guides in the project panel
+1. Always show indent guides in the project panel
 
 ```json [settings]
 {
@@ -4843,7 +4843,19 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 }
 ```
 
-2. Hide indent guides in the project panel
+2. Show them only while the pointer is inside the project panel
+
+```json [settings]
+{
+  "project_panel": {
+    "indent_guides": {
+      "show": "on_hover"
+    }
+  }
+}
+```
+
+3. Hide indent guides in the project panel
 
 ```json [settings]
 {

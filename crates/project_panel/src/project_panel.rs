@@ -88,6 +88,11 @@ use crate::{
 };
 
 const PROJECT_PANEL_KEY: &str = "ProjectPanel";
+/// The element group the panel's root declares, and what "inside the panel"
+/// means to anything that hides and shows with the pointer — today the indent
+/// guides. One const rather than two literals: a name that drifted would leave
+/// them hidden for good, and nothing would say so.
+const PANEL_GROUP: &str = "project-panel";
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
 
 struct VisibleEntriesForWorktree {
@@ -6622,7 +6627,12 @@ impl Render for ProjectPanel {
         let project = self.project.read(cx);
         let panel_settings = ProjectPanelSettings::get_global(cx);
         let indent_size = panel_settings.indent_size;
-        let show_indent_guides = panel_settings.indent_guides.show == ShowIndentGuides::Always;
+        let indent_guides = panel_settings.indent_guides.show;
+        let show_indent_guides = indent_guides != ShowIndentGuides::Never;
+        // Hidden and shown by `PANEL_GROUP` rather than by a flag on this panel;
+        // see `IndentGuides::visible_on_group_hover` for why the pointer is
+        // gpui's business here and not ours.
+        let guides_follow_pointer = indent_guides == ShowIndentGuides::OnHover;
         let horizontal_scroll = panel_settings.scrollbar.horizontal_scroll;
         let show_sticky_entries = {
             if panel_settings.sticky_scroll {
@@ -6713,7 +6723,7 @@ impl Render for ProjectPanel {
             }
             h_flex()
                 .id("project-panel")
-                .group("project-panel")
+                .group(PANEL_GROUP)
                 .when(panel_settings.drag_and_drop, |this| {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))
                         .on_drag_move(cx.listener(handle_drag_move::<DraggedSelection>))
@@ -6814,6 +6824,9 @@ impl Render for ProjectPanel {
                                         px(indent_size),
                                         IndentGuideColors::panel(cx),
                                     )
+                                    .when(guides_follow_pointer, |guides| {
+                                        guides.visible_on_group_hover(PANEL_GROUP)
+                                    })
                                     .with_compute_indents_fn(
                                         cx.entity(),
                                         |this, range, window, cx| {
@@ -6961,6 +6974,9 @@ impl Render for ProjectPanel {
                                             px(indent_size),
                                             IndentGuideColors::panel(cx),
                                         )
+                                        .when(guides_follow_pointer, |guides| {
+                                            guides.visible_on_group_hover(PANEL_GROUP)
+                                        })
                                         .with_render_fn(
                                             cx.entity(),
                                             move |_, params, _, _| {
