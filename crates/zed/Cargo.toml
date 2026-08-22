@@ -216,7 +216,10 @@ repl = { workspace = true, features = ["test-support"] }
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
 identifier = "io.github.tgiap04.zode.dev"
-name = "Zode Dev"
+# A locally built bundle is the editor this fork's author actually uses, so it is
+# named for what it is. The identifier still differs from the released one, so the
+# two remain distinct installs to macOS even though they share a display name.
+name = "Zode"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]
