@@ -4,7 +4,7 @@ use indoc::formatdoc;
 use crate::tasks::workflows::{
     run_bundling::{bundle_linux, bundle_mac, bundle_windows},
     run_tests,
-    runners::{self, Arch, Platform},
+    runners::{self, Arch, Platform, ReleaseChannel},
     steps::{self, FluentBuilder, NamedJob, dependant_job, named, release_job},
     vars::{self, assets},
 };
@@ -23,13 +23,19 @@ pub(crate) fn release() -> Workflow {
 
     let gate: &[&NamedJob] = &[&linux_tests, &linux_clippy, &check_scripts];
 
+    // Every bundling job resolves the channel from the tag itself. The bundling
+    // scripts read `crates/zed/RELEASE_CHANNEL`, and a job that leaves it alone
+    // bundles the checked-in channel -- which is how a `v*` tag produced installers
+    // named "Zode Dev" / "Zode Devel" on all three platforms.
+    let channel = Some(ReleaseChannel::FromTag);
+
     let bundle = ReleaseBundleJobs {
-        linux_aarch64: bundle_linux(Arch::AARCH64, None, gate),
-        linux_x86_64: bundle_linux(Arch::X86_64, None, gate),
-        mac_aarch64: bundle_mac(Arch::AARCH64, None, gate),
-        mac_x86_64: bundle_mac(Arch::X86_64, None, gate),
-        windows_aarch64: bundle_windows(Arch::AARCH64, None, gate),
-        windows_x86_64: bundle_windows(Arch::X86_64, None, gate),
+        linux_aarch64: bundle_linux(Arch::AARCH64, channel, gate),
+        linux_x86_64: bundle_linux(Arch::X86_64, channel, gate),
+        mac_aarch64: bundle_mac(Arch::AARCH64, channel, gate),
+        mac_x86_64: bundle_mac(Arch::X86_64, channel, gate),
+        windows_aarch64: bundle_windows(Arch::AARCH64, channel, gate),
+        windows_x86_64: bundle_windows(Arch::X86_64, channel, gate),
     };
 
     let upload_release_assets = upload_release_assets(&[&create_draft_release], &bundle);

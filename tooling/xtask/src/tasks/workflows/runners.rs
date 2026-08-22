@@ -93,4 +93,9 @@ impl std::fmt::Display for Platform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReleaseChannel {
     Nightly,
+    /// Whatever the release tag says -- `stable` for `v0.1.0`, `preview` for
+    /// `v0.1.0-beta.1`. Resolved inside the job, because the bundling scripts read
+    /// `crates/zed/RELEASE_CHANNEL` and a job that never writes it bundles the
+    /// checked-in channel instead of the one being released.
+    FromTag,
 }
