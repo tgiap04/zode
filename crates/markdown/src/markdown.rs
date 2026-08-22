@@ -1936,7 +1936,14 @@ impl Element for MarkdownElement {
                                         this.bg(cx.theme().colors().title_bar_background)
                                     })
                                     .when(!is_header && row_index % 2 == 1, |this| {
-                                        this.bg(cx.theme().colors().panel_background)
+                                        // `surface_background`, not `panel_background`: a markdown table takes
+                                        // whatever ground the view embedding it has, and the agent chat's ground
+                                        // *is* `panel_background` -- so striping with it paints the row in the
+                                        // colour it is already sitting on. `surface_background` is the design
+                                        // system's own answer for a mark on a surface
+                                        // (`ElevationIndex::EditorSurface::on_elevation_bg`) and stays distinct
+                                        // from both `panel_background` and `background` in every bundled theme.
+                                        this.bg(cx.theme().colors().surface_background)
                                     }),
                                 range,
                                 markdown_end,

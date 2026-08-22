@@ -11,7 +11,12 @@
     "light": "Light 2026",
     "dark": "Dark 2026",
   },
-  "icon_theme": "Zode (Default)",
+  // The file icons are fixed in this build: whatever is named here, and whatever
+  // an extension contributes, resolves to the one shipped icon theme -- see
+  // `ThemeRegistry::get_icon_theme`. The key stays because the settings machinery
+  // resolves it unconditionally and a missing key is a panic at startup, not a
+  // fallback.
+  "icon_theme": "Material Icon Theme",
   // The name of a base set of key bindings to use.
   // This setting can take six values, each named after another
   // text editor:
@@ -198,9 +203,6 @@
     // losing old output from hibernated (not actively-viewed) projects'
     // terminals is acceptable to you.
     "background_scroll_history_lines": null,
-    // Which side of the window the project switcher sidebar docks to.
-    // "left" or "right".
-    "sidebar_side": "right",
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
@@ -778,8 +780,6 @@
     "hide_gitignore": false,
     // Default width of the project panel.
     "default_width": 240,
-    // Where to dock the project panel. Can be 'left' or 'right'.
-    "dock": "left",
     // Spacing between worktree entries in the project panel. Can be 'comfortable' or 'standard'.
     "entry_spacing": "comfortable",
     // Whether to show file icons in the project panel.
@@ -836,13 +836,15 @@
     // Settings related to indent guides in the project panel.
     "indent_guides": {
       // When to show indent guides in the project panel.
-      // This setting can take two values:
+      // This setting can take three values:
       //
       // 1. Always show indent guides:
       //    "always"
-      // 2. Never show indent guides:
+      // 2. Show them only while the pointer is inside the panel:
+      //    "on_hover"
+      // 3. Never show indent guides:
       //    "never"
-      "show": "always",
+      "show": "on_hover",
     },
     // Sort order for entries in the project panel.
     // This setting can take three values:
@@ -895,8 +897,9 @@
     "button": true,
     // Default width of the outline panel.
     "default_width": 300,
-    // Where to dock the outline panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // Where to dock the outline panel. Can be 'left' or 'right'. Defaults to the rail's
+    // own side so its button appears in the rail rather than the status bar.
+    "dock": "left",
     // Whether to show file icons in the outline panel.
     "file_icons": true,
     // Whether to show folder icons or chevrons for directories in the outline panel.
@@ -915,11 +918,13 @@
     // Settings related to indent guides in the outline panel.
     "indent_guides": {
       // When to show indent guides in the outline panel.
-      // This setting can take two values:
+      // This setting can take three values:
       //
       // 1. Always show indent guides:
       //    "always"
-      // 2. Never show indent guides:
+      // 2. Show them only while the pointer is inside the panel:
+      //    "on_hover"
+      // 3. Never show indent guides:
       //    "never"
       "show": "always",
     },
@@ -947,8 +952,9 @@
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,
-    // Where to dock the git panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // Where to dock the git panel. Can be 'left' or 'right'. Defaults to the rail's
+    // own side so its button appears in the rail rather than the status bar.
+    "dock": "left",
     // Default width of the git panel.
     "default_width": 360,
     // Style of the git status indicator in the panel.
@@ -1509,6 +1515,16 @@
     "line_endings_button": false,
     // Control when to show the active encoding in the status bar.
     "active_encoding_button": "non_utf8",
+    // Whether to show Claude Code's subscription quota in the status bar.
+    "claude_usage_button": true,
+    // Whether to show Codex's subscription quota in the status bar.
+    "codex_usage_button": true,
+    // How much of an agent's quota to show in the status bar. May take 2 values:
+    // 1. Every window the agent reports:
+    //      "agent_usage_display": "detailed"
+    // 2. Only the window closest to running out:
+    //      "agent_usage_display": "compact"
+    "agent_usage_display": "detailed",
   },
   // Settings specific to the terminal
   "terminal": {
@@ -2351,52 +2367,7 @@
   "context_server_timeout": 60,
   // Configures context servers for use by the agent.
   "context_servers": {},
-  // Settings for the agent view that opens beside the editor.
-  "agent": {
-    // Whether agents are available at all.
-    "enabled": true,
-    // Which side the agent docks to. 'left' or 'right'.
-    //
-    // Deliberately NOT the side `project_panel` docks to: a dock shows one
-    // panel at a time, and the project panel is the only one shipped with
-    // `starts_open: true`. Sharing its side means a first click on an agent
-    // puts the project panel away.
-    "sidebar_side": "right",
-    // Whether to cap the conversation's content width for readability, centering
-    // it when the pane is wider than the cap.
-    "limit_content_width": true,
-    // The cap itself, in pixels, when limit_content_width is on.
-    "max_content_width": 850,
-    // Where a new thread starts. 'local_project' or 'new_worktree'.
-    "new_thread_location": "local_project",
-    // Where to show a notification when the agent is waiting on you.
-    // 'primary_screen', 'all_screens' or 'never'.
-    "notify_when_agent_waiting": "primary_screen",
-    // When to play a sound as the agent finishes or asks for input.
-    // 'never', 'when_hidden' or 'always'.
-    "play_sound_when_agent_done": "never",
-    // Whether to show the thumbs up/down feedback buttons.
-    "enable_feedback": true,
-    // Whether edit cards start expanded, showing the whole diff.
-    "expand_edit_card": true,
-    // Whether terminal cards start expanded, showing the whole output.
-    "expand_terminal_card": true,
-    // How thinking blocks are displayed.
-    // 'auto', 'preview', 'always_expanded' or 'always_collapsed'.
-    "thinking_display": "auto",
-    // Whether stopping a terminal the agent started also cancels its turn.
-    "cancel_generation_on_terminal_stop": true,
-    // Whether a message needs a modifier key to send, leaving plain enter for newlines.
-    "use_modifier_to_send": false,
-    // How many lines the message editor shows before it starts scrolling.
-    "message_editor_min_lines": 3,
-    // Whether to show elapsed time and turn duration while the agent works.
-    "show_turn_stats": false,
-    // Whether the agent's edits open one file at a time for review, rather than
-    // all of them together in the diff pane.
-    "single_file_review": true,
-  },
-  // Configures agent servers available in the agent panel.
+  // Configures the agent CLIs that can be opened as a tab.
   "agent_servers": {},
   "debugger": {
     "stepping_granularity": "line",

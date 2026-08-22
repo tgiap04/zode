@@ -1,12 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/acp_thread",
-    "crates/acp_tools",
     "crates/action_log",
-    "crates/agent_servers",
-    "crates/agent_settings",
+    "crates/agent_usage",
     "crates/activity_indicator",
+    "crates/agent_sessions",
     "crates/agent_ui",
     "crates/askpass",
     "crates/assets",
@@ -223,12 +221,10 @@ edition = "2024"
 # Workspace member crates
 #
 
-acp_thread = { path = "crates/acp_thread" }
-acp_tools = { path = "crates/acp_tools" }
 action_log = { path = "crates/action_log" }
-agent_servers = { path = "crates/agent_servers" }
-agent_settings = { path = "crates/agent_settings" }
+agent_usage = { path = "crates/agent_usage" }
 activity_indicator = { path = "crates/activity_indicator" }
+agent_sessions = { path = "crates/agent_sessions" }
 agent_ui = { path = "crates/agent_ui" }
 askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
@@ -417,7 +413,6 @@ ztracing_macro = { path = "crates/ztracing_macro" }
 # External crates
 #
 
-agent-client-protocol = { version = "=0.11.1", features = ["unstable"] }
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
 any_vec = "0.14"

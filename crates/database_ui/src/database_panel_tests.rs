@@ -4,7 +4,7 @@ use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
 use project::Project;
 use settings::{Settings as _, SettingsStore};
 use workspace::dock::{DockColumn, DockPosition};
-use workspace::{MultiWorkspace, SidebarSide};
+use workspace::MultiWorkspace;
 
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -68,14 +68,6 @@ async fn the_panel_lands_in_the_database_column(cx: &mut TestAppContext) {
                     .is_none(),
             "and never in the tool dock its position names"
         );
-        assert!(
-            workspace
-                .agent_dock()
-                .read(cx)
-                .panel::<DatabasePanel>()
-                .is_none(),
-            "nor in the other own column"
-        );
     });
 }
 
@@ -118,50 +110,34 @@ async fn the_column_draws_with_the_panel_in_it(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-/// The column follows the rail, so the button and the column it opens can never
-/// end up at opposite edges of the window.
+/// The column stands beside the rail, so the button and the column it opens can
+/// never end up at opposite edges of the window. Both stand on the left, and
+/// `Workspace::OWN_COLUMN_POSITION` is the single place that says so.
 #[gpui::test]
-async fn the_column_follows_the_rail(cx: &mut TestAppContext) {
+async fn the_column_stands_left_beside_the_rail(cx: &mut TestAppContext) {
     let (workspace, _panel, cx) = workspace_with_panel(cx).await;
+    cx.run_until_parked();
 
-    for (side, expected) in [
-        (SidebarSide::Right, DockPosition::Right),
-        (SidebarSide::Left, DockPosition::Left),
-    ] {
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(side);
-                });
-            });
-        });
-        cx.run_until_parked();
+    workspace.read_with(cx, |workspace, cx| {
+        let column = workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists");
 
-        workspace.read_with(cx, |workspace, cx| {
-            assert_eq!(
-                workspace
-                    .dock_for_column(DockColumn::Database)
-                    .expect("the database column exists")
-                    .read(cx)
-                    .position(),
-                expected,
-                "the column must stand on the rail's side ({side:?})"
-            );
-            assert!(
-                workspace
-                    .dock_for_column(DockColumn::Database)
-                    .expect("the database column exists")
-                    .read(cx)
-                    .panel::<DatabasePanel>()
-                    .is_some(),
-                "and the panel must not be hauled into a tool dock on the way"
-            );
-        });
-    }
+        assert_eq!(
+            column.read(cx).position(),
+            DockPosition::Left,
+            "the column stands on the rail's edge"
+        );
+        assert_ne!(
+            column.read(cx).position(),
+            DockPosition::Right,
+            "and never opposite it -- the button would be a window away from what it opens"
+        );
+        assert!(
+            column.read(cx).panel::<DatabasePanel>().is_some(),
+            "and the panel must not be hauled into a tool dock on the way"
+        );
+    });
 }
 
 /// An empty column is a legitimate state here -- unlike the agent panel, which

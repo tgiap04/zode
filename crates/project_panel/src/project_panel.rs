@@ -43,7 +43,7 @@ use rayon::slice::ParallelSliceMut;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
-    DockSide, ProjectPanelEntrySpacing, Settings, SettingsStore, ShowDiagnostics, ShowIndentGuides,
+    ProjectPanelEntrySpacing, Settings, SettingsStore, ShowDiagnostics, ShowIndentGuides,
     update_settings_file,
 };
 use smallvec::SmallVec;
@@ -88,6 +88,11 @@ use crate::{
 };
 
 const PROJECT_PANEL_KEY: &str = "ProjectPanel";
+/// The element group the panel's root declares, and what "inside the panel"
+/// means to anything that hides and shows with the pointer — today the indent
+/// guides. One const rather than two literals: a name that drifted would leave
+/// them hidden for good, and nothing would say so.
+const PANEL_GROUP: &str = "project-panel";
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
 
 struct VisibleEntriesForWorktree {
@@ -6622,7 +6627,12 @@ impl Render for ProjectPanel {
         let project = self.project.read(cx);
         let panel_settings = ProjectPanelSettings::get_global(cx);
         let indent_size = panel_settings.indent_size;
-        let show_indent_guides = panel_settings.indent_guides.show == ShowIndentGuides::Always;
+        let indent_guides = panel_settings.indent_guides.show;
+        let show_indent_guides = indent_guides != ShowIndentGuides::Never;
+        // Hidden and shown by `PANEL_GROUP` rather than by a flag on this panel;
+        // see `IndentGuides::visible_on_group_hover` for why the pointer is
+        // gpui's business here and not ours.
+        let guides_follow_pointer = indent_guides == ShowIndentGuides::OnHover;
         let horizontal_scroll = panel_settings.scrollbar.horizontal_scroll;
         let show_sticky_entries = {
             if panel_settings.sticky_scroll {
@@ -6713,7 +6723,7 @@ impl Render for ProjectPanel {
             }
             h_flex()
                 .id("project-panel")
-                .group("project-panel")
+                .group(PANEL_GROUP)
                 .when(panel_settings.drag_and_drop, |this| {
                     this.on_drag_move(cx.listener(handle_drag_move::<ExternalPaths>))
                         .on_drag_move(cx.listener(handle_drag_move::<DraggedSelection>))
@@ -6814,6 +6824,9 @@ impl Render for ProjectPanel {
                                         px(indent_size),
                                         IndentGuideColors::panel(cx),
                                     )
+                                    .when(guides_follow_pointer, |guides| {
+                                        guides.visible_on_group_hover(PANEL_GROUP)
+                                    })
                                     .with_compute_indents_fn(
                                         cx.entity(),
                                         |this, range, window, cx| {
@@ -6961,6 +6974,9 @@ impl Render for ProjectPanel {
                                             px(indent_size),
                                             IndentGuideColors::panel(cx),
                                         )
+                                        .when(guides_follow_pointer, |guides| {
+                                            guides.visible_on_group_hover(PANEL_GROUP)
+                                        })
                                         .with_render_fn(
                                             cx.entity(),
                                             move |_, params, _, _| {
@@ -7309,79 +7325,23 @@ impl EventEmitter<Event> for ProjectPanel {}
 
 impl EventEmitter<PanelEvent> for ProjectPanel {}
 
-/// Split out so a test can reach it: `set_position` runs inside a settings-file
-/// update closure that needs an `fs` and a live app.
-///
-/// Re-docking this panel rearranges the whole edge layout, so all of it is written
-/// at once. The project rail parks on the OPPOSITE edge -- that is what leaves this
-/// panel's button in the status bar rather than letting the rail adopt it -- and the
-/// panels that ride the rail follow the rail, or their buttons fall out of it and
-/// land in the status bar too.
-///
-/// A panel the user has explicitly parked along the BOTTOM is not riding the rail
-/// and is left where it is. It keeps its status-bar button either way, so dragging
-/// it to an edge it was deliberately moved off would cost a preference and buy
-/// nothing.
-///
-/// Naming the rail-riding panels here is the ugly part: this module has no business
-/// knowing about outline or git. The alternative is deriving the rail's side from
-/// this panel's dock at read time, which `workspace` cannot do -- `ProjectPanelSettings`
-/// lives in this crate, and this crate already depends on `workspace`.
-fn write_dock_and_opposite_rail(position: DockPosition, settings: &mut settings::SettingsContent) {
-    let dock = match position {
-        DockPosition::Left | DockPosition::Bottom => DockSide::Left,
-        DockPosition::Right => DockSide::Right,
-    };
-    // Same edge, three different enums: this panel and `outline_panel` use the
-    // two-way `DockSide`, `git_panel` uses the three-way `DockPosition`.
-    let (rail_side, rail_dock_side, rail_dock_position) = match dock {
-        DockSide::Left => (
-            settings::SidebarSide::Right,
-            DockSide::Right,
-            settings::DockPosition::Right,
-        ),
-        DockSide::Right => (
-            settings::SidebarSide::Left,
-            DockSide::Left,
-            settings::DockPosition::Left,
-        ),
-    };
-
-    settings.project_panel.get_or_insert_default().dock = Some(dock);
-    settings
-        .workspace
-        .multi_project
-        .get_or_insert_default()
-        .sidebar_side = Some(rail_side);
-    settings.outline_panel.get_or_insert_default().dock = Some(rail_dock_side);
-
-    let git_panel_is_along_the_bottom = settings
-        .git_panel
-        .as_ref()
-        .and_then(|panel| panel.dock)
-        .is_some_and(|dock| dock == settings::DockPosition::Bottom);
-    if !git_panel_is_along_the_bottom {
-        settings.git_panel.get_or_insert_default().dock = Some(rail_dock_position);
-    }
-}
-
 impl Panel for ProjectPanel {
-    fn position(&self, _: &Window, cx: &App) -> DockPosition {
-        match ProjectPanelSettings::get_global(cx).dock {
-            DockSide::Left => DockPosition::Left,
-            DockSide::Right => DockPosition::Right,
-        }
+    /// The right edge, always. The project rail stands on the left, and this
+    /// panel sits opposite it so its button lands in the status bar rather than
+    /// being adopted by the rail -- see `PANEL_ALWAYS_IN_STATUS_BAR`.
+    fn position(&self, _: &Window, _cx: &App) -> DockPosition {
+        DockPosition::Right
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
+        matches!(position, DockPosition::Right)
     }
 
-    fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
-            write_dock_and_opposite_rail(position, settings);
-        });
-    }
+    /// The panel's edge is not a preference any more. The trait requires this
+    /// method so it stays, but there is nothing to write -- and
+    /// `position_is_valid` refuses everything but `Right` before anything can
+    /// reach it.
+    fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {}
 
     fn default_size(&self, _: &Window, cx: &App) -> Pixels {
         ProjectPanelSettings::get_global(cx).default_width
@@ -7390,7 +7350,11 @@ impl Panel for ProjectPanel {
     fn icon(&self, _: &Window, cx: &App) -> Option<IconName> {
         ProjectPanelSettings::get_global(cx)
             .button
-            .then_some(IconName::FileTree)
+            // A folder, not a tree. The button stands at the top of the panel's
+            // own column now rather than in the status bar, directly over the
+            // tree it opens -- a second drawing of that tree beside it says
+            // nothing the panel below is not already saying.
+            .then_some(IconName::Folder)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {

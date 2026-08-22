@@ -246,76 +246,43 @@ mod tests {
         }
     }
 
-    // The project rail draws buttons for the LEFT dock only, so a panel docked
-    // right is absent from it entirely -- no error, no empty state, just a rail
-    // that quietly has nothing on it. That is what the shipped defaults did
-    // before: every panel defaulted to the right dock.
+    /// The rail stands on the LEFT and that edge is no longer a setting --
+    /// `Workspace::OWN_COLUMN_POSITION` is where the code says so. This crate
+    /// cannot see `workspace` (the dependency runs the other way), so the side is
+    /// a literal here; change it there and forget it here and this test goes red,
+    /// which is the point of writing it down twice.
+    const RAIL_SIDE: &str = "left";
+
+    // A panel docked away from the rail is absent from it entirely -- no error, no
+    // empty state, just a rail that quietly has nothing on it. That is what the
+    // shipped defaults did before this layout was pinned.
     #[test]
-    fn the_panel_docks_line_up_with_the_rails_side() {
+    fn the_rail_riding_panels_dock_where_the_rail_stands() {
         let defaults: serde_json::Value =
             crate::parse_json_with_comments(crate::default_settings().as_ref())
                 .expect("default settings must parse as jsonc");
-
-        let rail_side = defaults["multi_project"]["sidebar_side"]
-            .as_str()
-            .expect("multi_project.sidebar_side must be set");
 
         // These ride the rail, so they have to dock on its side or their buttons
         // are simply absent from it.
         for panel in ["outline_panel", "git_panel"] {
             assert_eq!(
-                defaults[panel]["dock"], rail_side,
-                "{panel} must dock on the rail's side ({rail_side}) to appear in it"
+                defaults[panel]["dock"], RAIL_SIDE,
+                "{panel} must dock on the rail's side ({RAIL_SIDE}) to appear in it"
             );
         }
 
-        // This one deliberately does NOT: docked opposite the rail, its button
-        // falls to the status bar instead, which is where it is wanted.
-        assert_ne!(
-            defaults["project_panel"]["dock"], rail_side,
-            "project_panel is meant to sit opposite the rail so its button lands \
-             in the status bar rather than in the rail"
-        );
-    }
-
-    // A dock shows one panel at a time, and `project_panel` is the only panel
-    // shipped already open. Docking the agent on its side therefore means the
-    // very first click on an agent puts the project panel away -- which is
-    // what the defaults did, and what got reported as "I cannot have both".
-    //
-    // The Rust `#[default]` is asserted alongside because it is NOT what a
-    // running app resolves -- this file is -- and the two silently drifting
-    // apart is how the wrong one gets reasoned from.
-    #[test]
-    fn the_agent_does_not_dock_beside_the_panel_that_starts_open() {
-        let defaults: serde_json::Value =
-            crate::parse_json_with_comments(crate::default_settings().as_ref())
-                .expect("default settings must parse as jsonc");
-
-        assert_eq!(
-            defaults["project_panel"]["starts_open"], true,
-            "this test only earns its keep while the project panel is the one \
-             that starts open; if that changes, re-derive which side is free"
+        // The project panel has no `dock` key left to disagree with: it is pinned
+        // to the right in code so its button lands in the status bar. A default
+        // surviving here would be a dead one.
+        assert!(
+            defaults["project_panel"].get("dock").is_none(),
+            "project_panel.dock was removed -- a default left behind here is read by nothing"
         );
 
-        let agent_side = defaults["agent"]["sidebar_side"]
-            .as_str()
-            .expect("agent.sidebar_side must be set");
-        assert_ne!(
-            agent_side, defaults["project_panel"]["dock"],
-            "the agent must not share a dock with the panel that starts open, \
-             or opening an agent closes it"
-        );
-
-        let rust_default = match crate::SidebarDockPosition::default() {
-            crate::SidebarDockPosition::Left => "left",
-            crate::SidebarDockPosition::Right => "right",
-        };
-        assert_eq!(
-            agent_side, rust_default,
-            "assets/settings/default.json and SidebarDockPosition's #[default] \
-             disagree; the shipped JSON wins at runtime, so the Rust default is \
-             a trap for anyone reading it to decide where the agent docks"
+        // And the rail's own edge is not a setting any more.
+        assert!(
+            defaults["multi_project"].get("sidebar_side").is_none(),
+            "multi_project.sidebar_side was removed -- a default left behind here is read by nothing"
         );
     }
 

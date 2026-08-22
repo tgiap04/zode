@@ -18,7 +18,7 @@ use settings::{Settings as _, SettingsStore};
 use std::sync::Arc;
 use ui::{ContextMenu, prelude::*};
 use workspace::dock::{DockColumn, DockPosition, Panel, PanelEvent};
-use workspace::{SidebarSide, Workspace, WorkspaceSettings};
+use workspace::Workspace;
 
 /// What a connection node is doing. `Failed` keeps the driver's own words --
 /// "password authentication failed" is worth far more than "could not connect".
@@ -330,15 +330,13 @@ impl Panel for DatabasePanel {
         "DatabasePanel"
     }
 
-    /// The rail's side, read from the setting rather than asked of the
-    /// workspace. `Workspace::add_panel` calls this from inside its own update,
-    /// so reaching back through the workspace handle here aborts the process --
-    /// the trap `ccd151f` already paid for once.
-    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
-        match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
-            SidebarSide::Left => DockPosition::Left,
-            SidebarSide::Right => DockPosition::Right,
-        }
+    /// The rail's side, taken from the associated const rather than asked of a
+    /// workspace *handle*. `Workspace::add_panel` calls this from inside its own
+    /// update, so reaching back through the handle here aborts the process --
+    /// the trap `ccd151f` already paid for once. A const borrows nothing, so it
+    /// is safe where the handle was not, and it no longer reads a setting either.
+    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
+        Workspace::OWN_COLUMN_POSITION
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {

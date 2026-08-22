@@ -386,21 +386,6 @@ pub mod theme_selector {
     }
 }
 
-pub mod icon_theme_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Toggles the icon theme selector interface.
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = icon_theme_selector)]
-    #[serde(deny_unknown_fields)]
-    pub struct Toggle {
-        /// A list of icon theme names to filter the theme selector down to.
-        pub themes_filter: Option<Vec<String>>,
-    }
-}
-
 pub mod search {
     use gpui::actions;
     actions!(
@@ -472,24 +457,22 @@ pub mod settings_profile_selector {
 }
 
 pub mod agent {
-    use gpui::{Action, SharedString, actions};
+    use gpui::{Action, actions};
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
-    /// Which face of an agent to open. The two are separate processes — an
-    /// interactive CLI in a pty on one side, an ACP connection over stdio on the
-    /// other — so a view is one or the other for its whole life, never both.
+    /// Which face of an agent to open.
+    ///
+    /// One variant, kept as an enum because it is serialized into the workspace
+    /// database: rows written when there was a second mode still deserialize.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "snake_case")]
     pub enum AgentViewMode {
-        /// The agent's own terminal UI, running the CLI the user installed.
-        ///
-        /// The default is what an agent opens in before it has ever been opened —
-        /// after that, whichever mode it was last used in wins.
+        /// A terminal session running the CLI the user installed. The agent's
+        /// interface is that CLI's, and this editor does not draw a second one
+        /// over it.
         #[default]
         Terminal,
-        /// The native conversation view, driven over ACP.
-        Chat,
     }
 
     /// Opens an agent beside the editor.
@@ -542,97 +525,24 @@ pub mod agent {
         pub mode: Option<AgentViewMode>,
     }
 
+
     actions!(
         agent,
         [
-            /// Opens the agent settings panel.
-            #[action(deprecated_aliases = ["agent::OpenConfiguration"])]
-            OpenSettings,
-            /// Opens the agent onboarding modal.
-            OpenOnboardingModal,
-            /// Resets the agent onboarding state.
-            ResetOnboarding,
-            /// Starts a chat conversation with the agent.
-            Chat,
-            /// Toggles the language model selector dropdown.
-            #[action(deprecated_aliases = ["assistant::ToggleModelSelector", "assistant2::ToggleModelSelector"])]
-            ToggleModelSelector,
-            /// Triggers re-authentication on Gemini
-            ReauthenticateAgent,
-            /// Add the current selection as context for threads in the agent panel.
-            #[action(deprecated_aliases = ["assistant::QuoteSelection", "agent::QuoteSelection"])]
-            AddSelectionToThread,
-            /// Resets the agent panel zoom levels (agent UI and buffer font sizes).
-            ResetAgentZoom,
-            /// Pastes clipboard content without any formatting.
-            PasteRaw,
+            /// Shows the history of past agent sessions, or puts it away.
+            ///
+            /// In the `agent` namespace rather than one of its own: the history is
+            /// another face of the same feature, and a namespace exists to group
+            /// what a user would look for together.
+            ToggleHistory,
         ]
     );
-
-    /// Opens a new agent thread with the provided branch diff for review.
-    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-    #[action(namespace = agent)]
-    #[serde(deny_unknown_fields)]
-    pub struct ReviewBranchDiff {
-        /// The full text of the diff to review.
-        pub diff_text: SharedString,
-        /// The base ref that the diff was computed against (e.g. "main").
-        pub base_ref: SharedString,
-    }
-
-    /// A single merge conflict region extracted from a file.
-    #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
-    pub struct ConflictContent {
-        pub file_path: String,
-        pub conflict_text: String,
-        pub ours_branch_name: String,
-        pub theirs_branch_name: String,
-    }
-
-    /// Opens a new agent thread to resolve specific merge conflicts.
-    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-    #[action(namespace = agent)]
-    #[serde(deny_unknown_fields)]
-    pub struct ResolveConflictsWithAgent {
-        /// Individual conflicts with their full text.
-        pub conflicts: Vec<ConflictContent>,
-    }
-
-    /// Opens a new agent thread to resolve merge conflicts in the given file paths.
-    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-    #[action(namespace = agent)]
-    #[serde(deny_unknown_fields)]
-    pub struct ResolveConflictedFilesWithAgent {
-        /// File paths with unresolved conflicts (for project-wide resolution).
-        pub conflicted_file_paths: Vec<String>,
-    }
 }
 
 pub mod assistant {
-    use gpui::{Action, actions};
+    use gpui::Action;
     use schemars::JsonSchema;
     use serde::Deserialize;
-    use uuid::Uuid;
-
-    actions!(
-        agent,
-        [
-            /// Toggles the agent panel.
-            Toggle,
-            #[action(deprecated_aliases = ["assistant::ToggleFocus"])]
-            ToggleFocus,
-            FocusAgent,
-        ]
-    );
-
-    /// Opens the rules library for managing agent rules and prompts.
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = agent, deprecated_aliases = ["assistant::OpenRulesLibrary", "assistant::DeployPromptLibrary"])]
-    #[serde(deny_unknown_fields)]
-    pub struct OpenRulesLibrary {
-        #[serde(skip)]
-        pub prompt_to_select: Option<Uuid>,
-    }
 
     /// Deploys the assistant interface with the specified configuration.
     #[derive(Clone, Default, Deserialize, PartialEq, JsonSchema, Action)]
@@ -641,6 +551,7 @@ pub mod assistant {
     pub struct InlineAssist {
         pub prompt: Option<String>,
     }
+
 }
 
 /// Opens the recent projects interface.
@@ -890,18 +801,7 @@ pub mod database {
 }
 
 pub mod agents_sidebar {
-    use gpui::{Action, actions};
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Toggles the thread switcher popup when the sidebar is focused.
-    #[derive(PartialEq, Clone, Deserialize, JsonSchema, Default, Action)]
-    #[action(namespace = agents_sidebar)]
-    #[serde(deny_unknown_fields)]
-    pub struct ToggleThreadSwitcher {
-        #[serde(default)]
-        pub select_last: bool,
-    }
+    use gpui::actions;
 
     actions!(
         agents_sidebar,

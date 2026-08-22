@@ -213,34 +213,50 @@ impl ThemeRegistry {
     }
 
     /// Returns the metadata of all icon themes in the registry.
+    ///
+    /// Always exactly one: this build ships a single icon theme and does not offer
+    /// a choice of them — see [`Self::get_icon_theme`].
     pub fn list_icon_themes(&self) -> Vec<ThemeMeta> {
-        self.state
-            .read()
-            .icon_themes
-            .values()
-            .map(|theme| ThemeMeta {
-                name: theme.name.clone(),
-                appearance: theme.appearance,
+        self.default_icon_theme()
+            .map(|theme| {
+                vec![ThemeMeta {
+                    name: theme.name.clone(),
+                    appearance: theme.appearance,
+                }]
             })
-            .collect()
+            .unwrap_or_default()
     }
 
-    /// Returns the icon theme with the specified name.
-    pub fn get_icon_theme(&self, name: &str) -> Result<Arc<IconTheme>, IconThemeNotFoundError> {
+    /// Returns this build's icon theme, whatever was asked for.
+    ///
+    /// **The name is deliberately ignored.** The icon set is fixed: a `icon_theme`
+    /// written into settings, an icon theme contributed by an extension, and the
+    /// icon-theme picker all resolve here, and all get the same answer. That is the
+    /// intent — the file icons are part of what this build *is*, not a preference.
+    ///
+    /// Locked here rather than by deleting the setting and every control that
+    /// reaches it: the resolution path is shared with the *colour* theme, which is
+    /// freely configurable, and pulling the icon half out of those functions would
+    /// put a working feature at risk to remove a dead one.
+    pub fn get_icon_theme(&self, _name: &str) -> Result<Arc<IconTheme>, IconThemeNotFoundError> {
         self.state
             .read()
             .icon_themes
-            .get(name)
-            .ok_or_else(|| IconThemeNotFoundError(name.to_string().into()))
+            .get(DEFAULT_ICON_THEME_NAME)
+            .ok_or_else(|| IconThemeNotFoundError(DEFAULT_ICON_THEME_NAME.into()))
             .cloned()
     }
 
     /// Removes the icon themes with the given names from the registry.
+    ///
+    /// The built-in icon theme is not removable. Since [`Self::get_icon_theme`]
+    /// resolves everything to that one entry, dropping it would leave every file
+    /// and folder in the editor with no icon at all — and an extension being
+    /// uninstalled is enough to reach this with the reserved name in hand.
     pub fn remove_icon_themes(&self, icon_themes_to_remove: &[SharedString]) {
-        self.state
-            .write()
-            .icon_themes
-            .retain(|name, _| !icon_themes_to_remove.contains(name))
+        self.state.write().icon_themes.retain(|name, _| {
+            name.as_ref() == DEFAULT_ICON_THEME_NAME || !icon_themes_to_remove.contains(name)
+        })
     }
 
     /// Loads the icon theme from the icon theme family and adds it to the registry.
@@ -315,6 +331,20 @@ impl ThemeRegistry {
                     .collect(),
             };
 
+            // The built-in name is reserved. Every lookup resolves to this one key
+            // now (see `get_icon_theme`), so an extension shipping an icon theme
+            // that happens to carry the same name would replace every file icon in
+            // the editor for anyone who installs it — and with the user's own
+            // `icon_theme` setting no longer consulted, there would be no way to
+            // pick something else. Loading it is fine; taking the name is not.
+            if icon_theme.name.as_ref() == DEFAULT_ICON_THEME_NAME {
+                log::warn!(
+                    "an extension contributed an icon theme named {DEFAULT_ICON_THEME_NAME:?}, \
+                     which is the built-in set's reserved name -- ignoring it"
+                );
+                continue;
+            }
+
             state
                 .icon_themes
                 .insert(icon_theme.name.clone(), Arc::new(icon_theme));
@@ -327,5 +357,99 @@ impl ThemeRegistry {
 impl Default for ThemeRegistry {
     fn default() -> Self {
         Self::new(Box::new(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::IconThemeContent;
+
+    /// An icon theme family the way an extension ships one — enough to register,
+    /// nothing more.
+    fn contributed_family(theme_name: &str) -> IconThemeFamilyContent {
+        IconThemeFamilyContent {
+            name: "Contributed".into(),
+            author: "an extension".into(),
+            themes: vec![IconThemeContent {
+                name: theme_name.into(),
+                appearance: AppearanceContent::Dark,
+                directory_icons: Default::default(),
+                named_directory_icons: Default::default(),
+                chevron_icons: Default::default(),
+                file_stems: Default::default(),
+                file_suffixes: Default::default(),
+                file_icons: Default::default(),
+            }],
+        }
+    }
+
+    /// The locked contract, asserted directly rather than inferred from the
+    /// icons that come out the other end.
+    #[test]
+    fn get_icon_theme_ignores_the_name_argument() {
+        let registry = ThemeRegistry::default();
+        registry
+            .load_icon_theme(contributed_family("Something Else"), Path::new("icons"))
+            .unwrap();
+
+        for asked_for in [
+            "Something Else",
+            "a name nothing registered",
+            "",
+            DEFAULT_ICON_THEME_NAME,
+        ] {
+            assert_eq!(
+                registry.get_icon_theme(asked_for).unwrap().name.as_ref(),
+                DEFAULT_ICON_THEME_NAME,
+                "asking for {asked_for:?} must still resolve to the built-in set"
+            );
+        }
+    }
+
+    /// A registered-but-unreachable theme must not be advertised as a choice —
+    /// this is what the settings JSON schema enumerates.
+    #[test]
+    fn list_icon_themes_reports_exactly_one() {
+        let registry = ThemeRegistry::default();
+        registry
+            .load_icon_theme(contributed_family("Something Else"), Path::new("icons"))
+            .unwrap();
+
+        let listed = registry.list_icon_themes();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name.as_ref(), DEFAULT_ICON_THEME_NAME);
+    }
+
+    /// The name is reserved. An extension taking it would silently replace every
+    /// file icon in the editor, and with the user's setting no longer consulted
+    /// there would be nothing to switch back to.
+    #[test]
+    fn an_extension_cannot_take_the_built_in_name() {
+        let registry = ThemeRegistry::default();
+        let built_in = registry.get_icon_theme("").unwrap();
+
+        registry
+            .load_icon_theme(
+                contributed_family(DEFAULT_ICON_THEME_NAME),
+                Path::new("icons"),
+            )
+            .unwrap();
+
+        let after = registry.get_icon_theme("").unwrap();
+        assert_eq!(after.id, built_in.id, "the built-in set must still be the one served");
+        assert!(!after.file_suffixes.is_empty(), "and it must still carry its associations");
+    }
+
+    /// Uninstalling an extension must not be able to take the icons with it.
+    #[test]
+    fn the_built_in_icon_theme_cannot_be_removed() {
+        let registry = ThemeRegistry::default();
+        registry.remove_icon_themes(&[DEFAULT_ICON_THEME_NAME.into()]);
+
+        assert_eq!(
+            registry.get_icon_theme("").unwrap().name.as_ref(),
+            DEFAULT_ICON_THEME_NAME
+        );
     }
 }

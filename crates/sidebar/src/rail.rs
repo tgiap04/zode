@@ -1,17 +1,8 @@
 use crate::Sidebar;
 use crate::project_list::ListEntry;
 use gpui::{AnyElement, App, Context, SharedString, Window, px};
-use settings::Settings as _;
 use ui::{Tooltip, prelude::*};
-use workspace::{SidebarSide, WorkspaceSettings, pane_group::SURFACE_ROUNDING};
-
-/// The edge the whole sidebar column stands against. Every part of the column
-/// that has a side -- the order of rail and panel, the rail's own separator, the
-/// active-project pill -- reads this one value, so they cannot end up mirrored
-/// against each other.
-pub(crate) fn rail_side(cx: &App) -> SidebarSide {
-    WorkspaceSettings::get_global(cx).multi_project.sidebar_side
-}
+use workspace::pane_group::SURFACE_ROUNDING;
 
 /// Width of the always-visible project rail. Sized so a 32px project
 /// square sits centred with room for the active-project indicator on the
@@ -89,7 +80,6 @@ impl Sidebar {
         let panels = self.render_rail_panels(window, cx);
         let colors = cx.theme().colors();
         let entries = self.contents.rail_entries.clone();
-        let side = rail_side(cx);
 
         v_flex()
             .id("project-rail")
@@ -111,10 +101,8 @@ impl Sidebar {
             // would open a notch onto the frame rather than a seam. Same radius
             // as the docks, which the rail now stands beside as a card of the
             // same layout.
-            .map(|el| match side {
-                SidebarSide::Left => el.border_r_1().rounded_tr(SURFACE_ROUNDING),
-                SidebarSide::Right => el.border_l_1().rounded_tl(SURFACE_ROUNDING),
-            })
+            .border_r_1()
+            .rounded_tr(SURFACE_ROUNDING)
             .border_color(colors.border)
             .child(
                 v_flex()
@@ -126,7 +114,7 @@ impl Sidebar {
                         entries
                             .iter()
                             .enumerate()
-                            .map(|(ix, entry)| self.render_rail_item(ix, entry, side, cx)),
+                            .map(|(ix, entry)| self.render_rail_item(ix, entry, cx)),
                     ),
             )
             .children(panels)
@@ -140,7 +128,6 @@ impl Sidebar {
         &self,
         ix: usize,
         entry: &ListEntry,
-        side: SidebarSide,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -172,10 +159,7 @@ impl Sidebar {
                 el.child(
                     div()
                         .absolute()
-                        .map(|pill| match side {
-                            SidebarSide::Left => pill.left_0(),
-                            SidebarSide::Right => pill.right_0(),
-                        })
+                        .left_0()
                         .h(px(24.0))
                         .w(px(3.0))
                         .rounded_sm()
@@ -250,9 +234,10 @@ impl Sidebar {
             .border_color(border)
             .child(
                 // Not a tree glyph: the panel switcher directly above already
-                // carries `FileTree` and `ListTree` from the project and
-                // outline panels, and a third tree in the same column reads as
-                // a duplicate.
+                // carries `ListTree` from the outline panel, and a second tree
+                // in the same column reads as a duplicate. (The project panel
+                // used to put a third one here; it stands in its own dock's
+                // header now, under a folder.)
                 IconButton::new("project-rail-toggle-panel", IconName::Menu)
                     .icon_size(RAIL_ICON_SIZE)
                     .toggle_state(panel_open)

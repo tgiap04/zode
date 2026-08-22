@@ -34,12 +34,11 @@ fn disable_background_project_retention(cx: &mut Context<MultiWorkspace>) {
             settings.workspace.multi_project = Some(MultiProjectContent {
                 retain_background_projects: Some(false),
                 // `None` is a no-op merge here — this helper only pins
-                // retention, not hibernation, the memory fuse, terminal
-                // scroll history, or the sidebar side.
+                // retention, not hibernation, the memory fuse, or terminal
+                // scroll history.
                 hibernate_after_ms: None,
                 memory_pressure_threshold_percent: None,
                 background_scroll_history_lines: None,
-                sidebar_side: None,
             });
         });
     });
@@ -64,11 +63,10 @@ fn set_multi_project_settings(
                 retain_background_projects: Some(retain_background_projects),
                 hibernate_after_ms: Some(hibernate_after_ms),
                 // `None` is a no-op merge here — this helper only pins
-                // retention and hibernation, not the memory fuse, terminal
-                // scroll history, or the sidebar side.
+                // retention and hibernation, not the memory fuse or terminal
+                // scroll history.
                 memory_pressure_threshold_percent: None,
                 background_scroll_history_lines: None,
-                sidebar_side: None,
             });
         });
     });
@@ -93,10 +91,8 @@ fn set_memory_fuse_settings(
                 hibernate_after_ms: Some(hibernate_after_ms),
                 memory_pressure_threshold_percent: Some(memory_pressure_threshold_percent),
                 // `None` is a no-op merge here — the memory-fuse tests
-                // don't exercise terminal scroll history or the sidebar
-                // side.
+                // don't exercise terminal scroll history.
                 background_scroll_history_lines: None,
-                sidebar_side: None,
             });
         });
     });

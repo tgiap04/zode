@@ -114,8 +114,6 @@ pub struct SettingsContent {
 
     pub preview_tabs: Option<PreviewTabsSettingsContent>,
 
-    pub agent: Option<AgentSettingsContent>,
-
     pub agent_servers: Option<AllAgentServersSettings>,
 
     /// Configuration of audio in Zed.
@@ -992,7 +990,14 @@ pub enum DockSide {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ShowIndentGuides {
+    /// Always draw the guides.
     Always,
+    /// Draw them only while the pointer is inside the panel.
+    ///
+    /// The guides are structure you consult, not structure you read: they earn
+    /// their ink while you are working the tree and cost it the rest of the time.
+    OnHover,
+    /// Never draw the guides.
     Never,
 }
 
@@ -1001,7 +1006,8 @@ pub enum ShowIndentGuides {
     Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Eq, Default,
 )]
 pub struct IndentGuidesSettingsContent {
-    /// When to show the scrollbar in the outline panel.
+    /// When to draw the indent guides. Shared by every panel that has a tree, so
+    /// it names none of them.
     pub show: Option<ShowIndentGuides>,
 }
 

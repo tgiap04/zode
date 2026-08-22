@@ -1,9 +1,8 @@
 use crate::Sidebar;
-use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE, rail_side};
+use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE};
 use gpui::{AnyElement, App, Context, Entity, Window};
 use std::sync::Arc;
 use ui::{Tooltip, prelude::*};
-use workspace::SidebarSide;
 use workspace::dock::{Dock, PanelHandle};
 
 impl Sidebar {
@@ -16,10 +15,9 @@ impl Sidebar {
         let multi_workspace = self.multi_workspace.upgrade()?;
         let workspace = multi_workspace.read(cx).workspace().clone();
         let workspace = workspace.read(cx);
-        Some(match rail_side(cx) {
-            SidebarSide::Left => workspace.left_dock().clone(),
-            SidebarSide::Right => workspace.right_dock().clone(),
-        })
+        // The rail stands on the left, so the dock it draws buttons for is the
+        // left one -- see `Workspace::OWN_COLUMN_POSITION`.
+        Some(workspace.left_dock().clone())
     }
 
     /// The panels the rail draws buttons for. Kept apart from the rendering so a
@@ -30,7 +28,6 @@ impl Sidebar {
             return Vec::new();
         };
         let position = dock.read(cx).position();
-        let side = rail_side(cx);
 
         // Same predicate the status bar consults, so the two can never both claim
         // a panel or both drop one. `rail_drawn: true` is a statement of fact
@@ -39,7 +36,7 @@ impl Sidebar {
         dock.read(cx)
             .panels()
             .filter(|panel| {
-                workspace::dock::rail_draws_panel(panel.persistent_name(), position, side, true)
+                workspace::dock::rail_draws_panel(panel.persistent_name(), position, true)
             })
             .cloned()
             .collect()
@@ -143,10 +140,9 @@ mod tests {
     use crate::Sidebar;
     use crate::sidebar_tests::init_test;
     use fs::FakeFs;
-    use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
+    use gpui::{AppContext as _, TestAppContext};
     use project::Project;
     use workspace::MultiWorkspace;
-    use workspace::SidebarSide;
     use workspace::dock::DockPosition;
     use workspace::dock::test::TestPanel;
 
@@ -236,27 +232,16 @@ mod tests {
             sidebar
         });
 
-        for (side, expected) in [(SidebarSide::Left, 2), (SidebarSide::Right, 1)] {
-            cx.update(|_, cx| {
-                settings::SettingsStore::update_global(cx, |settings, cx| {
-                    settings.update_user_settings(cx, |settings| {
-                        settings
-                            .workspace
-                            .multi_project
-                            .get_or_insert_default()
-                            .sidebar_side = Some(side);
-                    });
-                });
-            });
-
-            sidebar.read_with(cx, |sidebar, cx| {
-                assert_eq!(
-                    sidebar.rail_panels(cx).len(),
-                    expected,
-                    "a {side:?} rail must list the panels docked {side:?}"
-                );
-            });
-        }
+        // Two panels are docked left and one right. The rail stands on the left,
+        // so it lists exactly the two -- the count is what proves the right-hand
+        // one is left out rather than merely that the rail found something.
+        sidebar.read_with(cx, |sidebar, cx| {
+            assert_eq!(
+                sidebar.rail_panels(cx).len(),
+                2,
+                "the rail stands on the left and lists only the panels docked there"
+            );
+        });
     }
 
     /// Reading the workspace and its dock from inside `Sidebar::render` is the

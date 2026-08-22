@@ -58,24 +58,24 @@ linux() {
     db_suffix="stable"
     case "$channel" in
       stable)
-        appid="dev.zed.Zed"
+        appid="io.github.tgiap04.zode"
         db_suffix="stable"
         ;;
       nightly)
-        appid="dev.zed.Zed-Nightly"
+        appid="io.github.tgiap04.zode.nightly"
         db_suffix="nightly"
         ;;
       preview)
-        appid="dev.zed.Zed-Preview"
+        appid="io.github.tgiap04.zode.preview"
         db_suffix="preview"
         ;;
       dev)
-        appid="dev.zed.Zed-Dev"
+        appid="io.github.tgiap04.zode.dev"
         db_suffix="dev"
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
-        appid="dev.zed.Zed"
+        appid="io.github.tgiap04.zode"
         db_suffix="stable"
         ;;
     esac
@@ -105,24 +105,27 @@ linux() {
 }
 
 macos() {
+    # The bundle identifiers here must match the `[package.metadata.bundle-*]`
+    # sections in crates/zed/Cargo.toml -- they are what macOS keys caches,
+    # preferences and saved state on, so a stale one leaves all of it behind.
     app="Zode.app"
     db_suffix="stable"
-    app_id="dev.zed.Zed"
+    app_id="io.github.tgiap04.zode"
     case "$channel" in
       nightly)
         app="Zode Nightly.app"
         db_suffix="nightly"
-        app_id="dev.zed.Zed-Nightly"
+        app_id="io.github.tgiap04.zode.nightly"
         ;;
       preview)
         app="Zode Preview.app"
         db_suffix="preview"
-        app_id="dev.zed.Zed-Preview"
+        app_id="io.github.tgiap04.zode.preview"
         ;;
       dev)
-        app="Zed Dev.app"
+        app="Zode.app"
         db_suffix="dev"
-        app_id="dev.zed.Zed-Dev"
+        app_id="io.github.tgiap04.zode.dev"
         ;;
     esac
 

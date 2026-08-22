@@ -48,7 +48,7 @@ use zed_actions::{OpenProjectSettings, OpenSettings, OpenSettingsAt};
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
-    SettingsSectionHeader, icon_theme_picker, theme_picker,
+    SettingsSectionHeader, theme_picker,
 };
 
 // Re-exported for the onboarding page's font section. Deliberately narrow: the
@@ -537,8 +537,6 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::ThemeSelectionDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::ThemeAppearanceMode>(render_dropdown)
         .add_basic_renderer::<settings::ThemeName>(render_theme_picker)
-        .add_basic_renderer::<settings::IconThemeSelectionDiscriminants>(render_dropdown)
-        .add_basic_renderer::<settings::IconThemeName>(render_icon_theme_picker)
         .add_basic_renderer::<settings::BufferLineHeightDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::AutosaveSettingDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::WorkingDirectoryDiscriminants>(render_dropdown)
@@ -4284,59 +4282,6 @@ fn render_theme_picker(
                                 (field.write)(
                                     settings,
                                     Some(settings::ThemeName(theme_name.into())),
-                                );
-                            },
-                        )
-                        .log_err(); // todo(settings_ui) don't log err
-                    },
-                    window,
-                    cx,
-                )
-            }))
-        })
-        .anchor(gpui::Anchor::TopLeft)
-        .offset(gpui::Point {
-            x: px(0.0),
-            y: px(2.0),
-        })
-        .with_handle(ui::PopoverMenuHandle::default())
-        .into_any_element()
-}
-
-fn render_icon_theme_picker(
-    field: SettingField<settings::IconThemeName>,
-    file: SettingsUiFile,
-    _metadata: Option<&SettingsFieldMetadata>,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let (_, value) = SettingsStore::global(cx).get_value_from_file(file.to_settings(), field.pick);
-    let current_value = value
-        .cloned()
-        .map(|theme_name| theme_name.0.into())
-        .unwrap_or_else(|| cx.theme().name.clone());
-
-    PopoverMenu::new("icon-theme-picker")
-        .trigger(render_picker_trigger_button(
-            "icon_theme_picker_trigger".into(),
-            current_value.clone(),
-        ))
-        .menu(move |window, cx| {
-            Some(cx.new(|cx| {
-                let file = file.clone();
-                let current_value = current_value.clone();
-                icon_theme_picker(
-                    current_value,
-                    move |theme_name, window, cx| {
-                        update_settings_file(
-                            file.clone(),
-                            field.json_path,
-                            window,
-                            cx,
-                            move |settings, _cx| {
-                                (field.write)(
-                                    settings,
-                                    Some(settings::IconThemeName(theme_name.into())),
                                 );
                             },
                         )

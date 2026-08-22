@@ -494,12 +494,22 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
+        let agent_usage = cx.new(|cx| agent_usage::AgentUsageIndicator::new(window, cx));
+        let agent_usage_panel_handle = agent_usage.read(cx).panel_handle();
+        workspace.register_action(move |_, _: &agent_usage::ToggleUsagePanel, window, cx| {
+            agent_usage_panel_handle.toggle(window, cx);
+        });
         workspace.status_bar().update(cx, |status_bar, cx| {
             status_bar.add_left_item(search_button, window, cx);
             status_bar.add_left_item(lsp_button, window, cx);
             status_bar.add_left_item(diagnostic_summary, window, cx);
             status_bar.add_left_item(active_file_name, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            // Beside the activity indicator rather than among the right-hand
+            // items: quota is something happening to your account over time, the
+            // way indexing and downloads are, not a property of the buffer in
+            // front of you.
+            status_bar.add_left_item(agent_usage, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);
@@ -640,13 +650,9 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let database_panel =
             database_ui::DatabasePanel::load(workspace_handle.clone(), cx.clone());
-        // Built holding nothing. It reopens the agents this workspace had
-        // running — and starts them — only once it is in the workspace, which is
-        // why it does not go through `add_panel_when_ready` below: putting the
-        // column back reaches through the workspace handle, and the workspace
-        // does not hold this panel while `load` is still resolving.
-        let agent_panel = agent_ui::AgentPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
+        let agent_history_panel =
+            agent_ui::AgentHistoryPanel::load(workspace_handle.clone(), cx.clone());
 
         async fn add_panel_when_ready(
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
@@ -663,32 +669,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             }
         }
 
-        async fn add_agent_panel(
-            panel_task: impl Future<Output = anyhow::Result<Entity<agent_ui::AgentPanel>>> + 'static,
-            workspace_handle: WeakEntity<Workspace>,
-            mut cx: gpui::AsyncWindowContext,
-        ) {
-            let Some(panel) = panel_task
-                .await
-                .context("failed to load the agent panel")
-                .log_err()
-            else {
-                return;
-            };
-            workspace_handle
-                .update_in(&mut cx, |workspace, window, cx| {
-                    workspace.add_panel(panel.clone(), window, cx);
-                })
-                .log_err();
-            // Second, and separately: the panel has to be findable through the
-            // workspace before it can open its own column.
-            panel
-                .update_in(&mut cx, |panel, window, cx| {
-                    panel.restore_tabs(window, cx);
-                })
-                .log_err();
-        }
-
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
@@ -696,7 +676,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            add_agent_panel(agent_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(agent_history_panel, workspace_handle.clone(), cx.clone()),
         );
 
         anyhow::Ok(())
@@ -1174,8 +1154,6 @@ fn initialize_pane(
             toolbar.add_item(branch_diff_toolbar, window, cx);
             let commit_view_toolbar = cx.new(|_| CommitViewToolbar::new());
             toolbar.add_item(commit_view_toolbar, window, cx);
-            let agent_diff_toolbar = cx.new(agent_ui::AgentDiffToolbar::new);
-            toolbar.add_item(agent_diff_toolbar, window, cx);
             let basedpyright_banner = cx.new(|cx| BasedPyrightBanner::new(workspace, cx));
             toolbar.add_item(basedpyright_banner, window, cx);
             let image_view_toolbar = cx.new(|_| image_viewer::ImageViewToolbarControls::new());
@@ -2468,11 +2446,14 @@ mod tests {
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
                     assert_eq!(workspace.worktrees(cx).count(), 2);
-                    // The left dock, not the right. Upstream's assistant panel opened on
-                    // the right, but this fork moved the agent out to a column of its own
-                    // and put the rail and tool dock on the left, so a fresh workspace now
-                    // comes up with the right dock closed and no panel wanting it.
-                    assert!(workspace.left_dock().read(cx).is_open());
+                    // The RIGHT dock: the project panel is pinned there and is the
+                    // only panel that starts open, so a fresh workspace comes up with
+                    // that dock open and the left one -- the rail's own edge, whose
+                    // panels do not start open -- closed. Both halves are asserted
+                    // because the interesting failure is them swapping, which a
+                    // single positive assertion would not catch.
+                    assert!(workspace.right_dock().read(cx).is_open());
+                    assert!(!workspace.left_dock().read(cx).is_open());
                     assert!(
                         workspace
                             .active_pane()
@@ -5039,10 +5020,10 @@ mod tests {
                 "action",
                 "activity_indicator",
                 "agent",
+                "agent_usage",
                 "agents_sidebar",
                 "app_menu",
                 "assistant",
-                "assistant2",
                 "branch_picker",
                 "branches",
                 "buffer_search",
@@ -5068,7 +5049,6 @@ mod tests {
                 "git_picker",
                 "go_to_line",
                 "highlights_tree_view",
-                "icon_theme_selector",
                 "image_viewer",
                 "journal",
                 "keymap_editor",

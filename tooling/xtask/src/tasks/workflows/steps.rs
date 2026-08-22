@@ -96,6 +96,13 @@ impl CheckoutStep {
         self
     }
 
+    /// For a token that is not a step output -- a secret read straight from the
+    /// workflow context, rather than one minted by an earlier step.
+    pub fn with_token_expression(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
     pub fn with_path(mut self, path: &str) -> Self {
         self.path = Some(path.to_string());
         self

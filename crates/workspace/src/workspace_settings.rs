@@ -4,8 +4,8 @@ use crate::DockPosition;
 use collections::HashMap;
 use serde::Deserialize;
 pub use settings::{
-    ActionName, AutosaveSetting, BottomDockLayout, EncodingDisplayOptions, InactiveOpacity,
-    PaneSplitDirectionHorizontal, PaneSplitDirectionVertical, RegisterSetting,
+    ActionName, AgentUsageDisplay, AutosaveSetting, BottomDockLayout, EncodingDisplayOptions,
+    InactiveOpacity, PaneSplitDirectionHorizontal, PaneSplitDirectionVertical, RegisterSetting,
     RestoreOnStartupBehavior, Settings,
 };
 
@@ -67,9 +67,6 @@ pub struct MultiProjectSettings {
     /// `settings::MultiProjectContent::background_scroll_history_lines`
     /// for why this is real, irrecoverable data loss when enabled.
     pub background_scroll_history_lines: Option<usize>,
-    /// Which side of the window the project switcher sidebar docks to. See
-    /// `settings::MultiProjectContent::sidebar_side`.
-    pub sidebar_side: settings::SidebarSide,
 }
 
 #[derive(Copy, Clone, Deserialize)]
@@ -194,7 +191,6 @@ impl Settings for WorkspaceSettings {
                     .multi_project
                     .unwrap()
                     .background_scroll_history_lines,
-                sidebar_side: workspace.multi_project.unwrap().sidebar_side.unwrap(),
             },
             focus_follows_mouse: FocusFollowsMouse {
                 enabled: workspace
@@ -234,6 +230,9 @@ pub struct StatusBarSettings {
     pub cursor_position_button: bool,
     pub line_endings_button: bool,
     pub active_encoding_button: EncodingDisplayOptions,
+    pub claude_usage_button: bool,
+    pub codex_usage_button: bool,
+    pub agent_usage_display: AgentUsageDisplay,
 }
 
 impl Settings for StatusBarSettings {
@@ -246,6 +245,9 @@ impl Settings for StatusBarSettings {
             cursor_position_button: status_bar.cursor_position_button.unwrap(),
             line_endings_button: status_bar.line_endings_button.unwrap(),
             active_encoding_button: status_bar.active_encoding_button.unwrap(),
+            claude_usage_button: status_bar.claude_usage_button.unwrap(),
+            codex_usage_button: status_bar.codex_usage_button.unwrap(),
+            agent_usage_display: status_bar.agent_usage_display.unwrap(),
         }
     }
 }

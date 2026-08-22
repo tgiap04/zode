@@ -1,40 +1,26 @@
 ---
 title: Icon Themes
-description: "Zode comes with a built-in icon theme, with more icon themes available as extensions."
+description: "Zode's file and folder icons come from the Material Icon Theme, in colour, and cannot be changed."
 ---
 
 # Icon Themes
 
-Zode comes with a built-in icon theme, with more icon themes available as extensions.
+Zode ships one icon theme — the [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme), rendered in its real colours — and does not offer a choice of icon themes. There is no Icon Theme Selector, and no other icon theme takes effect, whether named in settings or contributed by an extension.
 
-## Selecting an Icon Theme
+File and folder name matching for icons is case-insensitive, so names like `Dockerfile`, `README.MD`, or `.PNG` still resolve to the right icon.
 
-See what icon themes are installed and preview them via the Icon Theme Selector, which you can open from the command palette with `icon theme selector: toggle`.
+## The `icon_theme` Setting
 
-Navigating through the icon theme list by moving up and down will change the icon theme in real time and hitting enter will save it to your settings file.
-
-## Installing more Icon Themes
-
-More icon themes are available from the Extensions page, which you can access via the command palette with `zed: extensions` or the [Zode website](https://zed.dev/extensions?filter=icon-themes).
-
-## Configuring Icon Themes
-
-Your selected icon theme is stored in your settings file.
-You can open your settings file from the command palette with {#action zed::OpenSettingsFile} (bound to {#kb zed::OpenSettingsFile}).
-
-Just like with themes, Zode allows for configuring different icon themes for light and dark mode.
-You can set the mode to `"light"` or `"dark"` to ignore the current system mode.
+The `icon_theme` setting still exists in the settings schema — including the object form for light/dark variants — because the settings machinery resolves it unconditionally and a missing key would be a startup panic. Whatever name you put here has no effect on which icons are drawn:
 
 ```json [settings]
 {
-  "icon_theme": {
-    "mode": "system",
-    "light": "Light Icon Theme",
-    "dark": "Dark Icon Theme"
-  }
+  "icon_theme": "Material Icon Theme"
 }
 ```
 
+This is the shipped default. Writing any other name, or the `{ "mode", "light", "dark" }` object form, does not change the icons shown.
+
 ## Icon Theme Development
 
-See: [Developing Zode Icon Themes](./extensions/icon-themes.md)
+Extensions may still declare an `icon_themes` directory (see [Developing Zode Icon Themes](./extensions/icon-themes.md)), but a contributed icon theme is never selected — the file icons are part of what this build is, not a user preference.
