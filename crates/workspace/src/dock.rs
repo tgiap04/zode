@@ -1652,6 +1652,79 @@ impl Dock {
             .into_any_element()
     }
 
+    /// The dock's own panels, named in a strip along its top edge.
+    ///
+    /// Only the column facing the rail draws one -- see `dock_header_draws_panel`
+    /// for why that column and no other. These are the status bar's buttons,
+    /// moved rather than reimplemented: `DockButton` builds both, so the menu
+    /// that re-docks a panel and switches it between flexible and fixed width
+    /// comes along with them. Nothing about them changes except that they now
+    /// stand on top of what they open instead of a window's width away from it.
+    ///
+    /// Called before the resize-handle closure in `render`, which holds a borrow
+    /// of `self` and `cx` for as long as it lives.
+    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !dock_header_draws_panel(self.position) {
+            return None;
+        }
+        // An own column has affordances of its own beside the rail; it is not the
+        // tool column this rule is about. Enforced here rather than left to the
+        // fact that no own column contributes an icon today.
+        if self.column.is_own_column() {
+            return None;
+        }
+
+        // The handle, for the menu's deferred closures only. Never read back --
+        // this dock is leased for the duration of its own render.
+        let dock_entity = cx.entity();
+        // Left to right in registration order. `PanelButtons` reverses this for
+        // the right dock so its buttons read inward from the window edge; a strip
+        // that starts at the panel's own left edge has nothing to read inward
+        // from.
+        let buttons: Vec<AnyElement> = self
+            .panel_entries
+            .iter()
+            .filter_map(|entry| {
+                Some(
+                    DockButton::for_entry(
+                        self,
+                        &dock_entity,
+                        entry,
+                        PanelButtonPlacement::DockHeader,
+                        window,
+                        cx,
+                    )?
+                    .render(window, cx),
+                )
+            })
+            .collect();
+
+        // No strip at all rather than an empty one: an empty header still costs
+        // its padding and its border, which reads as a stray rule above the
+        // panel.
+        if buttons.is_empty() {
+            return None;
+        }
+
+        Some(
+            h_flex()
+                .id("dock-header")
+                .debug_selector(|| "dock-header".into())
+                .flex_none()
+                .w_full()
+                .px_1()
+                .py_0p5()
+                .gap_1()
+                // A dock narrower than its own buttons clips them rather than
+                // pushing the panel below out of the card.
+                .overflow_x_hidden()
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
+                .children(buttons)
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn load_persisted_size_state(
         workspace: &Workspace,
         panel_key: &'static str,
@@ -1682,6 +1755,9 @@ impl Render for Dock {
             .is_some()
             .then(|| self.render_showing(window, cx));
         if let Some(showing) = showing {
+            // Built here, before the resize-handle closure below takes its own
+            // borrow of `self` and `cx`.
+            let header = self.render_header(window, cx);
             let position = self.position;
             let column = self.column;
             let create_resize_handle = || {
@@ -1780,7 +1856,23 @@ impl Render for Dock {
                             .border_color(cx.theme().colors().border)
                             .bg(cx.theme().colors().panel_background)
                             .overflow_hidden()
-                            .child(showing),
+                            .child(match header {
+                                // The panel gets `flex_1` with a floor of zero
+                                // so it sizes against a definite height instead
+                                // of running past the header -- the same shape
+                                // `render_stacked_panel` uses for the same
+                                // reason.
+                                Some(header) => v_flex()
+                                    .size_full()
+                                    .child(header)
+                                    .child(div().flex_1().min_h_0().child(showing))
+                                    .into_any_element(),
+                                // Handed through untouched with no header, which
+                                // keeps every dock that has never had one on
+                                // exactly the element tree it was laid out
+                                // against.
+                                None => showing,
+                            }),
                     ),
                 )
                 .when(self.resizable(cx), |this| {
@@ -1852,6 +1944,24 @@ pub fn rail_draws_panel(panel_name: &str, position: DockPosition, rail_drawn: bo
         && position == Workspace::OWN_COLUMN_POSITION
 }
 
+/// Whether this dock names its own panels in a header along its top edge -- and
+/// therefore whether the status bar must not.
+///
+/// One dock does: the column facing the rail. The rail draws the buttons for its
+/// own side and nothing represents the bottom dock, which left this one column
+/// with no surface of its own -- its buttons sat at the far end of the status
+/// bar, a window's width away from the panel they open.
+///
+/// Derived from the rail's side rather than written down as an edge, so the two
+/// cannot drift apart: move the rail and the header moves with it.
+///
+/// Split out of `render` for the same reason as `rail_draws_panel` above: the
+/// rule is one enum, while reaching it needs a whole workspace.
+pub fn dock_header_draws_panel(position: DockPosition) -> bool {
+    matches!(position, DockPosition::Left | DockPosition::Right)
+        && position != Workspace::OWN_COLUMN_POSITION
+}
+
 /// The edges the dock menu is allowed to offer for a panel.
 ///
 /// A single edge is NOT a choice: drawing it yields one already-ticked entry that
@@ -1916,19 +2026,262 @@ fn panel_button(
     )
 }
 
+/// Where a dock's buttons are drawn.
+///
+/// The two surfaces differ in less than they look: the menu hangs off a different
+/// corner and the status bar carries a divider against its neighbours. What the
+/// buttons dispatch, when they light, and what their menu offers is shared -- and
+/// shared by construction, not by two copies kept in step by hand.
+#[derive(Copy, Clone, PartialEq)]
+enum PanelButtonPlacement {
+    StatusBar,
+    DockHeader,
+}
+
+impl PanelButtonPlacement {
+    /// Which corner the right-click menu hangs from.
+    fn menu_anchors(self, position: DockPosition) -> (Anchor, Anchor) {
+        match self {
+            // Downward, over the panel below. A header stands at the top of the
+            // window, so a menu attached above it would open off screen.
+            Self::DockHeader => (Anchor::TopLeft, Anchor::BottomLeft),
+            Self::StatusBar => match position {
+                DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
+                DockPosition::Bottom | DockPosition::Right => {
+                    (Anchor::BottomRight, Anchor::TopRight)
+                }
+            },
+        }
+    }
+
+    /// What a test looks this button up by. Named per surface rather than per
+    /// panel: what a test needs to settle is which surface drew it, and a
+    /// selector carrying only the panel's name cannot answer that.
+    fn selector_prefix(self) -> &'static str {
+        match self {
+            Self::StatusBar => "status-bar-button",
+            Self::DockHeader => "dock-header-button",
+        }
+    }
+}
+
+/// One dock button, with everything behind it.
+///
+/// Built here rather than at each surface because the right-click menu is the
+/// only route to re-docking a panel and the only route at all to switching one
+/// between flexible and fixed width -- `Workspace::toggle_dock_panel_flexible_size`
+/// has no other caller in the tree, no action, no keybinding, no palette entry.
+/// A surface that drew the button without the menu would take both away, and for
+/// the flex toggle there would be no way back.
+struct DockButton {
+    /// Handed to the menu's click handlers, which run long after this render.
+    /// Deliberately never read here: a dock building its own header is leased
+    /// mid-render, and reading it back through the entity aborts the process.
+    dock: Entity<Dock>,
+    workspace: WeakEntity<Workspace>,
+    panel: Arc<dyn PanelHandle>,
+    position: DockPosition,
+    placement: PanelButtonPlacement,
+    name: &'static str,
+    icon: IconName,
+    is_active_button: bool,
+    action: Box<dyn Action>,
+    tooltip: SharedString,
+    focus_handle: FocusHandle,
+    icon_label: Option<String>,
+}
+
+impl DockButton {
+    /// `None` for a panel that contributes no icon -- a panel whose button
+    /// setting is off, which is how those settings take effect.
+    ///
+    /// The dock arrives as state (`dock`) *and* as a handle (`dock_entity`) for
+    /// the reason on the `dock` field: only the deferred closures may hold the
+    /// handle.
+    fn for_entry(
+        dock: &Dock,
+        dock_entity: &Entity<Dock>,
+        entry: &PanelEntry,
+        placement: PanelButtonPlacement,
+        window: &Window,
+        cx: &App,
+    ) -> Option<Self> {
+        let icon = entry.panel.icon(window, cx)?;
+        let icon_tooltip = entry
+            .panel
+            .icon_tooltip(window, cx)
+            .ok_or_else(|| anyhow::anyhow!("can't render a panel button without an icon tooltip"))
+            .log_err()?;
+
+        // Lit per panel rather than per dock: several can be up at once, so
+        // several buttons can be lit at once. The action for one that is up still
+        // closes the dock — this button has no way to name a single panel, and
+        // `Panel::toggle_action` respects `close_panel_on_toggle`, so it cannot
+        // be relied on to hide.
+        let is_active_button = dock.is_open && entry.visible;
+        let (action, tooltip): (Box<dyn Action>, SharedString) = if is_active_button {
+            (
+                dock.toggle_action(),
+                format!("Close {} Dock", dock.position.label()).into(),
+            )
+        } else {
+            (entry.panel.toggle_action(window, cx), icon_tooltip.into())
+        };
+
+        Some(Self {
+            dock: dock_entity.clone(),
+            workspace: dock.workspace.clone(),
+            panel: entry.panel.clone(),
+            position: dock.position,
+            placement,
+            name: entry.panel.persistent_name(),
+            icon,
+            is_active_button,
+            action,
+            tooltip,
+            focus_handle: dock.focus_handle(cx),
+            icon_label: entry.panel.icon_label(window, cx),
+        })
+    }
+
+    fn render(self, window: &Window, cx: &App) -> AnyElement {
+        let Self {
+            dock,
+            workspace,
+            panel,
+            position,
+            placement,
+            name,
+            icon,
+            is_active_button,
+            action,
+            tooltip,
+            focus_handle,
+            icon_label,
+        } = self;
+        let selector = placement.selector_prefix();
+
+        let supports_flexible = panel.supports_flexible_size(cx);
+        let currently_flexible = panel.has_flexible_size(window, cx);
+
+        // Nothing to offer and nothing to flex means no menu at all -- an
+        // attached menu with zero entries draws an empty popover.
+        let dockable = dockable_positions(&panel, cx);
+        if dockable.is_empty() && !supports_flexible {
+            return panel_button(
+                name,
+                icon,
+                is_active_button,
+                false,
+                action,
+                tooltip,
+                focus_handle,
+                icon_label,
+            )
+            .debug_selector(move || format!("{selector}:{name}"))
+            .into_any_element();
+        }
+
+        let (menu_anchor, menu_attach) = placement.menu_anchors(position);
+        right_click_menu(name)
+            .menu(move |window, cx| {
+                let dockable = dockable.clone();
+                ContextMenu::build(window, cx, |mut menu, _, _cx| {
+                    let has_position_entries = !dockable.is_empty();
+                    for dock_position in dockable {
+                        let is_current = dock_position == position;
+                        let panel = panel.clone();
+                        menu = menu.toggleable_entry(
+                            format!("Dock {}", dock_position.label()),
+                            is_current,
+                            IconPosition::Start,
+                            None,
+                            move |window, cx| {
+                                if !is_current {
+                                    panel.set_position(dock_position, window, cx);
+                                }
+                            },
+                        );
+                    }
+                    if supports_flexible {
+                        if has_position_entries {
+                            menu = menu.separator();
+                        }
+                        let panel_for_flex = panel.clone();
+                        let dock_for_flex = dock.clone();
+                        let workspace_for_flex = workspace.clone();
+                        menu = menu.toggleable_entry(
+                            "Flex Width",
+                            currently_flexible,
+                            IconPosition::Start,
+                            None,
+                            move |window, cx| {
+                                if !currently_flexible {
+                                    if let Some(ws) = workspace_for_flex.upgrade() {
+                                        ws.update(cx, |workspace, cx| {
+                                            workspace.toggle_dock_panel_flexible_size(
+                                                &dock_for_flex,
+                                                panel_for_flex.as_ref(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }
+                            },
+                        );
+                        let panel_for_fixed = panel.clone();
+                        let dock_for_fixed = dock.clone();
+                        let workspace_for_fixed = workspace.clone();
+                        menu = menu.toggleable_entry(
+                            "Fixed Width",
+                            !currently_flexible,
+                            IconPosition::Start,
+                            None,
+                            move |window, cx| {
+                                if currently_flexible {
+                                    if let Some(ws) = workspace_for_fixed.upgrade() {
+                                        ws.update(cx, |workspace, cx| {
+                                            workspace.toggle_dock_panel_flexible_size(
+                                                &dock_for_fixed,
+                                                panel_for_fixed.as_ref(),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }
+                            },
+                        );
+                    }
+                    menu
+                })
+            })
+            .anchor(menu_anchor)
+            .attach(menu_attach)
+            .trigger(move |is_menu_open, _window, _cx| {
+                panel_button(
+                    name,
+                    icon,
+                    is_active_button,
+                    is_menu_open,
+                    action.boxed_clone(),
+                    tooltip.clone(),
+                    focus_handle.clone(),
+                    icon_label.clone(),
+                )
+                .debug_selector(move || format!("{selector}:{name}"))
+            })
+            .into_any_element()
+    }
+}
+
 impl Render for PanelButtons {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dock = self.dock.read(cx);
-        let is_open = dock.is_open;
         let dock_position = dock.position;
 
-        let (menu_anchor, menu_attach) = match dock.position {
-            DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
-            DockPosition::Bottom | DockPosition::Right => (Anchor::BottomRight, Anchor::TopRight),
-        };
-
         let dock_entity = self.dock.clone();
-        let workspace = dock.workspace.clone();
         let mut buttons: Vec<AnyElement> = dock
             .panel_entries
             .iter()
@@ -1939,152 +2292,22 @@ impl Render for PanelButtons {
                 if self.rail_draws(entry.panel.persistent_name(), cx) {
                     return None;
                 }
-                let icon = entry.panel.icon(window, cx)?;
-                let icon_tooltip = entry
-                    .panel
-                    .icon_tooltip(window, cx)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("can't render a panel button without an icon tooltip")
-                    })
-                    .log_err()?;
-                let name = entry.panel.persistent_name();
-                let panel = entry.panel.clone();
-                let supports_flexible = panel.supports_flexible_size(cx);
-                let currently_flexible = panel.has_flexible_size(window, cx);
-                let dock_for_menu = dock_entity.clone();
-                let workspace_for_menu = workspace.clone();
-
-                // Lit per panel rather than per dock: several can be up at
-                // once, so several buttons can be lit at once. The action for
-                // one that is up still closes the dock — this button has no way
-                // to name a single panel, and `Panel::toggle_action` respects
-                // `close_panel_on_toggle`, so it cannot be relied on to hide.
-                let is_active_button = is_open && entry.visible;
-                let (action, tooltip) = if is_active_button {
-                    let action = dock.toggle_action();
-
-                    let tooltip: SharedString =
-                        format!("Close {} Dock", dock.position.label()).into();
-
-                    (action, tooltip)
-                } else {
-                    let action = entry.panel.toggle_action(window, cx);
-
-                    (action, icon_tooltip.into())
-                };
-
-                let focus_handle = dock.focus_handle(cx);
-                let icon_label = entry.panel.icon_label(window, cx);
-
-                // Nothing to offer and nothing to flex means no menu at all --
-                // an attached menu with zero entries draws an empty popover.
-                let dockable = dockable_positions(&panel, cx);
-                if dockable.is_empty() && !supports_flexible {
-                    return Some(
-                        panel_button(
-                            name,
-                            icon,
-                            is_active_button,
-                            false,
-                            action,
-                            tooltip,
-                            focus_handle,
-                            icon_label,
-                        )
-                        .into_any_element(),
-                    );
+                // And skip the dock that names its panels itself. Both surfaces
+                // read the one predicate, so neither can claim a panel the other
+                // has already taken -- nor drop one both think the other has.
+                if dock_header_draws_panel(dock_position) {
+                    return None;
                 }
-
                 Some(
-                    right_click_menu(name)
-                        .menu(move |window, cx| {
-                            let dockable = dockable.clone();
-                            ContextMenu::build(window, cx, |mut menu, _, _cx| {
-                                let has_position_entries = !dockable.is_empty();
-                                for position in dockable {
-                                    let is_current = position == dock_position;
-                                    let panel = panel.clone();
-                                    menu = menu.toggleable_entry(
-                                        format!("Dock {}", position.label()),
-                                        is_current,
-                                        IconPosition::Start,
-                                        None,
-                                        move |window, cx| {
-                                            if !is_current {
-                                                panel.set_position(position, window, cx);
-                                            }
-                                        },
-                                    );
-                                }
-                                if supports_flexible {
-                                    if has_position_entries {
-                                        menu = menu.separator();
-                                    }
-                                    let panel_for_flex = panel.clone();
-                                    let dock_for_flex = dock_for_menu.clone();
-                                    let workspace_for_flex = workspace_for_menu.clone();
-                                    menu = menu.toggleable_entry(
-                                        "Flex Width",
-                                        currently_flexible,
-                                        IconPosition::Start,
-                                        None,
-                                        move |window, cx| {
-                                            if !currently_flexible {
-                                                if let Some(ws) = workspace_for_flex.upgrade() {
-                                                    ws.update(cx, |workspace, cx| {
-                                                        workspace.toggle_dock_panel_flexible_size(
-                                                            &dock_for_flex,
-                                                            panel_for_flex.as_ref(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            }
-                                        },
-                                    );
-                                    let panel_for_fixed = panel.clone();
-                                    let dock_for_fixed = dock_for_menu.clone();
-                                    let workspace_for_fixed = workspace_for_menu.clone();
-                                    menu = menu.toggleable_entry(
-                                        "Fixed Width",
-                                        !currently_flexible,
-                                        IconPosition::Start,
-                                        None,
-                                        move |window, cx| {
-                                            if currently_flexible {
-                                                if let Some(ws) = workspace_for_fixed.upgrade() {
-                                                    ws.update(cx, |workspace, cx| {
-                                                        workspace.toggle_dock_panel_flexible_size(
-                                                            &dock_for_fixed,
-                                                            panel_for_fixed.as_ref(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            }
-                                        },
-                                    );
-                                }
-                                menu
-                            })
-                        })
-                        .anchor(menu_anchor)
-                        .attach(menu_attach)
-                        .trigger(move |is_active, _window, _cx| {
-                            panel_button(
-                                name,
-                                icon,
-                                is_active_button,
-                                is_active,
-                                action.boxed_clone(),
-                                tooltip.clone(),
-                                focus_handle.clone(),
-                                icon_label.clone(),
-                            )
-                        })
-                        .into_any_element(),
+                    DockButton::for_entry(
+                        dock,
+                        &dock_entity,
+                        entry,
+                        PanelButtonPlacement::StatusBar,
+                        window,
+                        cx,
+                    )?
+                    .render(window, cx),
                 )
             })
             .collect();
@@ -2266,12 +2489,16 @@ pub mod test {
 
         /// `None`, like `TestPanel`'s default: a panel with no icon draws no
         /// dock button, which keeps this out of the button-list assertions.
-        fn icon(&self, _window: &Window, _: &App) -> Option<ui::IconName> {
-            None
+        /// Delegated to the wrapped panel, like everything else here: a stack
+        /// test that needs two named sections has to be able to give each an
+        /// icon, and an icon is what puts a panel in a dock's header. Still
+        /// `None` by default -- `TestPanel::icon` is.
+        fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName> {
+            Panel::icon(&self.0, window, cx)
         }
 
-        fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-            None
+        fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str> {
+            Panel::icon_tooltip(&self.0, window, cx)
         }
 
         fn set_active(&mut self, active: bool, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -2375,7 +2602,10 @@ pub mod test {
 
 #[cfg(test)]
 mod rail_coverage_tests {
-    use super::{DockPosition, PANEL_ALWAYS_IN_STATUS_BAR, Workspace, rail_draws_panel};
+    use super::{
+        DockPosition, PANEL_ALWAYS_IN_STATUS_BAR, Workspace, dock_header_draws_panel,
+        rail_draws_panel,
+    };
 
     const ORDINARY: &str = "Outline Panel";
 
@@ -2424,6 +2654,46 @@ mod rail_coverage_tests {
                 !rail_draws_panel(PANEL_ALWAYS_IN_STATUS_BAR, position, true),
                 "the rail must leave the project panel in the status bar \
                  even when it is docked {position:?}"
+            );
+        }
+    }
+
+    /// The third surface. Get this wrong in one direction and the panel is named
+    /// twice -- once over itself and once at the far end of the status bar; wrong
+    /// in the other and a dock loses its buttons entirely.
+    #[test]
+    fn the_header_draws_the_column_facing_the_rail_and_nothing_else() {
+        for position in [
+            DockPosition::Left,
+            DockPosition::Right,
+            DockPosition::Bottom,
+        ] {
+            let expected =
+                position != DockPosition::Bottom && position != Workspace::OWN_COLUMN_POSITION;
+            assert_eq!(
+                dock_header_draws_panel(position),
+                expected,
+                "the rail stands on {:?}, so the header belongs to the other side \
+                 and never to the bottom -- got {} for {position:?}",
+                Workspace::OWN_COLUMN_POSITION,
+                dock_header_draws_panel(position)
+            );
+        }
+    }
+
+    /// Exactly one surface per dock. The rail and the header both claiming the
+    /// rail's own side is the doubling this pair of rules exists to prevent, and
+    /// it would draw the same button twice in two places.
+    #[test]
+    fn no_dock_is_claimed_by_both_the_rail_and_a_header() {
+        for position in [
+            DockPosition::Left,
+            DockPosition::Right,
+            DockPosition::Bottom,
+        ] {
+            assert!(
+                !(rail_draws_panel(ORDINARY, position, true) && dock_header_draws_panel(position)),
+                "the {position:?} dock is claimed by both the rail and its own header"
             );
         }
     }

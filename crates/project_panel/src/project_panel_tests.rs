@@ -10491,3 +10491,62 @@ async fn the_project_panel_draws_in_the_right_half_of_the_window(cx: &mut gpui::
         panel_bounds.right()
     );
 }
+
+/// The button that opens this panel stands on top of it, and only there.
+///
+/// Measured on a real frame for the same reason as the test above: a header the
+/// layout drops, or one drawn below the panel it names, reads as correct
+/// everywhere except on screen. The two selectors are the whole point -- asserting
+/// the header alone would pass just as well while the status bar drew a second
+/// copy of the same button a window's width away.
+#[gpui::test]
+async fn the_panels_button_moves_into_the_docks_own_header(cx: &mut gpui::TestAppContext) {
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    init_test(cx);
+
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    let dock_bounds = cx
+        .debug_bounds("dock-panel")
+        .expect("the docked panel must be drawn once the dock is open");
+    let header_bounds = cx
+        .debug_bounds("dock-header-button:Project Panel")
+        .expect("the dock must name its panel in a header of its own");
+
+    assert!(
+        cx.debug_bounds("status-bar-button:Project Panel").is_none(),
+        "the status bar must not draw a second copy of a button the dock header \
+         has taken"
+    );
+
+    // Inside the dock, in its upper half. Ordering rather than pixel counts: the
+    // strip's exact height follows the UI font.
+    assert!(
+        header_bounds.origin.x >= dock_bounds.origin.x - px(1.)
+            && header_bounds.right() <= dock_bounds.right() + px(1.),
+        "the header must sit inside its dock, got {header_bounds:?} in {dock_bounds:?}"
+    );
+    assert!(
+        header_bounds.bottom() < dock_bounds.origin.y + dock_bounds.size.height / 2.,
+        "the header must stand at the TOP of the dock, ended at {:?} in a dock \
+         running {:?}..{:?}",
+        header_bounds.bottom(),
+        dock_bounds.origin.y,
+        dock_bounds.bottom()
+    );
+}

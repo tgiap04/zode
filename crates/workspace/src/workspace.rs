@@ -1740,9 +1740,11 @@ impl Workspace {
             let mut status_bar =
                 StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
             // Every dock keeps its buttons here; `PanelButtons` itself draws
-            // nothing for the dock the project rail already stands beside, so
-            // the pair never doubles up and a dock the rail does not cover stays
-            // reachable from the status bar.
+            // nothing for a dock another surface already names -- the rail, for
+            // the dock it stands beside, and the dock's own header, for the
+            // column facing the rail. All three read one predicate, so the pair
+            // never doubles up and a dock neither covers stays reachable from
+            // the status bar.
             status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);
@@ -14566,6 +14568,91 @@ mod tests {
             1,
             "one panel left showing"
         );
+    }
+
+    /// The same split, in the dock that draws a header over it.
+    ///
+    /// The stack is nested one flex level deeper there, and this crate's
+    /// recurring layout defect is a section that resolves to full width and zero
+    /// height under the wrong parent -- which every state assertion reports as
+    /// fine. The left-dock test above cannot see it: that dock has no header.
+    #[gpui::test]
+    async fn a_stack_under_a_header_still_divides_the_dock(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Two panel *types*, because `persistent_name` names a type: two
+            // `TestPanel`s would collapse into one section. Both carry an icon,
+            // which is what puts a button in the header -- a panel without one
+            // contributes nothing and the header would not be drawn at all.
+            let first = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Right, 100, cx);
+                panel.icon = Some(ui::IconName::FileTree);
+                panel
+            });
+            let second = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Right, 101, cx);
+                panel.0.icon = Some(ui::IconName::Terminal);
+                panel
+            });
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let header = cx
+            .debug_bounds("dock-header")
+            .expect("a right dock showing panels with icons must draw its header");
+        let top = cx
+            .debug_bounds("dock-stacked-panel:0")
+            .expect("the first section of the stack should be drawn");
+        let bottom = cx
+            .debug_bounds("dock-stacked-panel:1")
+            .expect("the second section of the stack should be drawn");
+
+        for (which, bounds) in [("first", top), ("second", bottom)] {
+            assert!(
+                bounds.size.width > px(0.) && bounds.size.height > px(0.),
+                "the {which} section drew with no area under the header: {bounds:?}"
+            );
+        }
+        assert!(
+            header.bottom() <= top.origin.y + px(1.),
+            "the header must stand above the whole stack, ended at {:?} with the \
+             first section starting at {:?}",
+            header.bottom(),
+            top.origin.y
+        );
+        assert!(
+            top.bottom() <= bottom.origin.y,
+            "and the stack must still read top-to-bottom without overlapping, \
+             got {top:?} then {bottom:?}"
+        );
+
+        // Both buttons, not just the active one: the header stands for the whole
+        // dock, and a stack lights every section it is showing.
+        for selector in [
+            "dock-header-button:TestPanel",
+            "dock-header-button:OtherTestPanel",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "the header must name every panel the dock is showing, missing \
+                 {selector}"
+            );
+        }
     }
 
     #[gpui::test]
