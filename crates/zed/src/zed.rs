@@ -5046,7 +5046,6 @@ mod tests {
                 "git_picker",
                 "go_to_line",
                 "highlights_tree_view",
-                "icon_theme_selector",
                 "image_viewer",
                 "journal",
                 "keymap_editor",

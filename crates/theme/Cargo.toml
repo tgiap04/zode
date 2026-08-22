@@ -20,6 +20,7 @@ doctest = false
 anyhow.workspace = true
 collections.workspace = true
 gpui.workspace = true
+log.workspace = true
 syntax_theme.workspace = true
 palette = { workspace = true, default-features = false, features = ["std"] }
 parking_lot.workspace = true

@@ -11,7 +11,12 @@
     "light": "Light 2026",
     "dark": "Dark 2026",
   },
-  "icon_theme": "Zode (Default)",
+  // The file icons are fixed in this build: whatever is named here, and whatever
+  // an extension contributes, resolves to the one shipped icon theme -- see
+  // `ThemeRegistry::get_icon_theme`. The key stays because the settings machinery
+  // resolves it unconditionally and a missing key is a panic at startup, not a
+  // fallback.
+  "icon_theme": "Material Icon Theme",
   // The name of a base set of key bindings to use.
   // This setting can take six values, each named after another
   // text editor:

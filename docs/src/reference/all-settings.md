@@ -2467,13 +2467,13 @@ Example:
 
 ## Icon Theme
 
-- Description: The icon theme setting can be specified in two forms - either as the name of an icon theme or as an object containing the `mode`, `dark`, and `light` icon themes for files/folders inside Zode.
+- Description: The icon theme setting can be specified in two forms - either as the name of an icon theme or as an object containing the `mode`, `dark`, and `light` icon themes for files/folders inside Zode. **This build ignores the value**: file and folder icons are fixed to the Material Icon Theme, in colour, and no name written here changes them. The key stays in the schema because it is resolved unconditionally at startup — see [Icon Themes](../icon-themes.md).
 - Setting: `icon_theme`
-- Default: `Zode (Default)`
+- Default: `Material Icon Theme`
 
 ### Icon Theme Object
 
-- Description: Specify the icon theme using an object that includes the `mode`, `dark`, and `light`.
+- Description: Specify the icon theme using an object that includes the `mode`, `dark`, and `light`. Accepted and parsed, but — like the string form above — has no effect on the icons shown.
 - Setting: `icon_theme`
 - Default:
 
@@ -2481,75 +2481,29 @@ Example:
 {
   "icon_theme": {
     "mode": "system",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
+    "dark": "Material Icon Theme",
+    "light": "Material Icon Theme"
   }
 }
 ```
 
 ### Mode
 
-- Description: Specify the icon theme mode.
+- Description: Specify the icon theme mode. Has no effect in this build (see above).
 - Setting: `mode`
 - Default: `system`
 
-**Options**
-
-1. Set the icon theme to dark mode
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "dark",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
-  }
-}
-```
-
-2. Set the icon theme to light mode
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "light",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
-  }
-}
-```
-
-3. Set the icon theme to system mode
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "system",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
-  }
-}
-```
-
 ### Dark
 
-- Description: The name of the dark icon theme.
+- Description: The name of the dark icon theme. Has no effect in this build (see above).
 - Setting: `dark`
-- Default: `Zode (Default)`
-
-**Options**
-
-Run the {#action icon_theme_selector::Toggle} action in the command palette to see a current list of valid icon themes names.
+- Default: `Material Icon Theme`
 
 ### Light
 
-- Description: The name of the light icon theme.
+- Description: The name of the light icon theme. Has no effect in this build (see above).
 - Setting: `light`
-- Default: `Zode (Default)`
-
-**Options**
-
-Run the {#action icon_theme_selector::Toggle} action in the command palette to see a current list of valid icon themes names.
+- Default: `Material Icon Theme`
 
 ## Image Viewer
 

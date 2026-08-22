@@ -386,21 +386,6 @@ pub mod theme_selector {
     }
 }
 
-pub mod icon_theme_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Toggles the icon theme selector interface.
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = icon_theme_selector)]
-    #[serde(deny_unknown_fields)]
-    pub struct Toggle {
-        /// A list of icon theme names to filter the theme selector down to.
-        pub themes_filter: Option<Vec<String>>,
-    }
-}
-
 pub mod search {
     use gpui::actions;
     actions!(

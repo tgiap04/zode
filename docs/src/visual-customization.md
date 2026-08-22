@@ -11,14 +11,13 @@ See [All Settings](./reference/all-settings.md) for additional information and o
 
 ## Themes
 
-You can install many [themes](./themes.md) and [icon themes](./icon-themes.md) in form of extensions by running {#action zed::Extensions} from the command palette.
+You can install many [color themes](./themes.md) in form of extensions by running {#action zed::Extensions} from the command palette. [Icon themes](./icon-themes.md) are a different story: Zode's file and folder icons are fixed to the Material Icon Theme and cannot be changed, so there is nothing to install there.
 
-You can preview/choose amongst your installed themes and icon themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}) and {#action icon_theme_selector::Toggle} which will modify the following settings:
+You can preview/choose amongst your installed color themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}), which modifies the following setting:
 
 ```json [settings]
 {
-  "theme": "One Dark",
-  "icon_theme": "Zode (Default)"
+  "theme": "One Dark"
 }
 ```
 
@@ -31,15 +30,11 @@ If you would like to use distinct themes for light mode/dark mode that can be se
     "light": "One Light",
     // Mode to use (dark, light) or "system" to follow the OS's light/dark mode (default)
     "mode": "system"
-  },
-  "icon_theme": {
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)",
-    // Mode to use (dark, light) or "system" to follow the OS's light/dark mode (default)
-    "mode": "system"
   }
 }
 ```
+
+The `icon_theme` setting still exists — it defaults to `"Material Icon Theme"` and accepts the same `{ "mode", "light", "dark" }` object form as `theme` — but no value written there changes which icons are drawn; see [Icon Themes](./icon-themes.md).
 
 ## Fonts
 
