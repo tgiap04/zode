@@ -1,0 +1,67 @@
+{
+  "score": 9.7,
+  "criticalCount": 0,
+  "decision": "SEALED",
+  "contractStatus": "REVIEWED",
+  "acceptanceCovered": [
+    "the project rail is always on the left and its edge is not a setting — Workspace::OWN_COLUMN_POSITION is the single named place, and grep finds no SidebarSide, sidebar_side, sidebar_on_right or rail_side left in code",
+    "the project panel is always on the right and cannot be moved by menu or action — position_is_valid refuses Left and Bottom, set_position writes nothing, dockable_positions offers no entries below two valid edges, and move_to_next_position no longer shoves a one-edge panel to Left",
+    "no settings key survives that is read by nothing — multi_project.sidebar_side and project_panel.dock are gone from settings_content, the resolved structs, default.json and the Settings UI together",
+    "the shipped defaults give a new user that layout, with git and outline riding the rail — all four defaults flipped in one change, asserted by the_rail_riding_panels_dock_where_the_rail_stands",
+    "no behaviour outside the sidebar layout changes — the reviewer hand-traced all nine activate_pane_in_direction branches, the title-bar and status-bar rounding algebra and the drag arithmetic against the pre-change code and found no divergence",
+    "every gate in the plan passes and no test is lost — 98 + 226 + 22 + 48 + 56 + 31 + 15, clippy clean, binary links"
+  ],
+  "regressionChecked": [
+    "zode 56 run WITHOUT --lib, which is the gate that caught the one real regression: test_open_paths_action asserted the LEFT dock opens on a fresh workspace, true only while the project panel defaulted left; now asserts right open AND left closed",
+    "workspace 226 — no test removed across four phases; five parametrized tests were collapsed rather than deleted, each keeping its negative arms",
+    "sidebar 22 = 20 + the two activate_pane_in_direction characterization tests",
+    "project_panel 98, database_ui 48, settings 31, settings_ui 15, settings_content 13",
+    "six falsifications: widening position_is_valid, making set_position write, restoring unwrap_or(Left), forcing sidebar_on_right true, and moving ProjectPanel::position to Left each turn the matching test red on its own message",
+    "test_hibernate_after_ms_zero_disables_hibernation reproduced identically at HEAD with the same command, twice, by stashing the tree — pre-existing, not a regression",
+    "cargo check -p workspace --all-targets is red at HEAD too (RemoteConnectionIdentity::Mock, a feature-unification artifact of checking one crate alone) — the sound command for this crate is cargo test -p workspace"
+  ],
+  "refuted": [],
+  "unproven": [],
+  "reachableRegressions": [],
+  "findings": [
+    {
+      "severity": "medium",
+      "category": "stale-comment",
+      "location": "crates/workspace/src/multi_workspace_tests.rs:38",
+      "summary": "three test-helper comments listed the sidebar side among the MultiProjectContent fields left at None, after the field was deleted from the struct",
+      "disposition": "Accept"
+    },
+    {
+      "severity": "low",
+      "category": "style",
+      "location": "crates/settings_content/src/workspace.rs:1065",
+      "summary": "a double blank line was left where the SidebarSide enum used to sit",
+      "disposition": "Accept"
+    },
+    {
+      "severity": "low",
+      "category": "pre-existing",
+      "location": "crates/database_ui/src/database_panel.rs:342",
+      "summary": "DatabasePanel still reports both Left and Right valid with a no-op set_position; unreachable because it contributes no icon so PanelButtons filters it before dockable_positions is consulted, and unchanged by this work",
+      "disposition": "Defer"
+    },
+    {
+      "severity": "low",
+      "category": "pre-existing",
+      "location": "crates/workspace/src/status_bar.rs:33",
+      "summary": "SidebarStatus tracks only `open` while platform_title_bar tracks `open || rail`, so the bottom-left corner rounds under a rail-only sidebar where the top-left does not; verified against HEAD as pre-dating this change",
+      "disposition": "Defer"
+    },
+    {
+      "severity": "low",
+      "category": "efficiency",
+      "location": "crates/workspace/src/dock.rs:1845",
+      "summary": "dockable_positions allocates a Vec per panel per render frame; three elements of a Copy enum, and it replaced a const array that was iterated the same number of times",
+      "disposition": "Reject"
+    }
+  ],
+  "riskGate": {
+    "touchesSensitiveArea": false,
+    "signoffRequired": false
+  }
+}
