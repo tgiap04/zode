@@ -234,9 +234,10 @@ impl Sidebar {
             .border_color(border)
             .child(
                 // Not a tree glyph: the panel switcher directly above already
-                // carries `FileTree` and `ListTree` from the project and
-                // outline panels, and a third tree in the same column reads as
-                // a duplicate.
+                // carries `ListTree` from the outline panel, and a second tree
+                // in the same column reads as a duplicate. (The project panel
+                // used to put a third one here; it stands in its own dock's
+                // header now, under a folder.)
                 IconButton::new("project-rail-toggle-panel", IconName::Menu)
                     .icon_size(RAIL_ICON_SIZE)
                     .toggle_state(panel_open)

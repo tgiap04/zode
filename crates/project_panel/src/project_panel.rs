@@ -7334,7 +7334,11 @@ impl Panel for ProjectPanel {
     fn icon(&self, _: &Window, cx: &App) -> Option<IconName> {
         ProjectPanelSettings::get_global(cx)
             .button
-            .then_some(IconName::FileTree)
+            // A folder, not a tree. The button stands at the top of the panel's
+            // own column now rather than in the status bar, directly over the
+            // tree it opens -- a second drawing of that tree beside it says
+            // nothing the panel below is not already saying.
+            .then_some(IconName::Folder)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {

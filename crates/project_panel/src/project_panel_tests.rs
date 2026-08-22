@@ -10549,4 +10549,24 @@ async fn the_panels_button_moves_into_the_docks_own_header(cx: &mut gpui::TestAp
         dock_bounds.origin.y,
         dock_bounds.bottom()
     );
+
+    // The pending agent-history entry, beside the panel's own button rather than
+    // somewhere else in the window. It has nothing behind it yet, so the only
+    // thing worth asserting is that it is drawn and where.
+    let history_bounds = cx
+        .debug_bounds("dock-header-agent-history")
+        .expect("the header must carry the pending agent-history entry");
+    assert!(
+        history_bounds.origin.x >= header_bounds.right(),
+        "the agent-history entry must sit beside the panel's button, not before \
+         it: entry at {:?}, button ending at {:?}",
+        history_bounds.origin.x,
+        header_bounds.right()
+    );
+    assert!(
+        history_bounds.origin.y < dock_bounds.origin.y + dock_bounds.size.height / 2.
+            && history_bounds.right() <= dock_bounds.right() + px(1.),
+        "and must share the strip at the top of the dock, got {history_bounds:?} \
+         in {dock_bounds:?}"
+    );
 }
