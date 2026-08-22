@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{
-    ActionName, CenteredPaddingSettings, DelayMs, DockPosition, DockSide, InactiveOpacity,
+    ActionName, CenteredPaddingSettings, DelayMs, DockPosition, InactiveOpacity,
     ShowIndentGuides, ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
 };
 
@@ -743,10 +743,6 @@ pub struct ProjectPanelSettingsContent {
     /// Default: 240
     #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
     pub default_width: Option<f32>,
-    /// The position of project panel
-    ///
-    /// Default: left
-    pub dock: Option<DockSide>,
     /// Spacing between worktree entries in the project panel.
     ///
     /// Default: comfortable
@@ -1068,30 +1064,6 @@ pub struct FocusFollowsMouse {
     pub debounce_ms: Option<u64>,
 }
 
-/// Which side of the window the multi-project switcher sidebar docks to.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum SidebarSide {
-    /// Dock the sidebar on the left side of the window.
-    #[default]
-    Left,
-    /// Dock the sidebar on the right side of the window.
-    Right,
-}
-
 #[with_fallible_options]
 #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct MultiProjectContent {
@@ -1161,9 +1133,4 @@ pub struct MultiProjectContent {
     ///
     /// Default: null (disabled)
     pub background_scroll_history_lines: Option<usize>,
-    /// FR8 (multi-project-window-switching, phase 7): which side of the
-    /// window the project switcher sidebar docks to.
-    ///
-    /// Default: left
-    pub sidebar_side: Option<SidebarSide>,
 }

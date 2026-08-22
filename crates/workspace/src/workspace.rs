@@ -34,7 +34,7 @@ pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectToNewWindow,
     MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject, ProjectGroup,
     ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    SidebarRenderState, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -1707,11 +1707,12 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let rail_side = match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
-            SidebarSide::Left => DockPosition::Left,
-            SidebarSide::Right => DockPosition::Right,
-        };
-        let database_dock = Dock::new(rail_side, modal_layer.clone(), window, cx);
+        let database_dock = Dock::new(
+            Self::OWN_COLUMN_POSITION,
+            modal_layer.clone(),
+            window,
+            cx,
+        );
         database_dock.update(cx, |dock, _cx| {
             dock.mark_as_own_column(DockColumn::Database)
         });
@@ -1724,7 +1725,7 @@ impl Workspace {
         let own_columns_follow_rail = cx.observe_global::<SettingsStore>({
             let database_dock = database_dock.clone();
             move |workspace: &mut Workspace, cx| {
-                let side = workspace.own_column_position(cx);
+                let side = workspace.own_column_position();
                 database_dock.update(cx, |dock, cx| dock.set_own_column_position(side, cx));
             }
         });
@@ -5115,25 +5116,10 @@ impl Workspace {
             .as_ref()
             .map(|h| Target::Sidebar(h.clone()));
 
-        let sidebar_on_right = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map_or(false, |mw| {
-                mw.read(cx).sidebar_side(cx) == SidebarSide::Right
-            });
-
-        let away_from_sidebar = if sidebar_on_right {
-            SplitDirection::Left
-        } else {
-            SplitDirection::Right
-        };
-
-        let (near_dock, far_dock) = if sidebar_on_right {
-            (&self.right_dock, &self.left_dock)
-        } else {
-            (&self.left_dock, &self.right_dock)
-        };
+        // The sidebar stands on the left, so moving away from it means moving
+        // right, and the dock nearer to it is the left one.
+        let away_from_sidebar = SplitDirection::Right;
+        let (near_dock, far_dock) = (&self.left_dock, &self.right_dock);
 
         let target = match (origin, direction) {
             (Origin::Sidebar, dir) if dir == away_from_sidebar => try_dock(near_dock)
@@ -5153,21 +5139,9 @@ impl Workspace {
                         SplitDirection::Up => None,
                         SplitDirection::Down => try_dock(&self.bottom_dock),
                         SplitDirection::Left => {
-                            let dock_target = try_dock(&self.left_dock);
-                            if sidebar_on_right {
-                                dock_target
-                            } else {
-                                dock_target.or(sidebar_target)
-                            }
+                            try_dock(&self.left_dock).or(sidebar_target)
                         }
-                        SplitDirection::Right => {
-                            let dock_target = try_dock(&self.right_dock);
-                            if sidebar_on_right {
-                                dock_target.or(sidebar_target)
-                            } else {
-                                dock_target
-                            }
-                        }
+                        SplitDirection::Right => try_dock(&self.right_dock),
                     }
                 }
             }
@@ -5180,34 +5154,16 @@ impl Workspace {
                 }
             }
 
-            (Origin::LeftDock, SplitDirection::Left) => {
-                if sidebar_on_right {
-                    None
-                } else {
-                    sidebar_target
-                }
-            }
+            (Origin::LeftDock, SplitDirection::Left) => sidebar_target,
 
             (Origin::LeftDock, SplitDirection::Down)
             | (Origin::RightDock, SplitDirection::Down) => try_dock(&self.bottom_dock),
 
             (Origin::BottomDock, SplitDirection::Up) => get_last_active_pane().map(Target::Pane),
             (Origin::BottomDock, SplitDirection::Left) => {
-                let dock_target = try_dock(&self.left_dock);
-                if sidebar_on_right {
-                    dock_target
-                } else {
-                    dock_target.or(sidebar_target)
-                }
+                try_dock(&self.left_dock).or(sidebar_target)
             }
-            (Origin::BottomDock, SplitDirection::Right) => {
-                let dock_target = try_dock(&self.right_dock);
-                if sidebar_on_right {
-                    dock_target.or(sidebar_target)
-                } else {
-                    dock_target
-                }
-            }
+            (Origin::BottomDock, SplitDirection::Right) => try_dock(&self.right_dock),
 
             (Origin::RightDock, SplitDirection::Left) => {
                 if let Some(last_active_pane) = get_last_active_pane() {
@@ -5217,13 +5173,7 @@ impl Workspace {
                 }
             }
 
-            (Origin::RightDock, SplitDirection::Right) => {
-                if sidebar_on_right {
-                    sidebar_target
-                } else {
-                    None
-                }
-            }
+            (Origin::RightDock, SplitDirection::Right) => None,
 
             _ => None,
         };
@@ -7761,14 +7711,19 @@ impl Workspace {
 
     /// Which side of the editor the own columns stand on.
     ///
-    /// The rail's side, not a setting of their own: a column belongs beside the
-    /// strip of buttons that opens it, so the two never end up at opposite
-    /// edges of the screen. Both columns share this answer.
-    pub fn own_column_position(&self, cx: &App) -> DockPosition {
-        match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
-            SidebarSide::Left => DockPosition::Left,
-            SidebarSide::Right => DockPosition::Right,
-        }
+    /// The rail's side, and the rail stands on the left. Both columns share this
+    /// answer because a column belongs beside the strip of buttons that opens it,
+    /// so the two can never end up at opposite edges of the screen.
+    ///
+    /// This is the place the layout is named. It used to read
+    /// `multi_project.sidebar_side`; that setting is gone, and with it the
+    /// possibility of the rail and its columns disagreeing.
+    pub const OWN_COLUMN_POSITION: DockPosition = DockPosition::Left;
+
+    /// See [`Self::OWN_COLUMN_POSITION`]. Kept as a method because six call sites
+    /// read it through a workspace handle.
+    pub fn own_column_position(&self) -> DockPosition {
+        Self::OWN_COLUMN_POSITION
     }
 
     /// What an own column must always leave for whatever stands beside it.
@@ -7824,7 +7779,7 @@ impl Workspace {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let dock = self.dock_for_column(column)?.clone();
-        let side = self.own_column_position(cx);
+        let side = self.own_column_position();
         Some(
             div()
                 .flex()
@@ -7851,7 +7806,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let side = self.own_column_position(cx);
+        let side = self.own_column_position();
         let showing: Vec<DockColumn> = Self::OWN_COLUMN_ORDER
             .into_iter()
             .filter(|column| {
@@ -8209,11 +8164,11 @@ impl Workspace {
         let Some(dock) = self.dock_for_column(column).cloned() else {
             return;
         };
-        let new_size = match self.own_column_position(cx) {
+        let new_size = match self.own_column_position() {
             DockPosition::Left => pointer.x - bounds.left(),
             DockPosition::Right | DockPosition::Bottom => bounds.right() - pointer.x,
         };
-        let new_size = new_size.min(self.own_column_max_width(column, cx));
+        let new_size = new_size.min(self.own_column_max_width(column));
         dock.update(cx, |dock, cx| {
             dock.resize_active_panel(Some(new_size), None, window, cx);
         });
@@ -8227,13 +8182,13 @@ impl Workspace {
     /// measured from the column's own edge outwards, and a strip is kept back
     /// so the editor cannot be squeezed to nothing by a drag nobody can undo
     /// without finding a handle that is no longer on screen.
-    pub fn own_column_max_width(&self, column: DockColumn, cx: &App) -> Pixels {
+    pub fn own_column_max_width(&self, column: DockColumn) -> Pixels {
         let workspace = self.bounds.size.width - RESIZE_HANDLE_SIZE;
         let Some(bounds) = self.own_column_bounds(column) else {
             return workspace;
         };
 
-        let side = self.own_column_position(cx);
+        let side = self.own_column_position();
 
         // Everything on the inward side of the column: the other own column,
         // the centre, and whatever dock stands past it.
@@ -13502,18 +13457,6 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(SidebarSide::Left);
-                });
-            });
-        });
-
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.set_random_database_id();
 
@@ -13666,21 +13609,8 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
-        // Pinned rather than left to the default: which edge the rail sits on
-        // decides which of the column's edges the handle hangs off, and this
-        // test drags rightwards.
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(SidebarSide::Left);
-                });
-            });
-        });
-
+        // The rail stands on the left, so the column's handle hangs off its right
+        // edge -- which is the direction this test drags.
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.set_random_database_id();
             let database = cx.new(|cx| TestPanel::new_database(DockPosition::Left, 102, cx));
@@ -13692,13 +13622,13 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let (database_left, limit, workspace_width) = workspace.read_with(cx, |workspace, cx| {
+        let (database_left, limit, workspace_width) = workspace.read_with(cx, |workspace, _cx| {
             (
                 workspace
                     .database_column_bounds
                     .expect("the database column must record where it drew")
                     .left(),
-                workspace.own_column_max_width(DockColumn::Database, cx),
+                workspace.own_column_max_width(DockColumn::Database),
                 workspace.bounds.size.width,
             )
         });
@@ -13748,39 +13678,29 @@ mod tests {
             workspace.add_panel(database, window, cx);
         });
 
-        for (side, expected) in [
-            (SidebarSide::Right, DockPosition::Right),
-            (SidebarSide::Left, DockPosition::Left),
-        ] {
-            cx.update(|_window, cx| {
-                SettingsStore::update_global(cx, |settings, cx| {
-                    settings.update_user_settings(cx, |settings| {
-                        settings
-                            .workspace
-                            .multi_project
-                            .get_or_insert_default()
-                            .sidebar_side = Some(side);
-                    });
-                });
-            });
-            cx.run_until_parked();
+        cx.run_until_parked();
 
-            workspace.read_with(cx, |workspace, cx| {
-                assert_eq!(
-                    workspace.database_dock.read(cx).position(),
-                    expected,
-                    "the database column must stand on the rail's side ({side:?})"
-                );
-                assert!(
-                    workspace
-                        .database_dock
-                        .read(cx)
-                        .panel::<TestPanel>()
-                        .is_some(),
-                    "flipping the rail must not haul the panel into a tool dock"
-                );
-            });
-        }
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.database_dock.read(cx).position(),
+                Workspace::OWN_COLUMN_POSITION,
+                "the database column stands on the rail's edge"
+            );
+            assert_ne!(
+                workspace.database_dock.read(cx).position(),
+                DockPosition::Right,
+                "and never opposite the rail -- the button would be a window away \
+                 from the column it opens"
+            );
+            assert!(
+                workspace
+                    .database_dock
+                    .read(cx)
+                    .panel::<TestPanel>()
+                    .is_some(),
+                "and the panel must not be hauled into a tool dock"
+            );
+        });
     }
 
     #[gpui::test]

@@ -1,13 +1,10 @@
 use crate::Sidebar;
-use crate::rail::rail_side;
 use gpui::{Context, IntoElement, Render, Window};
 use ui::prelude::*;
-use workspace::SidebarSide;
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let panel_open = self.panel_open(cx);
-        let side = rail_side(cx);
         let rail = self.render_rail(window, cx);
         // The rail is the outermost column on whichever edge the sidebar stands
         // against -- VS Code's activity bar sits beyond its sidebar, not between
@@ -28,10 +25,8 @@ impl Render for Sidebar {
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::on_focus_sidebar_filter))
-            .map(|this| match side {
-                SidebarSide::Left => this.child(rail).children(panel),
-                SidebarSide::Right => this.children(panel).child(rail),
-            })
+            .child(rail)
+            .children(panel)
     }
 }
 

@@ -2443,11 +2443,14 @@ mod tests {
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
                     assert_eq!(workspace.worktrees(cx).count(), 2);
-                    // The left dock, not the right. Upstream's assistant panel opened on
-                    // the right, but this fork put the rail and tool dock on the left and
-                    // the agent among the editor's tabs, so a fresh workspace now comes up
-                    // with the right dock closed and no panel wanting it.
-                    assert!(workspace.left_dock().read(cx).is_open());
+                    // The RIGHT dock: the project panel is pinned there and is the
+                    // only panel that starts open, so a fresh workspace comes up with
+                    // that dock open and the left one -- the rail's own edge, whose
+                    // panels do not start open -- closed. Both halves are asserted
+                    // because the interesting failure is them swapping, which a
+                    // single positive assertion would not catch.
+                    assert!(workspace.right_dock().read(cx).is_open());
+                    assert!(!workspace.left_dock().read(cx).is_open());
                     assert!(
                         workspace
                             .active_pane()

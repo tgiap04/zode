@@ -29,7 +29,7 @@ use project::ProjectGroupKey;
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use ui::{ContextMenu, PopoverMenuHandle, prelude::*};
 use workspace::{
-    MultiWorkspace, MultiWorkspaceEvent, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide,
+    MultiWorkspace, MultiWorkspaceEvent, Sidebar as WorkspaceSidebar, SidebarEvent,
 };
 
 const DEFAULT_WIDTH: Pixels = px(300.0);
@@ -162,10 +162,6 @@ impl WorkspaceSidebar for Sidebar {
 
     fn has_notifications(&self, _cx: &App) -> bool {
         false
-    }
-
-    fn side(&self, cx: &App) -> SidebarSide {
-        crate::rail::rail_side(cx)
     }
 
     fn prepare_for_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {

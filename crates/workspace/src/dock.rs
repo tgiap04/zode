@@ -3,7 +3,7 @@ use crate::pane_group::element::pane_axis;
 use crate::pane_group::{SURFACE_MARGIN, SURFACE_ROUNDING};
 use crate::persistence::model::DockData;
 use crate::{
-    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, SidebarSide, WorkspaceSettings,
+    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings,
 };
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
@@ -145,18 +145,32 @@ pub trait PanelHandle: Send + Sync {
     fn activation_priority(&self, cx: &App) -> u32;
     fn enabled(&self, cx: &App) -> bool;
     fn own_column(&self, cx: &App) -> Option<DockColumn>;
+    /// Cycles the panel to its next valid edge, wrapping at the end.
+    ///
+    /// Wrapping happens WITHIN the valid edges. The earlier form filtered the
+    /// edges but then answered the end of the list with a literal
+    /// `DockPosition::Left`, which is the right answer only because `Left`
+    /// happens to be first: a panel whose only valid edge is `Right` was moved
+    /// to an edge it had just refused, and `MoveFocusedPanelToNextPosition`
+    /// carries a keybinding, so that was reachable. Indexing the valid list
+    /// keeps the wrap for a panel that can move and leaves a one-edge panel
+    /// exactly where it is.
     fn move_to_next_position(&self, window: &mut Window, cx: &mut App) {
         let current_position = self.position(window, cx);
-        let next_position = [
+        let valid: Vec<DockPosition> = [
             DockPosition::Left,
             DockPosition::Bottom,
             DockPosition::Right,
         ]
         .into_iter()
         .filter(|position| self.position_is_valid(*position, cx))
-        .skip_while(|valid_position| *valid_position != current_position)
-        .nth(1)
-        .unwrap_or(DockPosition::Left);
+        .collect();
+
+        let next_position = valid
+            .iter()
+            .position(|position| *position == current_position)
+            .map(|index| valid[(index + 1) % valid.len()])
+            .unwrap_or(current_position);
 
         self.set_position(next_position, window, cx);
     }
@@ -1809,7 +1823,6 @@ impl PanelButtons {
         rail_draws_panel(
             panel_name,
             self.dock.read(cx).position,
-            WorkspaceSettings::get_global(cx).multi_project.sidebar_side,
             !project::DisableAiSettings::get_global(cx).disable_ai,
         )
     }
@@ -1830,20 +1843,77 @@ const PANEL_ALWAYS_IN_STATUS_BAR: &str = "Project Panel";
 ///
 /// Split out from the settings lookup so it can be tested without a window: the
 /// rule is a name and three booleans, while reaching it needs a whole workspace.
-pub fn rail_draws_panel(
-    panel_name: &str,
-    position: DockPosition,
-    rail_side: SidebarSide,
-    rail_drawn: bool,
-) -> bool {
+pub fn rail_draws_panel(panel_name: &str, position: DockPosition, rail_drawn: bool) -> bool {
     rail_drawn
         && panel_name != PANEL_ALWAYS_IN_STATUS_BAR
-        && match position {
-            DockPosition::Left => rail_side == SidebarSide::Left,
-            DockPosition::Right => rail_side == SidebarSide::Right,
-            // The rail stands beside one edge; nothing represents the bottom.
-            DockPosition::Bottom => false,
-        }
+        // The rail stands against one edge -- `Workspace::OWN_COLUMN_POSITION` --
+        // and nothing represents the bottom, so those two docks are never drawn
+        // by it.
+        && position == Workspace::OWN_COLUMN_POSITION
+}
+
+/// The edges the dock menu is allowed to offer for a panel.
+///
+/// A single edge is NOT a choice: drawing it yields one already-ticked entry that
+/// does nothing when clicked. Anything with two or three gets the list unchanged,
+/// so this is a no-op for every panel that really can move.
+///
+/// Split out of `render` so the rule can be tested without a window -- the same
+/// reason `rail_draws_panel` above is split out.
+pub fn dockable_positions(panel: &Arc<dyn PanelHandle>, cx: &App) -> Vec<DockPosition> {
+    let valid: Vec<DockPosition> = [
+        DockPosition::Left,
+        DockPosition::Right,
+        DockPosition::Bottom,
+    ]
+    .into_iter()
+    .filter(|position| panel.position_is_valid(*position, cx))
+    .collect();
+
+    if valid.len() >= 2 { valid } else { Vec::new() }
+}
+
+/// The dock button itself, in one place.
+///
+/// A free function rather than a closure so the branch that attaches a
+/// right-click menu can rebuild it on every trigger call while the branch
+/// without one calls it directly -- two copies of this would drift on the
+/// element id, and the id is what invalidates the cached tooltip.
+#[allow(clippy::too_many_arguments)]
+fn panel_button(
+    name: &'static str,
+    icon: IconName,
+    is_active_button: bool,
+    is_menu_open: bool,
+    action: Box<dyn Action>,
+    tooltip: SharedString,
+    focus_handle: FocusHandle,
+    icon_label: Option<String>,
+) -> Div {
+    // Include active state in element ID to invalidate the cached
+    // tooltip when panel state changes (e.g., via keyboard shortcut)
+    let button = IconButton::new((name, is_active_button as u64), icon)
+        .icon_size(IconSize::Small)
+        .toggle_state(is_active_button)
+        .on_click({
+            let action = action.boxed_clone();
+            move |_, window, cx| {
+                window.focus(&focus_handle, cx);
+                window.dispatch_action(action.boxed_clone(), cx)
+            }
+        })
+        .when(!is_menu_open, |this| {
+            this.tooltip(move |_window, cx| {
+                Tooltip::for_action(tooltip.clone(), &*action, cx)
+            })
+        });
+
+    div().relative().child(button).when_some(
+        icon_label
+            .filter(|_| !is_active_button)
+            .and_then(|label| label.parse::<usize>().ok()),
+        |this, count| this.child(CountBadge::new(count)),
+    )
 }
 
 impl Render for PanelButtons {
@@ -1859,7 +1929,7 @@ impl Render for PanelButtons {
 
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
-        let mut buttons: Vec<_> = dock
+        let mut buttons: Vec<AnyElement> = dock
             .panel_entries
             .iter()
             .filter_map(|entry| {
@@ -1906,34 +1976,45 @@ impl Render for PanelButtons {
                 let focus_handle = dock.focus_handle(cx);
                 let icon_label = entry.panel.icon_label(window, cx);
 
+                // Nothing to offer and nothing to flex means no menu at all --
+                // an attached menu with zero entries draws an empty popover.
+                let dockable = dockable_positions(&panel, cx);
+                if dockable.is_empty() && !supports_flexible {
+                    return Some(
+                        panel_button(
+                            name,
+                            icon,
+                            is_active_button,
+                            false,
+                            action,
+                            tooltip,
+                            focus_handle,
+                            icon_label,
+                        )
+                        .into_any_element(),
+                    );
+                }
+
                 Some(
                     right_click_menu(name)
                         .menu(move |window, cx| {
-                            const POSITIONS: [DockPosition; 3] = [
-                                DockPosition::Left,
-                                DockPosition::Right,
-                                DockPosition::Bottom,
-                            ];
-
-                            ContextMenu::build(window, cx, |mut menu, _, cx| {
-                                let mut has_position_entries = false;
-                                for position in POSITIONS {
-                                    if panel.position_is_valid(position, cx) {
-                                        let is_current = position == dock_position;
-                                        let panel = panel.clone();
-                                        menu = menu.toggleable_entry(
-                                            format!("Dock {}", position.label()),
-                                            is_current,
-                                            IconPosition::Start,
-                                            None,
-                                            move |window, cx| {
-                                                if !is_current {
-                                                    panel.set_position(position, window, cx);
-                                                }
-                                            },
-                                        );
-                                        has_position_entries = true;
-                                    }
+                            let dockable = dockable.clone();
+                            ContextMenu::build(window, cx, |mut menu, _, _cx| {
+                                let has_position_entries = !dockable.is_empty();
+                                for position in dockable {
+                                    let is_current = position == dock_position;
+                                    let panel = panel.clone();
+                                    menu = menu.toggleable_entry(
+                                        format!("Dock {}", position.label()),
+                                        is_current,
+                                        IconPosition::Start,
+                                        None,
+                                        move |window, cx| {
+                                            if !is_current {
+                                                panel.set_position(position, window, cx);
+                                            }
+                                        },
+                                    );
                                 }
                                 if supports_flexible {
                                     if has_position_entries {
@@ -1992,32 +2073,18 @@ impl Render for PanelButtons {
                         .anchor(menu_anchor)
                         .attach(menu_attach)
                         .trigger(move |is_active, _window, _cx| {
-                            // Include active state in element ID to invalidate the cached
-                            // tooltip when panel state changes (e.g., via keyboard shortcut)
-                            let button = IconButton::new((name, is_active_button as u64), icon)
-                                .icon_size(IconSize::Small)
-                                .toggle_state(is_active_button)
-                                .on_click({
-                                    let action = action.boxed_clone();
-                                    move |_, window, cx| {
-                                        window.focus(&focus_handle, cx);
-                                        window.dispatch_action(action.boxed_clone(), cx)
-                                    }
-                                })
-                                .when(!is_active, |this| {
-                                    this.tooltip(move |_window, cx| {
-                                        Tooltip::for_action(tooltip.clone(), &*action, cx)
-                                    })
-                                });
-
-                            div().relative().child(button).when_some(
-                                icon_label
-                                    .clone()
-                                    .filter(|_| !is_active_button)
-                                    .and_then(|label| label.parse::<usize>().ok()),
-                                |this, count| this.child(CountBadge::new(count)),
+                            panel_button(
+                                name,
+                                icon,
+                                is_active_button,
+                                is_active,
+                                action.boxed_clone(),
+                                tooltip.clone(),
+                                focus_handle.clone(),
+                                icon_label.clone(),
                             )
-                        }),
+                        })
+                        .into_any_element(),
                 )
             })
             .collect();
@@ -2068,6 +2135,10 @@ pub mod test {
         pub flexible: bool,
         pub own_column: Option<DockColumn>,
         pub activation_priority: u32,
+        /// Every edge, by default -- what `position_is_valid` used to answer
+        /// unconditionally, so existing tests keep their behaviour. Narrow it to
+        /// test a panel that cannot move.
+        pub valid_positions: Vec<DockPosition>,
         /// Defaults to `None`, matching a panel that contributes no dock button.
         /// Set it when a test needs the panel to appear in an icon list.
         pub icon: Option<ui::IconName>,
@@ -2087,6 +2158,11 @@ pub mod test {
                 flexible: false,
                 own_column: None,
                 activation_priority,
+                valid_positions: vec![
+                    DockPosition::Left,
+                    DockPosition::Right,
+                    DockPosition::Bottom,
+                ],
                 icon: None,
             }
         }
@@ -2220,8 +2296,8 @@ pub mod test {
             self.position
         }
 
-        fn position_is_valid(&self, _: super::DockPosition) -> bool {
-            true
+        fn position_is_valid(&self, position: super::DockPosition) -> bool {
+            self.valid_positions.contains(&position)
         }
 
         fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
@@ -2299,7 +2375,7 @@ pub mod test {
 
 #[cfg(test)]
 mod rail_coverage_tests {
-    use super::{DockPosition, PANEL_ALWAYS_IN_STATUS_BAR, SidebarSide, rail_draws_panel};
+    use super::{DockPosition, PANEL_ALWAYS_IN_STATUS_BAR, Workspace, rail_draws_panel};
 
     const ORDINARY: &str = "Outline Panel";
 
@@ -2308,21 +2384,19 @@ mod rail_coverage_tests {
     /// anything that only checks the app still draws.
     #[test]
     fn the_rail_draws_the_panels_on_its_own_edge_and_nothing_else() {
-        for (side, adopted) in [
-            (SidebarSide::Left, DockPosition::Left),
-            (SidebarSide::Right, DockPosition::Right),
+        // The negative arms carry this test: only asserting that Left is drawn
+        // would pass for a rule that adopts every dock.
+        for position in [
+            DockPosition::Left,
+            DockPosition::Right,
+            DockPosition::Bottom,
         ] {
-            for position in [
-                DockPosition::Left,
-                DockPosition::Right,
-                DockPosition::Bottom,
-            ] {
-                assert_eq!(
-                    rail_draws_panel(ORDINARY, position, side, true),
-                    position == adopted,
-                    "a {side:?} rail against a {position:?} dock"
-                );
-            }
+            assert_eq!(
+                rail_draws_panel(ORDINARY, position, true),
+                position == Workspace::OWN_COLUMN_POSITION,
+                "the rail stands on {:?}, so it must draw a {position:?} dock only when they match",
+                Workspace::OWN_COLUMN_POSITION
+            );
         }
 
         // With no rail drawn, every panel keeps its status-bar button.
@@ -2331,18 +2405,7 @@ mod rail_coverage_tests {
             DockPosition::Right,
             DockPosition::Bottom,
         ] {
-            assert!(!rail_draws_panel(
-                ORDINARY,
-                position,
-                SidebarSide::Left,
-                false
-            ));
-            assert!(!rail_draws_panel(
-                ORDINARY,
-                position,
-                SidebarSide::Right,
-                false
-            ));
+            assert!(!rail_draws_panel(ORDINARY, position, false));
         }
     }
 
@@ -2352,18 +2415,143 @@ mod rail_coverage_tests {
     /// rail, because the rule was per dock rather than per panel.
     #[test]
     fn re_docking_the_project_panel_never_lifts_it_into_the_rail() {
-        for side in [SidebarSide::Left, SidebarSide::Right] {
-            for position in [
+        for position in [
+            DockPosition::Left,
+            DockPosition::Right,
+            DockPosition::Bottom,
+        ] {
+            assert!(
+                !rail_draws_panel(PANEL_ALWAYS_IN_STATUS_BAR, position, true),
+                "the rail must leave the project panel in the status bar \
+                 even when it is docked {position:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod dockable_position_tests {
+    use super::{DockPosition, PanelHandle, dockable_positions, test::TestPanel};
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+    use settings::SettingsStore;
+    use std::sync::Arc;
+
+    /// `TestPanel::set_position` pokes the settings store on its way through, so
+    /// the two tests that move a panel need one registered.
+    fn init_settings(cx: &mut VisualTestContext) {
+        cx.update(|_window, cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+    }
+
+    fn panel(
+        cx: &mut VisualTestContext,
+        position: DockPosition,
+        valid: Vec<DockPosition>,
+    ) -> Arc<dyn PanelHandle> {
+        let entity = cx.update(|_window, cx| {
+            cx.new(|cx| {
+                let mut panel = TestPanel::new(position, 0, cx);
+                panel.valid_positions = valid;
+                panel
+            })
+        });
+        Arc::new(entity) as Arc<dyn PanelHandle>
+    }
+
+    /// One edge is not a choice. The two- and three-edge arms are the regression
+    /// half: every panel that really can move must keep the list it has today.
+    #[gpui::test]
+    fn a_panel_with_one_valid_position_is_offered_none(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+
+        let one = panel(cx, DockPosition::Right, vec![DockPosition::Right]);
+        let two = panel(
+            cx,
+            DockPosition::Left,
+            vec![DockPosition::Left, DockPosition::Right],
+        );
+        let three = panel(
+            cx,
+            DockPosition::Left,
+            vec![
                 DockPosition::Left,
                 DockPosition::Right,
                 DockPosition::Bottom,
-            ] {
-                assert!(
-                    !rail_draws_panel(PANEL_ALWAYS_IN_STATUS_BAR, position, side, true),
-                    "a {side:?} rail must leave the project panel in the status bar \
-                     even when it is docked {position:?}"
+            ],
+        );
+
+        cx.update(|_window, cx| {
+            assert!(
+                dockable_positions(&one, cx).is_empty(),
+                "a single valid edge yields one ticked entry that does nothing -- offer none"
+            );
+            assert_eq!(
+                dockable_positions(&two, cx),
+                vec![DockPosition::Left, DockPosition::Right],
+                "two edges is a real choice and must be offered unchanged"
+            );
+            assert_eq!(
+                dockable_positions(&three, cx),
+                vec![
+                    DockPosition::Left,
+                    DockPosition::Right,
+                    DockPosition::Bottom
+                ],
+                "three edges must be offered unchanged"
+            );
+        });
+    }
+
+    /// Before the wrap was indexed into the valid list this landed on `Left` --
+    /// an edge the panel had just refused.
+    #[gpui::test]
+    fn moving_a_one_position_panel_leaves_it_alone(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        init_settings(cx);
+        let one = panel(cx, DockPosition::Right, vec![DockPosition::Right]);
+
+        cx.update(|window, cx| one.move_to_next_position(window, cx));
+
+        cx.update(|window, cx| {
+            assert_eq!(
+                one.position(window, cx),
+                DockPosition::Right,
+                "a panel with nowhere to go must stay where it is"
+            );
+        });
+    }
+
+    /// The wrap a three-edge panel depends on. The order is the iteration order
+    /// inside `move_to_next_position`, which is not the menu's order.
+    #[gpui::test]
+    fn moving_a_three_position_panel_still_cycles(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        init_settings(cx);
+        let three = panel(
+            cx,
+            DockPosition::Left,
+            vec![
+                DockPosition::Left,
+                DockPosition::Right,
+                DockPosition::Bottom,
+            ],
+        );
+
+        for expected in [
+            DockPosition::Bottom,
+            DockPosition::Right,
+            DockPosition::Left,
+        ] {
+            cx.update(|window, cx| three.move_to_next_position(window, cx));
+            cx.update(|window, cx| {
+                assert_eq!(
+                    three.position(window, cx),
+                    expected,
+                    "cycling must reach {expected:?}"
                 );
-            }
+            });
         }
     }
 }

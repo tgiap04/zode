@@ -4273,22 +4273,9 @@ fn window_and_layout_page() -> SettingsPage {
 }
 
 fn panels_page() -> SettingsPage {
-    fn project_panel_section() -> [SettingsPageItem; 29] {
+    fn project_panel_section() -> [SettingsPageItem; 28] {
         [
             SettingsPageItem::SectionHeader("Project Panel"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Project Panel Dock",
-                description: "Where to dock the project panel.",
-                field: Box::new(SettingField {
-                    json_path: Some("project_panel.dock"),
-                    pick: |settings_content| settings_content.project_panel.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
-                        settings_content.project_panel.get_or_insert_default().dock = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Project Panel Default Width",
                 description: "Default width of the project panel in pixels.",

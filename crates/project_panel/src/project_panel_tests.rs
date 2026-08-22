@@ -10340,75 +10340,154 @@ impl Render for TestProjectItemView {
     }
 }
 
-/// Re-docking this panel has to move the project rail to the opposite edge in the
-/// same write. They are two independent settings keys, so nothing but this makes
-/// them agree -- and when they land on the same edge the rail adopts the panel's
-/// button, which is precisely what keeping the panel opposite the rail prevents.
-#[test]
-fn re_docking_the_panel_parks_the_rail_on_the_far_side() {
-    for (position, expected_dock, expected_rail) in [
-        (
-            DockPosition::Left,
-            settings::DockSide::Left,
-            settings::SidebarSide::Right,
-        ),
-        (
-            DockPosition::Right,
-            settings::DockSide::Right,
-            settings::SidebarSide::Left,
-        ),
-    ] {
-        let mut content = settings::SettingsContent::default();
-        super::write_dock_and_opposite_rail(position, &mut content);
 
+/// The panel has one edge and no way off it.
+///
+/// Asserted against the `Panel` methods rather than against today's value in
+/// `default.json`: the point is that no value exists to read any more, so a
+/// later edit to the defaults cannot quietly move it.
+#[gpui::test]
+async fn the_project_panel_only_ever_lives_on_the_right(cx: &mut gpui::TestAppContext) {
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a": "" })).await;
+    init_test(cx);
+
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+
+    panel.update_in(cx, |panel, window, cx| {
         assert_eq!(
-            content.project_panel.as_ref().and_then(|panel| panel.dock),
-            Some(expected_dock),
-            "docking {position:?} must write the panel's own side"
+            Panel::position(panel, window, cx),
+            DockPosition::Right,
+            "the panel sits opposite the rail so its button lands in the status bar"
         );
-        assert_eq!(
-            content
-                .workspace
-                .multi_project
-                .as_ref()
-                .and_then(|multi| multi.sidebar_side),
-            Some(expected_rail),
-            "docking {position:?} must park the rail opposite"
+        assert!(
+            Panel::position_is_valid(panel, DockPosition::Right),
+            "its own edge has to be valid or the dock cannot hold it"
         );
-        assert_eq!(
-            content.outline_panel.as_ref().and_then(|panel| panel.dock),
-            Some(match expected_rail {
-                settings::SidebarSide::Left => settings::DockSide::Left,
-                settings::SidebarSide::Right => settings::DockSide::Right,
-            }),
-            "the outline panel rides the rail, so it must follow it to {expected_rail:?}"
-        );
-        assert_eq!(
-            content.git_panel.as_ref().and_then(|panel| panel.dock),
-            Some(match expected_rail {
-                settings::SidebarSide::Left => settings::DockPosition::Left,
-                settings::SidebarSide::Right => settings::DockPosition::Right,
-            }),
-            "the git panel rides the rail, so it must follow it to {expected_rail:?}"
-        );
-    }
+        for refused in [DockPosition::Left, DockPosition::Bottom] {
+            assert!(
+                !Panel::position_is_valid(panel, refused),
+                "{refused:?} must be refused -- this is what stops the dock menu offering it"
+            );
+        }
+    });
 }
 
-/// A panel parked along the bottom is not riding the rail, and its button sits in
-/// the status bar wherever the rail goes. Sweeping it to an edge with the rest
-/// would spend a preference the user set deliberately and buy nothing back.
-#[test]
-fn re_docking_the_panel_leaves_a_bottom_docked_git_panel_alone() {
-    for position in [DockPosition::Left, DockPosition::Right] {
-        let mut content = settings::SettingsContent::default();
-        content.git_panel.get_or_insert_default().dock = Some(settings::DockPosition::Bottom);
+/// Asking it to move has to change nothing, including the settings file.
+///
+/// Checking `position()` alone would pass even if `set_position` still wrote a
+/// stray key on its way to being ignored, so the whole user-settings content is
+/// compared before and after.
+#[gpui::test]
+async fn asking_the_project_panel_to_move_changes_nothing(cx: &mut gpui::TestAppContext) {
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a": "" })).await;
+    init_test(cx);
 
-        super::write_dock_and_opposite_rail(position, &mut content);
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
 
+    let before = cx.update(|_, cx| {
+        format!("{:?}", cx.global::<SettingsStore>().raw_user_settings())
+    });
+
+    panel.update_in(cx, |panel, window, cx| {
+        Panel::set_position(panel, DockPosition::Left, window, cx);
+    });
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
         assert_eq!(
-            content.git_panel.as_ref().and_then(|panel| panel.dock),
-            Some(settings::DockPosition::Bottom),
-            "docking the project panel {position:?} must not lift the git panel off the bottom"
+            Panel::position(panel, window, cx),
+            DockPosition::Right,
+            "being asked to dock left must leave the panel where it is"
         );
-    }
+    });
+
+    let after = cx.update(|_, cx| {
+        format!("{:?}", cx.global::<SettingsStore>().raw_user_settings())
+    });
+    assert_eq!(
+        before, after,
+        "set_position must not write anything into the user's settings"
+    );
+}
+
+/// Measured on a real frame, not reasoned about.
+///
+/// The panel's edge is a constant in code now, but a constant that the layout
+/// ignores would still read as correct everywhere except on screen. `cx.draw()`
+/// publishes no frame -- `debug_bounds` stays `None` after it -- so the panel is
+/// docked and the window is left to draw itself.
+///
+/// The other half of the claim, that the rail is the leftmost column, is proven
+/// in `sidebar::the_rail_stays_outside_the_panel_on_the_left_edge`; neither crate
+/// depends on the other, so neither can measure both.
+#[gpui::test]
+async fn the_project_panel_draws_in_the_right_half_of_the_window(cx: &mut gpui::TestAppContext) {
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    init_test(cx);
+
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+        workspace.toggle_panel_focus::<ProjectPanel>(window, cx);
+    });
+    cx.run_until_parked();
+
+    // Measured on the dock the panel was routed into. Only one dock is open, so
+    // this id is unambiguous -- asserted below rather than assumed.
+    let (right_open, left_open, bottom_open) = workspace.read_with(cx, |workspace, cx| {
+        (
+            workspace.right_dock().read(cx).is_open(),
+            workspace.left_dock().read(cx).is_open(),
+            workspace.bottom_dock().read(cx).is_open(),
+        )
+    });
+    assert!(
+        right_open && !left_open && !bottom_open,
+        "the panel must have opened the RIGHT dock and only that one, got \
+         right={right_open} left={left_open} bottom={bottom_open}"
+    );
+
+    let panel_bounds = cx
+        .debug_bounds("dock-panel")
+        .expect("the docked panel must be drawn once the dock is open");
+    let window_width = cx.update(|window, _| window.bounds().size.width);
+
+    // Ordering against the window's midpoint, not an absolute pixel count: the
+    // exact width follows the UI font and would go red for unrelated reasons.
+    assert!(
+        panel_bounds.origin.x > window_width / 2.,
+        "the panel must start in the right half of a {window_width:?}-wide window, \
+         started at {:?}",
+        panel_bounds.origin.x
+    );
+    assert!(
+        panel_bounds.right() <= window_width + px(1.),
+        "and must not run off the right edge, ended at {:?}",
+        panel_bounds.right()
+    );
 }

@@ -11,7 +11,6 @@ pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project, ProjectActivity};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
-pub use settings::SidebarSide;
 use std::future::Future;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -62,23 +61,14 @@ pub struct SidebarRenderState {
     /// Whether the wide project panel is showing.
     pub open: bool,
     /// Whether the always-visible project rail is present. Independent of
-    /// `open`: the rail occupies the window's `side` edge even with the
+    /// `open`: the rail occupies the window's leading edge even with the
     /// panel closed.
     pub rail: bool,
-    pub side: SidebarSide,
-    /// How much of the `side` edge the sidebar actually covers. The title bar
+    /// How much of the leading edge the sidebar actually covers. The title bar
     /// needs the width, not just `occupies`: the rail alone is narrower than
     /// the strip macOS draws its window controls over, so the title bar still
     /// has to reserve the remainder or the controls land on its content.
     pub edge_width: Pixels,
-}
-
-impl SidebarRenderState {
-    /// Whether the sidebar covers the window edge on `side` -- either
-    /// component is enough to push the title bar off that edge.
-    pub fn occupies(&self, side: SidebarSide) -> bool {
-        self.side == side && (self.open || self.rail)
-    }
 }
 
 pub enum MultiWorkspaceEvent {
@@ -105,7 +95,6 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
         px(0.0)
     }
     fn has_notifications(&self, cx: &App) -> bool;
-    fn side(&self, _cx: &App) -> SidebarSide;
 
     /// Makes focus reset back to the search editor upon toggling the sidebar from outside
     fn prepare_for_focus(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
@@ -145,7 +134,6 @@ pub trait SidebarHandle: 'static + Send + Sync {
     fn entity_id(&self) -> EntityId;
     fn cycle_project(&self, forward: bool, window: &mut Window, cx: &mut App);
 
-    fn side(&self, cx: &App) -> SidebarSide;
     fn serialized_state(&self, cx: &App) -> Option<String>;
     fn restore_serialized_state(&self, state: &str, window: &mut Window, cx: &mut App);
 }
@@ -160,7 +148,7 @@ impl Render for DraggedSidebar {
 }
 
 /// Every method here borrows the sidebar entity (`read`/`update`), so any
-/// `MultiWorkspace` method that reaches this trait — `sidebar_side`,
+/// `MultiWorkspace` method that reaches this trait —
 /// `open_sidebar`, `close_sidebar`, `toggle_sidebar`, `focus_sidebar`,
 /// `sidebar_has_notifications` — inherits that borrow.
 ///
@@ -215,10 +203,6 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
                 this.cycle_project(forward, window, cx);
             });
         });
-    }
-
-    fn side(&self, cx: &App) -> SidebarSide {
-        self.read(cx).side(cx)
     }
 
     fn serialized_state(&self, cx: &App) -> Option<String> {
@@ -399,12 +383,6 @@ pub struct MultiWorkspace {
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
 
 impl MultiWorkspace {
-    pub fn sidebar_side(&self, cx: &App) -> SidebarSide {
-        self.sidebar
-            .as_ref()
-            .map_or(SidebarSide::Left, |s| s.side(cx))
-    }
-
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
         let enabled = self.multi_workspace_enabled(cx);
         let open = self.sidebar_open() && enabled;
@@ -412,7 +390,6 @@ impl MultiWorkspace {
         SidebarRenderState {
             open,
             rail,
-            side: self.sidebar_side(cx),
             // Mirrors the container width in `render`: the rail is always drawn,
             // the panel only when open.
             edge_width: match (&self.sidebar, rail) {
@@ -628,11 +605,7 @@ impl MultiWorkspace {
     /// `should_retain()` like every other live path, rather than
     /// unconditionally retaining the active workspace.
     pub fn open_sidebar(&mut self, cx: &mut Context<Self>) {
-        let side = match self.sidebar_side(cx) {
-            SidebarSide::Left => "left",
-            SidebarSide::Right => "right",
-        };
-        telemetry::event!("Sidebar Toggled", action = "open", side = side);
+        telemetry::event!("Sidebar Toggled", action = "open");
         self.apply_open_sidebar(true, cx);
     }
 
@@ -662,11 +635,7 @@ impl MultiWorkspace {
     }
 
     pub fn close_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let side = match self.sidebar_side(cx) {
-            SidebarSide::Left => "left",
-            SidebarSide::Right => "right",
-        };
-        telemetry::event!("Sidebar Toggled", action = "close", side = side);
+        telemetry::event!("Sidebar Toggled", action = "close");
         self.sidebar_open = false;
         for workspace in self.retained_workspaces.clone() {
             workspace.update(cx, |workspace, _cx| {
@@ -2374,7 +2343,6 @@ impl MultiWorkspace {
                     hibernate_after_ms: None,
                     memory_pressure_threshold_percent: None,
                     background_scroll_history_lines: None,
-                    sidebar_side: None,
                 });
             });
         });
@@ -2666,9 +2634,6 @@ impl MultiWorkspace {
 impl Render for MultiWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let multi_workspace_enabled = self.multi_workspace_enabled(cx);
-        let sidebar_side = self.sidebar_side(cx);
-        let sidebar_on_right = sidebar_side == SidebarSide::Right;
-
         let panel_open = self.sidebar_open();
         // `None` when nothing is mounted in the title bar slot -- reserving a
         // row for a header that is not drawn would leave a bare strip.
@@ -2705,12 +2670,9 @@ impl Render for MultiWorkspace {
                     div()
                         .id("sidebar-resize-handle")
                         .absolute()
-                        .when(!sidebar_on_right, |el| {
-                            el.right(-SIDEBAR_RESIZE_HANDLE_SIZE / 2.)
-                        })
-                        .when(sidebar_on_right, |el| {
-                            el.left(-SIDEBAR_RESIZE_HANDLE_SIZE / 2.)
-                        })
+                        // The sidebar stands on the left, so its resize handle
+                        // straddles its right edge -- the one facing the editor.
+                        .right(-SIDEBAR_RESIZE_HANDLE_SIZE / 2.)
                         .top(px(0.))
                         .h_full()
                         .w(SIDEBAR_RESIZE_HANDLE_SIZE)
@@ -2788,12 +2750,6 @@ impl Render for MultiWorkspace {
             None
         };
 
-        let (left_sidebar, right_sidebar) = if sidebar_on_right {
-            (None, sidebar)
-        } else {
-            (sidebar, None)
-        };
-
         let ui_font = theme_settings::setup_ui_font(window, cx);
         let text_color = cx.theme().colors().text;
 
@@ -2856,24 +2812,21 @@ impl Render for MultiWorkspace {
                         this.on_drag_move(cx.listener(
                             move |this: &mut Self,
                                   e: &DragMoveEvent<DraggedSidebar>,
-                                  window,
+                                  _window,
                                   cx| {
                                 if let Some(sidebar) = &this.sidebar {
                                     // The pointer is over the outer edge of
                                     // rail + panel, but `width` measures the
                                     // panel alone.
-                                    let new_width = if sidebar_on_right {
-                                        window.bounds().size.width - e.event.position.x
-                                    } else {
-                                        e.event.position.x
-                                    } - sidebar.rail_width(cx);
+                                    let new_width =
+                                        e.event.position.x - sidebar.rail_width(cx);
                                     sidebar.set_width(Some(new_width.max(px(0.))), cx);
                                 }
                             },
                         ))
                     },
                 )
-                .children(left_sidebar)
+                .children(sidebar)
                 .child(
                     div()
                         .flex()
@@ -2882,7 +2835,6 @@ impl Render for MultiWorkspace {
                         .overflow_hidden()
                         .child(self.workspace().clone()),
                 )
-                .children(right_sidebar)
                 .child(self.workspace().read(cx).modal_layer.clone())
                 .children(self.sidebar_overlay.as_ref().map(|view| {
                     deferred(div().absolute().size_full().inset_0().occlude().child(
@@ -2900,8 +2852,7 @@ impl Render for MultiWorkspace {
             window,
             cx,
             Tiling {
-                left: !sidebar_on_right && multi_workspace_enabled && self.sidebar_open(),
-                right: sidebar_on_right && multi_workspace_enabled && self.sidebar_open(),
+                left: multi_workspace_enabled && self.sidebar_open(),
                 ..Tiling::default()
             },
         )

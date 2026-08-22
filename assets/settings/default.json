@@ -203,9 +203,6 @@
     // losing old output from hibernated (not actively-viewed) projects'
     // terminals is acceptable to you.
     "background_scroll_history_lines": null,
-    // Which side of the window the project switcher sidebar docks to.
-    // "left" or "right".
-    "sidebar_side": "right",
   },
   // Whether to attempt to restore previous file's state when opening it again.
   // The state is stored per pane.
@@ -783,8 +780,6 @@
     "hide_gitignore": false,
     // Default width of the project panel.
     "default_width": 240,
-    // Where to dock the project panel. Can be 'left' or 'right'.
-    "dock": "left",
     // Spacing between worktree entries in the project panel. Can be 'comfortable' or 'standard'.
     "entry_spacing": "comfortable",
     // Whether to show file icons in the project panel.
@@ -900,8 +895,9 @@
     "button": true,
     // Default width of the outline panel.
     "default_width": 300,
-    // Where to dock the outline panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // Where to dock the outline panel. Can be 'left' or 'right'. Defaults to the rail's
+    // own side so its button appears in the rail rather than the status bar.
+    "dock": "left",
     // Whether to show file icons in the outline panel.
     "file_icons": true,
     // Whether to show folder icons or chevrons for directories in the outline panel.
@@ -952,8 +948,9 @@
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,
-    // Where to dock the git panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // Where to dock the git panel. Can be 'left' or 'right'. Defaults to the rail's
+    // own side so its button appears in the rail rather than the status bar.
+    "dock": "left",
     // Default width of the git panel.
     "default_width": 360,
     // Style of the git status indicator in the panel.

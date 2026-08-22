@@ -4618,6 +4618,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 - Description: Customize project panel
 - Setting: `project_panel`
+- Note: the project panel always docks on the right side of the window, opposite the project rail; there is no `dock` setting for it.
 - Default:
 
 ```json [settings]
@@ -4625,7 +4626,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
   "project_panel": {
     "button": true,
     "default_width": 240,
-    "dock": "left",
     "entry_spacing": "comfortable",
     "file_icons": true,
     "folder_icons": true,
@@ -4653,34 +4653,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
       "on_paste": true,
       "on_drop": true
     }
-  }
-}
-```
-
-### Dock
-
-- Description: Control the position of the dock
-- Setting: `dock`
-- Default: `left`
-
-**Options**
-
-1. Default dock position to left
-
-```json [settings]
-{
-  "project_panel": {
-    "dock": "left"
-  }
-}
-```
-
-2. Default dock position to right
-
-```json [settings]
-{
-  "project_panel": {
-    "dock": "right"
   }
 }
 ```

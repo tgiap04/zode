@@ -246,35 +246,43 @@ mod tests {
         }
     }
 
-    // The project rail draws buttons for the LEFT dock only, so a panel docked
-    // right is absent from it entirely -- no error, no empty state, just a rail
-    // that quietly has nothing on it. That is what the shipped defaults did
-    // before: every panel defaulted to the right dock.
+    /// The rail stands on the LEFT and that edge is no longer a setting --
+    /// `Workspace::OWN_COLUMN_POSITION` is where the code says so. This crate
+    /// cannot see `workspace` (the dependency runs the other way), so the side is
+    /// a literal here; change it there and forget it here and this test goes red,
+    /// which is the point of writing it down twice.
+    const RAIL_SIDE: &str = "left";
+
+    // A panel docked away from the rail is absent from it entirely -- no error, no
+    // empty state, just a rail that quietly has nothing on it. That is what the
+    // shipped defaults did before this layout was pinned.
     #[test]
-    fn the_panel_docks_line_up_with_the_rails_side() {
+    fn the_rail_riding_panels_dock_where_the_rail_stands() {
         let defaults: serde_json::Value =
             crate::parse_json_with_comments(crate::default_settings().as_ref())
                 .expect("default settings must parse as jsonc");
-
-        let rail_side = defaults["multi_project"]["sidebar_side"]
-            .as_str()
-            .expect("multi_project.sidebar_side must be set");
 
         // These ride the rail, so they have to dock on its side or their buttons
         // are simply absent from it.
         for panel in ["outline_panel", "git_panel"] {
             assert_eq!(
-                defaults[panel]["dock"], rail_side,
-                "{panel} must dock on the rail's side ({rail_side}) to appear in it"
+                defaults[panel]["dock"], RAIL_SIDE,
+                "{panel} must dock on the rail's side ({RAIL_SIDE}) to appear in it"
             );
         }
 
-        // This one deliberately does NOT: docked opposite the rail, its button
-        // falls to the status bar instead, which is where it is wanted.
-        assert_ne!(
-            defaults["project_panel"]["dock"], rail_side,
-            "project_panel is meant to sit opposite the rail so its button lands \
-             in the status bar rather than in the rail"
+        // The project panel has no `dock` key left to disagree with: it is pinned
+        // to the right in code so its button lands in the status bar. A default
+        // surviving here would be a dead one.
+        assert!(
+            defaults["project_panel"].get("dock").is_none(),
+            "project_panel.dock was removed -- a default left behind here is read by nothing"
+        );
+
+        // And the rail's own edge is not a setting any more.
+        assert!(
+            defaults["multi_project"].get("sidebar_side").is_none(),
+            "multi_project.sidebar_side was removed -- a default left behind here is read by nothing"
         );
     }
 
