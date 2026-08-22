@@ -4,6 +4,7 @@ members = [
     "crates/action_log",
     "crates/agent_usage",
     "crates/activity_indicator",
+    "crates/agent_sessions",
     "crates/agent_ui",
     "crates/askpass",
     "crates/assets",
@@ -223,6 +224,7 @@ edition = "2024"
 action_log = { path = "crates/action_log" }
 agent_usage = { path = "crates/agent_usage" }
 activity_indicator = { path = "crates/activity_indicator" }
+agent_sessions = { path = "crates/agent_sessions" }
 agent_ui = { path = "crates/agent_ui" }
 askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
