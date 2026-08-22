@@ -2366,52 +2366,7 @@
   "context_server_timeout": 60,
   // Configures context servers for use by the agent.
   "context_servers": {},
-  // Settings for the agent view that opens beside the editor.
-  "agent": {
-    // Whether agents are available at all.
-    "enabled": true,
-    // Which side the agent docks to. 'left' or 'right'.
-    //
-    // Deliberately NOT the side `project_panel` docks to: a dock shows one
-    // panel at a time, and the project panel is the only one shipped with
-    // `starts_open: true`. Sharing its side means a first click on an agent
-    // puts the project panel away.
-    "sidebar_side": "right",
-    // Whether to cap the conversation's content width for readability, centering
-    // it when the pane is wider than the cap.
-    "limit_content_width": true,
-    // The cap itself, in pixels, when limit_content_width is on.
-    "max_content_width": 850,
-    // Where a new thread starts. 'local_project' or 'new_worktree'.
-    "new_thread_location": "local_project",
-    // Where to show a notification when the agent is waiting on you.
-    // 'primary_screen', 'all_screens' or 'never'.
-    "notify_when_agent_waiting": "primary_screen",
-    // When to play a sound as the agent finishes or asks for input.
-    // 'never', 'when_hidden' or 'always'.
-    "play_sound_when_agent_done": "never",
-    // Whether to show the thumbs up/down feedback buttons.
-    "enable_feedback": true,
-    // Whether edit cards start expanded, showing the whole diff.
-    "expand_edit_card": true,
-    // Whether terminal cards start expanded, showing the whole output.
-    "expand_terminal_card": true,
-    // How thinking blocks are displayed.
-    // 'auto', 'preview', 'always_expanded' or 'always_collapsed'.
-    "thinking_display": "auto",
-    // Whether stopping a terminal the agent started also cancels its turn.
-    "cancel_generation_on_terminal_stop": true,
-    // Whether a message needs a modifier key to send, leaving plain enter for newlines.
-    "use_modifier_to_send": false,
-    // How many lines the message editor shows before it starts scrolling.
-    "message_editor_min_lines": 3,
-    // Whether to show elapsed time and turn duration while the agent works.
-    "show_turn_stats": false,
-    // Whether the agent's edits open one file at a time for review, rather than
-    // all of them together in the diff pane.
-    "single_file_review": true,
-  },
-  // Configures agent servers available in the agent panel.
+  // Configures the agent CLIs that can be opened as a tab.
   "agent_servers": {},
   "debugger": {
     "stepping_granularity": "line",

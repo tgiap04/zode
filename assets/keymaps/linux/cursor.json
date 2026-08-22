@@ -4,21 +4,12 @@
     "context": "Workspace",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-i": "agent::ToggleFocus",
-      "ctrl-shift-i": "agent::ToggleFocus",
-      "ctrl-l": "agent::ToggleFocus",
-      "ctrl-shift-l": "agent::ToggleFocus",
-      "ctrl-shift-j": "agent::OpenSettings",
     },
   },
   {
     "context": "Editor && mode == full",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-i": "agent::ToggleFocus",
-      "ctrl-shift-i": "agent::ToggleFocus",
-      "ctrl-shift-l": "agent::AddSelectionToThread", // In cursor uses "Ask" mode
-      "ctrl-l": "agent::AddSelectionToThread", // In cursor uses "Agent" mode
       "ctrl-k": "assistant::InlineAssist",
     },
   },

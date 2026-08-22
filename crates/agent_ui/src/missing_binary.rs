@@ -87,7 +87,6 @@ pub(crate) fn render(
     view: &Entity<AgentView>,
     display_name: &SharedString,
     missing: &AgentBinaryMissing,
-    chat_mode: bool,
     cx: &mut App,
 ) -> AnyElement {
     let colors = cx.theme().colors();
@@ -157,27 +156,6 @@ pub(crate) fn render(
                             }
                         }),
                 )
-                // The soft gate: the conversation reaches the agent through its npx
-                // adapter, so it can run without the CLI on the machine. Installing is
-                // still the better answer — the CLI carries the user's own auth, config
-                // and MCP servers — so it leads, and this is the second option rather
-                // than a silent fallback.
-                .when(chat_mode, |row| {
-                    row.child(
-                        Button::new("run-via-npx", "Run with npx")
-                            .style(ButtonStyle::Subtle)
-                            .tooltip(Tooltip::text(
-                                "Downloads and runs the ACP adapter, without your CLI's settings",
-                            ))
-                            .on_click({
-                                let view = view.downgrade();
-                                move |_, window, cx| {
-                                    view.update(cx, |view, cx| view.start_chat(window, cx))
-                                        .log_err();
-                                }
-                            }),
-                    )
-                })
                 // The CLI can be installed while this screen is open, so there has
                 // to be a way back that is not "close the tab and click again".
                 .child(Button::new("check-again", "Check Again").on_click({

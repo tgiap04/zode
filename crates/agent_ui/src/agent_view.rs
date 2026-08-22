@@ -7,7 +7,7 @@ use gpui::{
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal_view::TerminalView;
-use ui::{ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, prelude::*};
+use ui::prelude::*;
 use workspace::Workspace;
 use zed_actions::agent::AgentViewMode;
 
@@ -46,9 +46,6 @@ pub struct AgentView {
 enum State {
     Starting,
     Terminal(Entity<TerminalView>),
-    /// The ACP conversation, driven by the npx adapter. The CLI itself speaks no
-    /// ACP, so this mode never runs the binary the terminal mode runs.
-    Chat(Entity<crate::conversation_view::ConversationView>),
     /// The agent's own CLI is not on this machine. Carries what the install
     /// screen needs, so the view never has to ask which agent it is showing for.
     MissingBinary(AgentBinaryMissing),
@@ -60,18 +57,6 @@ pub enum AgentViewEvent {
 }
 
 impl AgentView {
-    /// The conversation this view is showing, if it is showing one.
-    ///
-    /// `ConversationView` asks for this to answer whether the user is currently
-    /// looking at it — the question that decides whether a finished turn is worth
-    /// a notification.
-    pub fn conversation_view(&self) -> Option<&Entity<crate::conversation_view::ConversationView>> {
-        match &self.state {
-            State::Chat(view) => Some(view),
-            _ => None,
-        }
-    }
-
     /// Brings this agent's tab forward — the response to accepting a
     /// notification.
     ///
@@ -283,53 +268,6 @@ impl AgentView {
             return;
         }
         self.set_mode(mode, window, cx);
-    }
-
-    /// Opens the ACP conversation.
-    ///
-    /// Nothing is resolved against the local CLI first: the conversation reaches the
-    /// agent through its npx adapter, since the CLI itself speaks no ACP. The
-    /// install screen belongs to terminal mode, where the binary is what runs.
-    pub(crate) fn start_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let agent = crate::Agent::Custom {
-            id: self.agent.clone(),
-        };
-        let connection_store = cx.new(|cx| {
-            crate::agent_connection_store::AgentConnectionStore::new(self.project.clone(), cx)
-        });
-        ensure_prompt_store(cx);
-        let prompt_store = prompt_store::PromptStore::global(cx);
-        let project = self.project.clone();
-        let workspace = self.workspace.clone();
-        let server = agent.server();
-
-        self._startup = Some(cx.spawn_in(window, async move |this, cx| {
-            let prompt_store = prompt_store.await.log_err();
-            this.update_in(cx, |this, window, cx| {
-                let conversation = cx.new(|cx| {
-                    crate::conversation_view::ConversationView::new(
-                        server,
-                        connection_store,
-                        agent,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        workspace,
-                        project,
-                        prompt_store,
-                        "agent_view",
-                        window,
-                        cx,
-                    )
-                });
-                this.state = State::Chat(conversation);
-                cx.emit(AgentViewEvent::UpdateTab);
-                cx.notify();
-            })
-            .ok();
-        }));
     }
 
     pub(crate) fn new(
@@ -551,7 +489,6 @@ impl AgentView {
         }
 
         match previous {
-            State::Chat(view) => watch("conversation", view, cx),
             State::Terminal(view) => watch("terminal", view, cx),
             State::Starting | State::MissingBinary(_) | State::Failed(_) => {}
         }
@@ -572,7 +509,6 @@ impl AgentView {
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
-        let mode = self.mode;
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
@@ -606,12 +542,6 @@ impl AgentView {
                     return;
                 }
             };
-
-            if mode == AgentViewMode::Chat {
-                this.update_in(cx, |this, window, cx| this.start_chat(window, cx))
-                    .ok();
-                return;
-            }
 
             let terminal = project
                 .update(cx, |project, cx| {
@@ -652,14 +582,15 @@ fn display_name(agent: &AgentId) -> SharedString {
 pub(crate) fn mode_name(mode: AgentViewMode) -> &'static str {
     match mode {
         AgentViewMode::Terminal => "terminal",
-        AgentViewMode::Chat => "chat",
     }
 }
 
 pub(crate) fn mode_from_name(name: &str) -> AgentViewMode {
     match name {
         "terminal" => AgentViewMode::Terminal,
-        _ => AgentViewMode::Chat,
+        // Anything else, including a `"chat"` written down by a build that still
+        // had a chat mode, comes back as terminal -- the only mode there is.
+        _ => AgentViewMode::Terminal,
     }
 }
 
@@ -674,12 +605,6 @@ fn remember_mode(agent: &AgentId, mode: AgentViewMode, cx: &mut App) {
     let agent = agent.to_string();
     cx.background_spawn(async move { db.save_mode(agent, mode_name(mode).to_string()).await })
         .detach_and_log_err(cx);
-}
-
-fn ensure_prompt_store(cx: &mut App) {
-    if !cx.has_global::<prompt_store::GlobalPromptStore>() {
-        prompt_store::init(cx);
-    }
 }
 
 /// The agent's CLI is run as a task rather than typed into a shell, so the pty
@@ -722,42 +647,6 @@ impl Focusable for AgentView {
             State::Terminal(terminal) => terminal.focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
-    }
-}
-
-impl AgentView {
-    /// The switch between the conversation and the agent's own terminal.
-    ///
-    /// The mode is picked when the agent opens — a click on the rail for the
-    /// conversation, a right-click for the terminal — which left anyone already
-    /// looking at one mode with no way to reach the other, and nothing on screen
-    /// naming the two modes at all. This is that way, and that naming.
-    fn render_mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
-        ToggleButtonGroup::single_row(
-            "agent-view-mode",
-            [
-                ToggleButtonSimple::new(
-                    "Chat",
-                    cx.listener(|this, _, window, cx| {
-                        this.set_mode(AgentViewMode::Chat, window, cx)
-                    }),
-                ),
-                ToggleButtonSimple::new(
-                    "Terminal",
-                    cx.listener(|this, _, window, cx| {
-                        this.set_mode(AgentViewMode::Terminal, window, cx)
-                    }),
-                ),
-            ],
-        )
-        .label_size(LabelSize::Small)
-        .style(ToggleButtonGroupStyle::Outlined)
-        .auto_width()
-        .selected_index(match self.mode {
-            AgentViewMode::Chat => 0,
-            AgentViewMode::Terminal => 1,
-        })
-        .into_any_element()
     }
 }
 
@@ -945,12 +834,10 @@ impl workspace::item::SerializableItem for AgentView {
 
 impl Render for AgentView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Both of these need `cx` mutably, so they are built before the theme is
-        // borrowed — that borrow lives to the end of the element tree below.
-        let mode_switch = self.render_mode_switch(cx);
+        // Built before the theme is borrowed: this needs `cx` mutably, and that
+        // borrow lives to the end of the element tree below.
         let body = match &self.state {
             State::Terminal(terminal) => terminal.clone().into_any_element(),
-            State::Chat(conversation) => conversation.clone().into_any_element(),
             State::Starting => centered_message(
                 IconName::ArrowCircle,
                 format!("Starting {}…", self.display_name).into(),
@@ -961,7 +848,6 @@ impl Render for AgentView {
                 &cx.entity(),
                 &self.display_name,
                 missing,
-                self.mode == AgentViewMode::Chat,
                 cx,
             ),
             State::Failed(error) => centered_message(IconName::Warning, error.clone(), None, cx),
@@ -985,20 +871,13 @@ impl Render for AgentView {
             .on_action(cx.listener(|this: &mut Self, _: &RenameAgent, window, cx| {
                 this.start_renaming(window, cx);
             }))
-            .child(
-                h_flex()
-                    .flex_none()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .justify_end()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .child(mode_switch),
-            )
+            // No header row any more: it existed only to hold the mode switch, and
+            // an empty bar with a bottom border is a line across the top of a
+            // terminal for no reason.
+            //
             // `flex_1` with a floor of zero, in a column so it grows along the axis
             // meant: the body's children size themselves against a definite height,
-            // and `size_full` here would run them straight through the header.
+            // and `size_full` here would run them straight through the view.
             .child(v_flex().flex_1().min_h_0().child(body))
     }
 }
@@ -1045,29 +924,11 @@ mod tests {
         });
     }
 
-    /// Opening a conversation asked for a prompt store that nothing in this fork
-    /// had set, and `PromptStore::global` unwraps its global — so the very first
-    /// click on a chat agent aborted the process. No test reached that line
-    /// because every test that touches the prompt store seeds it itself.
-    #[gpui::test]
-    fn a_conversation_can_ask_for_the_prompt_store_on_a_bare_app(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            assert!(
-                !cx.has_global::<prompt_store::GlobalPromptStore>(),
-                "no startup path in this fork seeds the prompt store; \
-                 if one appears, this view should stop seeding it too"
-            );
-
-            ensure_prompt_store(cx);
-            drop(prompt_store::PromptStore::global(cx));
-        });
-    }
-
-    /// Leaving a mode has to end it. Each mode owns a child process — an npx
-    /// adapter over ACP, or the agent's CLI under a pty — and nothing kills those
-    /// but `Drop`, which runs only on the last strong handle. Assigning over
-    /// `state` looks like it is enough and silently is not the moment anything else
-    /// keeps a handle, so this asserts the count really reached zero.
+    /// Leaving a state has to end it. The terminal state owns the agent's CLI
+    /// under a pty, and nothing kills that but `Drop`, which runs only on the last
+    /// strong handle. Assigning over `state` looks like it is enough and silently
+    /// is not the moment anything else keeps a handle, so this asserts the count
+    /// really reached zero.
     #[gpui::test]
     async fn leaving_a_mode_releases_it(cx: &mut TestAppContext) {
         init_test(cx);
@@ -1402,29 +1263,28 @@ mod tests {
             use workspace::item::SerializableItem as _;
             assert!(
                 view.should_serialize(&AgentViewEvent::UpdateTab),
-                "a rename and a mode switch both arrive as `UpdateTab`, and both \
-                 belong in the row"
+                "a rename arrives as `UpdateTab`, and it belongs in the row"
             );
         });
     }
 
-    /// Two tables store a mode by name — the per-tab row and the per-agent
-    /// preference — and a tab restored from one must not disagree with a rail click
-    /// reading the other.
+    /// The one mode still survives the round trip through its name, and — the
+    /// part worth asserting — **anything else read from disk comes back as
+    /// terminal**. Rows written by a build that still had a chat mode are on real
+    /// machines right now, and `"chat"` must not resolve to a mode that no longer
+    /// exists.
     #[gpui::test]
-    async fn a_mode_survives_the_round_trip_through_its_name(_cx: &mut TestAppContext) {
-        for mode in [AgentViewMode::Chat, AgentViewMode::Terminal] {
-            assert_eq!(mode_from_name(mode_name(mode)), mode);
-        }
-    }
-
-    /// A plain click carries no chosen mode and, the first time an agent is
-    /// opened, finds no stored preference either — `AgentView::open` falls
-    /// all the way through to this default. The CLI is what most people
-    /// already have installed and know how to drive; the chat view is the
-    /// one extra hop through an npx adapter.
-    #[gpui::test]
-    async fn a_first_click_opens_the_cli_rather_than_chat(_cx: &mut TestAppContext) {
+    async fn any_stored_mode_name_comes_back_as_terminal(_cx: &mut TestAppContext) {
+        assert_eq!(
+            mode_from_name(mode_name(AgentViewMode::Terminal)),
+            AgentViewMode::Terminal
+        );
+        assert_eq!(
+            mode_from_name("chat"),
+            AgentViewMode::Terminal,
+            "a row left behind by a build with a chat mode has to open something"
+        );
+        assert_eq!(mode_from_name("nonsense"), AgentViewMode::Terminal);
         assert_eq!(AgentViewMode::default(), AgentViewMode::Terminal);
     }
 
