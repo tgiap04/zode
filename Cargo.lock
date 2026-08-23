@@ -3092,6 +3092,8 @@ dependencies = [
  "extension",
  "fs",
  "gpui",
+ "language",
+ "log",
  "menu",
  "multi_buffer",
  "project",

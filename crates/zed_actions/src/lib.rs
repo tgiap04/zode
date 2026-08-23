@@ -525,7 +525,6 @@ pub mod agent {
         pub mode: Option<AgentViewMode>,
     }
 
-
     actions!(
         agent,
         [
@@ -551,7 +550,6 @@ pub mod assistant {
     pub struct InlineAssist {
         pub prompt: Option<String>,
     }
-
 }
 
 /// Opens the recent projects interface.
@@ -783,6 +781,12 @@ pub mod database {
             AddConnection,
             /// Gives the database column the whole window, or gives it back.
             ToggleFullScreen,
+            /// Moves the database out of its column and into an editor tab,
+            /// where it lays itself out by the width it is given.
+            OpenInEditorTab,
+            /// Moves the database out of its column and into a window of its
+            /// own that floats above other applications.
+            OpenInFloatingWindow,
             /// Closes the connection under the cursor, stopping its driver.
             Disconnect,
             /// Runs the selected SQL, or the whole scratch buffer when nothing

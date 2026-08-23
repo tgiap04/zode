@@ -3,8 +3,8 @@ use fs::FakeFs;
 use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
 use project::Project;
 use settings::{Settings as _, SettingsStore};
-use workspace::dock::{DockColumn, DockPosition};
 use workspace::MultiWorkspace;
+use workspace::dock::{DockColumn, DockPosition};
 
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -12,6 +12,11 @@ fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings_store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         project::DisableAiSettings::register(cx);
+        // Registers the workspace actions, so a test can reach the buttons the
+        // way a click does instead of calling the handler behind them. A button
+        // wired to nothing is a defect this crate's own history has already
+        // shipped once.
+        crate::init(cx);
     });
 }
 
@@ -851,4 +856,267 @@ async fn a_closed_connection_offers_to_open_again(cx: &mut TestAppContext) {
             "connecting again must actually start, not quietly do nothing"
         );
     });
+}
+
+/// The column wears one surface card, not two.
+///
+/// `Dock::render` insets every dock by `SURFACE_MARGIN` and draws the rounded
+/// border and background inside that -- own columns included. The panel drew a
+/// second identical card within it, so the column's edge carried two borders
+/// four pixels apart.
+///
+/// Measured off the tree, which is the panel's own first child and carries no
+/// inset of its own: one card puts its left edge `SURFACE_MARGIN + 1px` inside
+/// the dock, two put it twice that. Asserted as an exact figure rather than a
+/// threshold -- "less than two cards" would also pass for a card and a half.
+#[gpui::test]
+async fn the_database_column_draws_a_single_surface_card(cx: &mut TestAppContext) {
+    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let dock = cx
+        .debug_bounds("dock-panel")
+        .expect("the database column must be drawn");
+    let tree = cx
+        .debug_bounds("database-tree-column")
+        .expect("the table list must be drawn");
+
+    let card = workspace::pane_group::SURFACE_MARGIN + gpui::px(1.);
+    assert_eq!(
+        tree.left() - dock.left(),
+        card,
+        "the column must be inset by one card, got {:?} against one card of {:?}",
+        tree.left() - dock.left(),
+        card
+    );
+}
+
+/// The button that moves the database into an editor tab.
+///
+/// Dispatched as an action rather than by calling the handler, so the wiring
+/// between the button and the work is what is under test. A button that dispatches
+/// an action nobody registered does nothing at all, silently, and this crate has
+/// shipped exactly that before.
+///
+/// Asserts both halves of the decision that was taken: a tab appears, and the
+/// column goes away -- the database lives in one place at a time.
+#[gpui::test]
+async fn opening_in_an_editor_tab_takes_it_out_of_the_column(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
+
+    let dock = workspace.update_in(cx, |workspace, window, cx| {
+        let dock = workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .clone();
+        dock.update(cx, |dock, cx| {
+            dock.show_panel(0, window, cx);
+            dock.set_open(true, window, cx);
+        });
+        dock
+    });
+    cx.run_until_parked();
+
+    assert!(
+        dock.read_with(cx, |dock, _| dock.is_open()),
+        "the column must be up before it can be moved out of"
+    );
+
+    panel.update_in(cx, |panel, window, cx| {
+        window.focus(&panel.focus_handle.clone(), cx);
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(zed_actions::database::OpenInEditorTab);
+    cx.run_until_parked();
+
+    let tabs = workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_pane()
+            .read(cx)
+            .items()
+            .map(|item| item.tab_content_text(0, cx).to_string())
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        tabs.contains(&"Database".to_string()),
+        "the action must put a database tab in the active pane, found {tabs:?}"
+    );
+    assert!(
+        !dock.read_with(cx, |dock, _| dock.is_open()),
+        "and must hide the column, so the database is not in two places at once"
+    );
+}
+
+/// A view standing on its own lays the table list beside the data once it is
+/// wide enough, without anybody toggling full screen.
+///
+/// Measured off the drawn tab rather than off `side_by_side()`: the flag and the
+/// element tree are resolved in different places, and agreeing with the flag
+/// would prove nothing about the layout.
+///
+/// What actually separates the two layouts here is the data view *existing*: the
+/// stacked layout holds it back until there is a connection to run against, and
+/// the side-by-side one draws all three regions regardless. That is the
+/// assertion doing the work -- checked by forcing the stacked layout, which fails
+/// on the missing region. The geometry below is a second, weaker check that the
+/// regions are ordered across rather than down; it cannot fail on its own.
+#[gpui::test]
+async fn a_wide_editor_tab_stands_the_table_list_beside_the_data(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+    });
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        window.focus(&panel.focus_handle.clone(), cx);
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(zed_actions::database::OpenInEditorTab);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let tree = cx
+        .debug_bounds("database-tree-column")
+        .expect("the table list must be drawn in the tab");
+    let data = cx.debug_bounds("database-data-view").expect(
+        "a standalone view must draw the data view with no connection open -- \
+             the column holds it back, the side-by-side layout does not",
+    );
+
+    assert!(
+        tree.right() <= data.left(),
+        "a wide tab must stand the list beside the data, got the list ending at {:?} \
+         and the data starting at {:?}",
+        tree.right(),
+        data.left()
+    );
+}
+
+/// The floating-window button opens a second window and survives doing it.
+///
+/// The survival is the point. Both handlers run inside `register_action`, which
+/// leases the workspace for the whole call, and anything reached from there that
+/// takes a workspace handle and calls `update` on it aborts the process -- a trap
+/// this crate's own comments record paying for twice. Opening a window from that
+/// position is exactly where it would happen again, so this dispatches the real
+/// action rather than calling the function.
+///
+/// It does not check what the window looks like: a test window is not an
+/// `NSPanel`, so `WindowKind::Floating` and its window level are beyond what any
+/// test here can see. Those need an eye on a real build.
+#[gpui::test]
+async fn opening_in_a_floating_window_adds_a_window_without_aborting(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
+
+    let dock = workspace.update_in(cx, |workspace, window, cx| {
+        let dock = workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .clone();
+        dock.update(cx, |dock, cx| {
+            dock.show_panel(0, window, cx);
+            dock.set_open(true, window, cx);
+        });
+        dock
+    });
+    cx.run_until_parked();
+
+    let before = cx.update(|_window, cx| cx.windows().len());
+
+    panel.update_in(cx, |panel, window, cx| {
+        window.focus(&panel.focus_handle.clone(), cx);
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(zed_actions::database::OpenInFloatingWindow);
+    cx.run_until_parked();
+
+    let after = cx.update(|_window, cx| cx.windows().len());
+    assert_eq!(
+        after,
+        before + 1,
+        "the action must open exactly one window, went from {before} to {after}"
+    );
+    assert!(
+        !dock.read_with(cx, |dock, _| dock.is_open()),
+        "and must hide the column it came out of"
+    );
+}
+
+/// A standalone view must lay its *regions* out sideways too, not just pick the
+/// sideways top-level branch.
+///
+/// The defect this pins: the top-level branch moved to `side_by_side()` while
+/// `render_tree` and `render_nothing_chosen` kept reading `full_screen`, which is
+/// false in a tab. The table list then took the column's `flex_1()` under a row
+/// parent and drew, in its own comment's words, full width and zero rows -- a
+/// wide blank panel with no error anywhere.
+///
+/// Two assertions because two things were wrong, and each pins one of them: the
+/// list is a fixed width rather than grown to fill, and the waiting-room
+/// placeholder is the roomy one rather than the column's single grey line.
+#[gpui::test]
+async fn a_standalone_view_lays_its_regions_out_sideways(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .dock_for_column(DockColumn::Database)
+            .expect("the database column exists")
+            .update(cx, |dock, cx| {
+                dock.show_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+    });
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        window.focus(&panel.focus_handle.clone(), cx);
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(zed_actions::database::OpenInEditorTab);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let tree = cx
+        .debug_bounds("database-tree-column")
+        .expect("the table list must be drawn in the tab");
+    assert_eq!(
+        tree.size.width,
+        crate::panel_layout::DEFAULT_TREE_WIDTH,
+        "the list must hold its own width beside the data, not grow to fill the row -- \
+         growing is the column's branch, and under a row parent it draws zero rows"
+    );
+
+    assert!(
+        cx.debug_bounds("database-no-table-placeholder").is_some(),
+        "a view laid out sideways must draw the roomy waiting-room placeholder, \
+         not the column's one-line note"
+    );
 }

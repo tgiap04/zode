@@ -6,9 +6,14 @@ use zed_actions::database as actions;
 
 impl Render for DatabasePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // `SURFACE_MARGIN`/`SURFACE_ROUNDING`, as the agent column carries: an
-        // own column is a surface beside the centre, not a tool dock, and
-        // `Dock::render` leaves the dock chrome off for both.
+        // No surface card here. `Dock::render` draws one -- the inset, the
+        // rounding, the border and the background -- around *every* dock,
+        // own columns included, and full screen still goes through it
+        // (`render_window_filling_column` calls `render_dock`). This drew a
+        // second one inside it, which is the two borders you could count on the
+        // column's edge. The comment that used to sit here claimed the dock left
+        // its chrome off for an own column; that stopped being true when the
+        // card moved into `Dock::render`, and the claim outlived it.
         v_flex()
             .key_context("DatabasePanel")
             .track_focus(&self.focus_handle)
@@ -43,55 +48,79 @@ impl Render for DatabasePanel {
                 }
             }))
             .size_full()
-            .p(workspace::pane_group::SURFACE_MARGIN)
-            .child(
-                v_flex()
-                    .size_full()
-                    .min_h_0()
-                    .rounded(workspace::pane_group::SURFACE_ROUNDING)
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .bg(cx.theme().colors().panel_background)
-                    .overflow_hidden()
-                    .on_drag_move(cx.listener(
-                        |this, event: &DragMoveEvent<DraggedSplit>, _window, cx| {
-                            this.on_split_dragged(event, cx);
-                        },
-                    ))
-                    .child(self.render_header(cx))
-                    .map(|element| {
-                        if self.connections.is_empty() {
-                            element.child(self.render_empty())
-                        } else if self.full_screen {
-                            element.child(self.render_full_screen(window, cx))
-                        } else {
-                            element
-                                .child(self.render_tree(cx))
-                                // The SQL buffer and the grid appear only once
-                                // there is a connection to run against: two
-                                // empty boxes above an unconfigured tree read as
-                                // broken rather than as waiting.
-                                .when(self.active.is_some(), |element| {
-                                    element
-                                        .child(self.render_split_handle(Split::TreeAndSql, cx))
-                                        .child(self.render_sql(window, cx))
-                                        .child(self.render_split_handle(Split::SqlAndResults, cx))
-                                        .child(self.render_result_area(true, window, cx))
-                                })
-                        }
-                    })
-                    // Deferred and anchored at the pointer, so the menu is not
-                    // clipped by the tree's own scroll area.
-                    .children(self.context_menu.as_ref().map(|(menu, position, _)| {
-                        gpui::deferred(
-                            gpui::anchored()
-                                .position(*position)
-                                .anchor(gpui::Anchor::TopLeft)
-                                .child(menu.clone()),
-                        )
-                        .with_priority(1)
-                    })),
+            .min_h_0()
+            // For the measuring canvas below, which is positioned against this.
+            .relative()
+            .overflow_hidden()
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<DraggedSplit>, _window, cx| {
+                    this.on_split_dragged(event, cx);
+                }),
             )
+            // Standing on its own, the view has to know how wide it is before it
+            // can decide how to lay itself out, and nothing tells it -- a tab is
+            // as wide as its pane and a window as wide as it was dragged. A
+            // `canvas` is the only place a real width can be read, so it is read
+            // there and used on the next frame. Absent in the column, which has
+            // no such question to answer.
+            .when(self.is_standalone(), |element| {
+                let this = cx.entity().downgrade();
+                element.child(
+                    gpui::canvas(
+                        move |bounds: gpui::Bounds<Pixels>, _window, cx: &mut App| {
+                            let width = bounds.size.width;
+                            // Deferred rather than applied here: this runs inside
+                            // the prepaint of the very view it would update, and
+                            // the width is wanted for the *next* frame anyway.
+                            cx.defer(move |cx| {
+                                this.update(cx, |this, cx| {
+                                    this.note_measured_width(width, cx);
+                                })
+                                .ok();
+                            });
+                        },
+                        |_, _, _, _| {},
+                    )
+                    // Absolute and full size, so it measures the container it
+                    // overlays and claims no room in the column it sits in. Drawn
+                    // first, so it paints under everything and cannot come
+                    // between the pointer and a button.
+                    .absolute()
+                    .size_full(),
+                )
+            })
+            .child(self.render_header(cx))
+            .map(|element| {
+                if self.connections.is_empty() {
+                    element.child(self.render_empty())
+                } else if self.side_by_side() {
+                    element.child(self.render_full_screen(window, cx))
+                } else {
+                    element
+                        .child(self.render_tree(cx))
+                        // The SQL buffer and the grid appear only once there is a
+                        // connection to run against: two empty boxes above an
+                        // unconfigured tree read as broken rather than as waiting.
+                        .when(self.active.is_some(), |element| {
+                            element
+                                .child(self.render_split_handle(Split::TreeAndSql, cx))
+                                .child(self.render_sql(window, cx))
+                                .child(self.render_split_handle(Split::SqlAndResults, cx))
+                                .child(self.render_result_area(true, window, cx))
+                        })
+                }
+            })
+            // Deferred and anchored at the pointer, so the menu is not clipped by
+            // the tree's own scroll area.
+            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                gpui::deferred(
+                    gpui::anchored()
+                        .position(*position)
+                        .anchor(gpui::Anchor::TopLeft)
+                        .child(menu.clone()),
+                )
+                .with_priority(1)
+            }))
     }
 }
 
@@ -154,33 +183,76 @@ impl DatabasePanel {
                                 })),
                         )
                     })
-                    .child(
-                        IconButton::new(
-                            "database-full-screen",
-                            if self.full_screen {
-                                IconName::Minimize
-                            } else {
-                                IconName::Maximize
-                            },
-                        )
-                        .icon_size(IconSize::Small)
-                        .tooltip(move |_window, cx| {
-                            Tooltip::for_action(
-                                if full_screen {
-                                    "Exit full screen"
-                                } else {
-                                    "Full screen"
-                                },
-                                &actions::ToggleFullScreen,
-                                cx,
+                    // Three ways out of the column, offered only *from* the
+                    // column. Standing in a tab or a window of its own, a button
+                    // to take the window is offering what it already has, and
+                    // one to open a tab would open a second view of itself.
+                    .when(!self.is_standalone(), |element| {
+                        element
+                            .child(
+                                IconButton::new(
+                                    "database-full-screen",
+                                    if self.full_screen {
+                                        IconName::Minimize
+                                    } else {
+                                        IconName::Maximize
+                                    },
+                                )
+                                .icon_size(IconSize::Small)
+                                .tooltip(move |_window, cx| {
+                                    Tooltip::for_action(
+                                        if full_screen {
+                                            "Exit full screen"
+                                        } else {
+                                            "Full screen"
+                                        },
+                                        &actions::ToggleFullScreen,
+                                        cx,
+                                    )
+                                })
+                                .on_click(cx.listener(
+                                    |this, _event, window, cx| {
+                                        this.toggle_full_screen(window, cx);
+                                    },
+                                )),
                             )
-                        })
-                        .on_click(cx.listener(
-                            |this, _event, window, cx| {
-                                this.toggle_full_screen(window, cx);
-                            },
-                        )),
-                    )
+                            // Dispatched rather than called, for the reason
+                            // spelled out on the add-connection button below:
+                            // the workspace action is the one road, so the
+                            // button and a keybinding cannot drift apart.
+                            .child(
+                                IconButton::new("database-open-in-tab", IconName::ArrowUpRight)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::for_action(
+                                            "Open in editor tab",
+                                            &actions::OpenInEditorTab,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(|_event, window, cx| {
+                                        window
+                                            .dispatch_action(Box::new(actions::OpenInEditorTab), cx)
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("database-open-in-window", IconName::OpenNewWindow)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::for_action(
+                                            "Open in a floating window",
+                                            &actions::OpenInFloatingWindow,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(|_event, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(actions::OpenInFloatingWindow),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                    })
                     .child(
                         IconButton::new("database-add-connection", IconName::Plus)
                             .icon_size(IconSize::Small)
@@ -243,7 +315,14 @@ impl DatabasePanel {
         // full width and zero rows, silently and without a panic.
         v_flex()
             .map(|tree| {
-                if self.full_screen {
+                // `side_by_side()` and not `full_screen`: the question here is
+                // which way this region is laid out, and full screen is only one
+                // of the two ways to arrive at the sideways answer -- a tab and a
+                // window of their own get there by being wide. Reading the flag
+                // instead sent every standalone view down the column's branch,
+                // where `flex_1` under the row parent above did exactly what the
+                // comment warns of: full width, zero rows, no panic.
+                if self.side_by_side() {
                     tree.w(self.tree_width)
                         .h_full()
                         .flex_none()

@@ -17,8 +17,8 @@ use gpui::{
 use settings::{Settings as _, SettingsStore};
 use std::sync::Arc;
 use ui::{ContextMenu, prelude::*};
-use workspace::dock::{DockColumn, DockPosition, Panel, PanelEvent};
 use workspace::Workspace;
+use workspace::dock::{DockColumn, DockPosition, Panel, PanelEvent};
 
 /// What a connection node is doing. `Failed` keeps the driver's own words --
 /// "password authentication failed" is worth far more than "could not connect".
@@ -60,7 +60,37 @@ pub(crate) struct OpenTable {
     pub(crate) columns: Option<Vec<ColumnDef>>,
 }
 
+/// Where this view is standing.
+///
+/// The same view serves three places and only two behaviours, so this names the
+/// behaviours rather than the places. A column is pinned to one edge at a width
+/// somebody dragged, so it stacks and offers the button that takes the window.
+/// A tab and a window of its own are handed whatever width they are given, so
+/// they lay themselves out by measuring it -- and neither has any business
+/// offering to take a window it already has.
+///
+/// Sessions do not travel between them: each host builds its own view, with its
+/// own connections and its own scratch buffer. A single view drawn in two
+/// windows would need its `FocusHandle` in two dispatch trees at once, which is
+/// not a thing a focus handle can be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Host {
+    /// The own column beside the centre.
+    Column,
+    /// An editor tab, or a floating window.
+    Standalone,
+}
+
 pub struct DatabasePanel {
+    pub(crate) host: Host,
+    /// The width the view was last drawn at, when it is standing on its own.
+    ///
+    /// Measured rather than asked for: a tab is as wide as the pane holds and a
+    /// window is as wide as somebody dragged it, and neither number exists until
+    /// the frame is laid out. Read one frame late, which is what a `canvas`
+    /// measurement costs and is invisible at this scale -- the layout only
+    /// changes when the width crosses `SIDE_BY_SIDE_WIDTH`.
+    pub(crate) measured_width: Option<Pixels>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) workspace: WeakEntity<Workspace>,
     /// Shared with every other window: extensions add drivers to it after
@@ -110,6 +140,39 @@ pub struct DatabasePanel {
 
 impl DatabasePanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::for_host(
+            Host::Column,
+            workspace.weak_handle(),
+            workspace.project().read(cx).languages().clone(),
+            window,
+            cx,
+        )
+    }
+
+    /// A view for a tab or a window of its own, with a session of its own.
+    ///
+    /// Takes the two things it needs rather than the workspace, because the
+    /// callers cannot hand one over: both run inside `register_action`, which
+    /// leases the workspace for the whole handler, and the floating window
+    /// builds its view in a *different* window's context where a second
+    /// `&Workspace` cannot be borrowed alongside the `App` that creates the
+    /// entity. Reading these two out first is what makes both call sites legal.
+    pub fn standalone(
+        workspace: WeakEntity<Workspace>,
+        languages: Arc<language::LanguageRegistry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::for_host(Host::Standalone, workspace, languages, window, cx)
+    }
+
+    fn for_host(
+        host: Host,
+        workspace: WeakEntity<Workspace>,
+        languages: Arc<language::LanguageRegistry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings_observer = cx.observe_global::<SettingsStore>(|this, cx| {
             this.reload_connections(cx);
         });
@@ -119,11 +182,13 @@ impl DatabasePanel {
             editor.set_placeholder_text("SELECT …", window, cx);
             editor
         });
-        Self::apply_sql_language(&sql_editor, workspace, cx);
+        Self::apply_sql_language(&sql_editor, languages, cx);
 
         let mut panel = Self {
+            host,
+            measured_width: None,
             focus_handle: cx.focus_handle(),
-            workspace: workspace.weak_handle(),
+            workspace,
             registry: driver_registry::global(cx),
             connections: Vec::new(),
             open_table: None,
@@ -150,8 +215,11 @@ impl DatabasePanel {
     ///
     /// Best effort: the buffer is perfectly usable as plain text, and failing to
     /// open the column because a grammar is missing would be absurd.
-    fn apply_sql_language(editor: &Entity<Editor>, workspace: &Workspace, cx: &mut Context<Self>) {
-        let languages = workspace.project().read(cx).languages().clone();
+    fn apply_sql_language(
+        editor: &Entity<Editor>,
+        languages: Arc<language::LanguageRegistry>,
+        cx: &mut Context<Self>,
+    ) {
         let editor = editor.downgrade();
         cx.spawn(async move |_this, cx| {
             let Ok(language) = languages.language_for_name("SQL").await else {

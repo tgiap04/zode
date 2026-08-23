@@ -102,11 +102,14 @@ impl DatabasePanel {
     /// What stands where the rows go before anything has been asked for.
     ///
     /// A line of grey text is enough in the column, where this region is a few
-    /// hundred pixels tall. Full screen it is the largest thing on the screen,
+    /// hundred pixels tall. Laid out sideways it is the largest thing on screen,
     /// and an all-but-empty half-window reads as a failure to load rather than
     /// as a waiting room -- so there it says what to do, and where.
+    ///
+    /// Keyed on the layout rather than on `full_screen`, which is one of two ways
+    /// to reach that layout: a tab and a floating window get there by being wide.
     fn render_nothing_chosen(&self, cx: &mut Context<Self>) -> AnyElement {
-        if !self.full_screen {
+        if !self.side_by_side() {
             return note("Run a statement to see results here", Color::Muted, cx);
         }
 
