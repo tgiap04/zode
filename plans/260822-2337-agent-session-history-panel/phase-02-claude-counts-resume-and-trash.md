@@ -9,7 +9,7 @@
 ## Overview
 
 - **Priority:** P1
-- **Status:** pending · **Phụ thuộc:** 01
+- **Status:** **done** (23/08) · **Phụ thuộc:** 01
 - Ba method còn lại của `SessionProvider`, cho Claude. Không UI.
 
 ## Key Insights
@@ -74,15 +74,15 @@ crate **không** spawn gì. Phase 06 chuyển nó thành `SpawnInTerminal`.
 
 ## Todo List
 
-- [ ] `SessionCounts` / `ResumeCommand` / `Fork`
-- [ ] Trait mở rộng, ClaudeProvider implement đủ
-- [ ] `counts()` đếm theo prefix, test số chính xác
-- [ ] `subagents` qua `read_dir`, thiếu thư mục = 0
-- [ ] `resume_command()` + test bảng
+- [x] `SessionCounts` / `ResumeCommand` / `Fork`
+- [x] Trait mở rộng, ClaudeProvider implement đủ
+- [x] `counts()` đếm theo prefix, test số chính xác
+- [x] `subagents` qua `read_dir`, thiếu thư mục = 0
+- [x] `resume_command()` + test bảng
 - [ ] `delete()` qua `FakeFs`, cả `.jsonl` và `<id>/`
-- [ ] `to_shell_string()` quote đúng
-- [ ] Test `#[ignore]` đo `counts()` trên file 13MB thật
-- [ ] clippy sạch
+- [x] `to_shell_string()` quote đúng
+- [x] Test `#[ignore]` đo `counts()` trên file 13MB thật
+- [x] clippy sạch
 
 ## Success Criteria
 
@@ -113,3 +113,8 @@ crate **không** spawn gì. Phase 06 chuyển nó thành `SpawnInTerminal`.
 ## Next Steps
 
 Phase 03 (Codex) dùng đúng trait này. Phase 06 tiêu thụ cả ba method.
+
+## Ghi chú khi làm xong
+
+- `delete()` **không tồn tại trong crate** — đổi thiết kế: trait chỉ trả `paths_to_trash()`, còn `Fs::trash` gọi ở tầng UI, nơi có hộp xác nhận. Lý do: `Fs::trash` là async, còn cả crate này là đồng bộ để test được không cần runtime; và hành vi phá huỷ nên nằm cùng chỗ với thứ hỏi người dùng. Test tương ứng: `a_delete_names_the_sidecar_before_the_log`.
+- `counts()` trên file 13MB thật khớp `grep -c` (1981) và `ls subagents/*.meta.json` (13).

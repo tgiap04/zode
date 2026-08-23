@@ -38,7 +38,6 @@ pub struct AgentHistoryPanel {
     /// Everything both stores can see, unfiltered. Filtering is a view over this,
     /// recomputed per render — 45 summaries on the author's machine, so the cost
     /// of a filter is nothing next to the cost of keeping two lists in step.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) sessions: Vec<SessionSummary>,
     pub(crate) counts: HashMap<Arc<str>, CountState>,
     /// The real editor behind the search box. Its text is the filter — read on

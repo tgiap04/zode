@@ -991,6 +991,56 @@ mod tests {
     use util::{path, paths::PathStyle, rel_path::rel_path};
     use workspace::MultiWorkspace;
 
+    /// The resume command reaches the pty, and an ordinary open still does not.
+    ///
+    /// This is the seam between the history panel and the agent: the panel hands
+    /// over args and a directory, and `agent_task` is the single place that turns
+    /// them into a process. Asserted on the task rather than on the panel because
+    /// this is where a wrong `cwd` would send the CLI at the wrong tree.
+    #[gpui::test]
+    async fn a_resumed_session_runs_its_own_arguments_in_its_own_directory(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/here"), json!({})).await;
+        let project = Project::test(fs, [path!("/here").as_ref()], cx).await;
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let binary = std::path::PathBuf::from("/bin/claude");
+
+        let (fresh, resumed) = cx.update(|cx| {
+            let project = project.read(cx);
+            let fresh = super::agent_task(&agent, binary.clone(), None, project, cx);
+            let resume = super::ResumeTarget {
+                args: vec!["--resume".into(), "abc-123".into(), "--fork-session".into()],
+                cwd: std::path::PathBuf::from("/elsewhere"),
+            };
+            let resumed = super::agent_task(&agent, binary.clone(), Some(&resume), project, cx);
+            (fresh, resumed)
+        });
+
+        // Unchanged for everyone who is not resuming: no arguments, and the cwd is
+        // still the window's own worktree.
+        assert!(fresh.args.is_empty());
+        assert_eq!(fresh.cwd, Some(std::path::PathBuf::from(path!("/here"))));
+
+        assert_eq!(
+            resumed.args,
+            vec![
+                "--resume".to_string(),
+                "abc-123".to_string(),
+                "--fork-session".to_string()
+            ]
+        );
+        assert_eq!(
+            resumed.cwd,
+            Some(std::path::PathBuf::from("/elsewhere")),
+            "a resumed session runs where the conversation ran, not where this \
+             window is pointed"
+        );
+        assert_eq!(resumed.command, Some("/bin/claude".to_string()));
+    }
+
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);

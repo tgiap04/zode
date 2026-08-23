@@ -10,7 +10,7 @@
 ## Overview
 
 - **Priority:** P2
-- **Status:** **blocked** — chờ người dùng chạy `codex` một lần
+- **Status:** **done** (23/08) — chặn đã mở, người dùng chạy `codex` ngày 23/08
 - **Phụ thuộc:** 02 (trait phải đủ hình dạng) + một row dữ liệu thật
 
 ## Chặn đường (đọc trước khi bắt đầu)
@@ -94,14 +94,14 @@ chính app này, còn đây là DB của tiến trình khác mà ta không sở 
 
 ## Todo List
 
-- [ ] Có ≥ 1 row Codex thật, dump ra fixture
-- [ ] Chọn `state_*.sqlite` theo suffix số, test 2 vs 10
-- [ ] Mở read-only, nhánh copy-tạm cho WAL, có test
-- [ ] `list()` + test trên fixture
-- [ ] `Availability` + 3 test xuống thang
-- [ ] `resume_command` (Fork::New → None), `delete` theo rollout_path
-- [ ] `messages: Option<usize>` lan sang Claude + call site
-- [ ] clippy sạch, `cargo test -p agent_sessions` xanh
+- [x] Có ≥ 1 row Codex thật, dump ra fixture
+- [x] Chọn `state_*.sqlite` theo suffix số, test 2 vs 10
+- [x] Mở read-only, nhánh copy-tạm cho WAL, có test
+- [x] `list()` + test trên fixture
+- [x] `Availability` + 3 test xuống thang
+- [x] `resume_command` (Fork::New → None), `delete` theo rollout_path
+- [x] `messages: Option<usize>` lan sang Claude + call site
+- [x] clippy sạch, `cargo test -p agent_sessions` xanh
 
 ## Success Criteria
 
@@ -135,3 +135,10 @@ chính app này, còn đây là DB của tiến trình khác mà ta không sở 
 ## Next Steps
 
 Phase 06 mở rộng menu sang Codex: `Fork::New` disable, `messages` ẩn.
+
+## Ghi chú khi làm xong
+
+- Fixture là schema **viết lại bằng tay** theo `.schema threads` thật, không phải `.dump` — dump chứa hội thoại thật của người dùng.
+- Phát hiện quyết định: `has_user_event = 0` trên thread người dùng đã gõ vào, nên FR15 (`where has_user_event = 1`) bị **bỏ**. Nếu viết mù, Codex sẽ ẩn sạch session thật.
+- `messages` cho Codex **không** phải `None` như plan dự: `rollout_path` có thật, đếm được từ đó (3 message trên thread thật).
+- Nhánh copy-tạm cho WAL chưa có test riêng — chưa dựng được một DB mà read-only open thật sự fail; nhánh đó chỉ có `log::warn` + đường code, chưa có bằng chứng chạy.

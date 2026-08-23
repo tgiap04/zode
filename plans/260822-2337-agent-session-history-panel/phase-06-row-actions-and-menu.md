@@ -11,7 +11,7 @@
 ## Overview
 
 - **Priority:** P1
-- **Status:** pending · **Phụ thuộc:** 02 + 05
+- **Status:** **done** (23/08) · **Phụ thuộc:** 02 + 05
 - Kết quả: mọi nút trong ảnh làm đúng việc của nó, hoặc bị disable với lý do nhìn thấy được.
 
 ## Key Insights
@@ -92,17 +92,17 @@ call site hiện tại truyền `Vec::new()` + `None` và **không đổi hành 
 
 ## Todo List
 
-- [ ] `agent_task()` nhận args + cwd, hành vi cũ không đổi (có test)
-- [ ] `open_resumed()` defer đúng khuôn
-- [ ] Toolbar 4 nút, chỉ hiện khi hover
-- [ ] `ContextMenu` 9 mục + separator + Delete đỏ
-- [ ] 3 mục clipboard
-- [ ] Open/Reveal Log, Open Working Directory
-- [ ] Delete + xác nhận nêu path và dung lượng + bỏ hàng
-- [ ] Disable: path chết, Codex fork
+- [x] `agent_task()` nhận args + cwd, hành vi cũ không đổi (có test)
+- [x] `open_resumed()` defer đúng khuôn
+- [x] Toolbar 4 nút, chỉ hiện khi hover
+- [x] `ContextMenu` 9 mục + separator + Delete đỏ
+- [x] 3 mục clipboard
+- [x] Open/Reveal Log, Open Working Directory
+- [x] Delete + xác nhận nêu path và dung lượng + bỏ hàng
+- [x] Disable: path chết, Codex fork
 - [ ] Test dispatch từng action (lease)
-- [ ] Test: resume dựng đúng `SpawnInTerminal` (program, args, cwd)
-- [ ] clippy + `cargo test -p agent_ui -p workspace -p zode`, build
+- [x] Test: resume dựng đúng `SpawnInTerminal` (program, args, cwd)
+- [x] clippy + `cargo test -p agent_ui -p workspace -p zode`, build
 
 ## Success Criteria
 
@@ -139,3 +139,10 @@ call site hiện tại truyền `Vec::new()` + `None` và **không đổi hành 
 
 Xong phase này là hết plan. Nếu phase 03 còn chặn, mở lại menu cho Codex sau khi nó xong
 — các mục đã disable sẵn theo `Availability` nên không phải sửa layout.
+
+## Ghi chú khi làm xong
+
+- `Open Working Directory` = **reveal** trong Finder, không mở thành project: panel này đã gắn với project đang mở, đổi project vì một mục menu là chuyện người dùng không yêu cầu. Plan cho phép chọn, lý do ghi ở đây.
+- `Delete` đỏ: `ContextMenuEntry` không có API màu riêng cho entry, nên nó mang icon `Trash` và đứng sau separator cuối như trong ảnh; chữ không đỏ.
+- **Chưa làm:** dispatch-test *từng* action trong menu. Chỉ `agent::ToggleHistory` được dispatch-test (đó là action duy nhất đi qua `register_action`, tức đường duy nhất có bẫy lease). 9 mục menu chạy qua `panel.update` từ callback của `ContextMenu`, không qua `register_action`.
+- `Open Log` giữ nguyên: `jsonl` không nằm trong `path_suffixes` của grammar JSON nên file mở dạng plain text, không tree-sitter; và không có size guard nào trong `project`/`language`/`editor`.

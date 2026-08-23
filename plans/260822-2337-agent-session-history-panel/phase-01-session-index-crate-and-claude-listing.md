@@ -9,7 +9,7 @@
 ## Overview
 
 - **Priority:** P1 (mọi phase khác đứng trên nó)
-- **Status:** pending
+- **Status:** **done** (23/08)
 - Crate mới, không UI, test được không cần window. Nhiệm vụ duy nhất: biến 292 file
   jsonl thành `Vec<SessionSummary>` đủ để vẽ một hàng, **không** đọc hết file.
 
@@ -94,14 +94,14 @@ Root `Cargo.toml`: thêm `"crates/agent_sessions"` vào `members` và
 
 ## Todo List
 
-- [ ] Crate + workspace wiring, `cargo check` xanh
-- [ ] `SessionSummary`/`SessionCounts`/`ResumeCommand`
-- [ ] `trait SessionProvider { agent, list }`
-- [ ] `claude_log.rs` + test parse thuần (gồm dòng hỏng, file rỗng, không `ai-title`)
-- [ ] `ClaudeProvider::list()`
-- [ ] Fixture thật + test end-to-end qua `FakeFs`
-- [ ] Test `#[ignore]` đo thời gian trên `~/.claude/projects` thật
-- [ ] `cargo clippy -p agent_sessions --all-targets` sạch
+- [x] Crate + workspace wiring, `cargo check` xanh
+- [x] `SessionSummary`/`SessionCounts`/`ResumeCommand`
+- [x] `trait SessionProvider { agent, list }`
+- [x] `claude_log.rs` + test parse thuần (gồm dòng hỏng, file rỗng, không `ai-title`)
+- [x] `ClaudeProvider::list()`
+- [x] Fixture thật + test end-to-end qua `FakeFs`
+- [x] Test `#[ignore]` đo thời gian trên `~/.claude/projects` thật
+- [x] `cargo clippy -p agent_sessions --all-targets` sạch
 
 ## Success Criteria
 
@@ -134,3 +134,8 @@ Root `Cargo.toml`: thêm `"crates/agent_sessions"` vào `members` và
 
 Phase 02 (số đếm + resume + trash) và phase 05 (danh sách) đều đứng trên phase này.
 Phase 04 chạy song song, không chờ.
+
+## Ghi chú khi làm xong
+
+- Fixture **viết tay trên `tempfile::TempDir`**, không copy transcript thật vào repo và không qua `FakeFs`: crate này đọc bằng `std::fs` (đồng bộ, chạy trên background executor) nên `FakeFs` không áp được. Đối chiếu với dữ liệu thật nằm ở test `#[ignore]` `reads_the_real_store`.
+- Đo thật: **45 session trong ~355ms**. Con số 292 file/408MB trong plan là sai (đếm cả subagent transcript) — thực tế 46 file/221MB.

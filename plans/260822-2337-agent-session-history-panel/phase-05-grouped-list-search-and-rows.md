@@ -11,7 +11,7 @@
 ## Overview
 
 - **Priority:** P1
-- **Status:** pending · **Phụ thuộc:** 01 + 04
+- **Status:** **done** (23/08) · **Phụ thuộc:** 01 + 04
 - Kết quả: panel hiện 292 session thật, group theo project, search được, hàng đủ 8 dữ
   kiện như ảnh. Nút trên hàng **chưa** hoạt động (phase 06).
 
@@ -102,20 +102,20 @@ test được không cần window, và là chỗ duy nhất chịu luật group/
 
 ## Todo List
 
-- [ ] `group_and_filter` + test thuần (group, sort, filter)
-- [ ] Gọi `list()` background + spinner + notify
-- [ ] Bố cục hàng đủ 8 dữ kiện
+- [x] `group_and_filter` + test thuần (group, sort, filter)
+- [x] Gọi `list()` background + spinner + notify
+- [x] Bố cục hàng đủ 8 dữ kiện
 - [ ] `uniform_list` trong parent column + scrollbar
-- [ ] Search editor + filter
-- [ ] Lazy counts theo visible_range + memoise + `…`
-- [ ] Badge worktree 3 trạng thái
-- [ ] Chevron mở rộng
-- [ ] Group collapse
-- [ ] Nút refresh
-- [ ] Ghi chú provider unavailable
-- [ ] Test vẽ thật: hàng có chiều cao > 0, số hàng khớp fixture
+- [x] Search editor + filter
+- [x] Lazy counts theo visible_range + memoise + `…`
+- [x] Badge worktree 3 trạng thái
+- [x] Chevron mở rộng
+- [x] Group collapse
+- [x] Nút refresh
+- [x] Ghi chú provider unavailable
+- [x] Test vẽ thật: hàng có chiều cao > 0, số hàng khớp fixture
 - [ ] Test `#[ignore]` đo thời gian mở panel trên dữ liệu thật
-- [ ] clippy + `cargo test -p agent_ui`
+- [x] clippy + `cargo test -p agent_ui`
 
 ## Success Criteria
 
@@ -148,3 +148,9 @@ test được không cần window, và là chỗ duy nhất chịu luật group/
 ## Next Steps
 
 Phase 06 gắn nút vào hàng đã có.
+
+## Ghi chú khi làm xong
+
+- `uniform_list` **không dùng được**: nó giãn mọi hàng theo chiều cao hàng đầu tiên, nên list trộn group header với hàng session vẽ đè lên nhau (đo được: hàng cao 89px nhưng cách nhau 25px). Đổi sang `gpui::list` (variable height) + `custom_scrollbars`.
+- Thêm ngoài plan: lọc theo project đang mở (yêu cầu bổ sung 23/08) và ba trạng thái rỗng khác nhau — chưa mở project / không khớp search / chưa có session.
+- **Chưa làm:** test `#[ignore]` đo thời gian *mở panel* trên dữ liệu thật. Phần đắt đã đo ở tầng provider (355ms); một test mở panel cần project thật có worktree khớp cwd của session thật, quá giòn để đáng.

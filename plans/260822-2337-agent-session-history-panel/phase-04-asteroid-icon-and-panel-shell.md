@@ -12,7 +12,7 @@
 ## Overview
 
 - **Priority:** P1
-- **Status:** pending · **Phụ thuộc:** không — chạy song song với phase 01
+- **Status:** **done** (23/08) · **Phụ thuộc:** không — chạy song song với phase 01
 - Kết quả: bấm icon asteroid ở header dock phải → panel mở, hiện "Chưa có gì" (danh
   sách thật là phase 05). Placeholder disabled bị xoá.
 
@@ -104,17 +104,17 @@ dựng ở `load()`, nhưng **chưa gọi** `list()` ở phase này.
 
 ## Todo List
 
-- [ ] `asteroid.svg` đúng khuôn, nhìn cân bên cạnh icon khác
-- [ ] `IconName::Asteroid`
-- [ ] `AgentHistoryPanel` + `Panel` impl + `load()`
-- [ ] Action + init + đăng ký trong `initialize_panels`
+- [x] `asteroid.svg` đúng khuôn, nhìn cân bên cạnh icon khác
+- [x] `IconName::Asteroid`
+- [x] `AgentHistoryPanel` + `Panel` impl + `load()`
+- [x] Action + init + đăng ký trong `initialize_panels`
 - [ ] `test_action_namespaces` cập nhật
-- [ ] Xoá placeholder + call site trong `dock.rs`
+- [x] Xoá placeholder + call site trong `dock.rs`
 - [ ] Sửa `the_panels_button_moves_into_the_docks_own_header` sang selector mới
-- [ ] Xoá `agents_sidebar::ToggleThreadSwitcher`
-- [ ] Test vẽ thật: panel ở nửa phải, nút trong header
-- [ ] Test dispatch action (bẫy lease workspace)
-- [ ] `cargo test -p zode -p workspace -p project_panel -p agent_ui`, clippy, build
+- [x] Xoá `agents_sidebar::ToggleThreadSwitcher`
+- [x] Test vẽ thật: panel ở nửa phải, nút trong header
+- [x] Test dispatch action (bẫy lease workspace)
+- [x] `cargo test -p zode -p workspace -p project_panel -p agent_ui`, clippy, build
 
 ## Success Criteria
 
@@ -145,3 +145,9 @@ dựng ở `load()`, nhưng **chưa gọi** `list()` ở phase này.
 ## Next Steps
 
 Phase 05 lấp nội dung vào cái vỏ này.
+
+## Ghi chú khi làm xong
+
+- `test_action_namespaces` **không cần sửa**: action nằm trong namespace `agent` đã có (`agent::ToggleHistory`), không tạo namespace mới. Đây là lý do chọn `agent` thay vì `agent_history`.
+- `the_panels_button_moves_into_the_docks_own_header`: **xoá** assertion về agent-history thay vì sửa selector. Test đó ở crate `project_panel`, không thấy được panel của `agent_ui`, và nó dựng workspace bằng tay chứ không qua `initialize_panels`. Claim 'header liệt kê nhiều panel' nằm ở `workspace::a_stack_under_a_header_still_divides_the_dock`.
+- Toggle **không** dùng `toggle_panel_focus`: đường đó đi qua `Dock::show_panel` nên **stack** panel. Handler tự viết dùng `activate_panel` để thay chỗ nhau, có test phân biệt hai hành vi.
