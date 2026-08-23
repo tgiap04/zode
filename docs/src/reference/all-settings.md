@@ -4619,6 +4619,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 - Description: Customize project panel
 - Setting: `project_panel`
 - Note: the project panel always docks on the right side of the window, opposite the project rail; there is no `dock` setting for it.
+- Note: `default_width` sets the width of the whole tool column, not just this panel. The column shows one panel at a time and keeps a single width, so switching to the agent history does not move its edge — and dragging that edge while the agent history is up resizes the column all the same.
 - Default:
 
 ```json [settings]

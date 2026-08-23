@@ -7939,10 +7939,17 @@ impl Workspace {
         // this, toggle_panel_focus cannot focus the panel when the dock is closed.
         let dock = dock.read(cx);
         if let Some(panel) = dock.visible_panel() {
-            let size_state = dock.stored_panel_size_state(panel.as_ref());
+            // The dock's extent comes from the panel that governs it, which in a
+            // dock that takes turns is the column's primary panel rather than
+            // the tab currently up -- see `Dock::size_governing_index`. The
+            // minimum stays the showing panel's own: a panel must never be drawn
+            // below the width it says it needs, and that is a real constraint
+            // rather than the column wobbling.
+            let sizing = dock.size_governing_panel().unwrap_or(panel);
+            let size_state = dock.stored_panel_size_state(sizing.as_ref());
             let min_size = panel.min_size(window, cx);
             if position.axis() == Axis::Horizontal {
-                let use_flexible = panel.has_flexible_size(window, cx);
+                let use_flexible = sizing.has_flexible_size(window, cx);
                 let flex_grow = if use_flexible {
                     size_state
                         .and_then(|state| state.flex)
@@ -7959,7 +7966,7 @@ impl Workspace {
                 } else {
                     let size = size_state
                         .and_then(|state| state.size)
-                        .unwrap_or_else(|| panel.default_size(window, cx));
+                        .unwrap_or_else(|| sizing.default_size(window, cx));
                     container = container.w(size);
                 }
                 if let Some(min) = min_size {
@@ -7968,7 +7975,7 @@ impl Workspace {
             } else {
                 let size = size_state
                     .and_then(|state| state.size)
-                    .unwrap_or_else(|| panel.default_size(window, cx));
+                    .unwrap_or_else(|| sizing.default_size(window, cx));
                 container = container.h(size);
             }
         }
@@ -14760,6 +14767,88 @@ mod tests {
                 "the header must name every panel the dock holds, missing {selector}"
             );
         }
+    }
+
+    /// Switching tabs in a dock that takes turns must not move the column's edge.
+    ///
+    /// The two panels here default to widths as far apart as the real pair that
+    /// exposed this — the project panel at 240px and the agent history at 420px.
+    /// The dock read its width off whichever panel was up, so every switch
+    /// dragged the editor's edge sideways under the pointer.
+    ///
+    /// Measured off the painted `dock-panel`, not off `stored_active_panel_size`:
+    /// the accessor and `render_dock` resolved the width separately, so agreeing
+    /// with the accessor would have proved nothing about what the eye sees.
+    #[gpui::test]
+    async fn switching_tabs_in_a_header_dock_keeps_the_column_width(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Two panel *types* carrying an icon each, for the reasons spelled
+            // out in `a_header_dock_takes_turns_rather_than_stacking`. The
+            // priorities put `TestPanel` first, so it is the column's primary
+            // panel and the one whose 240 governs.
+            let first = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Right, 100, cx);
+                panel.icon = Some(ui::IconName::FileTree);
+                panel.default_size = px(240.);
+                panel
+            });
+            let second = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Right, 101, cx);
+                panel.0.icon = Some(ui::IconName::Terminal);
+                panel.0.default_size = px(420.);
+                panel
+            });
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.set_open(true, window, cx);
+                dock.show_panel(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let before = cx
+            .debug_bounds("dock-panel")
+            .expect("the dock must be drawn showing its first panel")
+            .size
+            .width;
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let after = cx
+            .debug_bounds("dock-panel")
+            .expect("the dock must still be drawn showing its second panel")
+            .size
+            .width;
+
+        assert_eq!(
+            after, before,
+            "switching tabs must leave the column where it was, went from {before:?} to {after:?}"
+        );
+
+        // Named rather than merely "unchanged": equal-but-wrong would pass the
+        // assertion above, and the primary panel's width is the one that is right.
+        assert_eq!(
+            before,
+            px(240.),
+            "and the width a turn-taking dock keeps is its primary panel's, got {before:?}"
+        );
     }
 
     #[gpui::test]

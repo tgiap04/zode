@@ -687,6 +687,43 @@ impl Dock {
         self.active_panel_index
     }
 
+    /// The entry whose stored size decides how wide -- or, at the bottom, how
+    /// tall -- the dock is.
+    ///
+    /// A dock that takes turns is *one column* to the eye: its header is a tab
+    /// strip and only ever one panel is drawn below it. So it holds one extent,
+    /// and taking that extent from whichever panel happens to be up is what
+    /// made the column change width every time you switched tabs -- the project
+    /// panel defaults to 240px and the agent history to 420px, and a drag on
+    /// the column's edge only ever wrote to the panel showing at the time. Two
+    /// panels, two widths, one column: the width had to move.
+    ///
+    /// Entries are held in `activation_priority` order, so the first is the
+    /// column's primary panel. It owns the extent and the others read it. A
+    /// dock that stacks has no switcher and each section keeps its own size, so
+    /// there this stays the active entry, exactly as before.
+    fn size_governing_index(&self) -> Option<usize> {
+        if self.takes_turns() {
+            (!self.panel_entries.is_empty()).then_some(0)
+        } else {
+            self.active_panel_index
+        }
+    }
+
+    fn size_governing_entry(&self) -> Option<&PanelEntry> {
+        self.size_governing_index()
+            .and_then(|index| self.panel_entries.get(index))
+    }
+
+    /// The panel whose size, default size and flexibility describe the dock.
+    ///
+    /// For `render_dock`, which needs all three from the same place -- reading
+    /// the width off one panel and the fixed-or-flexible mode off another would
+    /// be a third way for the column to move.
+    pub fn size_governing_panel(&self) -> Option<&Arc<dyn PanelHandle>> {
+        self.size_governing_entry().map(|entry| &entry.panel)
+    }
+
     pub fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open != self.is_open {
             self.is_open = open;
@@ -1360,7 +1397,7 @@ impl Dock {
 
     pub fn active_panel_size(&self) -> Option<PanelSizeState> {
         if self.is_open {
-            self.active_panel_entry().map(|entry| entry.size_state)
+            self.size_governing_entry().map(|entry| entry.size_state)
         } else {
             None
         }
@@ -1392,7 +1429,7 @@ impl Dock {
 
     pub fn stored_active_panel_size(&self, window: &Window, cx: &App) -> Option<Pixels> {
         if self.is_open {
-            self.active_panel_entry().map(|entry| {
+            self.size_governing_entry().map(|entry| {
                 entry
                     .size_state
                     .size
@@ -1467,7 +1504,10 @@ impl Dock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.active_panel_index
+        // The governing entry, not the active one: in a dock that takes turns
+        // the column has a single width, and writing a drag to whichever tab
+        // was up meant the next tab ignored it.
+        if let Some(index) = self.size_governing_index()
             && let Some(entry) = self.panel_entries.get_mut(index)
         {
             let (panel_key, size_state) =
