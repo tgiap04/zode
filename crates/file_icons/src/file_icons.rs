@@ -44,8 +44,7 @@ impl FileIcons {
         let this = Self::get(cx);
 
         let get_icon_from_suffix = |suffix: &str| -> Option<SharedString> {
-            icon_key_for(&this.icon_theme, suffix)
-                .and_then(|typ| this.get_icon_for_type(typ, cx))
+            icon_key_for(&this.icon_theme, suffix).and_then(|typ| this.get_icon_for_type(typ, cx))
         };
         // TODO: Associate a type with the languages and have the file's language
         //       override these associations

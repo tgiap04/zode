@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 use std::path::PathBuf;
 
-
 #[with_fallible_options]
 #[derive(Default, PartialEq, Deserialize, Serialize, Clone, JsonSchema, MergeFrom, Debug)]
 #[serde(transparent)]

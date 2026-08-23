@@ -16,7 +16,6 @@ use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel, with_active_or_new_workspace};
 use zed_actions::{ExtensionCategoryFilter, Extensions};
 
-
 actions!(
     theme_selector,
     [

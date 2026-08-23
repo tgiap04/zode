@@ -10340,7 +10340,6 @@ impl Render for TestProjectItemView {
     }
 }
 
-
 /// The panel has one edge and no way off it.
 ///
 /// Asserted against the `Panel` methods rather than against today's value in
@@ -10398,9 +10397,8 @@ async fn asking_the_project_panel_to_move_changes_nothing(cx: &mut gpui::TestApp
     let cx = &mut VisualTestContext::from_window(window.into(), cx);
     let panel = workspace.update_in(cx, ProjectPanel::new);
 
-    let before = cx.update(|_, cx| {
-        format!("{:?}", cx.global::<SettingsStore>().raw_user_settings())
-    });
+    let before =
+        cx.update(|_, cx| format!("{:?}", cx.global::<SettingsStore>().raw_user_settings()));
 
     panel.update_in(cx, |panel, window, cx| {
         Panel::set_position(panel, DockPosition::Left, window, cx);
@@ -10415,9 +10413,8 @@ async fn asking_the_project_panel_to_move_changes_nothing(cx: &mut gpui::TestApp
         );
     });
 
-    let after = cx.update(|_, cx| {
-        format!("{:?}", cx.global::<SettingsStore>().raw_user_settings())
-    });
+    let after =
+        cx.update(|_, cx| format!("{:?}", cx.global::<SettingsStore>().raw_user_settings()));
     assert_eq!(
         before, after,
         "set_position must not write anything into the user's settings"
@@ -10628,4 +10625,3 @@ async fn the_panels_button_moves_into_the_docks_own_header(cx: &mut gpui::TestAp
         dock_bounds.bottom()
     );
 }
-

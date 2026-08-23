@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{
-    ActionName, CenteredPaddingSettings, DelayMs, DockPosition, InactiveOpacity,
-    ShowIndentGuides, ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
+    ActionName, CenteredPaddingSettings, DelayMs, DockPosition, InactiveOpacity, ShowIndentGuides,
+    ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
 };
 
 #[with_fallible_options]

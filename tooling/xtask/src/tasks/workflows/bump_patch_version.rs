@@ -35,10 +35,7 @@ pub fn bump_patch_version() -> Workflow {
         .add_job(bump_patch_version_job.name, bump_patch_version_job.job)
 }
 
-fn run_bump_patch_version(
-    branch: &WorkflowInput,
-    prerelease: &WorkflowInput,
-) -> steps::NamedJob {
+fn run_bump_patch_version(branch: &WorkflowInput, prerelease: &WorkflowInput) -> steps::NamedJob {
     fn checkout_branch(branch: &WorkflowInput) -> CheckoutStep {
         steps::checkout_repo()
             .with_token_expression(TAG_TOKEN)

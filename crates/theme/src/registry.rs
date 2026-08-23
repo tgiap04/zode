@@ -437,8 +437,14 @@ mod tests {
             .unwrap();
 
         let after = registry.get_icon_theme("").unwrap();
-        assert_eq!(after.id, built_in.id, "the built-in set must still be the one served");
-        assert!(!after.file_suffixes.is_empty(), "and it must still carry its associations");
+        assert_eq!(
+            after.id, built_in.id,
+            "the built-in set must still be the one served"
+        );
+        assert!(
+            !after.file_suffixes.is_empty(),
+            "and it must still carry its associations"
+        );
     }
 
     /// Uninstalling an extension must not be able to take the icons with it.

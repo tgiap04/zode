@@ -85,17 +85,19 @@ static DEFAULT_ICON_THEME: LazyLock<Arc<IconTheme>> = LazyLock::new(|| {
             collapsed: Some(DIRECTORY_ICON_COLLAPSED.into()),
             expanded: Some(DIRECTORY_ICON_EXPANDED.into()),
         },
-        named_directory_icons: HashMap::from_iter(material_named_directory_icons().into_iter().map(
-            |(name, (collapsed, expanded))| {
-                (
-                    name,
-                    DirectoryIcons {
-                        collapsed: Some(collapsed.into()),
-                        expanded: Some(expanded.into()),
-                    },
-                )
-            },
-        )),
+        named_directory_icons: HashMap::from_iter(
+            material_named_directory_icons()
+                .into_iter()
+                .map(|(name, (collapsed, expanded))| {
+                    (
+                        name,
+                        DirectoryIcons {
+                            collapsed: Some(collapsed.into()),
+                            expanded: Some(expanded.into()),
+                        },
+                    )
+                }),
+        ),
         // Material has no equivalent of zode's disclosure-triangle chevrons (VS Code
         // relies on the OS/tree-widget chrome for that, not a themed icon), so these
         // keep pointing at zode's own bundled chevron assets, unchanged.
@@ -105,9 +107,11 @@ static DEFAULT_ICON_THEME: LazyLock<Arc<IconTheme>> = LazyLock::new(|| {
         },
         file_stems: material_file_stems(),
         file_suffixes: material_file_suffixes(),
-        file_icons: HashMap::from_iter(material_file_icons().into_iter().map(|(ty, path)| {
-            (ty, IconDefinition { path: path.into() })
-        })),
+        file_icons: HashMap::from_iter(
+            material_file_icons()
+                .into_iter()
+                .map(|(ty, path)| (ty, IconDefinition { path: path.into() })),
+        ),
     })
 });
 
@@ -223,7 +227,17 @@ mod tests {
             .named_directory_icons
             .get("src")
             .expect("\"src\" is a common folder name Material has an icon for");
-        assert!(src.collapsed.as_ref().unwrap().starts_with("icons/file_icons/material/"));
-        assert!(src.expanded.as_ref().unwrap().starts_with("icons/file_icons/material/"));
+        assert!(
+            src.collapsed
+                .as_ref()
+                .unwrap()
+                .starts_with("icons/file_icons/material/")
+        );
+        assert!(
+            src.expanded
+                .as_ref()
+                .unwrap()
+                .starts_with("icons/file_icons/material/")
+        );
     }
 }
