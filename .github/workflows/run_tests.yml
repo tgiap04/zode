@@ -491,6 +491,8 @@ jobs:
       uses: taiki-e/install-action@921e2c9f7148d7ba14cd819f417db338f63e733c
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than 350 200
+    - name: steps::download_wasi_sdk
+      run: ./script/download-wasi-sdk
     - name: steps::setup_sccache
       run: ./script/setup-sccache
       env:

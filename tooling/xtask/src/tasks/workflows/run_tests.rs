@@ -667,6 +667,14 @@ fn run_platform_tests_impl(
             // with "no such command".
             .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(platform))
+            // After the clear, not before: the SDK lands in `target/`. Linux gets
+            // it from `install_linux_dependencies` above; mac had nothing, so the
+            // extension test downloaded it itself and timed out. Windows is left
+            // alone -- it passes as it is, and the download script's platform
+            // mapping has never run there.
+            .when(platform == Platform::Mac, |job| {
+                job.add_step(steps::download_wasi_sdk())
+            })
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
                 job.add_step(
