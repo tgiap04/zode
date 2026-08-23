@@ -2,7 +2,7 @@
 //!
 //! The format is undocumented and belongs to another program, so every field
 //! here degrades on its own: a missing `ai-title` falls back to the first user
-//! message, a missing `cwd` leaves the session ungrouped, an unparseable line is
+//! message, a missing `cwd` leaves the session ungrouped, an unparsable line is
 //! skipped. A format change must cost a column, never the panel.
 //!
 //! Everything in this module takes `&str` rather than a path. That keeps the

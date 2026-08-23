@@ -209,14 +209,26 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
             jq -r '.packages[] | select(.manifest_path | test("crates/|tooling/")) | "\(.manifest_path | capture("(crates|tooling)/(?<dir>[^/]+)") | .dir)=\(.name)"')
 
           # Map directory names to package names
+          #
+          # `|| true` on the grep is load-bearing under `set -o pipefail`: a
+          # directory with no package makes grep exit 1, which took the whole
+          # job down with it and left the `else` below unreachable. A PR that
+          # deleted a crate failed here every time, because a deleted crate's
+          # files are still in `git diff --name-only` while its package is gone
+          # from `cargo metadata`.
+          #
+          # Such a directory is skipped rather than passed through as its own
+          # name. The name would go into a `rdeps(...)` filterset, and nextest
+          # rejects a package it has never heard of -- so the fallback traded
+          # this failure for one a step later. Skipping is safe: if nothing maps,
+          # the empty-filterset branch below runs the whole suite.
           FILE_CHANGED_PKGS=""
           for dir in $CHANGED_DIRS; do
-            pkg=$(echo "$DIR_TO_PKG" | grep "^${dir}=" | cut -d= -f2 | head -1)
+            pkg=$(echo "$DIR_TO_PKG" | grep "^${dir}=" | cut -d= -f2 | head -1 || true)
             if [ -n "$pkg" ]; then
               FILE_CHANGED_PKGS=$(printf '%s\n%s' "$FILE_CHANGED_PKGS" "$pkg")
             else
-              # Fall back to directory name if no mapping found
-              FILE_CHANGED_PKGS=$(printf '%s\n%s' "$FILE_CHANGED_PKGS" "$dir")
+              echo "No package for directory '${dir}', skipping it (deleted crate, or a directory of crates)"
             fi
           done
           FILE_CHANGED_PKGS=$(echo "$FILE_CHANGED_PKGS" | grep -v '^$' | sort -u || true)

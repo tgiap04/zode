@@ -11,6 +11,7 @@ extend-exclude = [
 
     # File suffixes aren't typos.
     "crates/theme/src/icon_theme.rs",
+    "crates/theme/src/icon_theme_material.rs",
     "crates/extensions_ui/src/extension_suggest.rs",
 
     # Some mock data is flagged as typos.
@@ -112,5 +113,10 @@ extend-ignore-re = [
     "writeable",
     # Business Analyst, in the docs' role tables.
     "BA",
+    # An astroid is the four-cusped hypocycloid the agent-history icon is drawn
+    # as -- the curve, not the rock. The icon and the `IconName` are named after
+    # the shape they actually are, so "asteroid" would be the misspelling here.
+    "astroid",
+    "Astroid",
 ]
 check-filename = true
