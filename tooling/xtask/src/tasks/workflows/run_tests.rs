@@ -174,12 +174,25 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
     }
 
     script.push_str(indoc::indoc! {r#"
+        # A here-string and not a pipe, and the difference decides whether this
+        # repository is tested at all.
+        #
+        # `grep -q` stops at its first match and closes the pipe. On a small diff
+        # the upstream `echo` has already finished; on a large one it is still
+        # writing, takes EPIPE, and under `set -o pipefail` *that* becomes the
+        # pipeline's status -- so the `&&` branch is skipped and every rule
+        # silently answers "false". A PR touching 1352 files reported
+        # `run_tests=false` and skipped every test and clippy job on all four
+        # platforms, which reads as a green run rather than as an untested one.
+        # The tell was in the log of an earlier run: `echo: write error: Broken
+        # pipe`. A here-string is not a pipeline, so pipefail has nothing to
+        # report and the answer no longer depends on how big the diff is.
         check_pattern() {
           local output_name="$1"
           local pattern="$2"
           local grep_arg="$3"
 
-          echo "$CHANGED_FILES" | grep "$grep_arg" "$pattern" && \
+          grep "$grep_arg" "$pattern" <<< "$CHANGED_FILES" && \
             echo "${output_name}=true" >> "$GITHUB_OUTPUT" || \
             echo "${output_name}=false" >> "$GITHUB_OUTPUT"
         }
@@ -195,7 +208,7 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
         if [ -z "$GITHUB_BASE_REF" ]; then
           echo "Not a PR, running full test suite"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
-        elif echo "$CHANGED_FILES" | grep -qP '^(rust-toolchain\.toml|\.cargo/|\.github/|Cargo\.(toml|lock)$)'; then
+        elif grep -qP '^(rust-toolchain\.toml|\.cargo/|\.github/|Cargo\.(toml|lock)$)' <<< "$CHANGED_FILES"; then
           echo "Toolchain, cargo config, or root Cargo files changed, will run all tests"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
         else
