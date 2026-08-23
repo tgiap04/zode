@@ -126,6 +126,60 @@ async fn the_panel_draws_its_rows(cx: &mut TestAppContext) {
     );
 }
 
+/// A left click on the ellipsis opens the menu — and does **not** expand the row.
+///
+/// `right_click_menu` there made the button silent on a left click: with no
+/// `on_click`, `ButtonLike` never calls `stop_propagation`, so the click bubbled
+/// to the row's own handler and toggled its expansion. Both halves are asserted,
+/// because the second is what the defect actually looked like from the outside.
+#[gpui::test]
+async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let panel: Entity<AgentHistoryPanel> = workspace.update_in(cx, |workspace, window, cx| {
+        cx.new(|cx| AgentHistoryPanel::new(workspace, window, cx))
+    });
+    panel.update(cx, |panel, _| panel.providers.clear());
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+        workspace.toggle_panel_focus::<AgentHistoryPanel>(window, cx);
+    });
+    cx.run_until_parked();
+    panel.update(cx, |panel, cx| {
+        panel.sessions = vec![session("one", "/root", "Newest here", 300)];
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let ellipsis = cx
+        .debug_bounds("agent-history-menu:1")
+        .expect("row 1's ellipsis must be drawn");
+    cx.simulate_click(ellipsis.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    // The menu items carry `MENU_ITEM-{label}` probes of their own, so this is the
+    // dropdown really being on screen rather than a proxy for it.
+    assert!(
+        cx.debug_bounds("MENU_ITEM-Delete").is_some(),
+        "a left click on the ellipsis must open the menu"
+    );
+    assert!(
+        panel.read_with(cx, |panel, _| panel.expanded_rows.is_empty()),
+        "and must not fall through to the row, which would expand it instead"
+    );
+}
+
 /// The other half of the scoping claim: with nothing open, nothing is listed.
 #[gpui::test]
 async fn a_workspace_with_no_worktree_lists_nothing(cx: &mut TestAppContext) {

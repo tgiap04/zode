@@ -3,9 +3,9 @@ use crate::session_history::{
     panel::{AgentHistoryPanel, CountState},
 };
 use agent_sessions::{AgentKind, Fork, SessionSummary};
-use gpui::{Context, Window};
+use gpui::{Anchor, Context, Window};
 use std::path::{Path, PathBuf};
-use ui::{ContextMenu, ContextMenuEntry, IconName, Tooltip, prelude::*, right_click_menu};
+use ui::{ContextMenu, ContextMenuEntry, IconName, PopoverMenu, Tooltip, prelude::*};
 
 /// A project group's header: name, how many sessions, and a disclosure.
 pub(crate) fn render_group(
@@ -181,14 +181,26 @@ fn render_controls(
             .size(IconSize::Small)
             .color(Color::Muted),
         )
-        .child(render_menu(ix, session, alive, can_fork, cx))
+        .child(
+            // Wrapped only so a test can find the trigger's bounds and click it;
+            // `IconButton` has no probe of its own.
+            div()
+                .debug_selector(move || format!("agent-history-menu:{ix}"))
+                .child(render_menu(ix, session, alive, can_fork, cx)),
+        )
 }
 
 /// The ellipsis menu.
 ///
-/// `ContextMenu` rather than a view of our own behind `PopoverMenu`: a bespoke
-/// view there gets neither a background nor dismissal on an outside click, both
-/// of which `ContextMenu` handles itself.
+/// `PopoverMenu` opens it on a **left** click, which is the only way anyone tries
+/// to open an ellipsis. `right_click_menu` here left the button silent: with no
+/// `on_click` on the trigger, `ButtonLike` never calls `stop_propagation`
+/// (`button_like.rs:766`), so the click bubbled to the row and toggled its
+/// expansion instead. One wrapper, two symptoms.
+///
+/// The menu itself is a `ContextMenu` rather than a view of our own: a bespoke
+/// view behind `PopoverMenu` gets neither a background nor dismissal on an
+/// outside click, both of which `ContextMenu` handles itself.
 ///
 /// Entries that cannot work are drawn disabled rather than left out, so the menu
 /// has the same shape every time and says why a thing is unavailable.
@@ -201,114 +213,125 @@ fn render_menu(
 ) -> impl IntoElement {
     let panel = cx.entity();
     let session = session.clone();
-    right_click_menu(("agent-history-menu", ix))
+    PopoverMenu::new(("agent-history-menu", ix))
         .menu(move |window, cx| {
             let panel = panel.clone();
             let session = session.clone();
-            ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                let has_log = session.log_path.is_some();
-                // Every entry runs against the panel entity, deferred past this
-                // click by `Entity::update` — the panel is not leased here, but
-                // the handler runs later and must not assume it still is.
-                let add = |menu: ContextMenu,
-                           label: &'static str,
-                           icon: Option<IconName>,
-                           enabled: bool,
-                           action: fn(
-                    &mut AgentHistoryPanel,
-                    &SessionSummary,
-                    &mut Window,
-                    &mut Context<AgentHistoryPanel>,
-                )| {
-                    let panel = panel.clone();
-                    let session = session.clone();
-                    let mut entry = ContextMenuEntry::new(label).disabled(!enabled).handler(
-                        move |window, cx| {
-                            panel.update(cx, |panel, cx| action(panel, &session, window, cx));
+            Some(ContextMenu::build(
+                window,
+                cx,
+                move |mut menu, _window, _cx| {
+                    let has_log = session.log_path.is_some();
+                    // Every entry runs against the panel entity, deferred past this
+                    // click by `Entity::update` — the panel is not leased here, but
+                    // the handler runs later and must not assume it still is.
+                    let add = |menu: ContextMenu,
+                               label: &'static str,
+                               icon: Option<IconName>,
+                               enabled: bool,
+                               action: fn(
+                        &mut AgentHistoryPanel,
+                        &SessionSummary,
+                        &mut Window,
+                        &mut Context<AgentHistoryPanel>,
+                    )| {
+                        let panel = panel.clone();
+                        let session = session.clone();
+                        let mut entry = ContextMenuEntry::new(label).disabled(!enabled).handler(
+                            move |window, cx| {
+                                panel.update(cx, |panel, cx| action(panel, &session, window, cx));
+                            },
+                        );
+                        if let Some(icon) = icon {
+                            entry = entry.icon(icon);
+                        }
+                        menu.item(entry)
+                    };
+
+                    menu = add(
+                        menu,
+                        "Resume in Worktree",
+                        Some(IconName::PlayOutlined),
+                        alive,
+                        |panel, session, window, cx| {
+                            panel.resume(session, Fork::Continue, window, cx)
                         },
                     );
-                    if let Some(icon) = icon {
-                        entry = entry.icon(icon);
-                    }
-                    menu.item(entry)
-                };
-
-                menu = add(
-                    menu,
-                    "Resume in Worktree",
-                    Some(IconName::PlayOutlined),
-                    alive,
-                    |panel, session, window, cx| panel.resume(session, Fork::Continue, window, cx),
-                );
-                menu = add(
-                    menu,
-                    "Continue in New Session…",
-                    Some(IconName::Plus),
-                    alive && can_fork,
-                    |panel, session, window, cx| panel.resume(session, Fork::New, window, cx),
-                );
-                menu = add(
-                    menu,
-                    "Copy Resume Command",
-                    Some(IconName::Copy),
-                    true,
-                    |panel, session, _window, cx| panel.copy_resume_command(session, cx),
-                );
-                menu = menu.separator();
-                menu = add(
-                    menu,
-                    "Open Log",
-                    Some(IconName::FileCode),
-                    has_log,
-                    |panel, session, window, cx| panel.open_log(session, window, cx),
-                );
-                menu = add(
-                    menu,
-                    "Reveal Log",
-                    Some(IconName::Folder),
-                    has_log,
-                    |panel, session, _window, cx| panel.reveal_log(session, cx),
-                );
-                menu = add(
-                    menu,
-                    "Open Working Directory",
-                    Some(IconName::Folder),
-                    alive,
-                    |panel, session, _window, cx| panel.open_working_directory(session, cx),
-                );
-                menu = menu.separator();
-                menu = add(
-                    menu,
-                    "Copy Session ID",
-                    None,
-                    true,
-                    |panel, session, _window, cx| panel.copy(session.id.to_string(), cx),
-                );
-                menu = add(
-                    menu,
-                    "Copy Log Path",
-                    None,
-                    has_log,
-                    |panel, session, _window, cx| {
-                        if let Some(path) = &session.log_path {
-                            panel.copy(path.display().to_string(), cx);
-                        }
-                    },
-                );
-                menu = menu.separator();
-                add(
-                    menu,
-                    "Delete",
-                    Some(IconName::Trash),
-                    true,
-                    |panel, session, window, cx| panel.delete(session, window, cx),
-                )
-            })
+                    menu = add(
+                        menu,
+                        "Continue in New Session…",
+                        Some(IconName::Plus),
+                        alive && can_fork,
+                        |panel, session, window, cx| panel.resume(session, Fork::New, window, cx),
+                    );
+                    menu = add(
+                        menu,
+                        "Copy Resume Command",
+                        Some(IconName::Copy),
+                        true,
+                        |panel, session, _window, cx| panel.copy_resume_command(session, cx),
+                    );
+                    menu = menu.separator();
+                    menu = add(
+                        menu,
+                        "Open Log",
+                        Some(IconName::FileCode),
+                        has_log,
+                        |panel, session, window, cx| panel.open_log(session, window, cx),
+                    );
+                    menu = add(
+                        menu,
+                        "Reveal Log",
+                        Some(IconName::Folder),
+                        has_log,
+                        |panel, session, _window, cx| panel.reveal_log(session, cx),
+                    );
+                    menu = add(
+                        menu,
+                        "Open Working Directory",
+                        Some(IconName::Folder),
+                        alive,
+                        |panel, session, _window, cx| panel.open_working_directory(session, cx),
+                    );
+                    menu = menu.separator();
+                    menu = add(
+                        menu,
+                        "Copy Session ID",
+                        None,
+                        true,
+                        |panel, session, _window, cx| panel.copy(session.id.to_string(), cx),
+                    );
+                    menu = add(
+                        menu,
+                        "Copy Log Path",
+                        None,
+                        has_log,
+                        |panel, session, _window, cx| {
+                            if let Some(path) = &session.log_path {
+                                panel.copy(path.display().to_string(), cx);
+                            }
+                        },
+                    );
+                    menu = menu.separator();
+                    add(
+                        menu,
+                        "Delete",
+                        Some(IconName::Trash),
+                        true,
+                        |panel, session, window, cx| panel.delete(session, window, cx),
+                    )
+                },
+            ))
         })
-        .trigger(move |_open, _window, _cx| {
+        // Docked right, the ellipsis sits at the panel's right edge: drop the menu
+        // below it and let it grow leftwards, into the window rather than off it.
+        .anchor(Anchor::TopRight)
+        .attach(Anchor::BottomRight)
+        .trigger(
             IconButton::new(("agent-history-menu-trigger", ix), IconName::Ellipsis)
                 .icon_size(IconSize::Small)
-        })
+                .tooltip(Tooltip::text("More…")),
+        )
 }
 
 fn render_preview(session: &SessionSummary, expanded: bool) -> impl IntoElement {

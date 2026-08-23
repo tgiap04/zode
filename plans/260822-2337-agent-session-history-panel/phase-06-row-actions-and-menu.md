@@ -146,3 +146,17 @@ Xong phase này là hết plan. Nếu phase 03 còn chặn, mở lại menu cho 
 - `Delete` đỏ: `ContextMenuEntry` không có API màu riêng cho entry, nên nó mang icon `Trash` và đứng sau separator cuối như trong ảnh; chữ không đỏ.
 - **Chưa làm:** dispatch-test *từng* action trong menu. Chỉ `agent::ToggleHistory` được dispatch-test (đó là action duy nhất đi qua `register_action`, tức đường duy nhất có bẫy lease). 9 mục menu chạy qua `panel.update` từ callback của `ContextMenu`, không qua `register_action`.
 - `Open Log` giữ nguyên: `jsonl` không nằm trong `path_suffixes` của grammar JSON nên file mở dạng plain text, không tree-sitter; và không có size guard nào trong `project`/`language`/`editor`.
+- **Lỗi người dùng báo (23/08), đã sửa:** menu dựng bằng `right_click_menu`, tức chỉ mở
+  bằng **chuột phải** — không ai mở nút ba chấm bằng chuột phải. Tệ hơn, trigger không có
+  `on_click` nên `ButtonLike` không gọi `stop_propagation` (`button_like.rs:766`), click
+  trôi lên `on_click` của cả hàng và **toggle expand** thay vì mở menu. Một wrapper sai,
+  hai triệu chứng. Sửa sang `PopoverMenu` (anchor `TopRight`/attach `BottomRight` vì panel
+  dock phải) — cùng lúc đóng cả hai, vì trigger giờ có `on_click`.
+  Key Insight ở trên nói đúng *cái menu* (`ContextMenu`, không phải view tự viết) nhưng
+  không nói gì về *cái mở nó* — đó là khoảng trống đã trả giá.
+  Test mới `the_ellipsis_opens_its_menu_instead_of_expanding_the_row`: click thật vào
+  bounds của nút, khẳng định `MENU_ITEM-Delete` được vẽ **và** `expanded_rows` rỗng. Cả
+  hai assertion đã được falsify riêng từng cái.
+- Còn lại, cố ý không sửa: nút resume/fork khi **disabled** cũng rụng handler nên click
+  vào nó vẫn expand hàng. Đây là hành vi của `ButtonLike` trên toàn app, không riêng panel
+  này, và expand một hàng có cwd đã chết thì đúng ra lại hữu ích (nó hiện path).
