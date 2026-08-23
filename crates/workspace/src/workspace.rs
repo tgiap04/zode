@@ -10,6 +10,7 @@ mod multi_workspace_tests;
 pub mod notifications;
 pub mod pane;
 pub mod pane_group;
+pub mod project_appearance;
 pub mod path_list {
     pub use util::path_list::{PathList, SerializedPathList};
 }
@@ -31,10 +32,10 @@ mod workspace_settings;
 pub use crate::notifications::NotificationFrame;
 pub use dock::Panel;
 pub use multi_workspace::{
-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectToNewWindow,
-    MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject, ProjectGroup,
-    ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, ToggleWorkspaceSidebar,
+    CloseWorkspaceSidebar, DraggedProject, DraggedSidebar, FocusWorkspaceSidebar,
+    MoveProjectToNewWindow, MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject,
+    ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent,
+    SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -9371,7 +9372,12 @@ pub async fn apply_restored_multiworkspace_state(
         // stale keys from previous sessions get normalized and deduped.
         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
         for serialized in project_groups.iter().cloned() {
-            let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
+            let SerializedProjectGroupState {
+                key,
+                expanded,
+                initials,
+                colour,
+            } = serialized.into_restored_state();
             if key.path_list().paths().is_empty() {
                 continue;
             }
@@ -9392,6 +9398,8 @@ pub async fn apply_restored_multiworkspace_state(
                 resolved_groups.push(SerializedProjectGroupState {
                     key: resolved,
                     expanded,
+                    initials,
+                    colour,
                 });
             }
         }

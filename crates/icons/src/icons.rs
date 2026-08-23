@@ -166,6 +166,7 @@ pub enum IconName {
     Option,
     PageDown,
     PageUp,
+    Palette,
     PanelBottom,
     PanelLeft,
     PanelRight,

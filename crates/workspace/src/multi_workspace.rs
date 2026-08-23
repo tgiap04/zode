@@ -4,8 +4,8 @@ use fs::Fs;
 
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, Tiling, WeakEntity, Window,
-    WindowId, actions, deferred, px,
+    Hsla, ManagedView, MouseButton, Pixels, Render, SharedString, Subscription, Task, Tiling,
+    WeakEntity, Window, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project, ProjectActivity};
@@ -226,6 +226,47 @@ pub struct ProjectGroup {
 pub struct SerializedProjectGroupState {
     pub key: ProjectGroupKey,
     pub expanded: bool,
+    pub initials: Option<SharedString>,
+    pub colour: Option<Hsla>,
+}
+
+/// A project being dragged off its place on the rail.
+///
+/// Carries the key and never an index: reordering is precisely what is happening
+/// while it travels, so an index would be stale on arrival. It lives in this
+/// crate rather than in `sidebar` because the window root accepts the drop that
+/// means "out of the rail", and `workspace` cannot depend on `sidebar`.
+pub struct DraggedProject {
+    pub key: ProjectGroupKey,
+    pub label: SharedString,
+    pub initials: SharedString,
+    pub colour: Option<Hsla>,
+}
+
+impl Render for DraggedProject {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let background = self.colour.unwrap_or(colors.element_background);
+        gpui::div()
+            .size(px(32.))
+            .rounded_md()
+            .bg(background)
+            .border_1()
+            .border_color(colors.border_selected)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                ui::Label::new(self.initials.clone())
+                    .size(ui::LabelSize::Small)
+                    .color(match self.colour {
+                        Some(colour) => {
+                            ui::Color::Custom(crate::project_appearance::label_colour_for(colour))
+                        }
+                        None => ui::Color::Default,
+                    }),
+            )
+    }
 }
 
 #[derive(Clone)]
@@ -233,6 +274,11 @@ pub struct ProjectGroupState {
     pub key: ProjectGroupKey,
     pub expanded: bool,
     pub last_active_workspace: Option<WeakEntity<Workspace>>,
+    /// Set by hand through the project's own menu; `None` means initials
+    /// derived from the name.
+    pub initials: Option<SharedString>,
+    /// Set by hand; `None` means the default panel background.
+    pub colour: Option<Hsla>,
 }
 
 /// FR3 (Phase 6 of multi-project-window-switching): how the memory-pressure
@@ -803,6 +849,8 @@ impl MultiWorkspace {
                 key,
                 expanded: true,
                 last_active_workspace: None,
+                initials: None,
+                colour: None,
             },
         );
     }
@@ -942,7 +990,13 @@ impl MultiWorkspace {
         _cx: &mut Context<Self>,
     ) {
         let mut restored: Vec<ProjectGroupState> = Vec::new();
-        for SerializedProjectGroupState { key, expanded } in groups {
+        for SerializedProjectGroupState {
+            key,
+            expanded,
+            initials,
+            colour,
+        } in groups
+        {
             if key.path_list().paths().is_empty() {
                 continue;
             }
@@ -953,6 +1007,8 @@ impl MultiWorkspace {
                 key,
                 expanded,
                 last_active_workspace: None,
+                initials,
+                colour,
             });
         }
         for existing in std::mem::take(&mut self.project_groups) {
@@ -961,6 +1017,274 @@ impl MultiWorkspace {
             }
         }
         self.project_groups = restored;
+    }
+
+    /// Asks before taking a project off this window.
+    ///
+    /// Lives here rather than at either surface because both surfaces and the
+    /// drag-out drop target need it, and `open_project_group_in_new_window`
+    /// *is* a remove with an extra step -- it calls `remove_project_group`
+    /// itself. One destructive step, one question.
+    pub fn confirm_and_remove_project_group(
+        &mut self,
+        key: &ProjectGroupKey,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.clone();
+        self.confirm_then(
+            "Remove this project?",
+            format!(
+                "{label} will be taken off this window. Nothing on disk is touched, \
+                 and the project stays in your recent list."
+            ),
+            "Remove",
+            window,
+            cx,
+            move |this, window, cx| {
+                this.remove_project_group(&key, window, cx)
+                    .detach_and_log_err(cx);
+            },
+        );
+    }
+
+    /// Asks before moving a project into a window of its own.
+    pub fn confirm_and_move_project_to_new_window(
+        &mut self,
+        key: &ProjectGroupKey,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.clone();
+        self.confirm_then(
+            "Move this project to a new window?",
+            format!("{label} will leave this window and open in one of its own."),
+            "Move",
+            window,
+            cx,
+            move |this, window, cx| {
+                this.open_project_group_in_new_window(&key, window, cx)
+                    .detach_and_log_err(cx);
+            },
+        );
+    }
+
+    fn confirm_then(
+        &mut self,
+        title: &str,
+        detail: String,
+        action_label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            title,
+            Some(&detail),
+            &[action_label, "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            // Anything but the first button -- including dismissing the box --
+            // leaves everything as it was.
+            if answer.await.ok() != Some(0) {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| then(this, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Writes down the window's own project the first time anything asks.
+    ///
+    /// A window opened on a folder has that project *synthesized* into the
+    /// displayed list by `derived_project_groups` and stored nowhere, so
+    /// switching away from it made it look as though the new project had
+    /// replaced it, and `serialize` had nothing to record — a restarted window
+    /// remembered no projects at all.
+    ///
+    /// Only when the stored list is **empty**, and that bound is load-bearing
+    /// rather than an optimisation. The synthesis exists to keep the active
+    /// project on screen, which includes a group *mid-removal*:
+    /// `remove_project_group` takes the group out of the list and only then
+    /// closes its workspaces, so a store that ran unconditionally resurrected
+    /// the very group being removed and sent the removal's fallback to the wrong
+    /// project. Once anything is stored, the ordinary paths
+    /// (`ensure_project_group_state` on open and retain) keep the list, and this
+    /// must stay out of their way.
+    fn store_displayed_projects(&mut self, cx: &App) {
+        if !self.project_groups.is_empty() {
+            return;
+        }
+        let displayed: Vec<ProjectGroupKey> = self
+            .project_groups(cx)
+            .iter()
+            .map(|group| group.key.clone())
+            .collect();
+        for key in displayed {
+            self.ensure_project_group_state(key);
+        }
+    }
+
+    /// Brings `project_groups` into line with what the rail is showing.
+    ///
+    /// The window's own group is *synthesized* by `derived_project_groups` when
+    /// nothing has registered it, so a freshly opened project is on the rail
+    /// while the stored list is still empty. Two things go wrong without this:
+    /// a presentation setter finds no entry and silently drops the value, and a
+    /// reorder addresses the stored list by a *displayed* index that does not
+    /// line up with it. Both are silent, so the lists are made to agree once,
+    /// here, rather than each caller guessing.
+    ///
+    /// Order comes from the displayed list, so a group materialized here lands
+    /// where the rail already shows it rather than jumping to the front.
+    fn materialize_project_groups(&mut self, cx: &App) {
+        let displayed: Vec<ProjectGroupKey> = self
+            .project_groups(cx)
+            .iter()
+            .map(|group| group.key.clone())
+            .collect();
+        let already_agrees = displayed.len() == self.project_groups.len()
+            && displayed
+                .iter()
+                .zip(self.project_groups.iter())
+                .all(|(key, group)| *key == group.key);
+        if already_agrees {
+            return;
+        }
+
+        let mut existing = std::mem::take(&mut self.project_groups);
+        let mut rebuilt = Vec::with_capacity(displayed.len());
+        for key in displayed {
+            match existing.iter().position(|group| group.key == key) {
+                Some(at) => rebuilt.push(existing.remove(at)),
+                None => rebuilt.push(ProjectGroupState {
+                    key,
+                    expanded: true,
+                    last_active_workspace: None,
+                    initials: None,
+                    colour: None,
+                }),
+            }
+        }
+        // Anything stored but not displayed keeps its place at the end rather
+        // than being dropped: a group can be remembered without being shown.
+        rebuilt.extend(existing);
+        self.project_groups = rebuilt;
+    }
+
+    /// The mutable state a presentation setter writes into, or `None` if this
+    /// window has no such project.
+    ///
+    /// A key this window does not show gets nothing — writing a colour for an
+    /// arbitrary key would put a phantom project on the rail.
+    fn presentation_state_for(
+        &mut self,
+        key: &ProjectGroupKey,
+        cx: &App,
+    ) -> Option<&mut ProjectGroupState> {
+        if !self
+            .project_groups(cx)
+            .iter()
+            .any(|group| group.key == *key)
+        {
+            return None;
+        }
+        self.materialize_project_groups(cx);
+        self.project_groups
+            .iter_mut()
+            .find(|group| group.key == *key)
+    }
+
+    /// Puts a project at a given place on the rail, and remembers it.
+    ///
+    /// `to` is an index into the list as shown, which is why
+    /// `materialize_project_groups` runs first: the two lists have to be the
+    /// same list before an index means anything.
+    pub fn move_project_group(&mut self, key: &ProjectGroupKey, to: usize, cx: &mut Context<Self>) {
+        self.materialize_project_groups(cx);
+        let Some(from) = self
+            .project_groups
+            .iter()
+            .position(|group| group.key == *key)
+        else {
+            return;
+        };
+        let to = to.min(self.project_groups.len().saturating_sub(1));
+        // Dropping a project back where it started is not a change, and writing
+        // the record anyway would spend a disk write on nothing.
+        if from == to {
+            return;
+        }
+        let group = self.project_groups.remove(from);
+        self.project_groups.insert(to, group);
+        self.serialize(cx);
+        // Announced, not just redrawn. The sidebar rebuilds the list it draws
+        // from only when this event arrives (`update_entries`), so a reorder
+        // that merely notified left the rail painting the *old* order from its
+        // cached entries -- the model moved and the screen did not, which is
+        // indistinguishable from drag-and-drop being broken. The next drag then
+        // read a stale index and did nothing at all.
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+        cx.notify();
+    }
+
+    /// What the sidebar needs to draw this project's avatar, without it having
+    /// to know how the state is held.
+    pub fn project_presentation(
+        &self,
+        key: &ProjectGroupKey,
+    ) -> (Option<SharedString>, Option<Hsla>) {
+        self.project_groups
+            .iter()
+            .find(|group| group.key == *key)
+            .map(|group| (group.initials.clone(), group.colour))
+            .unwrap_or((None, None))
+    }
+
+    /// Sets the initials drawn on the avatar; an empty string clears them.
+    ///
+    /// The cap lives in `sanitize_initials`, one door for every caller, so no
+    /// surface can put ten characters into a square drawn for two.
+    pub fn set_project_initials(
+        &mut self,
+        key: &ProjectGroupKey,
+        initials: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let initials =
+            crate::project_appearance::sanitize_initials(initials).map(SharedString::from);
+        let Some(group) = self.presentation_state_for(key, cx) else {
+            return;
+        };
+        if group.initials == initials {
+            return;
+        }
+        group.initials = initials;
+        self.serialize(cx);
+        cx.notify();
+    }
+
+    /// Sets the avatar's colour; `None` goes back to the panel background.
+    pub fn set_project_colour(
+        &mut self,
+        key: &ProjectGroupKey,
+        colour: Option<Hsla>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.presentation_state_for(key, cx) else {
+            return;
+        };
+        if group.colour == colour {
+            return;
+        }
+        group.colour = colour;
+        self.serialize(cx);
+        cx.notify();
     }
 
     pub fn project_group_keys(&self) -> Vec<ProjectGroupKey> {
@@ -1926,6 +2250,14 @@ impl MultiWorkspace {
             return;
         }
 
+        // Write down what the rail is showing *before* the active workspace
+        // changes. The window's own project is only synthesized into the
+        // displayed list (see `derived_project_groups`), and a synthesized entry
+        // follows whatever is active -- so switching away from it made it look
+        // as though opening a second project had replaced the first, and left
+        // nothing for `serialize` to record.
+        self.store_displayed_projects(cx);
+
         let old_active_workspace = self.active_workspace.clone();
         let old_active_was_retained = self.active_workspace_is_retained();
         let workspace_was_retained = self.is_workspace_retained(&workspace);
@@ -2113,6 +2445,10 @@ impl MultiWorkspace {
     }
 
     pub fn serialize(&mut self, cx: &mut Context<Self>) {
+        // Same reason: the record is built from the *stored* list, so a project
+        // that only ever existed as a synthesized entry was never written down
+        // and never came back.
+        self.store_displayed_projects(cx);
         self._serialize_task = Some(cx.spawn(async move |this, cx| {
             let Some((window_id, state)) = this
                 .read_with(cx, |this, cx| {
@@ -2121,12 +2457,7 @@ impl MultiWorkspace {
                         project_groups: this
                             .project_groups
                             .iter()
-                            .map(|group| {
-                                crate::persistence::model::SerializedProjectGroup::from_group(
-                                    &group.key,
-                                    group.expanded,
-                                )
-                            })
+                            .map(crate::persistence::model::SerializedProjectGroup::from_group)
                             .collect::<Vec<_>>(),
                         sidebar_open: this.sidebar_open,
                         sidebar_state: this.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
@@ -2374,6 +2705,8 @@ impl MultiWorkspace {
             key: group.key,
             expanded: group.expanded,
             last_active_workspace: None,
+            initials: None,
+            colour: None,
         });
     }
 
@@ -2764,6 +3097,21 @@ impl Render for MultiWorkspace {
                 .font(ui_font)
                 .text_color(text_color)
                 .on_action(cx.listener(Self::close_window))
+                // Dropped anywhere but the rail: the project leaves this window.
+                // A drop that lands on an avatar never reaches here -- an inner
+                // drop listener that matches calls `stop_propagation` itself
+                // (`div.rs`), so reordering does not also ask this question.
+                .on_drop(
+                    cx.listener(|this: &mut Self, dragged: &DraggedProject, window, cx| {
+                        let label = dragged.label.clone();
+                        this.confirm_and_move_project_to_new_window(
+                            &dragged.key,
+                            &label,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
                 .when(self.multi_workspace_enabled(cx), |this| {
                     this.on_action(cx.listener(
                         |this: &mut Self, _: &ToggleWorkspaceSidebar, window, cx| {
@@ -2818,8 +3166,7 @@ impl Render for MultiWorkspace {
                                     // The pointer is over the outer edge of
                                     // rail + panel, but `width` measures the
                                     // panel alone.
-                                    let new_width =
-                                        e.event.position.x - sidebar.rail_width(cx);
+                                    let new_width = e.event.position.x - sidebar.rail_width(cx);
                                     sidebar.set_width(Some(new_width.max(px(0.))), cx);
                                 }
                             },
