@@ -2,7 +2,7 @@
 description = "A privacy-first fork of the Zed code editor, with auth, cloud, AI and telemetry removed."
 edition.workspace = true
 name = "zode"
-version = "0.1.0"
+version = "0.1.1"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zode contributors"]
