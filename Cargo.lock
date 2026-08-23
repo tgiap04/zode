@@ -122,7 +122,6 @@ dependencies = [
 name = "agent_usage"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "fs",
  "futures 0.3.32",
@@ -18932,7 +18931,6 @@ dependencies = [
  "schemars",
  "serde",
  "util",
- "uuid",
 ]
 
 [[package]]

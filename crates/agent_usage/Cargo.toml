@@ -25,7 +25,6 @@ doctest = false
 # what they are called -- `project` carries that -- but nothing about the agent
 # views themselves. Depending on `agent_ui` would tie a status-bar indicator to
 # the whole conversation stack.
-anyhow.workspace = true
 chrono.workspace = true
 fs.workspace = true
 futures.workspace = true

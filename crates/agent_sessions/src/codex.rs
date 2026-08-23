@@ -506,7 +506,11 @@ mod tests {
         // Somewhere else entirely.
         let outside = dir.path().join("elsewhere.jsonl");
         std::fs::write(&outside, "{}").unwrap();
-        session.log_path = Some(outside.clone());
+        // Moved, not cloned. The only later reader is the `#[cfg(unix)]` block
+        // below, which builds the path again for itself -- keeping a clone here
+        // for its sake made this a redundant clone on Windows, where that block
+        // does not exist, and `clippy_windows` was the one job that said so.
+        session.log_path = Some(outside);
         assert!(
             provider.paths_to_trash(&session).is_empty(),
             "a path from the database must not become a delete outside the store"
@@ -529,7 +533,8 @@ mod tests {
         #[cfg(unix)]
         {
             let link = codex.join("sessions").join("link.jsonl");
-            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let target = dir.path().join("elsewhere.jsonl");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
             session.log_path = Some(link);
             assert!(
                 provider.paths_to_trash(&session).is_empty(),
