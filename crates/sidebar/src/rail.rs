@@ -1,6 +1,5 @@
 use crate::Sidebar;
-use crate::project_list::ListEntry;
-use gpui::{AnyElement, App, Context, SharedString, Window, px};
+use gpui::{AnyElement, App, Context, Window, px};
 use ui::{Tooltip, prelude::*};
 use workspace::pane_group::SURFACE_ROUNDING;
 
@@ -8,8 +7,6 @@ use workspace::pane_group::SURFACE_ROUNDING;
 /// square sits centred with room for the active-project indicator on the
 /// leading edge.
 pub const RAIL_WIDTH: Pixels = px(48.0);
-
-const RAIL_ITEM_SIZE: Pixels = px(48.0);
 
 /// One knob for every glyph in the column, so they cannot drift apart.
 ///
@@ -23,40 +20,6 @@ pub(crate) const RAIL_ICON_SIZE: IconSize = IconSize::Small;
 /// 48px column reads as one run-on strip. The column's width does not shrink with
 /// the font, so neither should the air between its buttons.
 pub(crate) const RAIL_ICON_GAP: Pixels = px(10.0);
-const RAIL_SQUARE_SIZE: Pixels = px(32.0);
-
-/// One or two letters standing in for the project, Discord-style. Word
-/// boundaries win over raw prefix characters so `my-cool-app` reads `MA`
-/// rather than `MY`.
-fn project_initials(label: &str) -> SharedString {
-    let mut initials = String::new();
-    for word in label.split(|c: char| !c.is_alphanumeric()) {
-        let Some(first) = word.chars().next() else {
-            continue;
-        };
-        initials.extend(first.to_uppercase());
-        if initials.chars().count() == 2 {
-            return initials.into();
-        }
-    }
-    if initials.is_empty() {
-        // Nothing alphanumeric to work with (e.g. a path of only
-        // separators) -- fall back to raw leading characters so the square
-        // is never blank.
-        initials.extend(label.chars().take(2).flat_map(char::to_uppercase));
-    }
-    initials.into()
-}
-
-fn rail_tooltip(entry: &ListEntry) -> SharedString {
-    if entry.is_reindexing {
-        format!("{} — re-indexing after waking", entry.label).into()
-    } else if entry.activity == Some(project::ProjectActivity::Hibernated) {
-        format!("{} — hibernated", entry.label).into()
-    } else {
-        entry.label.clone()
-    }
-}
 
 impl Sidebar {
     /// Whether the wide panel is showing. Owned by `MultiWorkspace` rather
@@ -78,12 +41,25 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panels = self.render_rail_panels(window, cx);
-        let colors = cx.theme().colors();
+        // Copied out: `colors()` borrows `cx`, and the listeners below need it
+        // mutably.
+        let accent = cx.theme().colors().text_accent;
+        let colors = cx.theme().colors().clone();
         let entries = self.contents.rail_entries.clone();
 
         v_flex()
             .id("project-rail")
             .debug_selector(|| "project-rail".into())
+            // The rail catches every drop that lands on it, so a project
+            // released on the footer or the agents block is simply not a
+            // placement rather than a trip to a new window. Without a handler
+            // here the window root would take it and ask to move the project out
+            // -- "not on a row" is not the same question as "off the rail".
+            .on_drop(
+                cx.listener(|this, _dragged: &workspace::DraggedProject, _window, cx| {
+                    this.set_drop_gap(None, cx);
+                }),
+            )
             .h_full()
             .w(RAIL_WIDTH)
             .flex_shrink_0()
@@ -107,111 +83,65 @@ impl Sidebar {
             .child(
                 v_flex()
                     .id("project-rail-items")
+                    .debug_selector(|| "project-rail-items".into())
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    // Only ever *clears*, and never claims a gap. Handlers here
+                    // fire in an order that put this one after the rows -- it was
+                    // overwriting a row's answer with its own -- so the rule is
+                    // that every element claims only while the pointer is inside
+                    // its own bounds, and those bounds do not overlap. Then the
+                    // order stops mattering.
+                    .on_drag_move(cx.listener(
+                        |this,
+                         event: &gpui::DragMoveEvent<workspace::DraggedProject>,
+                         _window,
+                         cx| {
+                            if !event.bounds.contains(&event.event.position) {
+                                this.set_drop_gap(None, cx);
+                            }
+                        },
+                    ))
+                    .on_drop(cx.listener(
+                        |this, dragged: &workspace::DraggedProject, _window, cx| {
+                            let Some(gap) = this.drop_gap else {
+                                return;
+                            };
+                            let key = dragged.key.clone();
+                            this.drop_project_at_gap(&key, gap, cx);
+                        },
+                    ))
+                    .children(entries.iter().enumerate().flat_map(|(ix, entry)| {
+                        // The line stands in the gap the project would land in,
+                        // which is a place between rows rather than a row.
+                        let indicator = (self.drop_gap == Some(ix)).then(|| drop_indicator(accent));
+                        indicator
+                            .into_iter()
+                            .chain(std::iter::once(self.render_rail_item(ix, entry, cx)))
+                    }))
                     .children(
-                        entries
-                            .iter()
-                            .enumerate()
-                            .map(|(ix, entry)| self.render_rail_item(ix, entry, cx)),
-                    ),
+                        (self.drop_gap == Some(entries.len())).then(|| drop_indicator(accent)),
+                    )
+                    // The empty space under the last row, as an element of its
+                    // own so it can claim the end of the list without overlapping
+                    // any row.
+                    .child(div().flex_1().min_h_0().w_full().on_drag_move(cx.listener({
+                        let count = entries.len();
+                        move |this,
+                              event: &gpui::DragMoveEvent<workspace::DraggedProject>,
+                              _window,
+                              cx| {
+                            if event.bounds.contains(&event.event.position) {
+                                this.set_drop_gap(Some(count), cx);
+                            }
+                        }
+                    }))),
             )
             .children(panels)
             .child(self.render_rail_database(window, cx))
             .child(self.render_rail_agents(window, cx))
             .child(self.render_rail_footer(cx))
-            .into_any_element()
-    }
-
-    fn render_rail_item(
-        &self,
-        ix: usize,
-        entry: &ListEntry,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = cx.theme().colors();
-        let warning = cx.theme().status().warning;
-        let is_active = entry.is_active;
-        let is_hibernated = entry.activity == Some(project::ProjectActivity::Hibernated);
-
-        let square_bg = if is_active {
-            colors.element_selected
-        } else {
-            colors.element_background
-        };
-        let key_for_click = entry.key.clone();
-
-        div()
-            .id(("project-rail-item", ix))
-            .relative()
-            .w_full()
-            .h(RAIL_ITEM_SIZE)
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            // Leading indicator pill marking the active project, in the
-            // Discord-style rail this is modelled on. It rides the rail's outer
-            // edge, so it flips with the column rather than crossing to the side
-            // the separator is already on.
-            .when(is_active, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .h(px(24.0))
-                        .w(px(3.0))
-                        .rounded_sm()
-                        .bg(colors.text_accent),
-                )
-            })
-            .child(
-                div()
-                    .size(RAIL_SQUARE_SIZE)
-                    .rounded_md()
-                    .bg(square_bg)
-                    .border_1()
-                    .map(|el| {
-                        if is_active {
-                            el.border_color(colors.border_selected)
-                        } else {
-                            el.border_color(colors.border_transparent)
-                        }
-                    })
-                    .when(is_hibernated && !is_active, |el| el.opacity(0.6))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Label::new(project_initials(&entry.label))
-                            .size(LabelSize::Small)
-                            .color(if is_active {
-                                Color::Default
-                            } else {
-                                Color::Muted
-                            }),
-                    ),
-            )
-            // FR7 parity with the panel rows: a project mid-reindex after
-            // waking gets a corner dot, since the rail has no room for the
-            // panel's icon-plus-tooltip treatment.
-            .when(entry.is_reindexing, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(6.0))
-                        .right(px(6.0))
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(warning),
-                )
-            })
-            .hover(|s| s.bg(colors.element_hover))
-            .tooltip(Tooltip::text(rail_tooltip(entry)))
-            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
-                this.activate_or_open_workspace_for_group(&key_for_click, window, cx);
-            }))
             .into_any_element()
     }
 
@@ -276,16 +206,12 @@ impl Sidebar {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::project_initials;
-
-    #[test]
-    fn initials_prefer_word_boundaries() {
-        assert_eq!(project_initials("my-cool-app").as_ref(), "MC");
-        assert_eq!(project_initials("zode").as_ref(), "Z");
-        assert_eq!(project_initials("examio_be").as_ref(), "EB");
-        assert_eq!(project_initials("").as_ref(), "");
-        assert_eq!(project_initials("///").as_ref(), "//");
-    }
+/// The line that says where a dragged project will land.
+fn drop_indicator(colour: gpui::Hsla) -> AnyElement {
+    div()
+        .w_full()
+        .h(px(2.0))
+        .flex_shrink_0()
+        .bg(colour)
+        .into_any_element()
 }

@@ -107,6 +107,31 @@ Zode provides extensive control over UI elements including:
 
 → [Visual Customization documentation](./visual-customization.md) for all UI element settings
 
+## The Project Rail
+
+Every open project has a square on the rail down the left edge. Clicking one
+switches to that project; right-clicking opens its own menu:
+
+- **Open Project in New Window** — moves the project out of this window. Only
+  offered when there is more than one project open, since otherwise the window it
+  would move to is this one.
+- **Reveal in Finder** / **Copy Project Path** — a project opened over several
+  folders copies all of them, one per line.
+- **Change Initials…** — the two letters drawn on the square. Useful when two
+  projects reduce to the same initials. This changes the square only: the
+  project's name, its path and the window title are untouched.
+- **Change Colour…** — picks a colour for the square, previewed on the square
+  itself while you choose. **Use Default** returns it to the theme's colour. The
+  letters switch between light and dark on their own so they stay readable on
+  whatever you pick.
+- **Remove Project** — takes the project off this window. Nothing on disk is
+  touched and the project stays in your recent list.
+
+Squares can be **dragged to reorder** them, and the order is remembered between
+sessions. A newly opened project still appears at the top. Dragging a square off
+the rail entirely moves that project to a new window — both that and **Remove**
+ask for confirmation first, since both take the project off this window.
+
 ## What's Next
 
 - [All Settings](./reference/all-settings.md) — Complete settings reference
