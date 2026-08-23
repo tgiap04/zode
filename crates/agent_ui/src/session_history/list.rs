@@ -213,7 +213,7 @@ impl AgentHistoryPanel {
             .justify_center()
             .gap_2()
             .child(
-                Icon::new(IconName::Asteroid)
+                Icon::new(IconName::Astroid)
                     .size(IconSize::XLarge)
                     .color(Color::Muted),
             )

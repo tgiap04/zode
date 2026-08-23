@@ -27,40 +27,17 @@ pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<AgentView>(cx);
 
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
-        // Shows or hides the history, taking the tool column turn by turn with
-        // whatever else lives there.
+        // Shows or hides the history, the same way every other panel's toggle
+        // does. Taking the column turn by turn is `Dock::show_panel`'s job now
+        // (see `Dock::takes_turns`), not something this action arranges for
+        // itself — a hand-rolled toggle here is how the header ended up with two
+        // buttons that behaved differently.
         //
-        // Written out rather than handed to `toggle_panel_focus`, which routes
-        // through `Dock::show_panel` and therefore *stacks*: the history and the
-        // project tree would split the column's height between them, and two
-        // vertical lists in half a column each serves neither. `activate_panel`
-        // is the call that makes one panel the only visible one.
+        // Hiding leaves the panel in the dock, so its search text and expanded
+        // rows survive the round trip.
         workspace.register_action(
             |workspace, _: &zed_actions::agent::ToggleHistory, window, cx| {
-                let dock = workspace.right_dock().clone();
-                let Some(index) = dock.read(cx).panel_index_for_type::<AgentHistoryPanel>() else {
-                    return;
-                };
-                // Already up means: the dock is open and the panel it is drawing
-                // is this one.
-                let showing = {
-                    let dock = dock.read(cx);
-                    dock.is_open()
-                        && dock
-                            .visible_panel()
-                            .and_then(|panel| panel.to_any().downcast::<AgentHistoryPanel>().ok())
-                            .is_some()
-                };
-                dock.update(cx, |dock, cx| {
-                    if showing {
-                        // Put away, not closed: the dock keeps the panel, so its
-                        // search text and expanded rows survive the round trip.
-                        dock.set_open(false, window, cx);
-                    } else {
-                        dock.activate_panel(index, window, cx);
-                        dock.set_open(true, window, cx);
-                    }
-                });
+                workspace.toggle_panel_focus::<AgentHistoryPanel>(window, cx);
             },
         );
         workspace.register_action(|workspace, action: &OpenAgent, window, cx| {

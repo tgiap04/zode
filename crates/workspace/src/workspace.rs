@@ -1707,12 +1707,7 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let database_dock = Dock::new(
-            Self::OWN_COLUMN_POSITION,
-            modal_layer.clone(),
-            window,
-            cx,
-        );
+        let database_dock = Dock::new(Self::OWN_COLUMN_POSITION, modal_layer.clone(), window, cx);
         database_dock.update(cx, |dock, _cx| {
             dock.mark_as_own_column(DockColumn::Database)
         });
@@ -5140,9 +5135,7 @@ impl Workspace {
                     match direction {
                         SplitDirection::Up => None,
                         SplitDirection::Down => try_dock(&self.bottom_dock),
-                        SplitDirection::Left => {
-                            try_dock(&self.left_dock).or(sidebar_target)
-                        }
+                        SplitDirection::Left => try_dock(&self.left_dock).or(sidebar_target),
                         SplitDirection::Right => try_dock(&self.right_dock),
                     }
                 }
@@ -14570,14 +14563,102 @@ mod tests {
         );
     }
 
-    /// The same split, in the dock that draws a header over it.
+    /// A stack recorded before the header dock took turns must not come back as
+    /// a stack.
     ///
-    /// The stack is nested one flex level deeper there, and this crate's
-    /// recurring layout defect is a section that resolves to full width and zero
-    /// height under the wrong parent -- which every state assertion reports as
-    /// fine. The left-dock test above cannot see it: that dock has no header.
+    /// The record on a real machine was written by the build that stacked, so
+    /// this is the route by which the split returns on the next launch — with
+    /// nothing the user did to explain it. `takes_turns` is asked on the way in
+    /// as well as on the way through `show_panel`.
     #[gpui::test]
-    async fn a_stack_under_a_header_still_divides_the_dock(cx: &mut gpui::TestAppContext) {
+    async fn a_recorded_stack_does_not_restore_one_in_a_header_dock(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Right, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                // Exactly what the previous build wrote: two names and an even
+                // split between them.
+                let applied = dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: vec!["TestPanel".to_string(), "OtherTestPanel".to_string()],
+                        flexes: vec![1.0, 1.0],
+                    },
+                    window,
+                    cx,
+                );
+                assert!(applied, "a record naming panels this dock holds applies");
+                dock.set_open(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let (showing, names) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.right_dock().read(cx);
+            (
+                dock.visible_panels().count(),
+                dock.visible_panels()
+                    .map(|panel| panel.persistent_name().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            (showing, names),
+            (1, vec!["TestPanel".to_string()]),
+            "the first recorded panel comes back and the rest of the record is \
+             dropped"
+        );
+
+        // The left dock has no header and no switcher, so its records still
+        // restore a stack -- the guard is about the dock that takes turns, not
+        // about stacks in general.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: vec!["TestPanel".to_string(), "OtherTestPanel".to_string()],
+                        flexes: vec![1.0, 1.0],
+                    },
+                    window,
+                    cx,
+                );
+                dock.set_open(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            2,
+            "a dock without a header still restores its stack"
+        );
+    }
+
+    /// The dock that draws a header takes turns: showing one panel puts the
+    /// other away, and the survivor gets the whole column.
+    ///
+    /// This replaced a test asserting the opposite — that a header dock split
+    /// itself between two stacked sections. The header's buttons are a tab
+    /// strip, and the two of them disagreed: one took the column, one split it.
+    /// The left-dock stack tests above still hold; a dock with no header has no
+    /// switcher, so stacking is the only way to see a second panel there.
+    #[gpui::test]
+    async fn a_header_dock_takes_turns_rather_than_stacking(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -14605,6 +14686,7 @@ mod tests {
             workspace.right_dock().update(cx, |dock, cx| {
                 dock.activate_panel(0, window, cx);
                 dock.set_open(true, window, cx);
+                // The route every button, keybinding and palette entry takes.
                 dock.show_panel(1, window, cx);
             });
         });
@@ -14612,45 +14694,62 @@ mod tests {
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
 
+        let (showing, names) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.right_dock().read(cx);
+            (
+                dock.visible_panels().count(),
+                dock.visible_panels()
+                    .map(|panel| panel.persistent_name().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            (showing, names),
+            (1, vec!["OtherTestPanel".to_string()]),
+            "showing one panel in a header dock must put the other away"
+        );
+
         let header = cx
             .debug_bounds("dock-header")
-            .expect("a right dock showing panels with icons must draw its header");
-        let top = cx
-            .debug_bounds("dock-stacked-panel:0")
-            .expect("the first section of the stack should be drawn");
-        let bottom = cx
-            .debug_bounds("dock-stacked-panel:1")
-            .expect("the second section of the stack should be drawn");
-
-        for (which, bounds) in [("first", top), ("second", bottom)] {
+            .expect("a right dock showing a panel with an icon must draw its header");
+        // Unique here: `dock-panel` is drawn only by a dock with something to
+        // show, and this test opens exactly one.
+        let dock_bounds = cx
+            .debug_bounds("dock-panel")
+            .expect("the dock itself must be drawn");
+        assert!(
+            header.bottom() <= dock_bounds.bottom(),
+            "the header must stand inside the dock, ended at {:?} against {:?}",
+            header.bottom(),
+            dock_bounds.bottom()
+        );
+        assert!(
+            dock_bounds.bottom() - header.bottom() > px(50.),
+            "and must leave the rest of the column to the panel, got {:?} below \
+             a header ending at {:?}",
+            dock_bounds.bottom() - header.bottom(),
+            header.bottom()
+        );
+        // No section wrapper at all: `render_showing` draws a lone panel bare,
+        // and the per-section header with its own close button belongs to a
+        // stack. Its absence is the layout half of "takes turns" -- there is
+        // nothing here to divide.
+        for selector in ["dock-stacked-panel:0", "dock-stacked-panel:1"] {
             assert!(
-                bounds.size.width > px(0.) && bounds.size.height > px(0.),
-                "the {which} section drew with no area under the header: {bounds:?}"
+                cx.debug_bounds(selector).is_none(),
+                "a dock taking turns must draw no stack sections, found {selector}"
             );
         }
-        assert!(
-            header.bottom() <= top.origin.y + px(1.),
-            "the header must stand above the whole stack, ended at {:?} with the \
-             first section starting at {:?}",
-            header.bottom(),
-            top.origin.y
-        );
-        assert!(
-            top.bottom() <= bottom.origin.y,
-            "and the stack must still read top-to-bottom without overlapping, \
-             got {top:?} then {bottom:?}"
-        );
 
-        // Both buttons, not just the active one: the header stands for the whole
-        // dock, and a stack lights every section it is showing.
+        // Both buttons stay in the header -- that is how you switch back. Only
+        // one of them is lit, which the state assertion above already settled.
         for selector in [
             "dock-header-button:TestPanel",
             "dock-header-button:OtherTestPanel",
         ] {
             assert!(
                 cx.debug_bounds(selector).is_some(),
-                "the header must name every panel the dock is showing, missing \
-                 {selector}"
+                "the header must name every panel the dock holds, missing {selector}"
             );
         }
     }

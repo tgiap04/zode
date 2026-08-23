@@ -256,7 +256,7 @@ impl Panel for AgentHistoryPanel {
     }
 
     fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::Asteroid)
+        Some(IconName::Astroid)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {

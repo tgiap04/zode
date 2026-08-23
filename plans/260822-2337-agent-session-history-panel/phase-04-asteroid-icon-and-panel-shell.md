@@ -148,6 +148,42 @@ Phase 05 lấp nội dung vào cái vỏ này.
 
 ## Ghi chú khi làm xong
 
+### Lỗi người dùng báo (23/08), đã sửa: header có hai nút, hai hành vi
+
+Project panel đi qua `toggle_panel_focus` → `Dock::show_panel`, bật `entry.visible = true`
+mà **không tắt cái khác** → stack, chia đôi cột. Agent history đi qua handler riêng dùng
+`Dock::activate_panel` → độc quyền, chiếm cả cột. Cùng một thanh header, hai kết quả — và
+người dùng thấy "chỉ active được một cái" khi bấm cái này, "cả hai" khi bấm cái kia.
+
+Sửa ở **một chỗ**: `Dock::takes_turns()` = dock có vẽ header (tức dock Right, vì Left là
+own column của rail). `show_panel` hỏi nó và tắt các panel khác — nên mọi đường vào (nút,
+keybinding, command palette, `open_panel`) cùng một câu trả lời. Handler đặc cách trong
+`agent_ui.rs` bị **xoá**, thay bằng `toggle_panel_focus` như mọi panel khác: nó tồn tại chỉ
+để bù cho `show_panel`, giờ là dư.
+
+Lý lẽ của ranh giới: header **là** cái switcher — nút của nó là một dãy tab, và tab thì một
+lúc một cái. Dock không có header thì không có cách nào switch, nên ở đó stack là đường duy
+nhất để thấy panel thứ hai. Bằng chứng ranh giới này đúng chỗ: **mọi** test stack trong
+`workspace` dùng dock *left*, đúng một test dùng *right* — chính cái khẳng định bị đảo lại.
+
+Đường lỗi thứ hai, không tự thấy được: `apply_stack_state` bật visible cho mọi tên đã ghi,
+nên state persist từ bản cũ sẽ **dựng lại cái split ở lần khởi động sau**, không hành vi nào
+của người dùng giải thích được. Đã truncate về 1 khi `takes_turns()`.
+
+Test: `a_header_dock_takes_turns_rather_than_stacking` (thay cho
+`a_stack_under_a_header_still_divides_the_dock`) và
+`a_recorded_stack_does_not_restore_one_in_a_header_dock` — cái sau còn khẳng định dock left
+**vẫn** restore stack, để guard không âm thầm giết feature. Cả hai đã falsify riêng.
+
+### Icon: astroid, không phải asteroid
+
+Hình người dùng gửi là đường **astroid** trong hình học — 4 mũi lõm, `x = a cos³t`. Cái tôi
+vẽ trước là *asteroid*: tảng đá có hố. Từ đầu người dùng viết "astroid", tôi đọc thành
+asteroid. Vẽ lại bằng 4 cubic bezier, mỗi cung một quadrant, control point cách cusp
+`0.39a` theo đúng tiếp tuyến (dọc ở cusp trên/dưới, ngang ở trái/phải) — trung điểm bezier
+ra 3.24 so với 3.25 của astroid thật. Đổi tên file + `IconName::Asteroid` → `Astroid`;
+`every_icon_name_has_an_asset` trong crate `icons` là thứ bắt được rename lệch.
+
 - `test_action_namespaces` **không cần sửa**: action nằm trong namespace `agent` đã có (`agent::ToggleHistory`), không tạo namespace mới. Đây là lý do chọn `agent` thay vì `agent_history`.
 - `the_panels_button_moves_into_the_docks_own_header`: **xoá** assertion về agent-history thay vì sửa selector. Test đó ở crate `project_panel`, không thấy được panel của `agent_ui`, và nó dựng workspace bằng tay chứ không qua `initialize_panels`. Claim 'header liệt kê nhiều panel' nằm ở `workspace::a_stack_under_a_header_still_divides_the_dock`.
 - Toggle **không** dùng `toggle_panel_focus`: đường đó đi qua `Dock::show_panel` nên **stack** panel. Handler tự viết dùng `activate_panel` để thay chỗ nhau, có test phân biệt hai hành vi.

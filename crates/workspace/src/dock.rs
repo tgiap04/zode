@@ -2,9 +2,7 @@ use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::pane_group::element::pane_axis;
 use crate::pane_group::{SURFACE_MARGIN, SURFACE_ROUNDING};
 use crate::persistence::model::DockData;
-use crate::{
-    DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings,
-};
+use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
 use anyhow::Context as _;
 use client::proto;
@@ -1063,11 +1061,46 @@ impl Dock {
             .any(|panel| panel.panel_id() == panel_id)
     }
 
-    /// Adds a panel to what the dock is showing, keeping the rest up.
+    /// Whether this dock shows one panel at a time.
     ///
-    /// The counterpart to `activate_panel`, which is exclusive. This is the one
-    /// that builds a stack.
+    /// A dock that draws a header draws a *switcher*: its buttons are a tab
+    /// strip, and a tab strip means one tab. A dock without a header has no way
+    /// to switch, so there stacking is the only route to a second panel and the
+    /// stack stays. That is the whole of the rule, and it is asked in one place
+    /// — `show_panel` — so every route in (button, keybinding, palette,
+    /// `open_panel`) lands on the same answer. Two routes disagreeing is exactly
+    /// the defect this replaced: the header's own two buttons behaved
+    /// differently, one taking the column and one splitting it.
+    pub fn takes_turns(&self) -> bool {
+        dock_header_draws_panel(self.position)
+    }
+
+    /// Brings a panel up: alone in a dock that takes turns, alongside whatever
+    /// is already there in one that stacks.
+    ///
+    /// The counterpart to `activate_panel`, which is always exclusive.
     pub fn show_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if panel_ix >= self.panel_entries.len() {
+            return;
+        }
+        let mut displaced_any = false;
+        if self.takes_turns() {
+            // Collected first: `set_active` reaches back into the app and cannot
+            // run while the entries are borrowed.
+            let displaced: Vec<usize> = self
+                .panel_entries
+                .iter()
+                .enumerate()
+                .filter(|(ix, entry)| *ix != panel_ix && entry.visible)
+                .map(|(ix, _)| ix)
+                .collect();
+            displaced_any = !displaced.is_empty();
+            for ix in displaced {
+                self.panel_entries[ix].visible = false;
+                let panel = self.panel_entries[ix].panel.clone();
+                panel.set_active(false, window, cx);
+            }
+        }
         let Some(entry) = self.panel_entries.get_mut(panel_ix) else {
             return;
         };
@@ -1076,7 +1109,10 @@ impl Dock {
         // back onto it", not "nothing to do".
         let was_showing = entry.visible;
         entry.visible = true;
-        if !was_showing {
+        // Displacing a neighbour matters even when this panel was already up: the
+        // flexes still describe a split column, and the survivor would keep half
+        // the height with nothing beside it.
+        if !was_showing || displaced_any {
             self.reset_stack_flexes();
         }
         self.active_panel_index = Some(panel_ix);
@@ -1270,6 +1306,13 @@ impl Dock {
         }
         if indices.is_empty() {
             return false;
+        }
+        // A dock that takes turns shows one panel, and a record written before it
+        // did — or by hand — must not be the way a stack comes back. Restoring
+        // two here would put the split back on the next launch, with nothing the
+        // user did to explain it.
+        if self.takes_turns() {
+            indices.truncate(1);
         }
 
         for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
@@ -2013,9 +2056,7 @@ fn panel_button(
             }
         })
         .when(!is_menu_open, |this| {
-            this.tooltip(move |_window, cx| {
-                Tooltip::for_action(tooltip.clone(), &*action, cx)
-            })
+            this.tooltip(move |_window, cx| Tooltip::for_action(tooltip.clone(), &*action, cx))
         });
 
     div().relative().child(button).when_some(
@@ -2113,8 +2154,10 @@ impl DockButton {
             .ok_or_else(|| anyhow::anyhow!("can't render a panel button without an icon tooltip"))
             .log_err()?;
 
-        // Lit per panel rather than per dock: several can be up at once, so
-        // several buttons can be lit at once. The action for one that is up still
+        // Lit per panel rather than per dock: a stacking dock can have several up
+        // at once, so several of its buttons can be lit at once. A dock that
+        // takes turns lights exactly one, which falls out of the same reading
+        // rather than needing a second. The action for one that is up still
         // closes the dock — this button has no way to name a single panel, and
         // `Panel::toggle_action` respects `close_panel_on_toggle`, so it cannot
         // be relied on to hide.

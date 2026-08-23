@@ -22,7 +22,7 @@ pub enum IconName {
     ArrowRightLeft,
     ArrowUp,
     ArrowUpRight,
-    Asteroid,
+    Astroid,
     AtSign,
     Attach,
     AudioOff,
