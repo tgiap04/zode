@@ -1,0 +1,39 @@
+{
+  "task": "Delete the agent's chat/UI surface so an agent is a terminal session only, and make the Material Icon Theme the sole, colour, unchangeable icon theme.",
+  "mode": "takumi",
+  "acceptanceCriteria": [
+    "no code path can put an agent into a chat or UI mode",
+    "the ACP stack the chat depended on is gone from the workspace",
+    "file and folder icons come from the Material Icon Theme in colour",
+    "no user-facing control can change the icon theme",
+    "file name matching is case-insensitive so Dockerfile and README.MD resolve",
+    "colour themes remain fully user-changeable",
+    "the workspace compiles and every touched suite is green"
+  ],
+  "touchpoints": [
+    "crates/agent_ui/",
+    "crates/acp_thread/ (deleted)",
+    "crates/agent_servers/ (deleted)",
+    "crates/acp_tools/ (deleted)",
+    "crates/agent_settings/ (deleted)",
+    "crates/theme/src/icon_theme.rs",
+    "crates/theme/src/icon_theme_material.rs",
+    "crates/theme/src/registry.rs",
+    "crates/file_icons/src/file_icons.rs",
+    "crates/ui/src/components/icon.rs",
+    "crates/theme_selector/",
+    "crates/extensions_ui/src/extensions_ui.rs",
+    "crates/zed_actions/src/lib.rs",
+    "crates/zed/src/zed/app_menus.rs",
+    "assets/settings/default.json",
+    "assets/icons/file_icons/material/"
+  ],
+  "blastRadius": "Four crates removed from the workspace graph, so anything depending on them fails to compile rather than silently degrading. The icon-theme resolve path is shared with colour-theme resolution, so the lock was placed in ThemeRegistry rather than in settings resolution to keep colour themes untouched. The icon_theme settings key must stay present in default.json because from_settings unwraps unconditionally and a missing key is a startup panic. Extension-supplied icon themes now register but cannot take effect.",
+  "contracts": [
+    "ThemeRegistry::get_icon_theme(name) no longer honours name — every caller resolves to the default",
+    "ThemeRegistry::list_icon_themes() returns exactly one entry",
+    "AgentViewMode lost its Chat variant; mode_from_name defaults to Terminal",
+    "IconSource gained EmbeddedColor, routing embedded SVGs through img() instead of svg()",
+    "settings_content agent.rs kept intact — project::agent_server_store needs AllAgentServersSettings for terminal mode"
+  ]
+}

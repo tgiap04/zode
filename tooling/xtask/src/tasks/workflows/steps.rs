@@ -96,6 +96,13 @@ impl CheckoutStep {
         self
     }
 
+    /// For a token that is not a step output -- a secret read straight from the
+    /// workflow context, rather than one minted by an earlier step.
+    pub fn with_token_expression(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
     pub fn with_path(mut self, path: &str) -> Self {
         self.path = Some(path.to_string());
         self
@@ -315,7 +322,18 @@ pub fn setup_linux() -> Step<Run> {
     named::bash("./script/linux").timeout_minutes(20u32)
 }
 
-fn download_wasi_sdk() -> Step<Run> {
+/// Fetches the WASI SDK before anything needs it.
+///
+/// `extension_host`'s `test_extension_store_with_test_extension` compiles a real
+/// extension, and compiling a grammar needs this SDK. Without this step the
+/// *test* downloads it, inside its own 300s nextest budget and with no retry, so
+/// a slow GitHub release turns into a failed test rather than a slow one -- which
+/// is what took `run_tests_mac` down while `run_tests_linux` passed, Linux being
+/// the only platform that already ran this.
+///
+/// Must come after `clear_target_dir_if_large`: the SDK lands in `target/`, and
+/// clearing that afterwards would take it with it.
+pub(crate) fn download_wasi_sdk() -> Step<Run> {
     named::bash("./script/download-wasi-sdk")
 }
 

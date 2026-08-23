@@ -1,4 +1,4 @@
-use crate::{ItemHandle, MultiWorkspace, Pane, SidebarSide};
+use crate::{ItemHandle, MultiWorkspace, Pane};
 use gpui::{
     AnyView, App, Context, Decorations, Entity, IntoElement, ParentElement, Render, Styled,
     Subscription, WeakEntity, Window,
@@ -32,7 +32,6 @@ trait StatusItemViewHandle: Send {
 #[derive(Default)]
 struct SidebarStatus {
     open: bool,
-    side: SidebarSide,
 }
 
 impl SidebarStatus {
@@ -45,7 +44,6 @@ impl SidebarStatus {
                 let enabled = mw.multi_workspace_enabled(cx);
                 Self {
                     open: mw.sidebar_open() && enabled,
-                    side: mw.sidebar_side(cx),
                 }
             })
             .unwrap_or_default()
@@ -73,16 +71,14 @@ impl Render for StatusBar {
             .map(|el| match window.window_decorations() {
                 Decorations::Server => el,
                 Decorations::Client { tiling, .. } => el
-                    .when(
-                        !(tiling.bottom || tiling.right)
-                            && !(sidebar.open && sidebar.side == SidebarSide::Right),
-                        |el| el.rounded_br(CLIENT_SIDE_DECORATION_ROUNDING),
-                    )
-                    .when(
-                        !(tiling.bottom || tiling.left)
-                            && !(sidebar.open && sidebar.side == SidebarSide::Left),
-                        |el| el.rounded_bl(CLIENT_SIDE_DECORATION_ROUNDING),
-                    )
+                    .when(!(tiling.bottom || tiling.right), |el| {
+                        el.rounded_br(CLIENT_SIDE_DECORATION_ROUNDING)
+                    })
+                    // Only the left corner can be covered: the sidebar stands
+                    // against that edge and nothing puts it on the other one.
+                    .when(!(tiling.bottom || tiling.left) && !sidebar.open, |el| {
+                        el.rounded_bl(CLIENT_SIDE_DECORATION_ROUNDING)
+                    })
                     // This border is to avoid a transparent gap in the rounded corners
                     .mb(px(-1.))
                     .border_b(px(1.0))

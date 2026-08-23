@@ -10,7 +10,7 @@ use db::sqlez::{
     bindable::{Bind, Column, StaticColumnCount},
     statement::Statement,
 };
-use gpui::{AsyncWindowContext, Entity, WeakEntity, WindowId};
+use gpui::{AsyncWindowContext, Entity, SharedString, WeakEntity, WindowId};
 
 use language::{Toolchain, ToolchainScope};
 use project::{
@@ -68,6 +68,19 @@ pub struct SerializedProjectGroup {
     pub(crate) location: SerializedWorkspaceLocation,
     #[serde(default = "default_expanded")]
     pub expanded: bool,
+    /// What the avatar draws instead of initials derived from the name.
+    ///
+    /// `serde(default)` and not `Option`-by-accident: records written before
+    /// this field existed are the common case, not an error case, and they must
+    /// keep loading.
+    #[serde(default)]
+    pub initials: Option<String>,
+    /// `#RRGGBB`, or `None` for the default panel background.
+    ///
+    /// Text rather than a parsed colour, because this string is what a person
+    /// might edit by hand and an unparsable value has to be refusable.
+    #[serde(default)]
+    pub colour: Option<String>,
 }
 
 fn default_expanded() -> bool {
@@ -75,14 +88,20 @@ fn default_expanded() -> bool {
 }
 
 impl SerializedProjectGroup {
-    pub fn from_group(key: &ProjectGroupKey, expanded: bool) -> Self {
+    /// Takes the whole state rather than a field list.
+    ///
+    /// There is exactly one caller, and every presentation field added later
+    /// would otherwise change this signature again.
+    pub fn from_group(group: &crate::multi_workspace::ProjectGroupState) -> Self {
         Self {
-            path_list: key.path_list().serialize(),
-            location: match key.host() {
+            path_list: group.key.path_list().serialize(),
+            location: match group.key.host() {
                 Some(host) => SerializedWorkspaceLocation::Remote(host),
                 None => SerializedWorkspaceLocation::Local,
             },
-            expanded,
+            expanded: group.expanded,
+            initials: group.initials.as_ref().map(|initials| initials.to_string()),
+            colour: group.colour.map(crate::project_appearance::colour_to_hex),
         }
     }
 
@@ -92,9 +111,31 @@ impl SerializedProjectGroup {
             SerializedWorkspaceLocation::Local => None,
             SerializedWorkspaceLocation::Remote(opts) => Some(opts),
         };
+        let colour = self.colour.as_deref().and_then(|hex| {
+            let parsed = crate::project_appearance::colour_from_hex(hex);
+            if parsed.is_none() {
+                log::warn!("project group has an unreadable colour {hex:?}; using the default");
+            }
+            parsed
+        });
         SerializedProjectGroupState {
             key: ProjectGroupKey::new(host, path_list),
             expanded: self.expanded,
+            initials: self
+                .initials
+                .as_deref()
+                .and_then(|initials| {
+                    let kept = crate::project_appearance::sanitize_initials(initials);
+                    // Said out loud for the same reason the colour is: this
+                    // string can be hand-edited, and silently cutting it would
+                    // leave someone wondering why four letters became two.
+                    if kept.as_deref() != Some(initials) {
+                        log::warn!("project group initials {initials:?} were trimmed to {kept:?}");
+                    }
+                    kept
+                })
+                .map(SharedString::from),
+            colour,
         }
     }
 }
@@ -473,5 +514,94 @@ impl Column for SerializedItem {
             },
             next_index,
         ))
+    }
+}
+
+#[cfg(test)]
+mod project_group_record_tests {
+    use super::*;
+
+    /// A record in the shape written before the avatar had its own initials and
+    /// colour.
+    ///
+    /// Built by serializing a real record and then *removing* the two new keys,
+    /// rather than by hand-writing JSON: a hand-written shape can be wrong in a
+    /// way that makes the test pass for the wrong reason, and this shape is
+    /// provably the one on disk.
+    fn record_without_the_new_fields() -> String {
+        let group = SerializedProjectGroup {
+            path_list: PathList::new(&["/tmp/project"]).serialize(),
+            location: SerializedWorkspaceLocation::Local,
+            expanded: true,
+            initials: None,
+            colour: None,
+        };
+        let mut value = serde_json::to_value(&group).expect("a record serializes");
+        let object = value.as_object_mut().expect("a record is a JSON object");
+        assert!(
+            object.remove("initials").is_some() && object.remove("colour").is_some(),
+            "the keys being removed must actually be there, or this test proves nothing"
+        );
+        value.to_string()
+    }
+
+    /// This is the shape sitting in every existing installation's key-value
+    /// store right now — the common path, not an edge case. It has to load, and
+    /// it has to load as "no overrides" rather than as a failure.
+    #[test]
+    fn a_record_without_the_new_fields_still_loads() {
+        let group: SerializedProjectGroup = serde_json::from_str(&record_without_the_new_fields())
+            .expect("an older record must still deserialize");
+        assert_eq!(group.initials, None);
+        assert_eq!(group.colour, None);
+
+        let restored = group.into_restored_state();
+        assert_eq!(restored.initials, None);
+        assert_eq!(restored.colour, None);
+        assert!(restored.expanded);
+    }
+
+    /// A colour edited by hand into something unreadable costs the colour, not
+    /// the project.
+    #[test]
+    fn an_unreadable_colour_is_dropped_rather_than_fatal() {
+        let group = SerializedProjectGroup {
+            path_list: PathList::new(&["/tmp/project"]).serialize(),
+            location: SerializedWorkspaceLocation::Local,
+            expanded: true,
+            initials: Some("ABCDE".to_string()),
+            colour: Some("not-a-colour".to_string()),
+        };
+        let restored = group.into_restored_state();
+        assert_eq!(restored.colour, None, "the colour is refused");
+        assert_eq!(
+            restored.initials.as_ref().map(|initials| initials.as_ref()),
+            Some("AB"),
+            "and over-long initials from disk are capped like typed ones"
+        );
+        assert!(
+            !restored.key.path_list().paths().is_empty(),
+            "the project itself survives"
+        );
+    }
+
+    /// The colour a person picked comes back as the colour they picked.
+    #[test]
+    fn initials_and_colour_survive_the_record() {
+        let colour = crate::project_appearance::colour_from_hex("#3b82f6").unwrap();
+        let group = SerializedProjectGroup {
+            path_list: PathList::new(&["/tmp/project"]).serialize(),
+            location: SerializedWorkspaceLocation::Local,
+            expanded: false,
+            initials: Some("ZO".to_string()),
+            colour: Some(crate::project_appearance::colour_to_hex(colour)),
+        };
+        let json = serde_json::to_string(&group).unwrap();
+        let restored = serde_json::from_str::<SerializedProjectGroup>(&json)
+            .unwrap()
+            .into_restored_state();
+        assert_eq!(restored.initials.as_ref().map(|i| i.as_ref()), Some("ZO"));
+        assert_eq!(restored.colour, Some(colour));
+        assert!(!restored.expanded);
     }
 }

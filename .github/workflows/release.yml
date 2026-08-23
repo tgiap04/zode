@@ -199,6 +199,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::free_disk_space
       run: |
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
@@ -238,6 +240,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::free_disk_space
       run: |
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
@@ -280,6 +284,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -320,6 +326,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -364,6 +372,10 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel.ps1
+      run: script/determine-release-channel.ps1
+      shell: pwsh
+      working-directory: ${{ env.ZED_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
@@ -412,6 +424,10 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel.ps1
+      run: script/determine-release-channel.ps1
+      shell: pwsh
+      working-directory: ${{ env.ZED_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue

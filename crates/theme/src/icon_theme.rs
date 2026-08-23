@@ -4,6 +4,10 @@ use collections::HashMap;
 use gpui::SharedString;
 
 use crate::Appearance;
+use crate::icon_theme_material::{
+    DIRECTORY_ICON_COLLAPSED, DIRECTORY_ICON_EXPANDED, material_file_icons, material_file_stems,
+    material_file_suffixes, material_named_directory_icons,
+};
 
 /// A family of icon themes.
 pub struct IconThemeFamily {
@@ -65,389 +69,175 @@ pub struct IconDefinition {
     pub path: SharedString,
 }
 
-const FILE_STEMS_BY_ICON_KEY: &[(&str, &[&str])] = &[
-    ("docker", &["Containerfile", "Dockerfile"]),
-    ("ruby", &["Podfile"]),
-    ("heroku", &["Procfile"]),
-];
-
-const FILE_SUFFIXES_BY_ICON_KEY: &[(&str, &[&str])] = &[
-    ("astro", &["astro"]),
-    (
-        "audio",
-        &[
-            "aac", "flac", "m4a", "mka", "mp3", "ogg", "opus", "wav", "wma", "wv",
-        ],
-    ),
-    ("backup", &["bak"]),
-    ("bicep", &["bicep"]),
-    ("bun", &["lockb"]),
-    ("c", &["c", "h"]),
-    ("cairo", &["cairo"]),
-    ("code", &["handlebars", "metadata", "rkt", "scm"]),
-    ("coffeescript", &["coffee"]),
-    (
-        "cpp",
-        &[
-            "c++", "h++", "cc", "cpp", "cppm", "cxx", "hh", "hpp", "hxx", "inl", "ixx",
-        ],
-    ),
-    ("crystal", &["cr", "ecr"]),
-    ("csharp", &["cs"]),
-    ("csproj", &["csproj"]),
-    ("css", &["css", "pcss", "postcss"]),
-    ("cue", &["cue"]),
-    ("dart", &["dart"]),
-    ("diff", &["diff"]),
-    (
-        "docker",
-        &[
-            "docker-compose.yml",
-            "docker-compose.yaml",
-            "compose.yml",
-            "compose.yaml",
-        ],
-    ),
-    (
-        "document",
-        &[
-            "doc", "docx", "mdx", "odp", "ods", "odt", "pdf", "ppt", "pptx", "rtf", "txt", "xls",
-            "xlsx",
-        ],
-    ),
-    ("editorconfig", &["editorconfig"]),
-    ("elixir", &["eex", "ex", "exs", "heex", "leex", "neex"]),
-    ("elm", &["elm"]),
-    (
-        "erlang",
-        &[
-            "Emakefile",
-            "app.src",
-            "erl",
-            "escript",
-            "hrl",
-            "rebar.config",
-            "xrl",
-            "yrl",
-        ],
-    ),
-    (
-        "eslint",
-        &[
-            "eslint.config.cjs",
-            "eslint.config.cts",
-            "eslint.config.js",
-            "eslint.config.mjs",
-            "eslint.config.mts",
-            "eslint.config.ts",
-            "eslintrc",
-            "eslintrc.js",
-            "eslintrc.json",
-        ],
-    ),
-    ("font", &["otf", "ttf", "woff", "woff2"]),
-    ("fsharp", &["fs"]),
-    ("fsproj", &["fsproj"]),
-    ("gitlab", &["gitlab-ci.yml", "gitlab-ci.yaml"]),
-    ("gleam", &["gleam"]),
-    ("go", &["go", "mod", "work"]),
-    ("graphql", &["gql", "graphql", "graphqls"]),
-    ("haskell", &["hs"]),
-    ("hcl", &["hcl"]),
-    (
-        "helm",
-        &[
-            "helmfile.yaml",
-            "helmfile.yml",
-            "Chart.yaml",
-            "Chart.yml",
-            "Chart.lock",
-            "values.yaml",
-            "values.yml",
-            "requirements.yaml",
-            "requirements.yml",
-            "tpl",
-        ],
-    ),
-    ("html", &["htm", "html"]),
-    (
-        "image",
-        &[
-            "avif", "bmp", "gif", "heic", "heif", "ico", "j2k", "jfif", "jp2", "jpeg", "jpg",
-            "jxl", "png", "psd", "qoi", "svg", "tiff", "webp",
-        ],
-    ),
-    ("ipynb", &["ipynb"]),
-    ("java", &["java"]),
-    ("javascript", &["cjs", "js", "mjs"]),
-    ("json", &["json", "jsonc"]),
-    ("julia", &["jl"]),
-    ("kdl", &["kdl"]),
-    ("kotlin", &["kt"]),
-    ("lock", &["lock"]),
-    ("log", &["log"]),
-    ("lua", &["lua"]),
-    ("luau", &["luau"]),
-    ("markdown", &["markdown", "md"]),
-    ("metal", &["metal"]),
-    ("nim", &["nim", "nims", "nimble"]),
-    ("nix", &["nix"]),
-    ("ocaml", &["ml", "mli", "mlx"]),
-    ("odin", &["odin"]),
-    ("php", &["php"]),
-    (
-        "prettier",
-        &[
-            "prettier.config.cjs",
-            "prettier.config.js",
-            "prettier.config.mjs",
-            "prettierignore",
-            "prettierrc",
-            "prettierrc.cjs",
-            "prettierrc.js",
-            "prettierrc.json",
-            "prettierrc.json5",
-            "prettierrc.mjs",
-            "prettierrc.toml",
-            "prettierrc.yaml",
-            "prettierrc.yml",
-        ],
-    ),
-    ("prisma", &["prisma"]),
-    ("puppet", &["pp"]),
-    ("python", &["py"]),
-    ("r", &["r", "R"]),
-    ("react", &["cjsx", "ctsx", "jsx", "mjsx", "mtsx", "tsx"]),
-    ("roc", &["roc"]),
-    ("ruby", &["rb"]),
-    ("rust", &["rs"]),
-    ("sass", &["sass", "scss"]),
-    ("scala", &["scala", "sc"]),
-    ("settings", &["conf", "ini"]),
-    ("solidity", &["sol"]),
-    (
-        "storage",
-        &[
-            "accdb", "csv", "dat", "db", "dbf", "dll", "fmp", "fp7", "frm", "gdb", "ib", "ldf",
-            "mdb", "mdf", "myd", "myi", "pdb", "RData", "rdata", "sav", "sdf", "sql", "sqlite",
-            "tsv",
-        ],
-    ),
-    (
-        "stylelint",
-        &[
-            "stylelint.config.cjs",
-            "stylelint.config.js",
-            "stylelint.config.mjs",
-            "stylelintignore",
-            "stylelintrc",
-            "stylelintrc.cjs",
-            "stylelintrc.js",
-            "stylelintrc.json",
-            "stylelintrc.mjs",
-            "stylelintrc.yaml",
-            "stylelintrc.yml",
-        ],
-    ),
-    ("surrealql", &["surql"]),
-    ("svelte", &["svelte"]),
-    ("swift", &["swift"]),
-    ("tcl", &["tcl"]),
-    ("template", &["hbs", "plist", "xml"]),
-    (
-        "terminal",
-        &[
-            "bash",
-            "bash_aliases",
-            "bash_login",
-            "bash_logout",
-            "bash_profile",
-            "bashrc",
-            "fish",
-            "nu",
-            "profile",
-            "ps1",
-            "sh",
-            "zlogin",
-            "zlogout",
-            "zprofile",
-            "zsh",
-            "zsh_aliases",
-            "zsh_histfile",
-            "zsh_history",
-            "zshenv",
-            "zshrc",
-        ],
-    ),
-    ("terraform", &["tf", "tfvars"]),
-    ("toml", &["toml"]),
-    ("typescript", &["cts", "mts", "ts"]),
-    ("v", &["v", "vsh", "vv"]),
-    (
-        "vcs",
-        &[
-            "COMMIT_EDITMSG",
-            "EDIT_DESCRIPTION",
-            "MERGE_MSG",
-            "NOTES_EDITMSG",
-            "TAG_EDITMSG",
-            "gitattributes",
-            "gitignore",
-            "gitkeep",
-            "gitmodules",
-        ],
-    ),
-    ("vbproj", &["vbproj"]),
-    ("video", &["avi", "m4v", "mkv", "mov", "mp4", "webm", "wmv"]),
-    ("vs_sln", &["sln"]),
-    ("vs_suo", &["suo"]),
-    ("vue", &["vue"]),
-    ("vyper", &["vy", "vyi"]),
-    ("wgsl", &["wgsl"]),
-    ("yaml", &["yaml", "yml"]),
-    ("zig", &["zig"]),
-];
-
-/// A mapping of a file type identifier to its corresponding icon.
-const FILE_ICONS: &[(&str, &str)] = &[
-    ("astro", "icons/file_icons/astro.svg"),
-    ("audio", "icons/file_icons/audio.svg"),
-    ("bicep", "icons/file_icons/file.svg"),
-    ("bun", "icons/file_icons/bun.svg"),
-    ("c", "icons/file_icons/c.svg"),
-    ("cairo", "icons/file_icons/cairo.svg"),
-    ("code", "icons/file_icons/code.svg"),
-    ("coffeescript", "icons/file_icons/coffeescript.svg"),
-    ("cpp", "icons/file_icons/cpp.svg"),
-    ("crystal", "icons/file_icons/file.svg"),
-    ("csharp", "icons/file_icons/file.svg"),
-    ("csproj", "icons/file_icons/file.svg"),
-    ("css", "icons/file_icons/css.svg"),
-    ("cue", "icons/file_icons/file.svg"),
-    ("dart", "icons/file_icons/dart.svg"),
-    ("default", "icons/file_icons/file.svg"),
-    ("diff", "icons/file_icons/diff.svg"),
-    ("docker", "icons/file_icons/docker.svg"),
-    ("document", "icons/file_icons/book.svg"),
-    ("editorconfig", "icons/file_icons/editorconfig.svg"),
-    ("elixir", "icons/file_icons/elixir.svg"),
-    ("elm", "icons/file_icons/elm.svg"),
-    ("erlang", "icons/file_icons/erlang.svg"),
-    ("eslint", "icons/file_icons/eslint.svg"),
-    ("font", "icons/file_icons/font.svg"),
-    ("fsharp", "icons/file_icons/fsharp.svg"),
-    ("fsproj", "icons/file_icons/file.svg"),
-    ("gitlab", "icons/file_icons/gitlab.svg"),
-    ("gleam", "icons/file_icons/gleam.svg"),
-    ("go", "icons/file_icons/go.svg"),
-    ("graphql", "icons/file_icons/graphql.svg"),
-    ("haskell", "icons/file_icons/haskell.svg"),
-    ("hcl", "icons/file_icons/hcl.svg"),
-    ("helm", "icons/file_icons/helm.svg"),
-    ("heroku", "icons/file_icons/heroku.svg"),
-    ("html", "icons/file_icons/html.svg"),
-    ("image", "icons/file_icons/image.svg"),
-    ("ipynb", "icons/file_icons/jupyter.svg"),
-    ("java", "icons/file_icons/java.svg"),
-    ("javascript", "icons/file_icons/javascript.svg"),
-    ("json", "icons/file_icons/code.svg"),
-    ("julia", "icons/file_icons/julia.svg"),
-    ("kdl", "icons/file_icons/kdl.svg"),
-    ("kotlin", "icons/file_icons/kotlin.svg"),
-    ("lock", "icons/file_icons/lock.svg"),
-    ("log", "icons/file_icons/info.svg"),
-    ("lua", "icons/file_icons/lua.svg"),
-    ("luau", "icons/file_icons/luau.svg"),
-    ("markdown", "icons/file_icons/book.svg"),
-    ("metal", "icons/file_icons/metal.svg"),
-    ("nim", "icons/file_icons/nim.svg"),
-    ("nix", "icons/file_icons/nix.svg"),
-    ("ocaml", "icons/file_icons/ocaml.svg"),
-    ("odin", "icons/file_icons/odin.svg"),
-    ("phoenix", "icons/file_icons/phoenix.svg"),
-    ("php", "icons/file_icons/php.svg"),
-    ("prettier", "icons/file_icons/prettier.svg"),
-    ("prisma", "icons/file_icons/prisma.svg"),
-    ("puppet", "icons/file_icons/puppet.svg"),
-    ("python", "icons/file_icons/python.svg"),
-    ("r", "icons/file_icons/r.svg"),
-    ("react", "icons/file_icons/react.svg"),
-    ("roc", "icons/file_icons/roc.svg"),
-    ("ruby", "icons/file_icons/ruby.svg"),
-    ("rust", "icons/file_icons/rust.svg"),
-    ("sass", "icons/file_icons/sass.svg"),
-    ("scala", "icons/file_icons/scala.svg"),
-    ("settings", "icons/file_icons/settings.svg"),
-    ("solidity", "icons/file_icons/file.svg"),
-    ("storage", "icons/file_icons/database.svg"),
-    ("stylelint", "icons/file_icons/javascript.svg"),
-    ("surrealql", "icons/file_icons/surrealql.svg"),
-    ("svelte", "icons/file_icons/html.svg"),
-    ("swift", "icons/file_icons/swift.svg"),
-    ("tcl", "icons/file_icons/tcl.svg"),
-    ("template", "icons/file_icons/html.svg"),
-    ("terminal", "icons/file_icons/terminal.svg"),
-    ("terraform", "icons/file_icons/terraform.svg"),
-    ("toml", "icons/file_icons/toml.svg"),
-    ("typescript", "icons/file_icons/typescript.svg"),
-    ("v", "icons/file_icons/v.svg"),
-    ("vbproj", "icons/file_icons/file.svg"),
-    ("vcs", "icons/file_icons/git.svg"),
-    ("video", "icons/file_icons/video.svg"),
-    ("vs_sln", "icons/file_icons/file.svg"),
-    ("vs_suo", "icons/file_icons/file.svg"),
-    ("vue", "icons/file_icons/vue.svg"),
-    ("vyper", "icons/file_icons/vyper.svg"),
-    ("wgsl", "icons/file_icons/wgsl.svg"),
-    ("yaml", "icons/file_icons/yaml.svg"),
-    ("zig", "icons/file_icons/zig.svg"),
-];
-
-/// Returns a mapping of file associations to icon keys.
-fn icon_keys_by_association(
-    associations_by_icon_key: &[(&str, &[&str])],
-) -> HashMap<String, String> {
-    let mut icon_keys_by_association = HashMap::default();
-    for (icon_key, associations) in associations_by_icon_key {
-        for association in *associations {
-            icon_keys_by_association.insert(association.to_string(), icon_key.to_string());
-        }
-    }
-
-    icon_keys_by_association
-}
-
 /// The name of the default icon theme.
-pub const DEFAULT_ICON_THEME_NAME: &str = "Zode (Default)";
+///
+/// This is the Material Icon Theme (vendored under
+/// `assets/icons/file_icons/material/`), not zode's original hand-authored icon set.
+/// See `icon_theme_material.rs` for the generated mapping tables and their provenance.
+pub const DEFAULT_ICON_THEME_NAME: &str = "Material Icon Theme";
 
 static DEFAULT_ICON_THEME: LazyLock<Arc<IconTheme>> = LazyLock::new(|| {
     Arc::new(IconTheme {
-        id: "zed".into(),
+        id: "material".into(),
         name: DEFAULT_ICON_THEME_NAME.into(),
         appearance: Appearance::Dark,
         directory_icons: DirectoryIcons {
-            collapsed: Some("icons/file_icons/folder.svg".into()),
-            expanded: Some("icons/file_icons/folder_open.svg".into()),
+            collapsed: Some(DIRECTORY_ICON_COLLAPSED.into()),
+            expanded: Some(DIRECTORY_ICON_EXPANDED.into()),
         },
-        named_directory_icons: HashMap::default(),
+        named_directory_icons: HashMap::from_iter(
+            material_named_directory_icons()
+                .into_iter()
+                .map(|(name, (collapsed, expanded))| {
+                    (
+                        name,
+                        DirectoryIcons {
+                            collapsed: Some(collapsed.into()),
+                            expanded: Some(expanded.into()),
+                        },
+                    )
+                }),
+        ),
+        // Material has no equivalent of zode's disclosure-triangle chevrons (VS Code
+        // relies on the OS/tree-widget chrome for that, not a themed icon), so these
+        // keep pointing at zode's own bundled chevron assets, unchanged.
         chevron_icons: ChevronIcons {
             collapsed: Some("icons/file_icons/chevron_right.svg".into()),
             expanded: Some("icons/file_icons/chevron_down.svg".into()),
         },
-        file_stems: icon_keys_by_association(FILE_STEMS_BY_ICON_KEY),
-        file_suffixes: icon_keys_by_association(FILE_SUFFIXES_BY_ICON_KEY),
-        file_icons: HashMap::from_iter(FILE_ICONS.iter().map(|(ty, path)| {
-            (
-                ty.to_string(),
-                IconDefinition {
-                    path: (*path).into(),
-                },
-            )
-        })),
+        file_stems: material_file_stems(),
+        file_suffixes: material_file_suffixes(),
+        file_icons: HashMap::from_iter(
+            material_file_icons()
+                .into_iter()
+                .map(|(ty, path)| (ty, IconDefinition { path: path.into() })),
+        ),
     })
 });
 
 /// Returns the default icon theme.
 pub fn default_icon_theme() -> Arc<IconTheme> {
     DEFAULT_ICON_THEME.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_icon_theme_is_named_material() {
+        let theme = default_icon_theme();
+        assert_eq!(theme.name.as_ref(), DEFAULT_ICON_THEME_NAME);
+        assert_eq!(theme.name.as_ref(), "Material Icon Theme");
+    }
+
+    #[test]
+    fn default_icon_theme_has_a_default_file_icon() {
+        let theme = default_icon_theme();
+        let default_icon = theme
+            .file_icons
+            .get("default")
+            .expect("default icon theme must define a fallback \"default\" file icon");
+        assert!(
+            default_icon.path.starts_with("icons/file_icons/material/"),
+            "expected the default file icon to be a vendored Material asset, got {}",
+            default_icon.path
+        );
+    }
+
+    #[test]
+    fn default_icon_theme_resolves_common_file_suffixes() {
+        let theme = default_icon_theme();
+
+        let rust_key = theme
+            .file_suffixes
+            .get("rs")
+            .expect("\"rs\" suffix must map to an icon key");
+        let rust_icon = theme
+            .file_icons
+            .get(rust_key)
+            .expect("the icon key for \"rs\" must have a registered file icon");
+        assert!(rust_icon.path.starts_with("icons/file_icons/material/"));
+
+        let toml_key = theme
+            .file_suffixes
+            .get("toml")
+            .expect("\"toml\" suffix must map to an icon key");
+        assert!(theme.file_icons.contains_key(toml_key));
+    }
+
+    #[test]
+    fn default_icon_theme_resolves_docker_file_stem() {
+        let theme = default_icon_theme();
+        // The table is intentionally lowercase-only: `FileIcons::get_icon`
+        // (crates/file_icons/src/file_icons.rs) lowercases the real filename before
+        // looking it up here, so "Dockerfile" resolves via "dockerfile".
+        assert!(
+            theme.file_stems.contains_key("dockerfile"),
+            "expected \"dockerfile\" to be recognized by file stem, not just suffix"
+        );
+        assert!(
+            !theme.file_stems.contains_key("Dockerfile"),
+            "the table must hold exactly one canonical (lowercase) spelling; \
+             case-insensitivity is the lookup's job, not the table's"
+        );
+    }
+
+    #[test]
+    fn default_icon_theme_has_populated_directory_and_chevron_icons() {
+        let theme = default_icon_theme();
+
+        let collapsed = theme
+            .directory_icons
+            .collapsed
+            .as_ref()
+            .expect("default directory icon (collapsed) must be set");
+        let expanded = theme
+            .directory_icons
+            .expanded
+            .as_ref()
+            .expect("default directory icon (expanded) must be set");
+        assert!(collapsed.starts_with("icons/file_icons/material/"));
+        assert!(expanded.starts_with("icons/file_icons/material/"));
+
+        // Material has no chevron equivalent; zode's own bundled chevrons are kept.
+        let chevron_collapsed = theme
+            .chevron_icons
+            .collapsed
+            .as_ref()
+            .expect("chevron icon (collapsed) must be set");
+        let chevron_expanded = theme
+            .chevron_icons
+            .expanded
+            .as_ref()
+            .expect("chevron icon (expanded) must be set");
+        assert!(!chevron_collapsed.starts_with("icons/file_icons/material/"));
+        assert!(!chevron_expanded.starts_with("icons/file_icons/material/"));
+    }
+
+    #[test]
+    fn default_icon_theme_has_named_directory_icons() {
+        let theme = default_icon_theme();
+        assert!(
+            !theme.named_directory_icons.is_empty(),
+            "Material provides named-folder icons; the table must not be empty"
+        );
+
+        let src = theme
+            .named_directory_icons
+            .get("src")
+            .expect("\"src\" is a common folder name Material has an icon for");
+        assert!(
+            src.collapsed
+                .as_ref()
+                .unwrap()
+                .starts_with("icons/file_icons/material/")
+        );
+        assert!(
+            src.expanded
+                .as_ref()
+                .unwrap()
+                .starts_with("icons/file_icons/material/")
+        );
+    }
 }

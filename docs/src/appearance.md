@@ -17,11 +17,9 @@ Here's how to make Zode feel like home:
 
 2. **Toggle light/dark mode quickly**: Press {#kb theme::ToggleMode}. If you currently use a static `"theme": "..."` value, the first toggle converts it to dynamic mode settings with default themes.
 
-3. **Choose an icon theme**: Run `icon theme selector: toggle` from the command palette to browse icon themes.
+3. **Set your font**: Open the Settings Editor with {#kb zed::OpenSettings} and search for `buffer_font_family`. Set it to your preferred coding font.
 
-4. **Set your font**: Open the Settings Editor with {#kb zed::OpenSettings} and search for `buffer_font_family`. Set it to your preferred coding font.
-
-5. **Adjust font size**: In the same Settings Editor, search for `buffer_font_size` and `ui_font_size` to tweak the editor and interface text sizes.
+4. **Adjust font size**: In the same Settings Editor, search for `buffer_font_size` and `ui_font_size` to tweak the editor and interface text sizes.
 
 That's it. You now have a personalized Zode setup.
 
@@ -47,19 +45,7 @@ You can also override specific theme attributes for fine-grained control.
 
 ## Icon Themes
 
-Customize file and folder icons in the Project Panel and tabs. Browse available icon themes with the Icon Theme Selector (`icon theme selector: toggle` in the command palette).
-
-Like color themes, icon themes support separate light and dark variants:
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "system",
-    "light": "Zode (Default)",
-    "dark": "Zode (Default)"
-  }
-}
-```
+File and folder icons in the Project Panel and tabs come from the Material Icon Theme, in colour, and cannot be changed — there is no Icon Theme Selector, and no other icon theme takes effect.
 
 → [Icon Themes documentation](./icon-themes.md)
 
@@ -113,13 +99,38 @@ Adjust line spacing with `buffer_line_height`:
 Zode provides extensive control over UI elements including:
 
 - **Tab bar** — Show/hide, navigation buttons, file icons, git status
-- **Status bar** — Language selector, cursor position, line endings
+- **Status bar** — Language selector, cursor position, line endings, [agent usage](./agent-usage.md)
 - **Scrollbar** — Visibility, git diff indicators, search results
 - **Minimap** — Code overview display
 - **Gutter** — Line numbers, fold indicators, breakpoints
-- **Panels** — Project Panel, Terminal, Agent Panel sizing and docking
+- **Panels** — Project Panel sizing; Terminal sizing and docking (Project Panel always docks on the right, opposite the project rail, and cannot be moved)
 
 → [Visual Customization documentation](./visual-customization.md) for all UI element settings
+
+## The Project Rail
+
+Every open project has a square on the rail down the left edge. Clicking one
+switches to that project; right-clicking opens its own menu:
+
+- **Open Project in New Window** — moves the project out of this window. Only
+  offered when there is more than one project open, since otherwise the window it
+  would move to is this one.
+- **Reveal in Finder** / **Copy Project Path** — a project opened over several
+  folders copies all of them, one per line.
+- **Change Initials…** — the two letters drawn on the square. Useful when two
+  projects reduce to the same initials. This changes the square only: the
+  project's name, its path and the window title are untouched.
+- **Change Colour…** — picks a colour for the square, previewed on the square
+  itself while you choose. **Use Default** returns it to the theme's colour. The
+  letters switch between light and dark on their own so they stay readable on
+  whatever you pick.
+- **Remove Project** — takes the project off this window. Nothing on disk is
+  touched and the project stays in your recent list.
+
+Squares can be **dragged to reorder** them, and the order is remembered between
+sessions. A newly opened project still appears at the top. Dragging a square off
+the rail entirely moves that project to a new window — both that and **Remove**
+ask for confirmation first, since both take the project off this window.
 
 ## What's Next
 

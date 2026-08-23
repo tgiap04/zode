@@ -117,6 +117,12 @@ impl From<IconName> for Icon {
 enum IconSource {
     /// An SVG embedded in the Zed binary.
     Embedded(SharedString),
+    /// A full-colour (polychrome) image embedded in the Zed binary.
+    ///
+    /// Like `Embedded`, this is resolved through the app's `AssetSource` rather than a
+    /// filesystem read, but it renders via `img()` instead of `svg()` so that colour is
+    /// preserved -- our SVG renderer (`svg()`) only ever produces a monochrome mask.
+    EmbeddedColor(SharedString),
     /// An image file located at the specified path.
     ///
     /// Currently our SVG renderer is missing support for rendering polychrome SVGs.
@@ -146,11 +152,14 @@ impl Icon {
     }
 
     /// Create an icon from a path. Uses a heuristic to determine if it's embedded or external:
-    /// - Paths starting with "icons/" are treated as embedded SVGs
+    /// - Paths under `theme::MATERIAL_ICON_PREFIX` are treated as embedded, full-colour images
+    /// - Other paths starting with "icons/" are treated as embedded monochrome SVGs
     /// - Other paths are treated as external raster images (from icon themes)
     pub fn from_path(path: impl Into<SharedString>) -> Self {
         let path = path.into();
-        let source = if path.starts_with("icons/") {
+        let source = if path.starts_with(theme::MATERIAL_ICON_PREFIX) {
+            IconSource::EmbeddedColor(path)
+        } else if path.starts_with("icons/") {
             IconSource::Embedded(path)
         } else {
             IconSource::External(Arc::from(PathBuf::from(path.as_ref())))
@@ -211,6 +220,11 @@ impl RenderOnce for Icon {
             IconSource::ExternalSvg(path) => svg()
                 .external_path(path)
                 .with_transformation(self.transformation)
+                .size(self.size)
+                .flex_none()
+                .text_color(self.color.color(cx))
+                .into_any_element(),
+            IconSource::EmbeddedColor(path) => img(path)
                 .size(self.size)
                 .flex_none()
                 .text_color(self.color.color(cx))
@@ -280,6 +294,31 @@ impl RenderOnce for IconWithIndicator {
                         .child(indicator),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_path_routes_material_icons_to_embedded_color() {
+        let icon = Icon::from_path(format!("{}rust.svg", theme::MATERIAL_ICON_PREFIX));
+        assert!(matches!(icon.source, IconSource::EmbeddedColor(_)));
+    }
+
+    #[test]
+    fn from_path_routes_other_embedded_icons_to_monochrome() {
+        // Today's non-Material bundled icons (e.g. zode's own chevrons) must keep
+        // rendering exactly as they do now: as a monochrome `svg()` mask, not `img()`.
+        let icon = Icon::from_path("icons/file_icons/chevron_right.svg");
+        assert!(matches!(icon.source, IconSource::Embedded(_)));
+    }
+
+    #[test]
+    fn from_path_routes_non_icons_prefixed_paths_to_external() {
+        let icon = Icon::from_path("/home/user/.config/zode/icons/some-theme/file.png");
+        assert!(matches!(icon.source, IconSource::External(_)));
     }
 }
 

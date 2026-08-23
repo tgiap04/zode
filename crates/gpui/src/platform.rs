@@ -1573,6 +1573,17 @@ pub enum WindowKind {
     /// A floating window that appears on top of its parent window
     Floating,
 
+    /// An ordinary window that stays above other applications' windows.
+    ///
+    /// The difference from [`WindowKind::Floating`] is what the window *is*, not
+    /// where it sits: on macOS this is an `NSWindow` rather than an `NSPanel`, so
+    /// it takes part in window cycling, the Window menu and Mission Control the
+    /// way any window does, while keeping the raised window level that puts it
+    /// over other applications. `Floating` is a utility panel and is absent from
+    /// all three, which is right for a palette and wrong for a window somebody
+    /// works in and has to find again.
+    AlwaysOnTop,
+
     /// A Wayland LayerShell window, used to draw overlays or backgrounds for applications such as
     /// docks, notifications or wallpapers.
     #[cfg(all(target_os = "linux", feature = "wayland"))]

@@ -174,12 +174,25 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
     }
 
     script.push_str(indoc::indoc! {r#"
+        # A here-string and not a pipe, and the difference decides whether this
+        # repository is tested at all.
+        #
+        # `grep -q` stops at its first match and closes the pipe. On a small diff
+        # the upstream `echo` has already finished; on a large one it is still
+        # writing, takes EPIPE, and under `set -o pipefail` *that* becomes the
+        # pipeline's status -- so the `&&` branch is skipped and every rule
+        # silently answers "false". A PR touching 1352 files reported
+        # `run_tests=false` and skipped every test and clippy job on all four
+        # platforms, which reads as a green run rather than as an untested one.
+        # The tell was in the log of an earlier run: `echo: write error: Broken
+        # pipe`. A here-string is not a pipeline, so pipefail has nothing to
+        # report and the answer no longer depends on how big the diff is.
         check_pattern() {
           local output_name="$1"
           local pattern="$2"
           local grep_arg="$3"
 
-          echo "$CHANGED_FILES" | grep "$grep_arg" "$pattern" && \
+          grep "$grep_arg" "$pattern" <<< "$CHANGED_FILES" && \
             echo "${output_name}=true" >> "$GITHUB_OUTPUT" || \
             echo "${output_name}=false" >> "$GITHUB_OUTPUT"
         }
@@ -195,7 +208,7 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
         if [ -z "$GITHUB_BASE_REF" ]; then
           echo "Not a PR, running full test suite"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
-        elif echo "$CHANGED_FILES" | grep -qP '^(rust-toolchain\.toml|\.cargo/|\.github/|Cargo\.(toml|lock)$)'; then
+        elif grep -qP '^(rust-toolchain\.toml|\.cargo/|\.github/|Cargo\.(toml|lock)$)' <<< "$CHANGED_FILES"; then
           echo "Toolchain, cargo config, or root Cargo files changed, will run all tests"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
         else
@@ -209,14 +222,26 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
             jq -r '.packages[] | select(.manifest_path | test("crates/|tooling/")) | "\(.manifest_path | capture("(crates|tooling)/(?<dir>[^/]+)") | .dir)=\(.name)"')
 
           # Map directory names to package names
+          #
+          # `|| true` on the grep is load-bearing under `set -o pipefail`: a
+          # directory with no package makes grep exit 1, which took the whole
+          # job down with it and left the `else` below unreachable. A PR that
+          # deleted a crate failed here every time, because a deleted crate's
+          # files are still in `git diff --name-only` while its package is gone
+          # from `cargo metadata`.
+          #
+          # Such a directory is skipped rather than passed through as its own
+          # name. The name would go into a `rdeps(...)` filterset, and nextest
+          # rejects a package it has never heard of -- so the fallback traded
+          # this failure for one a step later. Skipping is safe: if nothing maps,
+          # the empty-filterset branch below runs the whole suite.
           FILE_CHANGED_PKGS=""
           for dir in $CHANGED_DIRS; do
-            pkg=$(echo "$DIR_TO_PKG" | grep "^${dir}=" | cut -d= -f2 | head -1)
+            pkg=$(echo "$DIR_TO_PKG" | grep "^${dir}=" | cut -d= -f2 | head -1 || true)
             if [ -n "$pkg" ]; then
               FILE_CHANGED_PKGS=$(printf '%s\n%s' "$FILE_CHANGED_PKGS" "$pkg")
             else
-              # Fall back to directory name if no mapping found
-              FILE_CHANGED_PKGS=$(printf '%s\n%s' "$FILE_CHANGED_PKGS" "$dir")
+              echo "No package for directory '${dir}', skipping it (deleted crate, or a directory of crates)"
             fi
           done
           FILE_CHANGED_PKGS=$(echo "$FILE_CHANGED_PKGS" | grep -v '^$' | sort -u || true)
@@ -642,6 +667,14 @@ fn run_platform_tests_impl(
             // with "no such command".
             .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(platform))
+            // After the clear, not before: the SDK lands in `target/`. Linux gets
+            // it from `install_linux_dependencies` above; mac had nothing, so the
+            // extension test downloaded it itself and timed out. Windows is left
+            // alone -- it passes as it is, and the download script's platform
+            // mapping has never run there.
+            .when(platform == Platform::Mac, |job| {
+                job.add_step(steps::download_wasi_sdk())
+            })
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
                 job.add_step(

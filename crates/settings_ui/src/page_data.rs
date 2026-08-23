@@ -370,7 +370,7 @@ fn general_page(cx: &App) -> SettingsPage {
 }
 
 fn appearance_page() -> SettingsPage {
-    fn theme_section() -> [SettingsPageItem; 3] {
+    fn theme_section() -> [SettingsPageItem; 2] {
         [
             SettingsPageItem::SectionHeader("Theme"),
             SettingsPageItem::DynamicItem(DynamicItem {
@@ -531,176 +531,6 @@ fn appearance_page() -> SettingsPage {
                                             .theme
                                             .theme.get_or_insert_default() {
                                                 settings::ThemeSelection::Dynamic{ dark, ..} => *dark = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            }
-                        ],
-                    }
-                }).collect(),
-            }),
-            SettingsPageItem::DynamicItem(DynamicItem {
-                discriminant: SettingItem {
-                    files: USER,
-                    title: "Icon Theme",
-                    description: "The custom set of icons Zed will associate with files and directories.",
-                    field: Box::new(SettingField {
-                        json_path: Some("icon_theme$"),
-                        pick: |settings_content| {
-                            Some(&dynamic_variants::<settings::IconThemeSelection>()[
-                                settings_content
-                                    .theme
-                                    .icon_theme
-                                    .as_ref()?
-                                    .discriminant() as usize])
-                        },
-                        write: |settings_content, value| {
-                            let Some(value) = value else {
-                                settings_content.theme.icon_theme = None;
-                                return;
-                            };
-                            let settings_value = settings_content.theme.icon_theme.get_or_insert_with(|| {
-                                settings::IconThemeSelection::Static(settings::IconThemeName(theme::default_icon_theme().name.clone().into()))
-                            });
-                            *settings_value = match value {
-                                settings::IconThemeSelectionDiscriminants::Static => {
-                                    let name = match settings_value {
-                                        settings::IconThemeSelection::Static(_) => return,
-                                        settings::IconThemeSelection::Dynamic { mode, light, dark } => {
-                                            match mode {
-                                                theme_settings::ThemeAppearanceMode::Light => light.clone(),
-                                                theme_settings::ThemeAppearanceMode::Dark => dark.clone(),
-                                                theme_settings::ThemeAppearanceMode::System => dark.clone(), // no cx, can't determine correct choice
-                                            }
-                                        },
-                                    };
-                                    settings::IconThemeSelection::Static(name)
-                                },
-                                settings::IconThemeSelectionDiscriminants::Dynamic => {
-                                    let static_name = match settings_value {
-                                        settings::IconThemeSelection::Static(theme_name) => theme_name.clone(),
-                                        settings::IconThemeSelection::Dynamic {..} => return,
-                                    };
-
-                                    settings::IconThemeSelection::Dynamic {
-                                        mode: settings::ThemeAppearanceMode::System,
-                                        light: static_name.clone(),
-                                        dark: static_name,
-                                    }
-                                },
-                            };
-                        },
-                    }),
-                    metadata: None,
-                },
-                pick_discriminant: |settings_content| {
-                    Some(settings_content.theme.icon_theme.as_ref()?.discriminant() as usize)
-                },
-                fields: dynamic_variants::<settings::IconThemeSelection>().into_iter().map(|variant| {
-                    match variant {
-                        settings::IconThemeSelectionDiscriminants::Static => vec![
-                            SettingItem {
-                                files: USER,
-                                title: "Icon Theme Name",
-                                description: "The name of your selected icon theme.",
-                                field: Box::new(SettingField {
-                                    json_path: Some("icon_theme$string"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.icon_theme.as_ref() {
-                                            Some(settings::IconThemeSelection::Static(name)) => Some(name),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .icon_theme.as_mut() {
-                                                Some(settings::IconThemeSelection::Static(theme_name)) => *theme_name = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            }
-                        ],
-                        settings::IconThemeSelectionDiscriminants::Dynamic => vec![
-                            SettingItem {
-                                files: USER,
-                                title: "Mode",
-                                description: "Choose whether to use the selected light or dark icon theme or to follow your OS appearance configuration.",
-                                field: Box::new(SettingField {
-                                    json_path: Some("icon_theme"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.icon_theme.as_ref() {
-                                            Some(settings::IconThemeSelection::Dynamic { mode, ..}) => Some(mode),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .icon_theme.as_mut() {
-                                                Some(settings::IconThemeSelection::Dynamic{ mode, ..}) => *mode = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            },
-                            SettingItem {
-                                files: USER,
-                                title: "Light Icon Theme",
-                                description: "The icon theme to use when mode is set to light, or when mode is set to system and it is in light mode.",
-                                field: Box::new(SettingField {
-                                    json_path: Some("icon_theme.light"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.icon_theme.as_ref() {
-                                            Some(settings::IconThemeSelection::Dynamic { light, ..}) => Some(light),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .icon_theme.as_mut() {
-                                                Some(settings::IconThemeSelection::Dynamic{ light, ..}) => *light = value,
-                                                _ => return
-                                            }
-                                    },
-                                }),
-                                metadata: None,
-                            },
-                            SettingItem {
-                                files: USER,
-                                title: "Dark Icon Theme",
-                                description: "The icon theme to use when mode is set to dark, or when mode is set to system and it is in dark mode.",
-                                field: Box::new(SettingField {
-                                    json_path: Some("icon_theme.dark"),
-                                    pick: |settings_content| {
-                                        match settings_content.theme.icon_theme.as_ref() {
-                                            Some(settings::IconThemeSelection::Dynamic { dark, ..}) => Some(dark),
-                                            _ => None
-                                        }
-                                    },
-                                    write: |settings_content, value| {
-                                        let Some(value) = value else {
-                                            return;
-                                        };
-                                        match settings_content
-                                            .theme
-                                            .icon_theme.as_mut() {
-                                                Some(settings::IconThemeSelection::Dynamic{ dark, ..}) => *dark = value,
                                                 _ => return
                                             }
                                     },
@@ -3345,7 +3175,7 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn status_bar_section() -> [SettingsPageItem; 10] {
+    fn status_bar_section() -> [SettingsPageItem; 13] {
         [
             SettingsPageItem::SectionHeader("Status Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3507,6 +3337,72 @@ fn window_and_layout_page() -> SettingsPage {
                             .status_bar
                             .get_or_insert_default()
                             .show_active_file = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Claude Usage",
+                description: "Show Claude Code's subscription quota in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.claude_usage_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .claude_usage_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .claude_usage_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Codex Usage",
+                description: "Show Codex's subscription quota in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.codex_usage_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .codex_usage_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .codex_usage_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Usage Detail",
+                description: "How much of an agent's quota to show in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.agent_usage_display"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .agent_usage_display
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .agent_usage_display = value;
                     },
                 }),
                 metadata: None,
@@ -4377,22 +4273,9 @@ fn window_and_layout_page() -> SettingsPage {
 }
 
 fn panels_page() -> SettingsPage {
-    fn project_panel_section() -> [SettingsPageItem; 29] {
+    fn project_panel_section() -> [SettingsPageItem; 28] {
         [
             SettingsPageItem::SectionHeader("Project Panel"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Project Panel Dock",
-                description: "Where to dock the project panel.",
-                field: Box::new(SettingField {
-                    json_path: Some("project_panel.dock"),
-                    pick: |settings_content| settings_content.project_panel.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value| {
-                        settings_content.project_panel.get_or_insert_default().dock = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Project Panel Default Width",
                 description: "Default width of the project panel in pixels.",

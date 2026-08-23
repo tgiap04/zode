@@ -144,7 +144,6 @@
       "find": "buffer_search::Deploy",
       "ctrl-f": "buffer_search::Deploy",
       "ctrl-h": "buffer_search::DeployReplace",
-      "ctrl->": "agent::AddSelectionToThread",
       "ctrl-alt-e": "editor::SelectEnclosingSymbol",
       "ctrl-shift-backspace": "editor::GoToPreviousChange",
       "ctrl-shift-alt-backspace": "editor::GoToNextChange",
@@ -213,7 +212,6 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-shift-d": "git::Diff",
-      "ctrl-shift-v": "agent::PasteRaw",
       // `alt-l` is provided as an alternative to `alt-tab` as the latter breaks on Linux under the `AcpThread > Editor` context
     },
   },
@@ -228,14 +226,12 @@
     "context": "AcpThread > Editor && !use_modifier_to_send",
     "use_key_equivalents": true,
     "bindings": {
-      "enter": "agent::Chat",
     },
   },
   {
     "context": "AcpThread > Editor && use_modifier_to_send",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-enter": "agent::Chat",
       "enter": "editor::Newline",
     },
   },
@@ -526,7 +522,6 @@
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
-      "ctrl-?": "agent::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
       "ctrl-k n": "encoding_selector::Toggle",
@@ -1023,8 +1018,7 @@
       "ctrl-shift-r": "terminal::RerunTask",
       "ctrl-alt-r": "terminal::RerunTask",
       "alt-t": "terminal::RerunTask",
-      "ctrl-shift-5": "pane::SplitRight",
-      "ctrl->": "agent::AddSelectionToThread",
+      "ctrl-shift-5": "pane::SplitRight"
     },
   },
   {

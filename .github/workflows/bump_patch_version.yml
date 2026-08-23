@@ -8,44 +8,38 @@ on:
         description: Branch name to run on
         required: true
         type: string
+      prerelease:
+        description: Tag as a prerelease (v0.1.2-pre) instead of a full release (v0.1.2)
+        type: boolean
+        default: 'false'
 jobs:
   run_bump_patch_version:
-    if: github.repository_owner == 'zed-industries'
+    if: (github.repository_owner == 'tgiap04')
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-    - id: generate-token
-      name: steps::authenticate_as_zippy
-      uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859
-      with:
-        app-id: ${{ secrets.ZED_ZIPPY_APP_ID }}
-        private-key: ${{ secrets.ZED_ZIPPY_APP_PRIVATE_KEY }}
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
         ref: ${{ inputs.branch }}
-        token: ${{ steps.generate-token.outputs.token }}
+        token: ${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}
     - id: bump-version
       name: bump_patch_version::run_bump_patch_version::bump_version
       run: |
-        channel="$(cat crates/zed/RELEASE_CHANNEL)"
+        if [[ "$PRERELEASE" == "true" ]]; then
+          tag_suffix="-pre"
+        else
+          tag_suffix=""
+        fi
 
-        tag_suffix=""
-        case $channel in
-          stable)
-            ;;
-          preview)
-            tag_suffix="-pre"
-            ;;
-          *)
-            echo "this must be run on either of stable|preview release branches" >&2
-            exit 1
-            ;;
-        esac
         which cargo-set-version > /dev/null || cargo install cargo-edit -f --no-default-features --features "set-version"
         version="$(cargo set-version -p zode --bump patch 2>&1 | sed 's/.* //')"
         echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "tag_suffix=$tag_suffix" >> "$GITHUB_OUTPUT"
+      env:
+        PRERELEASE: ${{ inputs.prerelease }}
     - id: commit
       name: bump_patch_version::run_bump_patch_version::commit_changes
       uses: IAreKyleW00t/verified-bot-commit@126a6a11889ab05bcff72ec2403c326cd249b84c
@@ -53,7 +47,7 @@ jobs:
         message: Bump to ${{ steps.bump-version.outputs.version }} for @${{ github.actor }}
         ref: refs/heads/${{ inputs.branch }}
         files: '**'
-        token: ${{ steps.generate-token.outputs.token }}
+        token: ${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}
     - name: bump_patch_version::run_bump_patch_version::create_version_tag
       uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
       with:
@@ -64,7 +58,7 @@ jobs:
               ref: 'refs/tags/v${{ steps.bump-version.outputs.version }}${{ steps.bump-version.outputs.tag_suffix }}',
               sha: '${{ steps.commit.outputs.commit }}'
           })
-        github-token: ${{ steps.generate-token.outputs.token }}
+        github-token: ${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.branch }}
   cancel-in-progress: true

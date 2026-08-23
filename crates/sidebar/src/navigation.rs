@@ -30,12 +30,18 @@ impl Sidebar {
         context
     }
 
+    /// Sends focus on to the filter editor when the sidebar itself is focused.
+    ///
+    /// Only when the sidebar's *own* handle is the one focused. `on_focus_in`
+    /// fires for the whole subtree, so focus arriving at something inside the
+    /// sidebar already has an owner — and taking it away from that owner was
+    /// dismissing a project's context menu the instant it opened: the menu is
+    /// focused two frames after it appears, that focus counted as the sidebar
+    /// gaining focus, this method handed it to the filter editor, and
+    /// `ContextMenu` cancels itself on blur. The menu drew for one frame and
+    /// died, which reads as a menu that never opened.
     pub(crate) fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .filter_editor
-            .focus_handle(cx)
-            .contains_focused(window, cx)
-        {
+        if !self.focus_handle.is_focused(window) {
             return;
         }
         self.filter_editor.update(cx, |editor, cx| {

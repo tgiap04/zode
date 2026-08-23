@@ -7,6 +7,8 @@ description: "Icon Themes for Zode extensions."
 
 Extensions may provide icon themes to change the icons Zode uses for folders and files.
 
+> **Note:** In this build, the file icons are fixed to the Material Icon Theme (see [Icon Themes](../icon-themes.md)). An extension can still declare an `icon_themes` directory following this schema, and it loads without error, but it is never selected — there is no icon theme picker, and no setting resolves to it.
+
 ## Example extension
 
 The [Material Icon Theme](https://github.com/zed-extensions/material-icon-theme) serves as an example for the structure of an extension containing an icon theme.

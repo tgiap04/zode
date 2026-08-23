@@ -2467,13 +2467,13 @@ Example:
 
 ## Icon Theme
 
-- Description: The icon theme setting can be specified in two forms - either as the name of an icon theme or as an object containing the `mode`, `dark`, and `light` icon themes for files/folders inside Zode.
+- Description: The icon theme setting can be specified in two forms - either as the name of an icon theme or as an object containing the `mode`, `dark`, and `light` icon themes for files/folders inside Zode. **This build ignores the value**: file and folder icons are fixed to the Material Icon Theme, in colour, and no name written here changes them. The key stays in the schema because it is resolved unconditionally at startup — see [Icon Themes](../icon-themes.md).
 - Setting: `icon_theme`
-- Default: `Zode (Default)`
+- Default: `Material Icon Theme`
 
 ### Icon Theme Object
 
-- Description: Specify the icon theme using an object that includes the `mode`, `dark`, and `light`.
+- Description: Specify the icon theme using an object that includes the `mode`, `dark`, and `light`. Accepted and parsed, but — like the string form above — has no effect on the icons shown.
 - Setting: `icon_theme`
 - Default:
 
@@ -2481,75 +2481,29 @@ Example:
 {
   "icon_theme": {
     "mode": "system",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
+    "dark": "Material Icon Theme",
+    "light": "Material Icon Theme"
   }
 }
 ```
 
 ### Mode
 
-- Description: Specify the icon theme mode.
+- Description: Specify the icon theme mode. Has no effect in this build (see above).
 - Setting: `mode`
 - Default: `system`
 
-**Options**
-
-1. Set the icon theme to dark mode
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "dark",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
-  }
-}
-```
-
-2. Set the icon theme to light mode
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "light",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
-  }
-}
-```
-
-3. Set the icon theme to system mode
-
-```json [settings]
-{
-  "icon_theme": {
-    "mode": "system",
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)"
-  }
-}
-```
-
 ### Dark
 
-- Description: The name of the dark icon theme.
+- Description: The name of the dark icon theme. Has no effect in this build (see above).
 - Setting: `dark`
-- Default: `Zode (Default)`
-
-**Options**
-
-Run the {#action icon_theme_selector::Toggle} action in the command palette to see a current list of valid icon themes names.
+- Default: `Material Icon Theme`
 
 ### Light
 
-- Description: The name of the light icon theme.
+- Description: The name of the light icon theme. Has no effect in this build (see above).
 - Setting: `light`
-- Default: `Zode (Default)`
-
-**Options**
-
-Run the {#action icon_theme_selector::Toggle} action in the command palette to see a current list of valid icon themes names.
+- Default: `Material Icon Theme`
 
 ## Image Viewer
 
@@ -4664,6 +4618,8 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 - Description: Customize project panel
 - Setting: `project_panel`
+- Note: the project panel always docks on the right side of the window, opposite the project rail; there is no `dock` setting for it.
+- Note: `default_width` sets the width of the whole tool column, not just this panel. The column shows one panel at a time and keeps a single width, so switching to the agent history does not move its edge — and dragging that edge while the agent history is up resizes the column all the same.
 - Default:
 
 ```json [settings]
@@ -4671,7 +4627,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
   "project_panel": {
     "button": true,
     "default_width": 240,
-    "dock": "left",
     "entry_spacing": "comfortable",
     "file_icons": true,
     "folder_icons": true,
@@ -4688,7 +4643,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
     "sticky_scroll": true,
     "show_diagnostics": "all",
     "indent_guides": {
-      "show": "always"
+      "show": "on_hover"
     },
     "sort_mode": "directories_first",
     "hide_root": false,
@@ -4699,34 +4654,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
       "on_paste": true,
       "on_drop": true
     }
-  }
-}
-```
-
-### Dock
-
-- Description: Control the position of the dock
-- Setting: `dock`
-- Default: `left`
-
-**Options**
-
-1. Default dock position to left
-
-```json [settings]
-{
-  "project_panel": {
-    "dock": "left"
-  }
-}
-```
-
-2. Default dock position to right
-
-```json [settings]
-{
-  "project_panel": {
-    "dock": "right"
   }
 }
 ```
@@ -4889,7 +4816,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 ### Indent Guides: Show
 
-- Description: Whether to show indent guides in the project panel.
+- Description: When to show indent guides in the project panel.
 - Setting: `indent_guides`
 - Default:
 
@@ -4897,7 +4824,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 {
   "project_panel": {
     "indent_guides": {
-      "show": "always"
+      "show": "on_hover"
     }
   }
 }
@@ -4905,7 +4832,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 
 **Options**
 
-1. Show indent guides in the project panel
+1. Always show indent guides in the project panel
 
 ```json [settings]
 {
@@ -4917,7 +4844,19 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 }
 ```
 
-2. Hide indent guides in the project panel
+2. Show them only while the pointer is inside the project panel
+
+```json [settings]
+{
+  "project_panel": {
+    "indent_guides": {
+      "show": "on_hover"
+    }
+  }
+}
+```
+
+3. Hide indent guides in the project panel
 
 ```json [settings]
 {

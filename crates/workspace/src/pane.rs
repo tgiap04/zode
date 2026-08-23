@@ -4237,7 +4237,8 @@ fn default_render_tab_bar_buttons(
                 .with_handle(pane.new_item_context_menu_handle.clone())
                 .menu(move |window, cx| {
                     Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action("New File", NewFile.boxed_clone())
+                        let menu = menu
+                            .action("New File", NewFile.boxed_clone())
                             .action("Open File", ToggleFileFinder::default().boxed_clone())
                             .separator()
                             .action("Search Project", DeploySearch::default().boxed_clone())
@@ -4247,7 +4248,33 @@ fn default_render_tab_bar_buttons(
                             .action(
                                 "New Center Terminal",
                                 NewCenterTerminal::default().boxed_clone(),
-                            )
+                            );
+
+                        // The agents belong on this menu because they open into
+                        // this pane: an agent is an item of the centre panes, so
+                        // "New Claude Code" lands exactly where "New File" does.
+                        // This is also the only place a second session of an
+                        // agent already running can be started -- a rail press
+                        // comes back to the one that is there.
+                        //
+                        // Named actions rather than a call into the agent crate,
+                        // so `workspace` gains no dependency on it: `NewTerminal`
+                        // above is dispatched the same way. Built from
+                        // `BUILTIN_AGENTS`, so a third agent appears here the day
+                        // it is added rather than the day someone remembers this
+                        // list.
+                        project::BUILTIN_AGENTS
+                            .iter()
+                            .fold(menu.separator(), |menu, agent| {
+                                menu.action(
+                                    format!("New {}", agent.display_name),
+                                    zed_actions::agent::NewAgent {
+                                        agent: agent.id.to_string(),
+                                        mode: None,
+                                    }
+                                    .boxed_clone(),
+                                )
+                            })
                     }))
                 }),
         )

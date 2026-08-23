@@ -162,16 +162,16 @@ export APP_ICON="zed"
 export APP_ARGS="%U"
 if [[ "$channel" == "preview" ]]; then
   export APP_NAME="Zode Preview"
-  APP_ID="dev.zed.Zed-Preview"
+  APP_ID="io.github.tgiap04.zode.preview"
 elif [[ "$channel" == "nightly" ]]; then
   export APP_NAME="Zode Nightly"
-  APP_ID="dev.zed.Zed-Nightly"
+  APP_ID="io.github.tgiap04.zode.nightly"
 elif [[ "$channel" == "dev" ]]; then
-  export APP_NAME="Zode Devel"
-  APP_ID="dev.zed.Zed-Dev"
+  export APP_NAME="Zode"
+  APP_ID="io.github.tgiap04.zode.dev"
 else
   export APP_NAME="Zode"
-  APP_ID="dev.zed.Zed"
+  APP_ID="io.github.tgiap04.zode"
 fi
 
 mkdir -p "${zed_dir}/share/applications"

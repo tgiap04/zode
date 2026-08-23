@@ -16,17 +16,27 @@ See the platform-specific instructions for building Zode from source:
 The database column talks to each engine through a separate binary
 (`zode-db-sqlite`, `zode-db-postgres`, `zode-db-mysql`), which the app starts
 from beside its own executable. Nothing links against them, and they are not in
-`default-members`, so `cargo run` does not build them — in a fresh checkout
-every connection fails with "could not start the driver".
+`default-members`, so `cargo run` does not build them.
 
-Build them once:
+`make build` builds them alongside the binary, so the usual loop needs nothing
+extra. To build them on their own:
 
 ```sh
+make drivers                             # beside `make build`
+make drivers PROFILE=release-fast        # beside `make build PROFILE=release-fast`
 script/build-database-drivers            # beside `cargo run`
 script/build-database-drivers --release  # beside `cargo run --release`
 ```
 
 The release bundles build and ship them; this is only for development builds.
+
+If they are missing, every connection fails — and the message you get is the
+shell's, not the driver's. The driver is started through a shell, so an absent
+binary is not a failed spawn: the shell writes `command not found:
+zode-db-postgres` to what the client reads as the driver's own stderr, and the
+reconnect loop repeats it every few seconds. Zode logs one clear warning at
+startup for each built-in driver it cannot find beside its executable; that line,
+not the repeated one, is the one worth reading.
 
 Note that saving a connection's password uses the keychain, so on a development
 build see the section below.

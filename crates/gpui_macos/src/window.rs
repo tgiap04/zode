@@ -666,7 +666,12 @@ impl MacWindow {
             }
 
             let native_window: id = match kind {
-                WindowKind::Normal => {
+                // An ordinary window, deliberately: the raised level is applied
+                // below, and it is the level rather than the class that keeps a
+                // window above other applications. An `NSPanel` would also be
+                // above them, and absent from window cycling and the Window
+                // menu with it.
+                WindowKind::Normal | WindowKind::AlwaysOnTop => {
                     msg_send![WINDOW_CLASS, alloc]
                 }
                 WindowKind::PopUp => {
@@ -840,12 +845,28 @@ impl MacWindow {
             let mut sheet_parent = None;
 
             match kind {
-                WindowKind::Normal | WindowKind::Floating => {
-                    if kind == WindowKind::Floating {
+                WindowKind::Normal | WindowKind::Floating | WindowKind::AlwaysOnTop => {
+                    if kind == WindowKind::Floating || kind == WindowKind::AlwaysOnTop {
                         // Let the window float keep above normal windows.
                         native_window.setLevel_(NSFloatingWindowLevel);
                     } else {
                         native_window.setLevel_(NSNormalWindowLevel);
+                    }
+                    if kind == WindowKind::AlwaysOnTop {
+                        // Raising the level is what takes a window *out* of
+                        // Spaces, Mission Control and window cycling: AppKit
+                        // manages windows at the normal level and treats
+                        // anything above it as transient by default. An
+                        // ordinary `NSWindow` class is not enough on its own,
+                        // so the two behaviours are asked for by name --
+                        // `Managed` is Spaces and Exposé, `ParticipatesInCycle`
+                        // is Cmd-` and the Window menu. Without them the window
+                        // is on top and unreachable once it loses focus, which
+                        // is half a feature.
+                        native_window.setCollectionBehavior_(
+                            NSWindowCollectionBehavior::NSWindowCollectionBehaviorManaged
+                                | NSWindowCollectionBehavior::NSWindowCollectionBehaviorParticipatesInCycle,
+                        );
                     }
                     native_window.setAcceptsMouseMovedEvents_(YES);
 
