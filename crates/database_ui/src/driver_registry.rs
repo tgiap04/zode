@@ -30,11 +30,33 @@ fn driver_path(executable: &str) -> PathBuf {
         executable.to_string()
     };
 
-    std::env::current_exe()
+    let beside_exe = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(&executable)))
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from(executable))
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&executable)));
+
+    if let Some(path) = beside_exe.as_ref().filter(|path| path.exists()) {
+        return path.clone();
+    }
+
+    // Absent. The bare name still goes back, because `PATH` answering for
+    // someone who put a driver there deliberately is the documented behaviour --
+    // but it is said out loud here, and that is the point.
+    //
+    // Silence was the defect. A bare name is handed to a *shell*
+    // (`StdioTransport::new` builds the command through `ShellBuilder`), so
+    // `spawn` succeeds, the shell writes `command not found` to what the client
+    // reads as the driver's stderr, and the reconnect loop repeats it. The one
+    // fact worth knowing -- the binary was never built -- appears nowhere, and
+    // the message that does appear looks like the driver talking.
+    log::warn!(
+        "database driver `{executable}` is not beside the executable{}, falling back to PATH; \
+         in a checkout build it with `make drivers` (or `script/build-database-drivers`)",
+        beside_exe
+            .as_deref()
+            .map(|path| format!(" at {}", path.display()))
+            .unwrap_or_default()
+    );
+    PathBuf::from(executable)
 }
 
 pub fn built_in_drivers() -> DriverRegistry {
