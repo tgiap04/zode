@@ -34,12 +34,11 @@ fn disable_background_project_retention(cx: &mut Context<MultiWorkspace>) {
             settings.workspace.multi_project = Some(MultiProjectContent {
                 retain_background_projects: Some(false),
                 // `None` is a no-op merge here — this helper only pins
-                // retention, not hibernation, the memory fuse, terminal
-                // scroll history, or the sidebar side.
+                // retention, not hibernation, the memory fuse, or terminal
+                // scroll history.
                 hibernate_after_ms: None,
                 memory_pressure_threshold_percent: None,
                 background_scroll_history_lines: None,
-                sidebar_side: None,
             });
         });
     });
@@ -64,11 +63,10 @@ fn set_multi_project_settings(
                 retain_background_projects: Some(retain_background_projects),
                 hibernate_after_ms: Some(hibernate_after_ms),
                 // `None` is a no-op merge here — this helper only pins
-                // retention and hibernation, not the memory fuse, terminal
-                // scroll history, or the sidebar side.
+                // retention and hibernation, not the memory fuse or terminal
+                // scroll history.
                 memory_pressure_threshold_percent: None,
                 background_scroll_history_lines: None,
-                sidebar_side: None,
             });
         });
     });
@@ -93,10 +91,8 @@ fn set_memory_fuse_settings(
                 hibernate_after_ms: Some(hibernate_after_ms),
                 memory_pressure_threshold_percent: Some(memory_pressure_threshold_percent),
                 // `None` is a no-op merge here — the memory-fuse tests
-                // don't exercise terminal scroll history or the sidebar
-                // side.
+                // don't exercise terminal scroll history.
                 background_scroll_history_lines: None,
-                sidebar_side: None,
             });
         });
     });
@@ -2141,6 +2137,291 @@ async fn the_only_open_project_still_forms_a_group(cx: &mut TestAppContext) {
     });
 }
 
+/// The window's own project survives being switched away from, and gets written
+/// down.
+///
+/// It is only *synthesized* into the displayed list (`derived_project_groups`),
+/// never stored, and a synthesized entry follows whatever is active. Two
+/// reported defects came out of that one fact: opening a second project looked
+/// like it had *replaced* the first, and a restarted window remembered no
+/// projects at all, because `serialize` records the stored list and the stored
+/// list was empty.
+#[gpui::test]
+async fn the_windows_own_project_is_stored_before_it_can_be_lost(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/root_a").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(
+            mw.project_groups(cx).len(),
+            1,
+            "the rail shows the window's own project from the start"
+        );
+    });
+
+    // What opening another project does: a new workspace becomes active.
+    let opened =
+        multi_workspace.update_in(cx, |mw, window, cx| mw.create_test_workspace(window, cx));
+    opened.await;
+    cx.run_until_parked();
+
+    let (displayed, stored) = multi_workspace.read_with(cx, |mw, cx| {
+        (
+            mw.project_groups(cx)
+                .iter()
+                .map(|group| {
+                    group
+                        .key
+                        .path_list()
+                        .paths()
+                        .first()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>(),
+            mw.project_group_keys().len(),
+        )
+    });
+    assert!(
+        displayed.iter().any(|path| path == path!("/root_a")),
+        "switching to another project must not take the first one off the rail, \
+         got {displayed:?}"
+    );
+    assert!(
+        stored >= 1,
+        "and it has to be written down, or a restart remembers nothing: stored={stored}"
+    );
+}
+
+/// Dragging a project changes the rail's order, the order is remembered, and a
+/// newly opened project still leads without disturbing what was arranged.
+///
+/// Groups are seeded through `retain_workspace`, the production route that runs
+/// `ensure_project_group_state` -- not through `test_add_project_group`, which
+/// appends where production inserts at the front. A reorder test standing on
+/// that helper would be describing an order production never produces.
+#[gpui::test]
+async fn a_project_can_be_moved_and_the_order_is_remembered(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let active = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    let key_for = |root: &str| ProjectGroupKey::new(None, crate::PathList::new(&[root]));
+    let leading_path = |key: &ProjectGroupKey| {
+        key.path_list()
+            .paths()
+            .first()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
+    };
+    // The displayed list, not the stored one: the window's own project is
+    // synthesized into it while the stored list is still empty, and the rail
+    // shows what is displayed. This is the very gap `move_project_group` has to
+    // close before an index means anything.
+    let order = |mw: &MultiWorkspace, cx: &App| -> Vec<String> {
+        mw.project_groups(cx)
+            .iter()
+            .map(|group| leading_path(&group.key))
+            .collect()
+    };
+
+    // Each newly registered project goes to the front, so this leaves [c, b, a].
+    multi_workspace.update(cx, |mw, cx| {
+        for root in [path!("/root_b"), path!("/root_c")] {
+            mw.retain_workspace(active.clone(), key_for(root), cx);
+        }
+    });
+    cx.run_until_parked();
+
+    let before = multi_workspace.read_with(cx, |mw, cx| order(mw, cx));
+    assert_eq!(before.len(), 3, "three projects to arrange, got {before:?}");
+    let last = before.last().cloned().unwrap();
+
+    // The one at the end, to the front.
+    multi_workspace.update(cx, |mw, cx| mw.move_project_group(&key_for(&last), 0, cx));
+    cx.run_until_parked();
+    let after = multi_workspace.read_with(cx, |mw, cx| order(mw, cx));
+    assert_eq!(
+        after.first(),
+        Some(&last),
+        "the moved project must lead the rail, got {after:?}"
+    );
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "nothing gained or lost in a move"
+    );
+
+    // Dropped where it already is: not a move.
+    multi_workspace.update(cx, |mw, cx| mw.move_project_group(&key_for(&last), 0, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, cx| order(mw, cx)),
+        after,
+        "a drop onto the same place must change nothing"
+    );
+
+    // The order comes back the way it was left. `serialize` writes the stored
+    // list in order by construction; what is worth testing is that the restore
+    // path does not reshuffle it.
+    let record: Vec<SerializedProjectGroupState> = multi_workspace.read_with(cx, |mw, cx| {
+        mw.project_groups(cx)
+            .iter()
+            .map(|group| group.key.clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|key| SerializedProjectGroupState {
+                key,
+                expanded: true,
+                initials: None,
+                colour: None,
+            })
+            .collect()
+    });
+    multi_workspace.update(cx, |mw, cx| mw.restore_project_groups(record, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, cx| order(mw, cx)),
+        after,
+        "a remembered order has to survive the trip through the record"
+    );
+
+    // Naming the end rather than an index: this is what a drop on the rail's
+    // empty space asks for, and it must not depend on the two lists agreeing
+    // about their length.
+    let first = multi_workspace.read_with(cx, |mw, cx| order(mw, cx))[0].clone();
+    multi_workspace.update(cx, |mw, cx| {
+        mw.move_project_group(&key_for(&first), usize::MAX, cx)
+    });
+    cx.run_until_parked();
+    let appended = multi_workspace.read_with(cx, |mw, cx| order(mw, cx));
+    assert_eq!(
+        appended.last(),
+        Some(&first),
+        "usize::MAX must land the project at the end, got {appended:?}"
+    );
+    assert_eq!(
+        appended.len(),
+        after.len(),
+        "and nothing may be lost doing it"
+    );
+
+    // Put it back so the ordering assertions below still describe `after`.
+    multi_workspace.update(cx, |mw, cx| mw.move_project_group(&key_for(&first), 0, cx));
+    cx.run_until_parked();
+
+    // A key this window does not show is not a project: moving it must not
+    // conjure one onto the rail. This is what dropping the pre-check rests on --
+    // `materialize_project_groups` only ever adds keys that are displayed.
+    let before_stranger = multi_workspace.read_with(cx, |mw, cx| order(mw, cx));
+    multi_workspace.update(cx, |mw, cx| {
+        mw.move_project_group(&key_for(path!("/nowhere")), 0, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, cx| order(mw, cx)),
+        before_stranger,
+        "a stranger key must change nothing and add nothing"
+    );
+
+    // And the arrangement is not undone by opening something new: the newcomer
+    // leads, the rest keep the order they were put in.
+    multi_workspace.update(cx, |mw, cx| {
+        mw.retain_workspace(active.clone(), key_for(path!("/root_d")), cx);
+    });
+    cx.run_until_parked();
+    let with_newcomer = multi_workspace.read_with(cx, |mw, cx| order(mw, cx));
+    assert_eq!(
+        with_newcomer.first().map(String::as_str),
+        Some(path!("/root_d")),
+        "a newly opened project leads, got {with_newcomer:?}"
+    );
+    assert_eq!(
+        &with_newcomer[1..],
+        after.as_slice(),
+        "and everything arranged by hand keeps its relative order"
+    );
+}
+
+/// Initials and colour set through the project's own menu, read back the way
+/// the sidebar reads them.
+///
+/// The cap is asserted here as well as in `project_appearance`: that module can
+/// be right while the setter forgets to call it, and the setter is the only door
+/// the menu goes through.
+#[gpui::test]
+async fn a_project_carries_its_own_initials_and_colour(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/root_a").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    let active = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    let key =
+        multi_workspace.read_with(cx, |mw, cx| mw.project_group_key_for_workspace(&active, cx));
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_presentation(&key),
+            (None, None),
+            "a project starts with neither, which is what makes it fall back to \
+             initials from its name"
+        );
+    });
+
+    let blue = crate::project_appearance::colour_from_hex("#3b82f6").unwrap();
+    multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_initials(&key, "  abcde ", cx);
+        mw.set_project_colour(&key, Some(blue), cx);
+    });
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        let (initials, colour) = mw.project_presentation(&key);
+        assert_eq!(
+            initials.as_ref().map(|initials| initials.as_ref()),
+            Some("ab"),
+            "trimmed and capped at the setter, not at the place that draws it"
+        );
+        assert_eq!(colour, Some(blue));
+    });
+
+    // Clearing the field is the way back to the default -- without this there is
+    // no undo for a name someone regrets.
+    multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_initials(&key, "   ", cx);
+        mw.set_project_colour(&key, None, cx);
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(mw.project_presentation(&key), (None, None));
+    });
+
+    // A key this window does not hold is ignored rather than panicking: the menu
+    // is built from a list that can shrink while it is open.
+    let stranger = ProjectGroupKey::new(None, crate::PathList::new(&[path!("/nowhere")]));
+    multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_initials(&stranger, "XX", cx);
+        mw.set_project_colour(&stranger, Some(blue), cx);
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(mw.project_presentation(&stranger), (None, None));
+    });
+}
+
 /// The second run of the same project, with the sidebar left closed.
 ///
 /// Group state comes back from disk while `retained_workspaces` starts empty --
@@ -2169,6 +2450,8 @@ async fn a_restored_group_still_carries_the_windows_own_workspace(cx: &mut TestA
             vec![SerializedProjectGroupState {
                 key: key.clone(),
                 expanded: true,
+                initials: None,
+                colour: None,
             }],
             cx,
         );

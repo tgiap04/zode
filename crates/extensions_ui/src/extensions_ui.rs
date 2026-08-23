@@ -429,23 +429,9 @@ impl ExtensionsPage {
             return;
         }
 
-        let icon_themes = extension_store
-            .extension_icon_themes(extension_id)
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>();
-        if !icon_themes.is_empty() {
-            workspace
-                .update(cx, |_workspace, cx| {
-                    window.dispatch_action(
-                        zed_actions::icon_theme_selector::Toggle {
-                            themes_filter: Some(icon_themes),
-                        }
-                        .boxed_clone(),
-                        cx,
-                    );
-                })
-                .ok();
-        }
+        // No icon-theme prompt: the file icons are fixed in this build, so an
+        // extension that ships one has nothing to offer here. Its colour themes,
+        // above, still apply.
     }
 
     /// Returns whether a dev extension currently exists for the extension with the given ID.

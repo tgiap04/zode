@@ -106,6 +106,11 @@ actions!(
 );
 
 const OUTLINE_PANEL_KEY: &str = "OutlinePanel";
+/// The element group the panel's root declares, and what "inside the panel"
+/// means to the indent guides when they follow the pointer. One const rather
+/// than two literals: a name that drifted would leave them hidden for good with
+/// nothing to say so.
+const PANEL_GROUP: &str = "outline-panel";
 const UPDATE_DEBOUNCE: Duration = Duration::from_millis(50);
 
 type Outline = OutlineItem<language::Anchor>;
@@ -4534,11 +4539,15 @@ impl OutlinePanel {
     fn render_main_contents(
         &mut self,
         query: Option<String>,
-        show_indent_guides: bool,
+        indent_guides: ShowIndentGuides,
         indent_size: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let show_indent_guides = indent_guides != ShowIndentGuides::Never;
+        // See `IndentGuides::visible_on_group_hover`: the pointer is gpui's
+        // business through `PANEL_GROUP`, not a flag this panel keeps.
+        let guides_follow_pointer = indent_guides == ShowIndentGuides::OnHover;
         let contents = if self.cached_entries.is_empty() {
             let header = if query.is_some() {
                 "No matches for query"
@@ -4662,6 +4671,9 @@ impl OutlinePanel {
                 .when(show_indent_guides, |list| {
                     list.with_decoration(
                         ui::indent_guides(px(indent_size), IndentGuideColors::panel(cx))
+                            .when(guides_follow_pointer, |guides| {
+                                guides.visible_on_group_hover(PANEL_GROUP)
+                            })
                             .with_compute_indents_fn(cx.entity(), |outline_panel, range, _, _| {
                                 let entries = outline_panel.cached_entries.get(range);
                                 if let Some(entries) = entries {
@@ -4985,7 +4997,7 @@ impl Render for OutlinePanel {
         let pinned = self.pinned;
         let settings = OutlinePanelSettings::get_global(cx);
         let indent_size = settings.indent_size;
-        let show_indent_guides = settings.indent_guides.show == ShowIndentGuides::Always;
+        let indent_guides = settings.indent_guides.show;
 
         let search_query = match &self.mode {
             ItemsDisplayMode::Search(search_query) => Some(search_query),
@@ -4996,6 +5008,7 @@ impl Render for OutlinePanel {
 
         v_flex()
             .id("outline-panel")
+            .group(PANEL_GROUP)
             .size_full()
             .overflow_hidden()
             .relative()
@@ -5059,7 +5072,7 @@ impl Render for OutlinePanel {
                         .child(Label::new(query_text)),
                 )
             })
-            .child(self.render_main_contents(query, show_indent_guides, indent_size, window, cx))
+            .child(self.render_main_contents(query, indent_guides, indent_size, window, cx))
     }
 }
 

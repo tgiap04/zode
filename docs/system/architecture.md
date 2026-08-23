@@ -1,26 +1,30 @@
 # Architecture
 
 <!-- Stack: Rust workspace (generic-source profile), native GPUI desktop app ("Zode", a Zed fork).
-     Verified via root Cargo.toml (180 crate members + 4 extensions + 3 tooling crates, resolver "2"),
+     Verified via root Cargo.toml (189 crate members + 4 extensions + 3 tooling crates, resolver "2"),
      and direct [dependencies] inspection of crates/zed, crates/workspace, crates/project, crates/editor,
      crates/extension_host, crates/git_ui, crates/sidebar, crates/title_bar, crates/client, crates/rpc,
      crates/proto, crates/remote, crates/remote_server, crates/remote_connection, crates/collections
      Cargo.toml [dependencies] sections (see scout-report.md for full per-crate inventory).
      CORRECTION vs. upstream Zed / a prior draft of this doc: this fork carries NO `agent`, `collab`,
      `livekit_api`/`livekit_client`, or `language_model`/provider crates — none of those directories
-     exist under crates/ and none are workspace members. The only trace of the AI-agent feature is a
-     single unused `agent-client-protocol = "=0.11.1"` entry in the root [workspace.dependencies]
-     table with zero consuming crates (`grep -rn agent-client-protocol crates/*/Cargo.toml` = no
-     matches) — vestigial from stripping that feature, not a live subsystem. Git log confirms an
+     exist under crates/ and none are workspace members. The Agent Client Protocol stack is gone too:
+     `acp_thread`, `agent_servers`, `acp_tools` and `agent_settings` were deleted along with the agent
+     chat surface, and the root [workspace.dependencies] `agent-client-protocol` entry went with them
+     (`grep -rn agent-client-protocol Cargo.toml crates/*/Cargo.toml` = no matches). What remains is
+     `crates/agent_ui`, a terminal-only agent tab: an agent is a PTY, never an ACP client. Git log confirms an
      explicit `collab_ui` removal (commit ad901af "restore the title bar lost with the collab_ui
      removal"). Treat any AI/Agent or Collaboration section from a generic Zode writeup as INVALID
      for this repo. -->
 
 ## System Architecture
 
-The binary `crates/zed` (`default-members`) statically links ~176 in-workspace library crates
-(180 crate paths total, 176 are libraries plus benchmarks/test-only crates). There is no
-client/server split, no collaboration backend, and no AI/agent subsystem in this fork — `client`,
+The binary `crates/zed` (`default-members`) statically links the great majority of the workspace's
+in-workspace library crates (196 workspace members, 189 of them under `crates/`; 184 carry a lib
+target, the remainder being the binary itself plus benchmark, tooling and test-only crates). There
+is no client/server split, no collaboration backend, and no in-editor AI chat surface or
+language-model provider stack in this fork — external agent CLIs run as terminal sessions and
+nothing more. `client`,
 `rpc`, and `proto` exist solely to support **remote development** (SSH-based `remote_server` /
 `remote_connection`, confirmed in `crates/remote_server/Cargo.toml` depending on `client`, `rpc`,
 `proto`, `project`, `extension_host`) and telemetry, not real-time multiplayer collaboration. The
@@ -152,16 +156,24 @@ graph TB
 | Debugging             | `dap` / `dap_adapters` (Debug Adapter Protocol client)                                                                                                        | separate from the language-server layer                                                                                                              |
 | Extension runtime     | WASM via `extension_host`, in-tree extensions under `extensions/*` (glsl, html, proto, test-extension)                                                        |                                                                                                                                                      |
 | Local persistence     | SQLite via `sqlez` (thin async wrapper) + `db`                                                                                                                | app/window/multi-workspace state, KV store                                                                                                           |
-| Remote development    | `client` + `rpc`/`proto` (custom binary wire protocol) + `remote`/`remote_connection` + `remote_server` (headless binary, `x86_64-unknown-linux-musl` target) | SSH-based remoting only — **no collaboration backend, no multiplayer, no AI agent** in this fork                                                     |
+| Remote development    | `client` + `rpc`/`proto` (custom binary wire protocol) + `remote`/`remote_connection` + `remote_server` (headless binary, `x86_64-unknown-linux-musl` target) | SSH-based remoting only — **no collaboration backend, no multiplayer, no AI chat surface** in this fork                                              |
 | Async runtime         | GPUI's own executor (`cx.spawn`, `cx.background_spawn`); `gpui_tokio` bridges Tokio only where a dependency requires it                                       | not tokio-first                                                                                                                                      |
-| Build/workspace       | Cargo workspace, resolver "2", 180 crate paths (`crates/*`) + 4 `extensions/*` + 3 `tooling/*`                                                                | root `Cargo.toml`                                                                                                                                    |
+| Build/workspace       | Cargo workspace, resolver "2", 189 crate paths (`crates/*`) + 4 `extensions/*` + 3 `tooling/*`                                                                | root `Cargo.toml`                                                                                                                                    |
 | Packaging targets     | macOS/Linux/Windows native, musl (remote server), WASM (extensions + experimental web)                                                                        | `rust-toolchain.toml`                                                                                                                                |
 
 **Removed relative to upstream Zed** (verified absent from workspace members and `crates/`): `agent`,
-`agent_ui`, `acp_thread`, `collab` (server binary), `language_model` + per-vendor provider crates
-(`anthropic`, `open_ai`, `google_ai`, `bedrock`, `ollama`, …), `livekit_api`/`livekit_client`,
-`edit_prediction*` (Zeta). This is a lean, non-AI, non-collaborative editor fork centered on local
-editing, multi-project workflows, and remote (SSH) development.
+`acp_thread`, `agent_servers`, `acp_tools`, `agent_settings`, `collab` (server binary),
+`language_model` + per-vendor provider crates (`anthropic`, `open_ai`, `google_ai`, `bedrock`,
+`ollama`, …), `livekit_api`/`livekit_client`, `edit_prediction*` (Zeta). Note that `agent_ui` **is**
+present but is not the upstream crate: it is a 2,270-line terminal-only agent tab (`actions.rs`,
+`agent_ui.rs`, `agent_view.rs`, `missing_binary.rs`) with no chat view, no message editor and no
+model or mode selector.
+
+This is a lean, non-collaborative editor fork centered on local editing, multi-project workflows,
+and remote (SSH) development. It carries no in-editor AI chat surface and no language-model provider
+crates; external agent CLIs are supported as **terminal sessions only** — an agent is a PTY
+(`project::AgentServerStore` → `project.create_terminal_task`) and never speaks the Agent Client
+Protocol.
 
 ## Concurrency & Event Model
 
@@ -219,7 +231,7 @@ calling in this repository.
 - Diagrams are derived from scout-report.md subsystem groupings plus direct `[dependencies]`
   inspection of a representative crate sample (`zed`, `workspace`, `project`, `editor`,
   `extension_host`, `git_ui`, `sidebar`, `title_bar`, `client`, `rpc`, `proto`, `remote`,
-  `remote_server`, `remote_connection`, `collections`); not every one of the 180 crate paths was
+  `remote_server`, `remote_connection`, `collections`); not every one of the 189 crate paths was
   individually verified — smaller leaf/utility crates are trusted from the scout report's per-crate
   purpose descriptions rather than re-sampled here.
 - No REST/GraphQL/gRPC API surface exists; the "System Architecture" diagram intentionally has no

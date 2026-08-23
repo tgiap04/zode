@@ -34,3 +34,9 @@ fi
 echo "Publishing version: ${version} on release channel ${channel}"
 echo "RELEASE_CHANNEL=${channel}" >> "$GITHUB_ENV"
 echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
+
+# The bundling scripts read the FILE, not this env var -- it is what picks the
+# `[package.metadata.bundle-*]` section on macOS, `APP_NAME` on Linux and the
+# installer's whole naming block on Windows. Leaving it at the checked-in value
+# is how a tagged release ends up installing itself as a dev build.
+echo "${channel}" > crates/zed/RELEASE_CHANNEL

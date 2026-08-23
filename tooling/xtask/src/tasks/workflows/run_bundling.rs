@@ -61,7 +61,7 @@ fn bundle_job(deps: &[&NamedJob]) -> Job {
 fn checkout_for(release_channel: Option<ReleaseChannel>) -> steps::CheckoutStep {
     match release_channel {
         Some(ReleaseChannel::Nightly) => steps::checkout_repo().with_ref("main"),
-        None => steps::checkout_repo(),
+        Some(ReleaseChannel::FromTag) | None => steps::checkout_repo(),
     }
 }
 
@@ -179,6 +179,20 @@ pub(crate) fn bundle_windows(
 fn set_release_channel(platform: Platform, release_channel: ReleaseChannel) -> Step<Run> {
     match release_channel {
         ReleaseChannel::Nightly => set_release_channel_to_nightly(platform),
+        ReleaseChannel::FromTag => set_release_channel_from_tag(platform),
+    }
+}
+
+/// Writes the tag's channel into `crates/zed/RELEASE_CHANNEL` before bundling.
+///
+/// `determine-release-channel` already runs in `create_draft_release`, but a workflow
+/// job is its own checkout: the file it writes there is not the file the bundling job
+/// reads. Every bundling job has to resolve the channel for itself.
+fn set_release_channel_from_tag(platform: Platform) -> Step<Run> {
+    match platform {
+        Platform::Linux | Platform::Mac => steps::script("script/determine-release-channel"),
+        Platform::Windows => steps::script("script/determine-release-channel.ps1")
+            .working_directory("${{ env.ZED_WORKSPACE }}"),
     }
 }
 

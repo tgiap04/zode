@@ -4113,7 +4113,12 @@ impl EditorElement {
         let scale = window.scale_factor();
         let pattern_size =
             Self::spacer_pattern_period(f32::from(line_height) * scale, target_size * scale);
-        let color = cx.theme().colors().panel_background;
+        // `surface_background`, not `panel_background`: these slashes are drawn over
+        // the editor's own ground, so the colour has to be one that differs from it.
+        // `panel_background` used to differ by accident and no longer does in the
+        // bundled themes, which made the hatch invisible -- a panel's ground is not
+        // the right token for a mark that has to be seen against a buffer.
+        let color = cx.theme().colors().surface_background;
         let background = pattern_slash(color, 2.0, pattern_size - 2.0);
 
         div()

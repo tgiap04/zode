@@ -54,15 +54,27 @@ THEME := assets/themes/vscode-2026/vscode-2026.json
 THEMES_DIR := $(ZODE_CONFIG)/themes
 
 .DEFAULT_GOAL := help
-.PHONY: help build dev fast run lint test clean trim theme-push theme-pull \
+.PHONY: help build drivers dev fast run lint test clean trim theme-push theme-pull \
 	paths reset-config reset-all onboarding bundle
 
 help: ## Show this help
 	@grep -hE '^[a-z][a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## Compile the zode binary (PROFILE=dev by default, incremental)
+build: ## Compile the zode binary and the database drivers (PROFILE=dev, incremental)
 	$(CARGO) build -p $(PACKAGE) --bin $(PACKAGE) --profile $(PROFILE)
+	@$(MAKE) drivers PROFILE=$(PROFILE)
+
+# The drivers are sidecar binaries outside `default-members`, so neither
+# `cargo build -p zode` nor `cargo run` produces them — a fresh checkout has
+# none, and zode looks for them beside its own executable. Without this every
+# connection failed with `command not found: zode-db-postgres`, repeated by the
+# reconnect loop, which reads as a broken database panel rather than as a
+# missing build step. `script/bundle-*` already build them; only the dev loop
+# did not.
+drivers: ## Compile the database driver sidecars beside the zode binary
+	$(CARGO) build --profile $(PROFILE) \
+		-p zode-db-sqlite -p zode-db-postgres -p zode-db-mysql
 
 dev: ## Launch the already-built binary — never recompiles (PROJECT= opens nothing)
 	@test -x $(BIN) || { \

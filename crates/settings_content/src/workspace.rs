@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{
-    ActionName, CenteredPaddingSettings, DelayMs, DockPosition, DockSide, InactiveOpacity,
-    ShowIndentGuides, ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
+    ActionName, CenteredPaddingSettings, DelayMs, DockPosition, InactiveOpacity, ShowIndentGuides,
+    ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
 };
 
 #[with_fallible_options]
@@ -487,6 +487,47 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: non_utf8
     pub active_encoding_button: Option<EncodingDisplayOptions>,
+    /// Whether to show Claude Code's subscription quota in the status bar.
+    ///
+    /// Default: true
+    pub claude_usage_button: Option<bool>,
+    /// Whether to show Codex's subscription quota in the status bar.
+    ///
+    /// Default: true
+    pub codex_usage_button: Option<bool>,
+    /// How much of an agent's quota to show in the status bar.
+    ///
+    /// Default: detailed
+    pub agent_usage_display: Option<AgentUsageDisplay>,
+}
+
+/// How much of an agent's quota the status bar shows.
+///
+/// Two agents reporting several windows each is five numbers on one line, which
+/// is a lot of status bar. `Compact` keeps only the window closest to running
+/// out — the one that will actually stop you — and the rest stay one click away
+/// in the usage panel.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantNames,
+    strum::VariantArray,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUsageDisplay {
+    /// Every window each agent reports.
+    #[default]
+    Detailed,
+    /// Only the window closest to running out, per agent.
+    Compact,
 }
 
 #[derive(
@@ -702,10 +743,6 @@ pub struct ProjectPanelSettingsContent {
     /// Default: 240
     #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
     pub default_width: Option<f32>,
-    /// The position of project panel
-    ///
-    /// Default: left
-    pub dock: Option<DockSide>,
     /// Spacing between worktree entries in the project panel.
     ///
     /// Default: comfortable
@@ -1027,30 +1064,6 @@ pub struct FocusFollowsMouse {
     pub debounce_ms: Option<u64>,
 }
 
-/// Which side of the window the multi-project switcher sidebar docks to.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum SidebarSide {
-    /// Dock the sidebar on the left side of the window.
-    #[default]
-    Left,
-    /// Dock the sidebar on the right side of the window.
-    Right,
-}
-
 #[with_fallible_options]
 #[derive(Copy, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct MultiProjectContent {
@@ -1120,9 +1133,4 @@ pub struct MultiProjectContent {
     ///
     /// Default: null (disabled)
     pub background_scroll_history_lines: Option<usize>,
-    /// FR8 (multi-project-window-switching, phase 7): which side of the
-    /// window the project switcher sidebar docks to.
-    ///
-    /// Default: left
-    pub sidebar_side: Option<SidebarSide>,
 }

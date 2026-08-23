@@ -1,10 +1,10 @@
 use crate::Sidebar;
 use fs::FakeFs;
-use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
+use gpui::{AppContext as _, Focusable as _, TestAppContext};
 use project::Project;
 use serde_json::json;
 use settings::Settings as _;
-use workspace::{MultiWorkspace, SidebarSide, ToggleWorkspaceSidebar};
+use workspace::{MultiWorkspace, ToggleWorkspaceSidebar};
 
 pub(crate) fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -57,8 +57,8 @@ async fn test_registered_sidebar_opens(cx: &mut TestAppContext) {
 
 /// The rail's panel-toggle button lives inside the sidebar, so its click
 /// handler runs within `Sidebar::update`. `MultiWorkspace::toggle_sidebar`
-/// reaches back through `SidebarHandle` (`sidebar_side`, then
-/// `prepare_for_focus`/`focus`), which borrows that same entity — calling it
+/// reaches back through `SidebarHandle` (`prepare_for_focus`/`focus`), which
+/// borrows that same entity — calling it
 /// directly from there aborts with "cannot read Sidebar while it is already
 /// being updated". Dispatching the action defers past the borrow; this locks
 /// that the toggle still lands when driven from the sidebar's own context.
@@ -220,16 +220,13 @@ async fn test_sidebar_box_starts_below_the_title_bar(cx: &mut TestAppContext) {
     );
 }
 
-/// The rail is the outermost column on whichever edge the sidebar stands against,
-/// the way VS Code's activity bar sits beyond its sidebar rather than between the
-/// sidebar and the editor. A fixed rail-then-panel order reads correctly on the
-/// left and mirrors wrongly on the right — which is the shipped default, so the
-/// wrong half is the one users see.
+/// The rail is the outermost column on the left edge, the way VS Code's activity
+/// bar sits beyond its sidebar rather than between the sidebar and the editor.
 ///
 /// Measured rather than reasoned: the ordering lives in an element tree, and
 /// nothing else in this crate would notice it flipping.
 #[gpui::test]
-async fn the_rail_stays_outside_the_panel_on_either_edge(cx: &mut TestAppContext) {
+async fn the_rail_stays_outside_the_panel_on_the_left_edge(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root", json!({ "a.txt": "" })).await;
@@ -245,40 +242,115 @@ async fn the_rail_stays_outside_the_panel_on_either_edge(cx: &mut TestAppContext
     });
     cx.run_until_parked();
 
-    for side in [SidebarSide::Left, SidebarSide::Right] {
-        cx.update(|_, cx| {
-            settings::SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(side);
-                });
-            });
-        });
-        cx.run_until_parked();
+    let rail = cx
+        .debug_bounds("project-rail")
+        .expect("the rail is always drawn while the sidebar is registered");
+    let panel = cx
+        .debug_bounds("project-list-panel")
+        .expect("the project list is drawn while the sidebar is open");
 
-        let rail = cx
-            .debug_bounds("project-rail")
-            .expect("the rail is always drawn while the sidebar is registered");
-        let panel = cx
-            .debug_bounds("project-list-panel")
-            .expect("the project list is drawn while the sidebar is open");
+    // Rail first, then the panel. Both halves matter: the rail has to end before
+    // the panel begins AND the panel must not start left of the rail, or a zero-
+    // width rail would satisfy the first on its own.
+    assert!(
+        rail.right() <= panel.origin.x,
+        "the rail stands outside the panel, got rail {rail:?} panel {panel:?}"
+    );
+    assert!(
+        rail.origin.x < panel.origin.x,
+        "the rail is the outer of the two, got rail {rail:?} panel {panel:?}"
+    );
+}
 
-        match side {
-            SidebarSide::Left => assert!(
-                rail.right() <= panel.origin.x,
-                "a left sidebar must read rail-then-panel, got rail {:?} panel {:?}",
-                rail,
-                panel
-            ),
-            SidebarSide::Right => assert!(
-                panel.right() <= rail.origin.x,
-                "a right sidebar must read panel-then-rail, got panel {:?} rail {:?}",
-                panel,
-                rail
-            ),
-        }
-    }
+/// Characterization, written before the sidebar's side stopped being a value.
+///
+/// `Workspace::activate_pane_in_direction` branched on `sidebar_on_right` in nine
+/// places and no test reached the function at all. These two cover the arms a
+/// default keybinding actually walks. The tests live here rather than in
+/// `workspace` because they need a real, drawn sidebar to hold focus -- a bare
+/// `FocusHandle` that was never rendered cannot, so a test written over there
+/// would have asserted nothing.
+///
+/// The remaining seven branches are checked against the plan's nine-site table by
+/// diff review; that limit is stated in the plan rather than papered over.
+#[gpui::test]
+async fn moving_focus_left_from_the_centre_falls_through_to_the_rail(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    let sidebar = multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar.clone(), cx);
+        mw.open_sidebar(cx);
+        sidebar
+    });
+    cx.run_until_parked();
+
+    // Focus starts in the centre, and there is no left dock open to catch the
+    // move -- so the rail beyond it is the only thing left to reach.
+    workspace.update_in(cx, |workspace, window, cx| {
+        let pane = workspace.active_pane().clone();
+        window.focus(&pane.focus_handle(cx), cx);
+        workspace
+            .left_dock()
+            .update(cx, |dock, cx| dock.set_open(false, window, cx));
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.activate_pane_in_direction(workspace::SplitDirection::Left, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.update(|window, cx| sidebar.focus_handle(cx).contains_focused(window, cx)),
+        "with no left dock open, going left from the centre must reach the rail"
+    );
+}
+
+/// Going further left than the left dock reaches the rail standing beyond it.
+#[gpui::test]
+async fn moving_focus_from_the_left_dock_reaches_the_rail(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    let sidebar = multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar.clone(), cx);
+        mw.open_sidebar(cx);
+        sidebar
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .left_dock()
+            .update(cx, |dock, cx| dock.set_open(true, window, cx));
+        window.focus(&workspace.left_dock().focus_handle(cx), cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.activate_pane_in_direction(workspace::SplitDirection::Left, window, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.update(|window, cx| sidebar.focus_handle(cx).contains_focused(window, cx)),
+        "going left out of the left dock must reach the rail beyond it"
+    );
 }

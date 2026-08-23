@@ -22,9 +22,11 @@ mod query;
 mod render;
 mod result_grid;
 mod session;
+mod standalone;
 
 pub use connection_store::{ConnectionConfig, DatabaseSettings};
-pub use database_panel::DatabasePanel;
+pub use database_panel::{DatabasePanel, Host};
+pub use standalone::SIDE_BY_SIDE_WIDTH;
 
 use connection_modal::ConnectionModal;
 
@@ -61,6 +63,22 @@ pub fn init(cx: &mut App) {
                 if !showing {
                     workspace.focus_panel::<DatabasePanel>(window, cx);
                 }
+            },
+        );
+        // Both take the database out of its column: one into a tab beside the
+        // code, one into a window that floats above other applications. Actions
+        // rather than plain click handlers so the two buttons and a keybinding
+        // reach the same code, and so neither button takes a shorter road that
+        // happens to work -- the note on `AddConnection` below is why that
+        // matters here.
+        workspace.register_action(
+            |workspace, _: &zed_actions::database::OpenInEditorTab, window, cx| {
+                standalone::open_in_editor_tab(workspace, window, cx);
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &zed_actions::database::OpenInFloatingWindow, window, cx| {
+                standalone::open_in_floating_window(workspace, window, cx);
             },
         );
         // The one place the dialog is opened, and it opens it from the

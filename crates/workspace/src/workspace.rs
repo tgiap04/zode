@@ -10,6 +10,7 @@ mod multi_workspace_tests;
 pub mod notifications;
 pub mod pane;
 pub mod pane_group;
+pub mod project_appearance;
 pub mod path_list {
     pub use util::path_list::{PathList, SerializedPathList};
 }
@@ -31,10 +32,10 @@ mod workspace_settings;
 pub use crate::notifications::NotificationFrame;
 pub use dock::Panel;
 pub use multi_workspace::{
-    CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectToNewWindow,
-    MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject, ProjectGroup,
-    ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent, SidebarHandle,
-    SidebarRenderState, SidebarSide, ToggleWorkspaceSidebar,
+    CloseWorkspaceSidebar, DraggedProject, DraggedSidebar, FocusWorkspaceSidebar,
+    MoveProjectToNewWindow, MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject,
+    ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent,
+    SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -1348,15 +1349,12 @@ pub struct Workspace {
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
-    /// The agent's own column, drawn beside the centre on the rail's side.
+    /// The database's own column, drawn beside the centre on the rail's side.
     ///
     /// A `Dock` rather than a bespoke column so it inherits the width, the
     /// resize handle and the panel stack the other three already have — but
-    /// deliberately NOT one of `all_docks`, which is the set a panel may be
-    /// routed into by position. Nothing lands here except by asking for it.
-    agent_dock: Entity<Dock>,
-    /// The database's column, on the same terms as `agent_dock`: a column of
-    /// its own beside the centre, never a destination for routing by position.
+    /// deliberately NOT a destination for routing by position. Nothing lands
+    /// here except by asking for it.
     database_dock: Entity<Dock>,
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
@@ -1388,13 +1386,10 @@ pub struct Workspace {
     _schedule_serialize_ssh_paths: Option<Task<()>>,
     pane_history_timestamp: Arc<AtomicUsize>,
     bounds: Bounds<Pixels>,
-    /// Where the agent column last drew. Unlike the three docks it is not flush
-    /// against a window edge, so `bounds` cannot be used to turn a pointer
-    /// position into its width.
-    agent_column_bounds: Option<Bounds<Pixels>>,
-    /// Same for the database column — see `agent_column_bounds`. Two fields
-    /// rather than one keyed by side: both columns stand on the rail's side, so
-    /// the side cannot tell them apart.
+    /// Where the database column last drew. Unlike the three docks it is not
+    /// flush against a window edge, so `bounds` cannot be used to turn a pointer
+    /// position into its width. Keyed by column rather than by side, because an
+    /// own column stands on the rail's side and so cannot be told apart by it.
     database_column_bounds: Option<Bounds<Pixels>>,
     pub centered_layout: bool,
     bounds_save_task_queued: Option<Task<()>>,
@@ -1713,27 +1708,20 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let rail_side = match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
-            SidebarSide::Left => DockPosition::Left,
-            SidebarSide::Right => DockPosition::Right,
-        };
-        let agent_dock = Dock::new(rail_side, modal_layer.clone(), window, cx);
-        agent_dock.update(cx, |dock, _cx| dock.mark_as_own_column(DockColumn::Agent));
-        let database_dock = Dock::new(rail_side, modal_layer.clone(), window, cx);
+        let database_dock = Dock::new(Self::OWN_COLUMN_POSITION, modal_layer.clone(), window, cx);
         database_dock.update(cx, |dock, _cx| {
             dock.mark_as_own_column(DockColumn::Database)
         });
-        // Both columns stand on the rail's side, so they have to move when the
-        // rail does — their side decides which edge carries the border and the
-        // resize handle, not just where they are drawn. One observer for both:
-        // two would leave them briefly on opposite sides depending on firing
-        // order, and there is no reading of the settings where they differ.
+        // An own column stands on the rail's side, so it has to move when the
+        // rail does — its side decides which edge carries the border and the
+        // resize handle, not just where it is drawn. One observer for every own
+        // column rather than one each: two would leave them briefly on opposite
+        // sides depending on firing order, and there is no reading of the
+        // settings where they differ.
         let own_columns_follow_rail = cx.observe_global::<SettingsStore>({
-            let agent_dock = agent_dock.clone();
             let database_dock = database_dock.clone();
             move |workspace: &mut Workspace, cx| {
-                let side = workspace.own_column_position(cx);
-                agent_dock.update(cx, |dock, cx| dock.set_own_column_position(side, cx));
+                let side = workspace.own_column_position();
                 database_dock.update(cx, |dock, cx| dock.set_own_column_position(side, cx));
             }
         });
@@ -1748,9 +1736,11 @@ impl Workspace {
             let mut status_bar =
                 StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
             // Every dock keeps its buttons here; `PanelButtons` itself draws
-            // nothing for the dock the project rail already stands beside, so
-            // the pair never doubles up and a dock the rail does not cover stays
-            // reachable from the status bar.
+            // nothing for a dock another surface already names -- the rail, for
+            // the dock it stands beside, and the dock's own header, for the
+            // column facing the rail. All three read one predicate, so the pair
+            // never doubles up and a dock neither covers stays reachable from
+            // the status bar.
             status_bar.add_left_item(left_dock_buttons, window, cx);
             status_bar.add_right_item(right_dock_buttons, window, cx);
             status_bar.add_right_item(bottom_dock_buttons, window, cx);
@@ -1841,7 +1831,6 @@ impl Workspace {
             left_dock,
             bottom_dock,
             right_dock,
-            agent_dock,
             database_dock,
             _panels_task: None,
             project: project.clone(),
@@ -1865,7 +1854,6 @@ impl Workspace {
             workspace_actions: Default::default(),
             // This data will be incorrect, but it will be overwritten by the time it needs to be used.
             bounds: Default::default(),
-            agent_column_bounds: None,
             database_column_bounds: None,
             centered_layout: false,
             bounds_save_task_queued: None,
@@ -2214,12 +2202,11 @@ impl Workspace {
     /// returns an own column. So `panel::<T>()`, `focus_panel` and
     /// `close_panel` reach a panel standing in a column of its own, while
     /// nothing else can be placed there by position.
-    pub fn all_docks(&self) -> [&Entity<Dock>; 5] {
+    pub fn all_docks(&self) -> [&Entity<Dock>; 4] {
         [
             &self.left_dock,
             &self.bottom_dock,
             &self.right_dock,
-            &self.agent_dock,
             &self.database_dock,
         ]
     }
@@ -2352,16 +2339,11 @@ impl Workspace {
             .collect()
     }
 
-    /// The agent's own column, beside the centre.
+    /// The database's own column, beside the centre.
     ///
     /// Reached by name rather than by position: it shares a `DockPosition` with
     /// whichever side dock it stands next to, so `dock_at_position` can never
     /// return it.
-    pub fn agent_dock(&self) -> &Entity<Dock> {
-        &self.agent_dock
-    }
-
-    /// The database's own column, on the same terms as `agent_dock`.
     pub fn database_dock(&self) -> &Entity<Dock> {
         &self.database_dock
     }
@@ -2373,7 +2355,6 @@ impl Workspace {
     pub fn dock_for_column(&self, column: DockColumn) -> Option<&Entity<Dock>> {
         match column {
             DockColumn::Tool => None,
-            DockColumn::Agent => Some(&self.agent_dock),
             DockColumn::Database => Some(&self.database_dock),
         }
     }
@@ -2384,13 +2365,6 @@ impl Workspace {
             DockPosition::Bottom => &self.bottom_dock,
             DockPosition::Right => &self.right_dock,
         }
-    }
-
-    pub fn agent_panel_position(&self, cx: &App) -> Option<DockPosition> {
-        self.all_docks().into_iter().find_map(|dock| {
-            let dock = dock.read(cx);
-            dock.has_agent_panel(cx).then_some(dock.position())
-        })
     }
 
     pub fn panel_size_state<T: Panel>(&self, cx: &App) -> Option<dock::PanelSizeState> {
@@ -5140,25 +5114,10 @@ impl Workspace {
             .as_ref()
             .map(|h| Target::Sidebar(h.clone()));
 
-        let sidebar_on_right = self
-            .multi_workspace
-            .as_ref()
-            .and_then(|mw| mw.upgrade())
-            .map_or(false, |mw| {
-                mw.read(cx).sidebar_side(cx) == SidebarSide::Right
-            });
-
-        let away_from_sidebar = if sidebar_on_right {
-            SplitDirection::Left
-        } else {
-            SplitDirection::Right
-        };
-
-        let (near_dock, far_dock) = if sidebar_on_right {
-            (&self.right_dock, &self.left_dock)
-        } else {
-            (&self.left_dock, &self.right_dock)
-        };
+        // The sidebar stands on the left, so moving away from it means moving
+        // right, and the dock nearer to it is the left one.
+        let away_from_sidebar = SplitDirection::Right;
+        let (near_dock, far_dock) = (&self.left_dock, &self.right_dock);
 
         let target = match (origin, direction) {
             (Origin::Sidebar, dir) if dir == away_from_sidebar => try_dock(near_dock)
@@ -5177,22 +5136,8 @@ impl Workspace {
                     match direction {
                         SplitDirection::Up => None,
                         SplitDirection::Down => try_dock(&self.bottom_dock),
-                        SplitDirection::Left => {
-                            let dock_target = try_dock(&self.left_dock);
-                            if sidebar_on_right {
-                                dock_target
-                            } else {
-                                dock_target.or(sidebar_target)
-                            }
-                        }
-                        SplitDirection::Right => {
-                            let dock_target = try_dock(&self.right_dock);
-                            if sidebar_on_right {
-                                dock_target.or(sidebar_target)
-                            } else {
-                                dock_target
-                            }
-                        }
+                        SplitDirection::Left => try_dock(&self.left_dock).or(sidebar_target),
+                        SplitDirection::Right => try_dock(&self.right_dock),
                     }
                 }
             }
@@ -5205,34 +5150,16 @@ impl Workspace {
                 }
             }
 
-            (Origin::LeftDock, SplitDirection::Left) => {
-                if sidebar_on_right {
-                    None
-                } else {
-                    sidebar_target
-                }
-            }
+            (Origin::LeftDock, SplitDirection::Left) => sidebar_target,
 
             (Origin::LeftDock, SplitDirection::Down)
             | (Origin::RightDock, SplitDirection::Down) => try_dock(&self.bottom_dock),
 
             (Origin::BottomDock, SplitDirection::Up) => get_last_active_pane().map(Target::Pane),
             (Origin::BottomDock, SplitDirection::Left) => {
-                let dock_target = try_dock(&self.left_dock);
-                if sidebar_on_right {
-                    dock_target
-                } else {
-                    dock_target.or(sidebar_target)
-                }
+                try_dock(&self.left_dock).or(sidebar_target)
             }
-            (Origin::BottomDock, SplitDirection::Right) => {
-                let dock_target = try_dock(&self.right_dock);
-                if sidebar_on_right {
-                    dock_target.or(sidebar_target)
-                } else {
-                    dock_target
-                }
-            }
+            (Origin::BottomDock, SplitDirection::Right) => try_dock(&self.right_dock),
 
             (Origin::RightDock, SplitDirection::Left) => {
                 if let Some(last_active_pane) = get_last_active_pane() {
@@ -5242,13 +5169,7 @@ impl Workspace {
                 }
             }
 
-            (Origin::RightDock, SplitDirection::Right) => {
-                if sidebar_on_right {
-                    sidebar_target
-                } else {
-                    None
-                }
-            }
+            (Origin::RightDock, SplitDirection::Right) => None,
 
             _ => None,
         };
@@ -5416,7 +5337,7 @@ impl Workspace {
         // If this pane is in a dock, preserve that dock when dismissing zoomed items.
         // This prevents the dock from closing when focus events fire during window activation.
         // We also preserve any dock whose active panel itself has focus — this covers
-        // panels like AgentPanel that don't implement `pane()` but can still be zoomed.
+        // panels that don't implement `pane()` but can still be zoomed.
         let dock_to_preserve = self.all_docks().iter().find_map(|dock| {
             let dock_read = dock.read(cx);
             if let Some(panel) = dock_read.active_panel() {
@@ -7786,14 +7707,19 @@ impl Workspace {
 
     /// Which side of the editor the own columns stand on.
     ///
-    /// The rail's side, not a setting of their own: a column belongs beside the
-    /// strip of buttons that opens it, so the two never end up at opposite
-    /// edges of the screen. Both columns share this answer.
-    pub fn own_column_position(&self, cx: &App) -> DockPosition {
-        match WorkspaceSettings::get_global(cx).multi_project.sidebar_side {
-            SidebarSide::Left => DockPosition::Left,
-            SidebarSide::Right => DockPosition::Right,
-        }
+    /// The rail's side, and the rail stands on the left. Both columns share this
+    /// answer because a column belongs beside the strip of buttons that opens it,
+    /// so the two can never end up at opposite edges of the screen.
+    ///
+    /// This is the place the layout is named. It used to read
+    /// `multi_project.sidebar_side`; that setting is gone, and with it the
+    /// possibility of the rail and its columns disagreeing.
+    pub const OWN_COLUMN_POSITION: DockPosition = DockPosition::Left;
+
+    /// See [`Self::OWN_COLUMN_POSITION`]. Kept as a method because six call sites
+    /// read it through a workspace handle.
+    pub fn own_column_position(&self) -> DockPosition {
+        Self::OWN_COLUMN_POSITION
     }
 
     /// What an own column must always leave for whatever stands beside it.
@@ -7802,12 +7728,16 @@ impl Workspace {
     /// with the editor at zero width and the handle that caused it off screen.
     const MIN_SPACE_BESIDE_AN_OWN_COLUMN: Pixels = px(240.);
 
-    /// Outward-to-inward order of the own columns on a left-hand side.
+    /// Outward-to-inward order of the own columns on a left-hand side. On a
+    /// right-hand side the sequence mirrors, so each keeps the same distance
+    /// from the centre rather than the same absolute side.
     ///
-    /// The agent stands closest to the code it works on; the database sits
-    /// beyond it. On a right-hand side the sequence mirrors, so each keeps the
-    /// same distance from the centre rather than the same absolute side.
-    const OWN_COLUMN_ORDER: [DockColumn; 2] = [DockColumn::Database, DockColumn::Agent];
+    /// One entry today. Kept as an ordered array rather than collapsed to the
+    /// single column, because everything that reads it -- the draw order, the
+    /// resize clamp's "what the other columns have already taken" -- is written
+    /// as a fold over this list. Specialising those for one column would have to
+    /// be undone, correctly, by whoever adds the second.
+    const OWN_COLUMN_ORDER: [DockColumn; 1] = [DockColumn::Database];
 
     /// The own column asking for the whole window, if one is.
     ///
@@ -7845,7 +7775,7 @@ impl Workspace {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let dock = self.dock_for_column(column)?.clone();
-        let side = self.own_column_position(cx);
+        let side = self.own_column_position();
         Some(
             div()
                 .flex()
@@ -7872,7 +7802,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        let side = self.own_column_position(cx);
+        let side = self.own_column_position();
         let showing: Vec<DockColumn> = Self::OWN_COLUMN_ORDER
             .into_iter()
             .filter(|column| {
@@ -7890,34 +7820,6 @@ impl Workspace {
             return self
                 .center
                 .render(self.zoomed.as_ref(), pane_render_context, window, cx);
-        }
-
-        // Zoomed, a column takes the editor's space as well as its own. The
-        // docks stay: this is the centre giving way, not a window-wide overlay.
-        // Nothing about the column's stored width is touched, so unzooming needs
-        // no memory of what it was — it simply stops asking for the rest.
-        //
-        // Asked *before* the centre is built. Rendering it first and discarding
-        // it in this branch cost a full pane-group element tree every frame the
-        // column was zoomed — for a centre nobody would see.
-        for column in showing.iter().copied() {
-            let Some(dock) = self.dock_for_column(column) else {
-                continue;
-            };
-            let Some(panel) = dock.read(cx).visible_panel().cloned() else {
-                continue;
-            };
-            if panel.fills_the_center(window, cx)
-                && let Some(rendered) = self.render_dock(side, dock, window, cx)
-            {
-                return div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .self_stretch()
-                    .child(rendered.flex_1())
-                    .into_any_element();
-            }
         }
 
         let centre = self
@@ -7994,7 +7896,6 @@ impl Workspace {
     fn set_own_column_bounds(&mut self, column: DockColumn, bounds: Bounds<Pixels>) {
         match column {
             DockColumn::Tool => {}
-            DockColumn::Agent => self.agent_column_bounds = Some(bounds),
             DockColumn::Database => self.database_column_bounds = Some(bounds),
         }
     }
@@ -8002,7 +7903,6 @@ impl Workspace {
     fn own_column_bounds(&self, column: DockColumn) -> Option<Bounds<Pixels>> {
         match column {
             DockColumn::Tool => None,
-            DockColumn::Agent => self.agent_column_bounds,
             DockColumn::Database => self.database_column_bounds,
         }
     }
@@ -8039,10 +7939,17 @@ impl Workspace {
         // this, toggle_panel_focus cannot focus the panel when the dock is closed.
         let dock = dock.read(cx);
         if let Some(panel) = dock.visible_panel() {
-            let size_state = dock.stored_panel_size_state(panel.as_ref());
+            // The dock's extent comes from the panel that governs it, which in a
+            // dock that takes turns is the column's primary panel rather than
+            // the tab currently up -- see `Dock::size_governing_index`. The
+            // minimum stays the showing panel's own: a panel must never be drawn
+            // below the width it says it needs, and that is a real constraint
+            // rather than the column wobbling.
+            let sizing = dock.size_governing_panel().unwrap_or(panel);
+            let size_state = dock.stored_panel_size_state(sizing.as_ref());
             let min_size = panel.min_size(window, cx);
             if position.axis() == Axis::Horizontal {
-                let use_flexible = panel.has_flexible_size(window, cx);
+                let use_flexible = sizing.has_flexible_size(window, cx);
                 let flex_grow = if use_flexible {
                     size_state
                         .and_then(|state| state.flex)
@@ -8059,7 +7966,7 @@ impl Workspace {
                 } else {
                     let size = size_state
                         .and_then(|state| state.size)
-                        .unwrap_or_else(|| panel.default_size(window, cx));
+                        .unwrap_or_else(|| sizing.default_size(window, cx));
                     container = container.w(size);
                 }
                 if let Some(min) = min_size {
@@ -8068,7 +7975,7 @@ impl Workspace {
             } else {
                 let size = size_state
                     .and_then(|state| state.size)
-                    .unwrap_or_else(|| panel.default_size(window, cx));
+                    .unwrap_or_else(|| sizing.default_size(window, cx));
                 container = container.h(size);
             }
         }
@@ -8260,11 +8167,11 @@ impl Workspace {
         let Some(dock) = self.dock_for_column(column).cloned() else {
             return;
         };
-        let new_size = match self.own_column_position(cx) {
+        let new_size = match self.own_column_position() {
             DockPosition::Left => pointer.x - bounds.left(),
             DockPosition::Right | DockPosition::Bottom => bounds.right() - pointer.x,
         };
-        let new_size = new_size.min(self.own_column_max_width(column, cx));
+        let new_size = new_size.min(self.own_column_max_width(column));
         dock.update(cx, |dock, cx| {
             dock.resize_active_panel(Some(new_size), None, window, cx);
         });
@@ -8278,13 +8185,13 @@ impl Workspace {
     /// measured from the column's own edge outwards, and a strip is kept back
     /// so the editor cannot be squeezed to nothing by a drag nobody can undo
     /// without finding a handle that is no longer on screen.
-    pub fn own_column_max_width(&self, column: DockColumn, cx: &App) -> Pixels {
+    pub fn own_column_max_width(&self, column: DockColumn) -> Pixels {
         let workspace = self.bounds.size.width - RESIZE_HANDLE_SIZE;
         let Some(bounds) = self.own_column_bounds(column) else {
             return workspace;
         };
 
-        let side = self.own_column_position(cx);
+        let side = self.own_column_position();
 
         // Everything on the inward side of the column: the other own column,
         // the centre, and whatever dock stands past it.
@@ -9472,7 +9379,12 @@ pub async fn apply_restored_multiworkspace_state(
         // stale keys from previous sessions get normalized and deduped.
         let mut resolved_groups: Vec<SerializedProjectGroupState> = Vec::new();
         for serialized in project_groups.iter().cloned() {
-            let SerializedProjectGroupState { key, expanded } = serialized.into_restored_state();
+            let SerializedProjectGroupState {
+                key,
+                expanded,
+                initials,
+                colour,
+            } = serialized.into_restored_state();
             if key.path_list().paths().is_empty() {
                 continue;
             }
@@ -9493,6 +9405,8 @@ pub async fn apply_restored_multiworkspace_state(
                 resolved_groups.push(SerializedProjectGroupState {
                     key: resolved,
                     expanded,
+                    initials,
+                    colour,
                 });
             }
         }
@@ -13539,32 +13453,19 @@ mod tests {
         });
     }
 
-    /// The agent column and the tool dock beside it carry the same
-    /// `DockPosition`, so a drag payload holding only that position sends the
-    /// column's own handle to its neighbour — which is what shipped, and why the
-    /// column could not be widened at all.
+    /// An own column and the tool dock beside it carry the same `DockPosition`,
+    /// so a drag payload holding only that position sends the column's own
+    /// handle to its neighbour — which is what shipped once, and why the column
+    /// could not be widened at all. That is the whole reason `DraggedDock`
+    /// carries a column as well as a position.
     #[gpui::test]
-    async fn dragging_the_agent_columns_handle_resizes_the_agent_column(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn dragging_an_own_columns_handle_resizes_that_column(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(SidebarSide::Left);
-                });
-            });
-        });
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.set_random_database_id();
@@ -13573,9 +13474,9 @@ mod tests {
             workspace.add_panel(tool, window, cx);
             workspace.toggle_dock(DockPosition::Left, window, cx);
 
-            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
-            workspace.add_panel(agent, window, cx);
-            workspace.agent_dock.update(cx, |dock, cx| {
+            let column = cx.new(|cx| TestPanel::new_database(DockPosition::Left, 101, cx));
+            workspace.add_panel(column, window, cx);
+            workspace.database_dock.update(cx, |dock, cx| {
                 dock.show_panel(0, window, cx);
                 dock.set_open(true, window, cx);
             });
@@ -13586,7 +13487,7 @@ mod tests {
         // column's own left edge is the only thing a pointer can be measured
         // against.
         let column_left = workspace
-            .read_with(cx, |workspace, _| workspace.agent_column_bounds)
+            .read_with(cx, |workspace, _| workspace.database_column_bounds)
             .expect("the column must record where it drew, or a drag has no reference edge")
             .left();
         assert!(
@@ -13606,7 +13507,7 @@ mod tests {
             workspace.drag_dock_edge(
                 DraggedDock {
                     position: DockPosition::Left,
-                    column: DockColumn::Agent,
+                    column: DockColumn::Database,
                 },
                 point(column_left + px(460.), px(400.)),
                 window,
@@ -13617,7 +13518,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             assert_eq!(
                 workspace
-                    .agent_dock
+                    .database_dock
                     .read(cx)
                     .stored_active_panel_size(window, cx),
                 Some(px(460.)),
@@ -13632,56 +13533,6 @@ mod tests {
                 "and the tool dock sharing its side must not have moved"
             );
         });
-    }
-
-    /// `Dock::add_panel` watches the settings and hauls a panel into
-    /// `left_dock`/`right_dock` when its `position()` changes. The agent's
-    /// position changes on every rail flip, and that mapping has no arm for the
-    /// column — so this pins that the panel stays where it belongs.
-    #[gpui::test]
-    async fn flipping_the_rail_leaves_the_agent_in_its_own_column(cx: &mut gpui::TestAppContext) {
-        init_test(cx);
-        let fs = FakeFs::new(cx.executor());
-        let project = Project::test(fs, [], cx).await;
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
-            workspace.add_panel(agent, window, cx);
-            workspace.agent_dock.update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-        });
-
-        for side in [SidebarSide::Right, SidebarSide::Left] {
-            cx.update(|_window, cx| {
-                SettingsStore::update_global(cx, |settings, cx| {
-                    settings.update_user_settings(cx, |settings| {
-                        settings
-                            .workspace
-                            .multi_project
-                            .get_or_insert_default()
-                            .sidebar_side = Some(side);
-                    });
-                });
-            });
-            cx.run_until_parked();
-
-            workspace.read_with(cx, |workspace, cx| {
-                assert!(
-                    workspace.agent_dock.read(cx).panel::<TestPanel>().is_some(),
-                    "the agent must still be in its column after the rail moved to {side:?}"
-                );
-                assert!(
-                    workspace.left_dock.read(cx).panel::<TestPanel>().is_none()
-                        && workspace.right_dock.read(cx).panel::<TestPanel>().is_none(),
-                    "and must not have been hauled into a tool dock"
-                );
-            });
-        }
     }
 
     /// `add_panel` routes by `own_column()` before it falls back to position.
@@ -13715,10 +13566,6 @@ mod tests {
                 "and not in the tool dock its position names"
             );
             assert!(
-                workspace.agent_dock.read(cx).panel::<TestPanel>().is_none(),
-                "nor in the other own column"
-            );
-            assert!(
                 workspace.panel::<TestPanel>(cx).is_some(),
                 "`all_docks` must reach it, or `panel`/`focus_panel`/`close_panel` \
                  go blind to everything in this column"
@@ -13726,49 +13573,12 @@ mod tests {
         });
     }
 
-    /// Both columns stand on the rail's side and share its `DockPosition`, so
-    /// keying stack storage by position would have them writing over each
-    /// other — the usually-empty one blanking the record of the one in use.
+    /// An own column stands on the rail's side and shares that side's
+    /// `DockPosition`, so keying stack storage by position would have the two
+    /// writing over each other — the usually-empty column blanking the record of
+    /// the tool dock in use, which is how this was found.
     #[gpui::test]
-    async fn the_two_own_columns_do_not_share_stack_storage(cx: &mut gpui::TestAppContext) {
-        init_test(cx);
-        let fs = FakeFs::new(cx.executor());
-        let project = Project::test(fs, [], cx).await;
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-
-        workspace.read_with(cx, |workspace, cx| {
-            let agent = workspace.agent_dock.read(cx);
-            let database = workspace.database_dock.read(cx);
-            assert_eq!(
-                agent.position(),
-                database.position(),
-                "both columns follow the rail, so this test is only meaningful \
-                 while they share a position"
-            );
-            assert_ne!(
-                agent.stack_key(),
-                database.stack_key(),
-                "sharing a stack key would have one column blanking the other's record"
-            );
-            assert_ne!(
-                agent.stack_key(),
-                workspace.left_dock.read(cx).stack_key(),
-                "and neither may collide with the tool dock on the same side"
-            );
-            assert_ne!(
-                database.stack_key(),
-                workspace.left_dock.read(cx).stack_key(),
-            );
-        });
-    }
-
-    /// The whole reason `DraggedDock` carries a column rather than a bool: with
-    /// two own columns on one side, position alone cannot say whose handle is
-    /// under the pointer, and the wrong answer resizes the neighbour.
-    #[gpui::test]
-    async fn dragging_the_database_handle_leaves_the_agent_column_alone(
+    async fn an_own_column_does_not_share_stack_storage_with_the_tool_dock(
         cx: &mut gpui::TestAppContext,
     ) {
         init_test(cx);
@@ -13778,183 +13588,19 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(SidebarSide::Left);
-                });
-            });
-        });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.set_random_database_id();
-
-            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
-            workspace.add_panel(agent, window, cx);
-            workspace.agent_dock.update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-
-            let database = cx.new(|cx| TestPanel::new_database(DockPosition::Left, 102, cx));
-            workspace.add_panel(database, window, cx);
-            workspace.database_dock.update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let (database_left, agent_left) = workspace.read_with(cx, |workspace, _| {
-            (
-                workspace
-                    .database_column_bounds
-                    .expect("the database column must record where it drew")
-                    .left(),
-                workspace
-                    .agent_column_bounds
-                    .expect("the agent column must record where it drew")
-                    .left(),
-            )
-        });
-        assert!(
-            database_left < agent_left,
-            "the agent stands closest to the code, so the database sits beyond it"
-        );
-
-        let agent_width = workspace.update_in(cx, |workspace, window, cx| {
-            workspace
-                .agent_dock
-                .read(cx)
-                .stored_active_panel_size(window, cx)
-        });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.drag_dock_edge(
-                DraggedDock {
-                    position: DockPosition::Left,
-                    column: DockColumn::Database,
-                },
-                point(database_left + px(370.), px(400.)),
-                window,
-                cx,
+        workspace.read_with(cx, |workspace, cx| {
+            // The tool dock is picked *by* the column's side rather than named,
+            // so this cannot quietly compare two docks that never shared one.
+            let side = workspace.database_dock.read(cx).position();
+            let column_key = workspace.database_dock.read(cx).stack_key();
+            let tool_key = workspace.dock_at_position(side).read(cx).stack_key();
+            assert_ne!(
+                column_key, tool_key,
+                "the column and the tool dock on its own side ({side:?}) must key \
+                 their stacks apart, or the usually-empty one blanks the other's \
+                 record"
             );
         });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            assert_eq!(
-                workspace
-                    .database_dock
-                    .read(cx)
-                    .stored_active_panel_size(window, cx),
-                Some(px(370.)),
-                "the dragged column should reach from its own left edge to the pointer"
-            );
-            assert_eq!(
-                workspace
-                    .agent_dock
-                    .read(cx)
-                    .stored_active_panel_size(window, cx),
-                agent_width,
-                "and the other own column on the same side must not have moved"
-            );
-        });
-    }
-
-    /// With both columns up, dragging the outer one must stop at the editor --
-    /// not at the editor *plus* the column standing between them.
-    ///
-    /// The room on a column's inward side is not all room it may take: some of
-    /// it belongs to the other column, which is not the editor's to give away.
-    #[gpui::test]
-    async fn an_outer_column_cannot_grow_through_the_one_beside_it(cx: &mut gpui::TestAppContext) {
-        init_test(cx);
-        let fs = FakeFs::new(cx.executor());
-        let project = Project::test(fs, [], cx).await;
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(SidebarSide::Left);
-                });
-            });
-        });
-
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.set_random_database_id();
-
-            let agent = cx.new(|cx| TestPanel::new_agent(DockPosition::Left, 101, cx));
-            workspace.add_panel(agent, window, cx);
-            workspace.agent_dock.update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-
-            let database = cx.new(|cx| TestPanel::new_database(DockPosition::Left, 102, cx));
-            workspace.add_panel(database, window, cx);
-            workspace.database_dock.update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let (database_left, agent_width) = workspace.read_with(cx, |workspace, _| {
-            (
-                workspace
-                    .database_column_bounds
-                    .expect("the database column must record where it drew")
-                    .left(),
-                workspace
-                    .agent_column_bounds
-                    .expect("the agent column must record where it drew")
-                    .size
-                    .width,
-            )
-        });
-
-        // Dragged far past the right-hand edge of the window.
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.drag_dock_edge(
-                DraggedDock {
-                    position: DockPosition::Left,
-                    column: DockColumn::Database,
-                },
-                point(database_left + px(4000.), px(400.)),
-                window,
-                cx,
-            );
-        });
-        cx.run_until_parked();
-
-        let (database_width, workspace_width) = workspace.read_with(cx, |workspace, cx| {
-            (
-                workspace
-                    .database_dock
-                    .read(cx)
-                    .active_panel_size()
-                    .and_then(|state| state.size)
-                    .unwrap_or_default(),
-                workspace.bounds.size.width,
-            )
-        });
-
-        assert!(
-            database_width + agent_width < workspace_width,
-            "the two columns together must leave the editor something to be: \
-             database {database_width:?} + agent {agent_width:?} in {workspace_width:?}"
-        );
     }
 
     /// A drag that runs off the end of the row must stop at the end of the row.
@@ -13973,21 +13619,8 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
-        // Pinned rather than left to the default: which edge the rail sits on
-        // decides which of the column's edges the handle hangs off, and this
-        // test drags rightwards.
-        cx.update(|_window, cx| {
-            SettingsStore::update_global(cx, |settings, cx| {
-                settings.update_user_settings(cx, |settings| {
-                    settings
-                        .workspace
-                        .multi_project
-                        .get_or_insert_default()
-                        .sidebar_side = Some(SidebarSide::Left);
-                });
-            });
-        });
-
+        // The rail stands on the left, so the column's handle hangs off its right
+        // edge -- which is the direction this test drags.
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.set_random_database_id();
             let database = cx.new(|cx| TestPanel::new_database(DockPosition::Left, 102, cx));
@@ -13999,13 +13632,13 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let (database_left, limit, workspace_width) = workspace.read_with(cx, |workspace, cx| {
+        let (database_left, limit, workspace_width) = workspace.read_with(cx, |workspace, _cx| {
             (
                 workspace
                     .database_column_bounds
                     .expect("the database column must record where it drew")
                     .left(),
-                workspace.own_column_max_width(DockColumn::Database, cx),
+                workspace.own_column_max_width(DockColumn::Database),
                 workspace.bounds.size.width,
             )
         });
@@ -14039,10 +13672,10 @@ mod tests {
         });
     }
 
-    /// One observer moves both columns. Two would leave them briefly on
+    /// One observer moves every own column. One each would leave them briefly on
     /// opposite sides depending on which fired first.
     #[gpui::test]
-    async fn both_own_columns_follow_the_rail(cx: &mut gpui::TestAppContext) {
+    async fn an_own_column_follows_the_rail(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -14055,44 +13688,29 @@ mod tests {
             workspace.add_panel(database, window, cx);
         });
 
-        for (side, expected) in [
-            (SidebarSide::Right, DockPosition::Right),
-            (SidebarSide::Left, DockPosition::Left),
-        ] {
-            cx.update(|_window, cx| {
-                SettingsStore::update_global(cx, |settings, cx| {
-                    settings.update_user_settings(cx, |settings| {
-                        settings
-                            .workspace
-                            .multi_project
-                            .get_or_insert_default()
-                            .sidebar_side = Some(side);
-                    });
-                });
-            });
-            cx.run_until_parked();
+        cx.run_until_parked();
 
-            workspace.read_with(cx, |workspace, cx| {
-                assert_eq!(
-                    workspace.database_dock.read(cx).position(),
-                    expected,
-                    "the database column must stand on the rail's side ({side:?})"
-                );
-                assert_eq!(
-                    workspace.agent_dock.read(cx).position(),
-                    expected,
-                    "and the agent column with it, from the same observer"
-                );
-                assert!(
-                    workspace
-                        .database_dock
-                        .read(cx)
-                        .panel::<TestPanel>()
-                        .is_some(),
-                    "flipping the rail must not haul the panel into a tool dock"
-                );
-            });
-        }
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.database_dock.read(cx).position(),
+                Workspace::OWN_COLUMN_POSITION,
+                "the database column stands on the rail's edge"
+            );
+            assert_ne!(
+                workspace.database_dock.read(cx).position(),
+                DockPosition::Right,
+                "and never opposite the rail -- the button would be a window away \
+                 from the column it opens"
+            );
+            assert!(
+                workspace
+                    .database_dock
+                    .read(cx)
+                    .panel::<TestPanel>()
+                    .is_some(),
+                "and the panel must not be hauled into a tool dock"
+            );
+        });
     }
 
     #[gpui::test]
@@ -14957,6 +14575,279 @@ mod tests {
                 .count()),
             1,
             "one panel left showing"
+        );
+    }
+
+    /// A stack recorded before the header dock took turns must not come back as
+    /// a stack.
+    ///
+    /// The record on a real machine was written by the build that stacked, so
+    /// this is the route by which the split returns on the next launch — with
+    /// nothing the user did to explain it. `takes_turns` is asked on the way in
+    /// as well as on the way through `show_panel`.
+    #[gpui::test]
+    async fn a_recorded_stack_does_not_restore_one_in_a_header_dock(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Right, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                // Exactly what the previous build wrote: two names and an even
+                // split between them.
+                let applied = dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: vec!["TestPanel".to_string(), "OtherTestPanel".to_string()],
+                        flexes: vec![1.0, 1.0],
+                    },
+                    window,
+                    cx,
+                );
+                assert!(applied, "a record naming panels this dock holds applies");
+                dock.set_open(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let (showing, names) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.right_dock().read(cx);
+            (
+                dock.visible_panels().count(),
+                dock.visible_panels()
+                    .map(|panel| panel.persistent_name().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            (showing, names),
+            (1, vec!["TestPanel".to_string()]),
+            "the first recorded panel comes back and the rest of the record is \
+             dropped"
+        );
+
+        // The left dock has no header and no switcher, so its records still
+        // restore a stack -- the guard is about the dock that takes turns, not
+        // about stacks in general.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.apply_stack_state(
+                    &dock::DockStackState {
+                        showing: vec!["TestPanel".to_string(), "OtherTestPanel".to_string()],
+                        flexes: vec![1.0, 1.0],
+                    },
+                    window,
+                    cx,
+                );
+                dock.set_open(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .count()),
+            2,
+            "a dock without a header still restores its stack"
+        );
+    }
+
+    /// The dock that draws a header takes turns: showing one panel puts the
+    /// other away, and the survivor gets the whole column.
+    ///
+    /// This replaced a test asserting the opposite — that a header dock split
+    /// itself between two stacked sections. The header's buttons are a tab
+    /// strip, and the two of them disagreed: one took the column, one split it.
+    /// The left-dock stack tests above still hold; a dock with no header has no
+    /// switcher, so stacking is the only way to see a second panel there.
+    #[gpui::test]
+    async fn a_header_dock_takes_turns_rather_than_stacking(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Two panel *types*, because `persistent_name` names a type: two
+            // `TestPanel`s would collapse into one section. Both carry an icon,
+            // which is what puts a button in the header -- a panel without one
+            // contributes nothing and the header would not be drawn at all.
+            let first = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Right, 100, cx);
+                panel.icon = Some(ui::IconName::FileTree);
+                panel
+            });
+            let second = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Right, 101, cx);
+                panel.0.icon = Some(ui::IconName::Terminal);
+                panel
+            });
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+                // The route every button, keybinding and palette entry takes.
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let (showing, names) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.right_dock().read(cx);
+            (
+                dock.visible_panels().count(),
+                dock.visible_panels()
+                    .map(|panel| panel.persistent_name().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            (showing, names),
+            (1, vec!["OtherTestPanel".to_string()]),
+            "showing one panel in a header dock must put the other away"
+        );
+
+        let header = cx
+            .debug_bounds("dock-header")
+            .expect("a right dock showing a panel with an icon must draw its header");
+        // Unique here: `dock-panel` is drawn only by a dock with something to
+        // show, and this test opens exactly one.
+        let dock_bounds = cx
+            .debug_bounds("dock-panel")
+            .expect("the dock itself must be drawn");
+        assert!(
+            header.bottom() <= dock_bounds.bottom(),
+            "the header must stand inside the dock, ended at {:?} against {:?}",
+            header.bottom(),
+            dock_bounds.bottom()
+        );
+        assert!(
+            dock_bounds.bottom() - header.bottom() > px(50.),
+            "and must leave the rest of the column to the panel, got {:?} below \
+             a header ending at {:?}",
+            dock_bounds.bottom() - header.bottom(),
+            header.bottom()
+        );
+        // No section wrapper at all: `render_showing` draws a lone panel bare,
+        // and the per-section header with its own close button belongs to a
+        // stack. Its absence is the layout half of "takes turns" -- there is
+        // nothing here to divide.
+        for selector in ["dock-stacked-panel:0", "dock-stacked-panel:1"] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "a dock taking turns must draw no stack sections, found {selector}"
+            );
+        }
+
+        // Both buttons stay in the header -- that is how you switch back. Only
+        // one of them is lit, which the state assertion above already settled.
+        for selector in [
+            "dock-header-button:TestPanel",
+            "dock-header-button:OtherTestPanel",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "the header must name every panel the dock holds, missing {selector}"
+            );
+        }
+    }
+
+    /// Switching tabs in a dock that takes turns must not move the column's edge.
+    ///
+    /// The two panels here default to widths as far apart as the real pair that
+    /// exposed this — the project panel at 240px and the agent history at 420px.
+    /// The dock read its width off whichever panel was up, so every switch
+    /// dragged the editor's edge sideways under the pointer.
+    ///
+    /// Measured off the painted `dock-panel`, not off `stored_active_panel_size`:
+    /// the accessor and `render_dock` resolved the width separately, so agreeing
+    /// with the accessor would have proved nothing about what the eye sees.
+    #[gpui::test]
+    async fn switching_tabs_in_a_header_dock_keeps_the_column_width(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Two panel *types* carrying an icon each, for the reasons spelled
+            // out in `a_header_dock_takes_turns_rather_than_stacking`. The
+            // priorities put `TestPanel` first, so it is the column's primary
+            // panel and the one whose 240 governs.
+            let first = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Right, 100, cx);
+                panel.icon = Some(ui::IconName::FileTree);
+                panel.default_size = px(240.);
+                panel
+            });
+            let second = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Right, 101, cx);
+                panel.0.icon = Some(ui::IconName::Terminal);
+                panel.0.default_size = px(420.);
+                panel
+            });
+            workspace.add_panel(first, window, cx);
+            workspace.add_panel(second, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.set_open(true, window, cx);
+                dock.show_panel(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let before = cx
+            .debug_bounds("dock-panel")
+            .expect("the dock must be drawn showing its first panel")
+            .size
+            .width;
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let after = cx
+            .debug_bounds("dock-panel")
+            .expect("the dock must still be drawn showing its second panel")
+            .size
+            .width;
+
+        assert_eq!(
+            after, before,
+            "switching tabs must leave the column where it was, went from {before:?} to {after:?}"
+        );
+
+        // Named rather than merely "unchanged": equal-but-wrong would pass the
+        // assertion above, and the primary panel's width is the one that is right.
+        assert_eq!(
+            before,
+            px(240.),
+            "and the width a turn-taking dock keeps is its primary panel's, got {before:?}"
         );
     }
 

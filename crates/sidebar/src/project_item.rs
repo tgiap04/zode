@@ -109,10 +109,18 @@ impl Sidebar {
         };
 
         let color = cx.theme().colors();
-        let sidebar_base_bg = color
-            .title_bar_background
-            .blend(color.panel_background.opacity(0.25));
-        let base_bg = color.background.blend(sidebar_base_bg);
+        // The rail sits on the same ground as the buffer beside it, so it takes the
+        // title bar's colour and nothing else.
+        //
+        // This used to blend a quarter of `panel_background` over that, which read
+        // as a grey lift against the editor. The bundled themes now carry the same
+        // value for both tokens, so the blend would be a no-op there anyway -- but
+        // it is removed rather than left in, because on any theme where the two
+        // differ (every third-party one) the tint comes straight back.
+        //
+        // `background.blend` is kept: `title_bar_background` is allowed to be
+        // translucent, and a theme that makes it so needs something underneath.
+        let base_bg = color.background.blend(color.title_bar_background);
         let hover_base = color
             .element_active
             .blend(color.element_background.opacity(0.2));

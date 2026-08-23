@@ -1,0 +1,39 @@
+{
+  "task": "Pin the project rail to the left and the project panel to the right, and delete the settings that let either move.",
+  "mode": "takumi",
+  "acceptanceCriteria": [
+    "the project rail is always on the left and its edge is not a setting",
+    "the project panel is always on the right and cannot be moved by menu or action",
+    "no settings key survives that is read by nothing",
+    "the shipped defaults give a new user that layout, with git and outline riding the rail",
+    "no behaviour outside the sidebar layout changes",
+    "every gate in the plan passes and no test is lost"
+  ],
+  "touchpoints": [
+    "crates/project_panel/src/project_panel.rs",
+    "crates/project_panel/src/project_panel_settings.rs",
+    "crates/settings_content/src/workspace.rs",
+    "crates/workspace/src/workspace_settings.rs",
+    "crates/workspace/src/workspace.rs",
+    "crates/workspace/src/dock.rs",
+    "crates/workspace/src/multi_workspace.rs",
+    "crates/workspace/src/status_bar.rs",
+    "crates/sidebar/src/{rail.rs,render.rs,sidebar.rs,rail_panels.rs}",
+    "crates/platform_title_bar/src/platform_title_bar.rs",
+    "crates/database_ui/src/database_panel.rs",
+    "crates/settings_ui/src/page_data.rs",
+    "crates/settings/src/settings.rs",
+    "crates/zed/src/zed.rs",
+    "assets/settings/default.json"
+  ],
+  "blastRadius": "The SidebarSide type was public API re-exported from `workspace`, so removing it reaches 6 crates. default.json is authoritative and from_settings unwraps every field, so a removed key without its resolved field is a startup panic. Four defaults had to flip in one commit: flipping the rail without flipping outline and git leaves the rail drawn but empty, with no error and no empty state. Workspace::activate_pane_in_direction had nine branches on the rail's side and no test reached the function.",
+  "contracts": [
+    "Workspace::OWN_COLUMN_POSITION is the single place the layout is named",
+    "rail_draws_panel lost its rail_side parameter",
+    "Workspace::own_column_position() and own_column_max_width() lost their cx argument",
+    "SidebarRenderState lost `side` and `occupies()`; the Sidebar/SidebarHandle `side()` trait methods and MultiWorkspace::sidebar_side are gone",
+    "dock.rs gained dockable_positions(panel, cx), which returns an empty vec below two valid edges",
+    "move_to_next_position wraps within the valid list instead of falling back to a literal Left",
+    "the `Sidebar Toggled` telemetry event lost its `side` property"
+  ]
+}

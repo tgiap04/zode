@@ -199,6 +199,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::free_disk_space
       run: |
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
@@ -238,6 +240,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::free_disk_space
       run: |
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
@@ -280,6 +284,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -320,6 +326,8 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel
+      run: script/determine-release-channel
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -364,6 +372,10 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel.ps1
+      run: script/determine-release-channel.ps1
+      shell: pwsh
+      working-directory: ${{ env.ZED_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
@@ -412,6 +424,10 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: script/determine-release-channel.ps1
+      run: script/determine-release-channel.ps1
+      shell: pwsh
+      working-directory: ${{ env.ZED_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
@@ -470,6 +486,8 @@ jobs:
     needs:
     - upload_release_assets
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
     - name: release::validate_release_assets
       run: |
@@ -477,6 +495,12 @@ jobs:
         TAG="$GITHUB_REF_NAME"
 
         ACTUAL_ASSETS=$(gh release view "$TAG" --repo="$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')
+
+        if [ -z "$ACTUAL_ASSETS" ]; then
+            echo "Error: could not read release $TAG. It exists only as a draft until someone"
+            echo "publishes it, and a draft is invisible to a token without write on contents."
+            exit 1
+        fi
 
         MISSING_ASSETS=$(echo "$EXPECTED_ASSETS" | jq -r --argjson actual "$ACTUAL_ASSETS" '. - $actual | .[]')
 

@@ -1,0 +1,45 @@
+[package]
+name = "agent_usage"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+# Reading a quota means shelling out to the OS keychain, reading the user's home
+# directory, calling an HTTP endpoint and spawning a CLI -- real I/O against the
+# real machine. A test of something else entirely must not pay for that, and the
+# deterministic test scheduler reports it as non-determinism when it does. With
+# this feature on, the indicator is built but never starts.
+[features]
+test-support = []
+
+[lib]
+path = "src/agent_usage.rs"
+doctest = false
+
+[dependencies]
+# Deliberately NOT `agent_ui`. This crate needs to know which agents exist and
+# what they are called -- `project` carries that -- but nothing about the agent
+# views themselves. Depending on `agent_ui` would tie a status-bar indicator to
+# the whole conversation stack.
+chrono.workspace = true
+fs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+http_client.workspace = true
+log.workspace = true
+smol.workspace = true
+project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+ui.workspace = true
+util.workspace = true
+which.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

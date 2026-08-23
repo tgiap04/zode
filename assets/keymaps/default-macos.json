@@ -169,7 +169,6 @@
       "cmd-alt-f": "buffer_search::DeployReplace",
       "cmd-alt-l": ["buffer_search::Deploy", { "selection_search_enabled": true }],
       "cmd-e": "buffer_search::UseSelectionForFind",
-      "cmd->": "agent::AddSelectionToThread",
       "cmd-alt-e": "editor::SelectEnclosingSymbol",
       "alt-enter": "editor::OpenSelectionsInMultibuffer",
     },
@@ -249,8 +248,7 @@
     "context": "AcpThread > Editor",
     "use_key_equivalents": true,
     "bindings": {
-      "shift-ctrl-d": "git::Diff",
-      "cmd-shift-v": "agent::PasteRaw",
+      "shift-ctrl-d": "git::Diff"
     },
   },
   {
@@ -264,14 +262,12 @@
     "context": "AcpThread > Editor && !use_modifier_to_send",
     "use_key_equivalents": true,
     "bindings": {
-      "enter": "agent::Chat",
     },
   },
   {
     "context": "AcpThread > Editor && use_modifier_to_send",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-enter": "agent::Chat",
       "enter": "editor::Newline",
     },
   },
@@ -574,7 +570,6 @@
       "cmd-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
-      "cmd-?": "agent::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
       "cmd-k m": "language_selector::Toggle",
@@ -1084,8 +1079,7 @@
       "ctrl-alt-left": "pane::SplitLeft",
       "ctrl-alt-right": "pane::SplitRight",
       "cmd-d": "pane::SplitRight",
-      "cmd-alt-r": "terminal::RerunTask",
-      "cmd->": "agent::AddSelectionToThread",
+      "cmd-alt-r": "terminal::RerunTask"
     },
   },
   {

@@ -14,7 +14,7 @@ use ui::{
     prelude::*,
     utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height},
 };
-use workspace::{MultiWorkspace, SidebarRenderState, SidebarSide};
+use workspace::{MultiWorkspace, SidebarRenderState};
 
 use crate::{
     platforms::{platform_linux, platform_windows},
@@ -245,13 +245,8 @@ impl Render for PlatformTitleBar {
                 // of it the sidebar does not already cover. The in-title-bar
                 // controls Linux draws start to the right of the sidebar and
                 // stay visible regardless.
-                let left_edge_covered = if sidebar.side == SidebarSide::Left {
-                    sidebar.edge_width
-                } else {
-                    px(0.)
-                };
-                let traffic_light_inset = px(TRAFFIC_LIGHT_PADDING) - left_edge_covered;
-                let show_left_controls = !(sidebar.open && sidebar.side == SidebarSide::Left);
+                let traffic_light_inset = px(TRAFFIC_LIGHT_PADDING) - sidebar.edge_width;
+                let show_left_controls = !sidebar.open;
 
                 if window.is_fullscreen() {
                     this.pl_2()
@@ -276,12 +271,14 @@ impl Render for PlatformTitleBar {
             .map(|el| match decorations {
                 Decorations::Server => el,
                 Decorations::Client { tiling, .. } => el
+                    .when(!(tiling.top || tiling.right), |el| {
+                        el.rounded_tr(theme::CLIENT_SIDE_DECORATION_ROUNDING)
+                    })
+                    // Either component of the sidebar reaching the left edge is
+                    // enough to square that corner off; nothing puts it on the
+                    // right, so the corner above is unconditional now.
                     .when(
-                        !(tiling.top || tiling.right) && !sidebar.occupies(SidebarSide::Right),
-                        |el| el.rounded_tr(theme::CLIENT_SIDE_DECORATION_ROUNDING),
-                    )
-                    .when(
-                        !(tiling.top || tiling.left) && !sidebar.occupies(SidebarSide::Left),
+                        !(tiling.top || tiling.left) && !(sidebar.open || sidebar.rail),
                         |el| el.rounded_tl(theme::CLIENT_SIDE_DECORATION_ROUNDING),
                     )
                     // this border is to avoid a transparent gap in the rounded corners
@@ -309,19 +306,13 @@ impl Render for PlatformTitleBar {
                     .children(children),
             )
             .when(!window.is_fullscreen(), |title_bar| {
-                let show_right_controls = !(sidebar.open && sidebar.side == SidebarSide::Right);
-
-                let title_bar = title_bar.children(
-                    show_right_controls
-                        .then(|| {
-                            render_right_window_controls(
-                                button_layout,
-                                close_action.as_ref().boxed_clone(),
-                                window,
-                            )
-                        })
-                        .flatten(),
-                );
+                // Unconditional: the sidebar stands on the left, so it can never
+                // be under these.
+                let title_bar = title_bar.children(render_right_window_controls(
+                    button_layout,
+                    close_action.as_ref().boxed_clone(),
+                    window,
+                ));
 
                 if self.platform_style == PlatformStyle::Linux
                     && matches!(decorations, Decorations::Client { .. })

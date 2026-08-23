@@ -11,14 +11,13 @@ See [All Settings](./reference/all-settings.md) for additional information and o
 
 ## Themes
 
-You can install many [themes](./themes.md) and [icon themes](./icon-themes.md) in form of extensions by running {#action zed::Extensions} from the command palette.
+You can install many [color themes](./themes.md) in form of extensions by running {#action zed::Extensions} from the command palette. [Icon themes](./icon-themes.md) are a different story: Zode's file and folder icons are fixed to the Material Icon Theme and cannot be changed, so there is nothing to install there.
 
-You can preview/choose amongst your installed themes and icon themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}) and {#action icon_theme_selector::Toggle} which will modify the following settings:
+You can preview/choose amongst your installed color themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}), which modifies the following setting:
 
 ```json [settings]
 {
-  "theme": "One Dark",
-  "icon_theme": "Zode (Default)"
+  "theme": "One Dark"
 }
 ```
 
@@ -31,15 +30,11 @@ If you would like to use distinct themes for light mode/dark mode that can be se
     "light": "One Light",
     // Mode to use (dark, light) or "system" to follow the OS's light/dark mode (default)
     "mode": "system"
-  },
-  "icon_theme": {
-    "dark": "Zode (Default)",
-    "light": "Zode (Default)",
-    // Mode to use (dark, light) or "system" to follow the OS's light/dark mode (default)
-    "mode": "system"
   }
 }
 ```
+
+The `icon_theme` setting still exists — it defaults to `"Material Icon Theme"` and accepts the same `{ "mode", "light", "dark" }` object form as `theme` — but no value written there changes which icons are drawn; see [Icon Themes](./icon-themes.md).
 
 ## Fonts
 
@@ -313,6 +308,8 @@ TBD: Centered layout related settings
 
 ### Status Bar
 
+`claude_usage_button` and `codex_usage_button` are also reachable by right-clicking the status bar's usage indicator; `agent_usage_display` is reachable from the Detailed/Compact switch in the usage panel (left-click the indicator to open it) — see [Agent Usage Indicator](./agent-usage.md) for the panel and menu that go with them.
+
 ```json [settings]
   "status_bar": {
     // Show/hide a button that displays the active buffer's language.
@@ -330,7 +327,17 @@ TBD: Centered layout related settings
     // Show/hide a button that displays the buffer's character encoding.
     // If set to "non_utf8", the button is hidden only for UTF-8 without BOM.
     // Defaults to "non_utf8".
-    "active_encoding_button": "non_utf8"
+    "active_encoding_button": "non_utf8",
+    // Show/hide Claude Code's subscription quota in the status bar.
+    // Defaults to true.
+    "claude_usage_button": true,
+    // Show/hide Codex's subscription quota in the status bar.
+    // Defaults to true.
+    "codex_usage_button": true,
+    // How much of an agent's quota the status bar and usage panel show.
+    // "detailed" shows every window the agent reports; "compact" shows only
+    // the window closest to running out. Defaults to "detailed".
+    "agent_usage_display": "detailed"
   },
   "global_lsp_settings": {
     // Show/hide the LSP button in the status bar.
@@ -432,12 +439,13 @@ TBD: Centered layout related settings
 
 Project panel can be shown/hidden with {#action project_panel::ToggleFocus} ({#kb project_panel::ToggleFocus}) or with {#action pane::RevealInProjectPanel} ({#kb pane::RevealInProjectPanel}).
 
+The Project Panel always docks on the right side of the window, opposite the project rail; there is no setting to move it.
+
 ```json [settings]
   // Project Panel Settings
   "project_panel": {
     "button": true,                 // Show/hide button in the status bar
     "default_width": 240,           // Default panel width
-    "dock": "left",                 // Position of the dock (left, right)
     "entry_spacing": "comfortable", // Vertical spacing (comfortable, standard)
     "file_icons": true,             // Show/hide file icons
     "folder_icons": true,           // Show/hide folder icons

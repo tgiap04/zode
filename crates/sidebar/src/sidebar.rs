@@ -1,16 +1,21 @@
 mod activity_watch;
 mod chrome;
+mod colour_modal;
 #[cfg(test)]
 mod contents_tests;
 mod context_menu;
+mod initials_modal;
 mod navigation;
 #[cfg(test)]
 mod navigation_tests;
+mod project_actions;
 mod project_item;
 mod project_list;
+mod project_menu;
 mod rail;
 mod rail_agents;
 mod rail_database;
+mod rail_item;
 mod rail_panels;
 mod refresh;
 mod render;
@@ -28,9 +33,7 @@ use gpui::{
 use project::ProjectGroupKey;
 use recent_projects::sidebar_recent_projects::SidebarRecentProjects;
 use ui::{ContextMenu, PopoverMenuHandle, prelude::*};
-use workspace::{
-    MultiWorkspace, MultiWorkspaceEvent, Sidebar as WorkspaceSidebar, SidebarEvent, SidebarSide,
-};
+use workspace::{MultiWorkspace, MultiWorkspaceEvent, Sidebar as WorkspaceSidebar, SidebarEvent};
 
 const DEFAULT_WIDTH: Pixels = px(300.0);
 
@@ -70,6 +73,18 @@ pub struct Sidebar {
     /// waking or hibernating in the background would never refresh
     /// `contents` -- `MultiWorkspaceEvent` alone doesn't fire for it.
     pub(crate) project_activity_subscriptions: HashMap<EntityId, Subscription>,
+    /// Where a dragged project would land: an index into the *gaps* between
+    /// rows, so `0` is above the first and `len` is below the last.
+    ///
+    /// Gaps rather than rows because the question a drop answers is "between
+    /// which two", and the ends are the two answers a row index cannot give.
+    pub(crate) drop_gap: Option<usize>,
+    /// The colour a picker is showing right now, before anyone has agreed to it.
+    ///
+    /// Held here and not written to the project, so the avatar can be previewed
+    /// live while cancelling still costs nothing: the record is untouched until
+    /// the picker is confirmed.
+    pub(crate) colour_preview: Option<(ProjectGroupKey, gpui::Hsla)>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -129,6 +144,8 @@ impl Sidebar {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
             contents: SidebarContents::default(),
             selection: None,
+            colour_preview: None,
+            drop_gap: None,
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_handles: HashMap::default(),
             project_activity_subscriptions: HashMap::default(),
@@ -162,10 +179,6 @@ impl WorkspaceSidebar for Sidebar {
 
     fn has_notifications(&self, _cx: &App) -> bool {
         false
-    }
-
-    fn side(&self, cx: &App) -> SidebarSide {
-        crate::rail::rail_side(cx)
     }
 
     fn prepare_for_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {

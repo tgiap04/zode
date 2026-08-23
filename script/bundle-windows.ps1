@@ -353,15 +353,15 @@ function BuildInstaller {
         "dev" {
             $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
             $appIconName = "app-icon-dev"
-            $appName = "Zode Dev"
-            $appDisplayName = "Zode Dev"
+            $appName = "Zode"
+            $appDisplayName = "Zode"
             $appSetupName = "Zode-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
             $appMutex = "Zode-Editor-Dev-Instance-Mutex"
             $appExeName = "Zode"
             $regValueName = "ZodeDev"
             $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ode Dev"
+            $appShellNameShort = "Z&ode"
             $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
         }
         default {

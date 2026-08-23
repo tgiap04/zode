@@ -8,7 +8,7 @@ use ui::{ContextMenu, PopoverMenu, PopoverMenuHandle, prelude::*};
 /// stay tied to the project itself rather than its current list position
 /// -- unlike a list index, this doesn't go stale if the entry list
 /// reorders or shrinks while this project's menu is open.
-fn stable_id_for_group(project_group_key: &ProjectGroupKey) -> u64 {
+pub(crate) fn stable_id_for_group(project_group_key: &ProjectGroupKey) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     project_group_key.hash(&mut hasher);
     hasher.finish()
@@ -37,6 +37,7 @@ impl Sidebar {
             })
             .unwrap_or(false);
 
+        let menu_label = group_name.clone();
         let menu_handle: PopoverMenuHandle<ContextMenu> = self
             .project_header_menu_handles
             .get(&project_group_key)
@@ -56,39 +57,43 @@ impl Sidebar {
             )
             .menu(move |window, cx| {
                 let project_group_key = project_group_key.clone();
-                let open_multi_workspace = multi_workspace.clone();
-                let remove_multi_workspace = multi_workspace.clone();
+                let group_name = menu_label.clone();
+                let multi_workspace = multi_workspace.clone();
 
                 Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                    // Two entries here against the rail avatar's five: the lists
+                    // are allowed to differ, the behaviour is not. Both go
+                    // through `project_actions`, so there is one `Remove` in this
+                    // crate and it asks the same question from either door.
                     menu.when(show_open_in_new_window, |this| {
                         let project_group_key = project_group_key.clone();
-                        let open_multi_workspace = open_multi_workspace.clone();
+                        let group_name = group_name.clone();
+                        let multi_workspace = multi_workspace.clone();
                         this.entry(
                             "Open Project in New Window",
                             Some(Box::new(workspace::MoveProjectToNewWindow)),
                             move |window, cx| {
-                                open_multi_workspace
-                                    .update(cx, |mw, cx| {
-                                        mw.open_project_group_in_new_window(
-                                            &project_group_key,
-                                            window,
-                                            cx,
-                                        )
-                                        .detach_and_log_err(cx);
-                                    })
-                                    .ok();
+                                crate::project_actions::open_project_in_new_window(
+                                    &multi_workspace,
+                                    &project_group_key,
+                                    &group_name,
+                                    window,
+                                    cx,
+                                );
                             },
                         )
                     })
                     .entry("Remove Project", None, {
                         let project_group_key = project_group_key.clone();
+                        let group_name = group_name.clone();
                         move |window, cx| {
-                            remove_multi_workspace
-                                .update(cx, |mw, cx| {
-                                    mw.remove_project_group(&project_group_key, window, cx)
-                                        .detach_and_log_err(cx);
-                                })
-                                .ok();
+                            crate::project_actions::remove_project(
+                                &multi_workspace,
+                                &project_group_key,
+                                &group_name,
+                                window,
+                                cx,
+                            );
                         }
                     })
                 }))
