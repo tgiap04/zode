@@ -1,3 +1,4 @@
+use auto_update::{AutoUpdateStatus, AutoUpdater, VersionCheckType};
 use editor::Editor;
 use extension_host::{ExtensionOperation, ExtensionStore};
 use futures::StreamExt;
@@ -119,6 +120,10 @@ impl ActivityIndicator {
                 anyhow::Ok(())
             })
             .detach();
+
+            if let Some(updater) = AutoUpdater::get(cx) {
+                cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+            }
 
             cx.subscribe(
                 &project.read(cx).lsp_store(),
@@ -692,6 +697,88 @@ impl ActivityIndicator {
                 })),
                 tooltip_message: None,
             });
+        }
+
+        // Ranked below language-server and extension work on purpose: pressing the update
+        // button should never hide a diagnostic. Ranked above nothing at all, because a
+        // 110 MB download must not look like an idle status bar.
+        if let Some(updater) = AutoUpdater::get(cx) {
+            let describe = |version: &VersionCheckType| match version {
+                VersionCheckType::Semantic(version) => version.to_string(),
+            };
+            match updater.read(cx).status() {
+                AutoUpdateStatus::Idle => {}
+                AutoUpdateStatus::Checking => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::LoadCircle)
+                                .size(IconSize::Small)
+                                .with_rotate_animation(3)
+                                .into_any_element(),
+                        ),
+                        message: "Checking for updates…".to_string(),
+                        on_click: None,
+                        tooltip_message: None,
+                    });
+                }
+                AutoUpdateStatus::Downloading { version } => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::Download)
+                                .size(IconSize::Small)
+                                .into_any_element(),
+                        ),
+                        message: format!("Downloading Zode {}…", describe(&version)),
+                        on_click: None,
+                        tooltip_message: None,
+                    });
+                }
+                AutoUpdateStatus::Installing { version } => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::LoadCircle)
+                                .size(IconSize::Small)
+                                .with_rotate_animation(3)
+                                .into_any_element(),
+                        ),
+                        message: format!("Installing Zode {}…", describe(&version)),
+                        on_click: None,
+                        tooltip_message: None,
+                    });
+                }
+                AutoUpdateStatus::Updated { version } => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::Download)
+                                .size(IconSize::Small)
+                                .into_any_element(),
+                        ),
+                        message: format!("Restart to update to {}", describe(&version)),
+                        on_click: Some(Arc::new(|_, _, cx| cx.restart())),
+                        tooltip_message: None,
+                    });
+                }
+                AutoUpdateStatus::Errored { error } => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::Warning)
+                                .size(IconSize::Small)
+                                .into_any_element(),
+                        ),
+                        message: "Update failed".to_string(),
+                        // Clearing it is the updater's own state to clear, not this
+                        // indicator's: `dismiss_message` only clears LSP messages.
+                        on_click: Some(Arc::new(|_, _, cx| {
+                            if let Some(updater) = AutoUpdater::get(cx) {
+                                updater.update(cx, |updater, cx| {
+                                    updater.dismiss(cx);
+                                });
+                            }
+                        })),
+                        tooltip_message: Some(error.to_string()),
+                    });
+                }
+            }
         }
 
         None

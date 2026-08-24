@@ -9,6 +9,8 @@ members = [
     "crates/askpass",
     "crates/assets",
     "crates/audio",
+    "crates/auto_update",
+    "crates/auto_update_ui",
     "crates/breadcrumbs",
     "crates/buffer_diff",
     "crates/cli",
@@ -229,6 +231,8 @@ agent_ui = { path = "crates/agent_ui" }
 askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
 audio = { path = "crates/audio" }
+auto_update = { path = "crates/auto_update" }
+auto_update_ui = { path = "crates/auto_update_ui" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
 cli = { path = "crates/cli" }

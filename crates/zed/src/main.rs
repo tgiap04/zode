@@ -282,7 +282,11 @@ fn main() {
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
         option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
-    let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), version, app_commit_sha.clone());
+    let app_version = AppVersion::load(
+        option_env!("ZODE_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+        version,
+        app_commit_sha.clone(),
+    );
 
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(
@@ -597,6 +601,10 @@ fn main() {
         diagnostics::init(cx);
 
         audio::init(cx);
+        // After `release_channel::init`: `AutoUpdater::new` reads the global app version,
+        // and a zero version would make every release look newer than what is installed.
+        auto_update::init(cx.http_client(), cx);
+        auto_update_ui::init(cx);
         workspace::init(app_state.clone(), cx);
         // Used to be reached via `collab_ui::init`; that crate is gone, so the
         // title bar has to be initialized directly or no workspace ever gets
