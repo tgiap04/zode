@@ -76,7 +76,9 @@ SmartScreen system-wide:
 - **macOS**: `xattr -d com.apple.quarantine /Applications/Zode.app`, or open it once via
   right-click → Open.
 - **Windows**: on the SmartScreen prompt, *More info* → *Run anyway*.
-- **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zode.app/bin/zed`.
+- **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zed.app/bin/zed`. The
+  directory inside the archive is `zed.app`, not `zode.app` — the bundle keeps upstream's
+  layout so `libexec/zed-editor` stays where the database drivers look for it.
 
 Linux builds are produced on Ubuntu 24.04, so they need **glibc 2.39 or newer**. Older
 distributions — including Ubuntu 22.04 — will fail with a `GLIBC_2.39 not found` error;
