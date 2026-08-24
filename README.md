@@ -65,8 +65,10 @@ Three limits are real, not caveats to skim:
 1. **The binaries are not code-signed or notarized.** Your OS will say so, and it is
    right to: nothing has verified where these came from except you. You are choosing to
    trust an unsigned build. If that is not a trade you want, build from source below.
-2. **There is no in-app updater.** Nothing will tell you a new version exists; you have
-   to come back here and download it.
+2. **Updates are manual, but they are in-app.** Nothing checks in the background and
+   nothing phones home. When you want to know, use *Help → Check for Updates*: it reads
+   this repository's latest published release, and if there is a newer one it downloads
+   and installs it for you. A published release only — a draft is invisible to it.
 3. **Debug symbols are stripped in release builds**, so a crash backtrace will be mostly
    empty. Reproduce against a source build if you want a useful one.
 
