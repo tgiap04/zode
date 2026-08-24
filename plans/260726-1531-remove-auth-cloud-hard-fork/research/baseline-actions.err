@@ -1,4 +1,0 @@
-   Compiling cli v0.1.0 (/Users/tgiap.dev/devs/zode/crates/cli)
-   Compiling zed v0.235.0 (/Users/tgiap.dev/devs/zode/crates/zed)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.92s
-     Running `target/debug/zed --dump-all-actions`
