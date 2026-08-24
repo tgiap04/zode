@@ -195,9 +195,27 @@ fn create_draft_release() -> NamedJob {
                     echo "- First release."
                 fi
                 echo
-                echo "Not code-signed, and there is no in-app updater. See the README before installing."
+                echo "Not code-signed. See the README before installing."
             } > target/release-notes.md
             cat target/release-notes.md
+        "#})
+    }
+
+    // The tag is the source of truth for a published version: `crates/zed/build.rs` stamps
+    // RELEASE_VERSION into the binary, so a Cargo.toml that disagrees no longer yields a
+    // build that misreports itself. A divergence is still worth saying out loud, because
+    // the repo and the release then name different versions and whoever reads the manifest
+    // next is misled. Warn, never fail -- releasing straight from a tag without a bump
+    // commit is a deliberate property of this fork (see script/determine-release-channel).
+    fn warn_on_version_divergence() -> Step<Run> {
+        named::bash(indoc::indoc! {r#"
+            # The first `version =` in the manifest is the one under [package].
+            manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zed/Cargo.toml | head -1)
+            if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
+                echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
+            else
+                echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml says ${manifest_version}; the binary reports the tag, so consider bumping the manifest to match"
+            fi
         "#})
     }
 
@@ -217,6 +235,7 @@ fn create_draft_release() -> NamedJob {
                     .with_ref(Context::github().ref_()),
             )
             .add_step(steps::script("script/determine-release-channel"))
+            .add_step(warn_on_version_divergence())
             .add_step(steps::script("mkdir -p target/"))
             .add_step(generate_release_notes())
             .add_step(create_release()),

@@ -157,6 +157,15 @@ jobs:
         ref: ${{ github.ref }}
     - name: script/determine-release-channel
       run: script/determine-release-channel
+    - name: release::create_draft_release::warn_on_version_divergence
+      run: |
+        # The first `version =` in the manifest is the one under [package].
+        manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zed/Cargo.toml | head -1)
+        if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
+            echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
+        else
+            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml says ${manifest_version}; the binary reports the tag, so consider bumping the manifest to match"
+        fi
     - name: mkdir -p target/
       run: mkdir -p target/
     - name: release::create_draft_release::generate_release_notes
@@ -171,7 +180,7 @@ jobs:
                 echo "- First release."
             fi
             echo
-            echo "Not code-signed, and there is no in-app updater. See the README before installing."
+            echo "Not code-signed. See the README before installing."
         } > target/release-notes.md
         cat target/release-notes.md
     - name: release::create_draft_release::create_release
