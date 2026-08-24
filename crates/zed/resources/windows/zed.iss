@@ -69,6 +69,9 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 [Files]
 Source: "{#ResourcesDir}\Zode.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
+; The in-app updater hands off to tools\auto_update_helper.exe on quit, because Windows
+; will not let the running Zode.exe be overwritten in place.
+Source: "{#ResourcesDir}\tools\*"; DestDir: "{code:GetInstallDir}\tools"; Flags: ignoreversion
 ; Beside Zode.exe, which is where `driver_path` looks -- the same reasoning that puts them
 ; in `libexec` next to the binary on Linux and in `Contents/MacOS` on macOS.
 Source: "{#ResourcesDir}\zode-db-*.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion

@@ -11,6 +11,7 @@ members = [
     "crates/audio",
     "crates/auto_update",
     "crates/auto_update_ui",
+    "crates/auto_update_helper",
     "crates/breadcrumbs",
     "crates/buffer_diff",
     "crates/cli",
@@ -233,6 +234,7 @@ assets = { path = "crates/assets" }
 audio = { path = "crates/audio" }
 auto_update = { path = "crates/auto_update" }
 auto_update_ui = { path = "crates/auto_update_ui" }
+auto_update_helper = { path = "crates/auto_update_helper" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
 cli = { path = "crates/cli" }
