@@ -63,19 +63,42 @@ a hold prevents the _idle_ lock, not a lock you ask for.
 
 ## Platform support
 
-Two separate things are needed, and they landed separately: asking the OS to hold
-the display, and noticing the machine is on battery.
+Two separate things are needed, and they were built separately: asking the OS to
+hold the display, and noticing the machine is on battery.
 
-| Platform        | Holds the display                                                                    | Detects battery |
-| --------------- | ------------------------------------------------------------------------------------ | --------------- |
-| macOS           | Yes — an IOKit assertion, visible in `pmset -g assertions` and named after the agent | Yes             |
-| Windows         | **Not yet**                                                                          | Yes             |
-| Linux (Wayland) | **Not yet**                                                                          | Yes             |
-| Linux (X11)     | **Not yet**                                                                          | Yes             |
+| Platform | Holds the display                                                                                           | Detects battery |
+| -------- | ----------------------------------------------------------------------------------------------------------- | --------------- |
+| macOS    | Yes — an IOKit assertion, visible in `pmset -g assertions` and named after the agent                        | Yes             |
+| Windows  | Yes — `SetThreadExecutionState` with `ES_DISPLAY_REQUIRED`                                                  | Yes             |
+| Linux    | Yes — an `org.freedesktop.ScreenSaver` inhibit on the session bus, the same call under both X11 and Wayland | Yes             |
 
-So today this does something only on macOS. **On every other platform there is
-no icon at all** — the editor asks the OS whether it could ever hold the display
-and, where the answer is no, builds none of this: no icon, no switch, no
-background work. A dimmed control opening a switch that can never do anything
-visible would be worse than nothing. The `keep_display_awake` setting is still
-read, so this appears on its own once a platform gains an implementation.
+All three are new, and none has been exercised end to end in a running editor
+yet. The evidence behind them is not equal, so it is worth stating plainly: on
+macOS the exact assertion call was verified out of band and shows up in
+`pmset -g assertions`; on Windows and Linux the code has been compiled against
+the real APIs for those targets and nothing more. If the display does not stay
+awake for you, or the switch claims a hold the screen does not honor, that is
+exactly the kind of thing worth filing an issue about.
+
+A platform that cannot make the request at all gets none of this built: no
+icon, no switch, no background work — a dimmed control opening a switch that
+can never do anything would be worse than nothing. That is a real code path
+(it is what a platform with no implementation gets by default), but none of
+the three platforms above take it any more: each one now answers yes, so on
+every supported platform the icon is always there.
+
+### What each platform cannot tell you
+
+- **Windows** has nowhere to record _why_ the display is held —
+  `SetThreadExecutionState` takes flags and nothing else. The status-bar switch
+  is the only place to find out.
+- **Linux** goes through the `org.freedesktop.ScreenSaver` session-bus
+  convention, so it behaves the same under X11 and Wayland — but only where
+  something answers that name. GNOME and KDE do. **wlroots-based compositors —
+  sway, Hyprland, river — do not by default**: they implement idle inhibition
+  through a Wayland protocol instead, which this does not use yet, so the switch
+  there will read "The system refused the request". Two further cases: some
+  environments answer the call and then do not actually hold the screen, which
+  cannot be detected from this side, so the switch may claim a hold while the
+  screen sleeps anyway; and with no session bus at all — a container, or over
+  SSH — the request simply fails and the menu says so.
