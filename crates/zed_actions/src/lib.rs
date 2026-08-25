@@ -83,7 +83,6 @@ pub enum ExtensionCategoryFilter {
     Grammars,
     LanguageServers,
     ContextServers,
-    AgentServers,
     Snippets,
     DebugAdapters,
 }
@@ -100,12 +99,6 @@ pub struct Extensions {
     #[serde(default)]
     pub id: Option<String>,
 }
-
-/// Opens the ACP registry.
-#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
-#[serde(deny_unknown_fields)]
-pub struct AcpRegistry;
 
 /// Decreases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
