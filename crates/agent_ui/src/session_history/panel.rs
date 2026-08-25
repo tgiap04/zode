@@ -1,4 +1,4 @@
-use agent_sessions::{SessionCounts, SessionProvider, SessionSummary};
+use agent_sessions::{AgentKind, SessionCounts, SessionProvider, SessionSummary};
 use anyhow::Result;
 use collections::HashMap;
 use editor::Editor;
@@ -43,7 +43,14 @@ pub struct AgentHistoryPanel {
     /// The real editor behind the search box. Its text is the filter — read on
     /// render rather than mirrored into a field, so the two cannot disagree.
     pub(crate) filter_editor: Entity<Editor>,
-    pub(crate) collapsed_groups: collections::HashSet<PathBuf>,
+    /// Which agent sections are closed.
+    pub(crate) collapsed_agents: collections::HashSet<AgentKind>,
+    /// Which project sections are closed, keyed by the agent they sit under.
+    ///
+    /// The pair matters: the same project appears under every agent the user ran
+    /// there, and keying by path alone would make closing it under Claude close it
+    /// under Codex too.
+    pub(crate) collapsed_groups: collections::HashSet<(AgentKind, PathBuf)>,
     pub(crate) expanded_rows: collections::HashSet<Arc<str>>,
     pub(crate) loading: bool,
     /// Set once the panel has been visible, so a closed panel never touches the
@@ -83,6 +90,7 @@ impl AgentHistoryPanel {
             providers: agent_sessions::default_providers(),
             sessions: Vec::new(),
             counts: HashMap::default(),
+            collapsed_agents: Default::default(),
             collapsed_groups: Default::default(),
             expanded_rows: Default::default(),
             loading: false,
