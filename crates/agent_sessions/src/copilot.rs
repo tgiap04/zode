@@ -539,27 +539,25 @@ mod tests {
         let provider = CopilotProvider::new(root.path().to_path_buf());
         let session = provider.list().unwrap().remove(0);
 
-        let mut cases = vec![
-            (
-                "an unrelated absolute path",
-                outside.path().join("victim/events.jsonl"),
-            ),
-            (
-                "a `..` climb back out of the store",
-                root.path()
-                    .join("s")
-                    .join("..")
-                    .join("..")
-                    .join(outside.path().file_name().unwrap())
-                    .join("victim/events.jsonl"),
-            ),
-            (
-                // Not a session directory: trashing this would take every
-                // session at once.
-                "the store root itself",
-                root.path().join("events.jsonl"),
-            ),
-        ];
+        // Built by pushing rather than as a literal: the symlink arm below is
+        // `cfg(unix)`, and a `vec![]` literal would leave `mut` unused on
+        // Windows — which clippy denies.
+        let mut cases: Vec<(&str, PathBuf)> = Vec::new();
+        cases.push((
+            "an unrelated absolute path",
+            outside.path().join("victim/events.jsonl"),
+        ));
+        cases.push((
+            "a `..` climb back out of the store",
+            root.path()
+                .join("s")
+                .join("..")
+                .join("..")
+                .join(outside.path().file_name().unwrap())
+                .join("victim/events.jsonl"),
+        ));
+        // Not a session directory: trashing this would take every session at once.
+        cases.push(("the store root itself", root.path().join("events.jsonl")));
 
         #[cfg(unix)]
         {
