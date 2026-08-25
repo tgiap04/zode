@@ -2,7 +2,7 @@ use crate::session_history::{
     actions::cwd_exists,
     panel::{AgentHistoryPanel, CountState},
 };
-use agent_sessions::{AgentKind, Fork, SessionSummary};
+use agent_sessions::{Fork, SessionSummary};
 use gpui::{Anchor, Context, Window};
 use std::path::{Path, PathBuf};
 use ui::{ContextMenu, ContextMenuEntry, IconName, PopoverMenu, Tooltip, prelude::*};
@@ -380,11 +380,10 @@ fn render_facts(session: &SessionSummary, panel: &AgentHistoryPanel) -> impl Int
         .w_full()
         .gap_1p5()
         .child(
-            Icon::new(match session.agent {
-                AgentKind::Claude => IconName::AiClaude,
-                AgentKind::Codex => IconName::AiOpenAi,
-            })
-            .size(IconSize::XSmall),
+            // Through `agent_icon` rather than a match of its own: the rail, the
+            // tab and this row must draw the same vendor mark, and three copies
+            // of the mapping is three places to forget when an agent is added.
+            Icon::new(crate::agent_icon(session.agent.builtin_agent_id())).size(IconSize::XSmall),
         )
         .child(
             Label::new(session.agent.label())

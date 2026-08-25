@@ -9,6 +9,7 @@ use std::{path::PathBuf, sync::Arc, time::SystemTime};
 pub enum AgentKind {
     Claude,
     Codex,
+    Copilot,
 }
 
 impl AgentKind {
@@ -16,6 +17,7 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Copilot => "Copilot",
         }
     }
 
@@ -25,6 +27,7 @@ impl AgentKind {
         match self {
             Self::Claude => "claude-acp",
             Self::Codex => "codex-acp",
+            Self::Copilot => "github-copilot-cli",
         }
     }
 }
