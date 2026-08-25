@@ -191,14 +191,20 @@ impl From<Result<Vec<UsageWindow>, claude::Unavailable>> for Outcome {
             Err(claude::Unavailable::Request(reason)) => Outcome::Keep(reason),
             // Keep, not Clear: being asked too often says nothing about whether
             // the numbers already on screen are still true.
+            //
+            // Short on purpose. This lands in a 340px panel row beside the agent's
+            // name, and beside a countdown when there are stale numbers to report:
+            // "Resets in 27d 2h · <this>". A sentence there is a sentence nobody
+            // finishes reading — see `fixed_reasons_fit_the_panel_row`.
             Err(claude::Unavailable::RateLimited) => {
-                Outcome::Keep("the usage endpoint is rate limiting this account — retrying".into())
+                Outcome::Keep("rate limited — retrying".into())
             }
-            Err(claude::Unavailable::RuntimeOverride) => Outcome::Clear(
-                "an ANTHROPIC_* override is set, so subscription quota does not \
-                 describe this session"
-                    .into(),
-            ),
+            // Also short. This one was 84 characters and would have overflowed
+            // the panel row on its own, which nobody had noticed because it only
+            // shows for a user who has set an ANTHROPIC_* variable.
+            Err(claude::Unavailable::RuntimeOverride) => {
+                Outcome::Clear("an ANTHROPIC_* override is set".into())
+            }
             Err(claude::Unavailable::NoCredentials) => {
                 Outcome::Clear("no Claude Code sign-in was found on this machine".into())
             }
@@ -1212,6 +1218,49 @@ mod tests {
         );
     }
 
+    /// The reasons this crate writes itself have to fit a 340px panel row next to
+    /// the agent's name, and next to a countdown when there are stale numbers too.
+    /// The row truncates rather than overflowing now, but a truncated sentence
+    /// tells the reader nothing — so these stay short.
+    ///
+    /// The bound is the longest string that was already here when this was
+    /// written. It exists because a 61-character one was added and overflowed the
+    /// panel on sight, and writing it revealed a pre-existing 84-character one.
+    ///
+    /// **Scope, deliberately narrow.** This covers only the variants carrying a
+    /// fixed string. `Unavailable::Request` and `codex::Unavailable::Failed`
+    /// interpolate an OS error — `codex.rs` formats
+    /// `"codex app-server would not start: {error}"`, and a routine
+    /// `std::io::Error` message takes that past 70 characters. Those cannot be
+    /// bounded at compile time, so what protects the row for them is the layout's
+    /// `min_w_0` + `truncate`, not any promise about length. Do not read this test
+    /// as covering them.
+    #[test]
+    fn fixed_reasons_fit_the_panel_row() {
+        const BUDGET: usize = 48;
+
+        let reasons = [
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RateLimited)),
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RuntimeOverride)),
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::NoCredentials)),
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::UnsupportedPlan)),
+            Outcome::from(Err::<Vec<_>, _>(codex::Unavailable::NotInstalled)),
+        ];
+
+        for outcome in &reasons {
+            let reason = match outcome {
+                Outcome::Keep(reason) | Outcome::Clear(reason) => reason,
+                Outcome::Windows(_) => continue,
+            };
+            assert!(
+                reason.chars().count() <= BUDGET,
+                "{reason:?} is {} characters; the panel row has room for about \
+                 {BUDGET} beside the agent's name",
+                reason.chars().count()
+            );
+        }
+    }
+
     /// Regaining focus used to fetch unconditionally, so alt-tabbing in and out
     /// was one request per tab — against an endpoint this editor shares with the
     /// Claude Code CLI on one token. These are the conditions under which that
@@ -1324,7 +1373,7 @@ mod tests {
             indicator.sources[0]
                 .reason
                 .as_ref()
-                .is_some_and(|reason| reason.contains("rate limiting")),
+                .is_some_and(|reason| reason.contains("rate limited")),
             "and the tooltip must say why it is not fresh"
         );
     }
