@@ -37,6 +37,7 @@ path = "src/main.rs"
 activity_indicator.workspace = true
 agent_ui.workspace = true
 agent_usage.workspace = true
+keep_awake.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
 assets.workspace = true

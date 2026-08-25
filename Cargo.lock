@@ -7380,6 +7380,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "keep_awake"
+version = "0.1.0"
+dependencies = [
+ "agent_ui",
+ "fs",
+ "gpui",
+ "log",
+ "settings",
+ "terminal",
+ "ui",
+ "workspace",
+]
+
+[[package]]
 name = "keymap_editor"
 version = "0.1.0"
 dependencies = [
@@ -19287,6 +19301,7 @@ dependencies = [
  "itertools 0.14.0",
  "journal",
  "json_schema_store",
+ "keep_awake",
  "keymap_editor",
  "language",
  "language_extension",

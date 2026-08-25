@@ -1,5 +1,5 @@
 use crate::{
-    AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels,
+    AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels, DisplayWakeLock,
     DummyKeyboardMapper, ForegroundExecutor, Keymap, NoopTextSystem, Platform, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SourceMetadata,
@@ -32,6 +32,19 @@ pub(crate) struct TestPlatform {
     pub(crate) prompts: RefCell<TestPrompts>,
     screen_capture_sources: RefCell<Vec<TestScreenCaptureSource>>,
     pub opened_url: RefCell<Option<String>>,
+    /// The reasons currently holding the display awake, newest last. Standing in
+    /// for a real OS assertion so a test can assert on the *policy* -- when a
+    /// lock is taken and when it is let go -- without a display.
+    pub display_wake_reasons: RefCell<Vec<String>>,
+    /// What `on_battery` should answer. Defaults to `None` -- the same "cannot
+    /// tell" a desktop gives -- so a test that does not care is not silently
+    /// pretending to be a laptop.
+    pub on_battery: RefCell<Option<bool>>,
+    /// Whether `keep_display_awake` can answer at all. `false` stands in for a
+    /// platform with no implementation -- which is every platform but macOS
+    /// today -- so the policy layer's "this machine cannot" state is reachable
+    /// from a test.
+    pub display_wake_supported: RefCell<bool>,
     pub text_system: Arc<dyn PlatformTextSystem>,
     pub expect_restart: RefCell<Option<oneshot::Sender<Option<PathBuf>>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
@@ -129,6 +142,9 @@ impl TestPlatform {
             current_find_pasteboard_item: Mutex::new(None),
             weak: weak.clone(),
             opened_url: Default::default(),
+            display_wake_reasons: Default::default(),
+            on_battery: Default::default(),
+            display_wake_supported: RefCell::new(true),
             text_system,
             headless_renderer_factory,
         })
@@ -243,6 +259,32 @@ impl Platform for TestPlatform {
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
         Box::new(TestKeyboardLayout)
+    }
+
+    fn on_battery(&self) -> Option<bool> {
+        *self.on_battery.borrow()
+    }
+
+    fn can_keep_display_awake(&self) -> bool {
+        *self.display_wake_supported.borrow()
+    }
+
+    fn keep_display_awake(&self, reason: &str) -> Option<DisplayWakeLock> {
+        if !*self.display_wake_supported.borrow() {
+            return None;
+        }
+        let reasons = self.weak.upgrade()?;
+        let reason = reason.to_string();
+        reasons
+            .display_wake_reasons
+            .borrow_mut()
+            .push(reason.clone());
+        Some(DisplayWakeLock::new(move || {
+            let mut held = reasons.display_wake_reasons.borrow_mut();
+            if let Some(index) = held.iter().rposition(|held| *held == reason) {
+                held.remove(index);
+            }
+        }))
     }
 
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper> {

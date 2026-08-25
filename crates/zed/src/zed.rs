@@ -495,6 +495,14 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let agent_usage = cx.new(|cx| agent_usage::AgentUsageIndicator::new(window, cx));
+        // Not built at all where the OS will not hold the display: the entity is
+        // both the policy and the indicator, so skipping it drops the icon, the
+        // subscriptions and the power-check timer together. A dimmed control
+        // opening a switch that can never do anything visible is worse than no
+        // control.
+        let keep_awake = cx
+            .can_keep_display_awake()
+            .then(|| cx.new(|cx| keep_awake::KeepAwake::new(workspace, &workspace_handle, cx)));
         let agent_usage_panel_handle = agent_usage.read(cx).panel_handle();
         workspace.register_action(move |_, _: &agent_usage::ToggleUsagePanel, window, cx| {
             agent_usage_panel_handle.toggle(window, cx);
@@ -510,6 +518,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             // way indexing and downloads are, not a property of the buffer in
             // front of you.
             status_bar.add_left_item(agent_usage, window, cx);
+            // Beside the quota indicator for the same reason: both report on
+            // something the machine is doing for an agent, not on the buffer.
+            if let Some(keep_awake) = keep_awake {
+                status_bar.add_left_item(keep_awake, window, cx);
+            }
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);

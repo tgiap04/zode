@@ -205,6 +205,39 @@ pub trait Platform: 'static {
     fn thermal_state(&self) -> ThermalState;
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
 
+    /// Asks the OS to keep the display lit until the returned handle is dropped.
+    ///
+    /// `reason` is shown wherever the platform records one -- macOS lists it in
+    /// `pmset -g assertions`, which is the only way to confirm by hand that this
+    /// is working at all. `None` means this platform cannot make the request,
+    /// which is an ordinary answer rather than a failure: the caller carries on
+    /// without a lock.
+    fn keep_display_awake(&self, _reason: &str) -> Option<DisplayWakeLock> {
+        None
+    }
+
+    /// Whether [`Platform::keep_display_awake`] can ever succeed here.
+    ///
+    /// Asked before building anything that depends on it, so a platform with no
+    /// implementation costs nothing at all rather than a control that cannot
+    /// work. Declared rather than probed: probing would mean taking a real
+    /// assertion and dropping it, which is a visible blip in the OS's own
+    /// accounting for no gain.
+    fn can_keep_display_awake(&self) -> bool {
+        false
+    }
+
+    /// Whether the machine is running from a battery rather than mains power.
+    ///
+    /// `None` means the question could not be answered -- a desktop with no
+    /// battery at all, or a reading that failed. Callers must treat `None` as
+    /// "not on battery": a machine that cannot report a battery almost certainly
+    /// does not have one, and guessing the other way would silently disable
+    /// battery-conditional behaviour on exactly those machines.
+    fn on_battery(&self) -> Option<bool> {
+        None
+    }
+
     fn compositor_name(&self) -> &'static str {
         ""
     }
@@ -278,6 +311,31 @@ pub enum ThermalState {
     Serious,
     /// System is critically constrained, minimize all resource usage
     Critical,
+}
+
+/// A request that the display stay lit, withdrawn when this value is dropped.
+///
+/// The withdrawal lives in `Drop` rather than a paired `release()` because an
+/// early return must not be able to leave the display pinned on -- every path
+/// out of a scope drops the value, including the ones nobody wrote by hand. The
+/// platform's handle is captured inside the closure, so gpui needs no
+/// per-platform variant of this type, and a test platform can hand back a
+/// closure that merely records the release.
+pub struct DisplayWakeLock(Option<Box<dyn FnOnce()>>);
+
+impl DisplayWakeLock {
+    /// Wraps a platform's withdrawal call. It runs exactly once, on drop.
+    pub fn new(release: impl FnOnce() + 'static) -> Self {
+        Self(Some(Box::new(release)))
+    }
+}
+
+impl Drop for DisplayWakeLock {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
 }
 
 /// Metadata for a given [ScreenCaptureSource]

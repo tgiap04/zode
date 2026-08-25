@@ -190,6 +190,10 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         ThermalState::Nominal
     }
 
+    fn on_battery(&self) -> Option<bool> {
+        read_mains_online()
+    }
+
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
         on_finish_launching();
 
@@ -1119,5 +1123,58 @@ mod tests {
             zero,
             Point::new(px(5.0), px(5.1))
         ),);
+    }
+}
+
+/// Whether any mains supply is present and connected, read from sysfs.
+///
+/// Deliberately files rather than D-Bus: this answers a yes/no question that the
+/// kernel already publishes, and a D-Bus round trip would add a dependency and a
+/// session requirement for nothing. `None` when no mains supply exists at all,
+/// which is the ordinary shape of a desktop and must not be read as "on battery".
+fn read_mains_online() -> Option<bool> {
+    let entries = match std::fs::read_dir("/sys/class/power_supply") {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn_once(format_args!("cannot list /sys/class/power_supply: {error}"));
+            return None;
+        }
+    };
+    let mut mains_seen = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let kind = match std::fs::read_to_string(path.join("type")) {
+            Ok(kind) => kind,
+            Err(error) => {
+                warn_once(format_args!("cannot read {}: {error}", path.display()));
+                continue;
+            }
+        };
+        if kind.trim() != "Mains" {
+            continue;
+        }
+        mains_seen = true;
+        // Any connected mains supply settles it; keep looking only while every
+        // one seen so far is disconnected.
+        match std::fs::read_to_string(path.join("online")) {
+            Ok(online) if online.trim() == "1" => return Some(false),
+            Ok(_) => {}
+            Err(error) => {
+                warn_once(format_args!("cannot read {}: {error}", path.display()));
+            }
+        }
+    }
+    mains_seen.then_some(true)
+}
+
+/// Logs the first power-supply read failure and stays quiet after that.
+///
+/// The caller runs on a timer while an agent works, so an unreadable sysfs would
+/// otherwise produce a line a minute for hours. One line is a diagnostic; sixty
+/// an hour is noise that buries everything else.
+fn warn_once(message: std::fmt::Arguments<'_>) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!("{message}");
     }
 }

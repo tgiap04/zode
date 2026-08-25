@@ -147,6 +147,18 @@ pub struct SettingsContent {
     /// Default: false
     pub helix_mode: Option<bool>,
 
+    /// Whether to keep the display lit while an agent's CLI is still working.
+    ///
+    /// While this holds, the machine will not dim, sleep or reach a
+    /// time-based lock screen. That is the point of it, and it is also the cost:
+    /// an editor left in a public place stays readable.
+    ///
+    /// Released automatically while running on battery, and whenever no agent is
+    /// working.
+    ///
+    /// Default: true
+    pub keep_display_awake: Option<bool>,
+
     pub database: Option<DatabaseSettingsContent>,
 
     pub journal: Option<JournalSettingsContent>,

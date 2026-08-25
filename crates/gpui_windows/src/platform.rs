@@ -21,7 +21,7 @@ use windows::{
         Foundation::*,
         Graphics::{Direct3D11::ID3D11Device, Gdi::*},
         Security::Credentials::*,
-        System::{Com::*, LibraryLoader::*, Ole::*, SystemInformation::*},
+        System::{Com::*, LibraryLoader::*, Ole::*, Power::*, SystemInformation::*},
         UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -387,6 +387,22 @@ impl Platform for WindowsPlatform {
     }
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn on_battery(&self) -> Option<bool> {
+        let mut status = SYSTEM_POWER_STATUS::default();
+        // SAFETY: `status` is a valid, fully-initialised out parameter of exactly
+        // the size the call expects.
+        if unsafe { GetSystemPowerStatus(&mut status) }.is_err() {
+            return None;
+        }
+        match status.ACLineStatus {
+            0 => Some(true),
+            1 => Some(false),
+            // 255 is the documented "unknown". Anything else is undocumented and
+            // gets the same answer rather than a guess.
+            _ => None,
+        }
+    }
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal

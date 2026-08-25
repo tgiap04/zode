@@ -124,6 +124,11 @@
   // Whether to enable helix mode and key bindings.
   // Enabling this mode will automatically enable vim mode.
   "helix_mode": false,
+  // Whether to keep the display lit while an agent's CLI is still working.
+  // While this holds, the machine will not dim, sleep or reach a time-based lock
+  // screen -- an editor left in a public place stays readable. Released
+  // automatically while running on battery, and whenever no agent is working.
+  "keep_display_awake": true,
   // Whether to show the informational hover box when moving the mouse
   // over symbols in the editor.
   "hover_popover_enabled": true,

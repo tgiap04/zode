@@ -394,8 +394,21 @@ impl AgentView {
         self.rename_editor.as_ref()
     }
 
+    /// The terminal this agent's CLI runs in, once it has started.
+    ///
+    /// Public for `keep_awake`, which needs the terminal's task status: an agent
+    /// tab outliving its CLI is deliberate (`agent_task` sets
+    /// `HideStrategy::Never`), so the tab being open says nothing about whether
+    /// the process is still alive. Only the task status does.
+    pub fn terminal(&self) -> Option<&Entity<TerminalView>> {
+        match &self.state {
+            State::Terminal(view) => Some(view),
+            State::Starting | State::MissingBinary(_) | State::Failed(_) => None,
+        }
+    }
+
     /// What the tab shows: the name the user gave this session, or the agent's.
-    pub(crate) fn tab_label(&self) -> SharedString {
+    pub fn tab_label(&self) -> SharedString {
         self.custom_name
             .clone()
             .unwrap_or_else(|| self.display_name.clone())
