@@ -64,6 +64,8 @@ The indicator draws no icon and reserves no space for a source with nothing to s
 
 Open the panel for the specific reason — it keeps a row for a silent agent and says why it is silent, which is the one thing the status bar itself cannot tell you. A request that simply failed keeps showing the last numbers it had rather than clearing them — clearing only happens for the reasons above, where the old numbers would no longer be a true answer.
 
+This includes **Claude answering `429`**: after the retries described in [Polling](#polling) are exhausted, the indicator keeps whatever numbers it already had rather than going quiet, and the panel reports that the account is being rate limited rather than one of the reasons above. Being asked too often says nothing about whether those numbers are still true.
+
 ## Why Antigravity and Copilot have no numbers
 
 The rail offers four agents; this indicator reports on two. That is not an oversight
@@ -102,6 +104,10 @@ is the trade the Codex route exists to avoid.
 
 ## Polling
 
-Both agents are read together every 60 seconds, but only while the window is focused. Regaining focus reads both again immediately rather than waiting for the next tick, and clicking the refresh glyph — on the status bar or in the panel — does the same on demand. This is unchanged by the panel and menu: opening either reads state already in hand and triggers no extra request.
+Both agents are read together every 60 seconds, but only while the window is focused. Regaining focus reads both again immediately — unless the last attempt was under 30 seconds ago, in which case it trusts what is on screen and just restarts the interval. Clicking the refresh glyph — on the status bar or in the panel — always reads, throttle or not: the point of pressing it is to distrust what is showing. Opening the panel or the menu reads state already in hand and triggers no extra request.
+
+That 30-second floor exists because Claude's endpoint is shared with the Claude Code CLI on one token, so alt-tabbing in and out used to be one request per tab against an endpoint that answers `429` when asked too often.
+
+**When Claude answers `429`**, the request is retried up to three times with a short backoff, honouring a `Retry-After` header when one is sent and clamping it to five seconds so a retry never outlives the poll that would supersede it. `408`, `425` and any `5xx` are retried the same way. Every other `4xx` is not: a `401` will answer the same thing next time, and asking again only spends the limit. If the retries are exhausted the indicator keeps whatever numbers it already had and says it is being rate limited — being asked too often says nothing about whether those numbers are still true.
 
 See also: [Telemetry](./telemetry.md#agent-subscription-quota) for how this fits into what this build sends over the network.

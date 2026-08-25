@@ -143,6 +143,25 @@ pub struct UsageWindow {
 /// current. A minute is short enough that a reset is noticed soon after it
 /// happens and long enough that it is not traffic worth thinking about.
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// How recent a successful read has to be for regaining focus to trust it rather
+/// than ask again.
+///
+/// Regaining focus used to fetch unconditionally, so alt-tabbing in and out five
+/// times was five requests in a few seconds — against an undocumented endpoint
+/// this editor shares with the Claude Code CLI on one token. That is a good way
+/// to earn the 429 the retry above now has to absorb. A manual refresh is never
+/// throttled: the whole point of pressing it is to distrust what is on screen.
+const ACTIVATION_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether a poll was asked for by a person or by the window regaining focus,
+/// which decides whether the immediate fetch may be skipped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PollReason {
+    /// The window regained focus. Skippable when the numbers are fresh.
+    Activation,
+    /// Someone pressed refresh. Never skipped.
+    Manual,
+}
 
 /// What a source's answer means for what is on screen.
 ///
@@ -170,6 +189,11 @@ impl From<Result<Vec<UsageWindow>, claude::Unavailable>> for Outcome {
             // A failed request keeps what is there; anything else means the
             // display is no longer warranted at all.
             Err(claude::Unavailable::Request(reason)) => Outcome::Keep(reason),
+            // Keep, not Clear: being asked too often says nothing about whether
+            // the numbers already on screen are still true.
+            Err(claude::Unavailable::RateLimited) => {
+                Outcome::Keep("the usage endpoint is rate limiting this account — retrying".into())
+            }
             Err(claude::Unavailable::RuntimeOverride) => Outcome::Clear(
                 "an ANTHROPIC_* override is set, so subscription quota does not \
                  describe this session"
@@ -256,6 +280,17 @@ pub struct AgentUsageIndicator {
     /// A fetch is in flight. Guards the click so pressing twice does not queue a
     /// second request behind the first.
     fetching: bool,
+    /// When a read was last *attempted*, whatever came back.
+    ///
+    /// Deliberately not "when a read last succeeded": the question the activation
+    /// throttle asks is "have I already asked recently", and answering it with
+    /// success would invert the whole thing. `Outcome::Keep` never sets a
+    /// source's `fetched_at` and `Outcome::Clear` nulls it, so a persistent 429 —
+    /// or a Codex CLI that is simply not installed — would leave every activation
+    /// unthrottled, and each one now costs a retry chain rather than one request.
+    /// That would make the sustained-rate-limit case, the one this exists for,
+    /// several times worse instead of better.
+    last_polled_at: Option<DateTime<Utc>>,
     /// The interval loop. Held so it stops when the indicator goes away, and
     /// replaced rather than accumulated when polling restarts.
     _poll: Option<Task<()>>,
@@ -274,6 +309,7 @@ impl AgentUsageIndicator {
                 SourceState::new(AgentId::new(project::CODEX_AGENT_ID.to_string())),
             ],
             fetching: false,
+            last_polled_at: None,
             _poll: None,
             _fetch: None,
             _activation: None,
@@ -287,14 +323,16 @@ impl AgentUsageIndicator {
         // next tick.
         this._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
-                this.start_polling(window, cx);
+                this.start_polling(PollReason::Activation, window, cx);
             } else {
                 this._poll = None;
             }
         }));
 
         if window.is_window_active() {
-            this.start_polling(window, cx);
+            // The first read of the session has nothing on screen to trust, so it
+            // is never skippable.
+            this.start_polling(PollReason::Manual, window, cx);
         }
         this
     }
@@ -314,16 +352,28 @@ impl AgentUsageIndicator {
         !cfg!(feature = "test-support")
     }
 
-    /// (Re)starts the interval loop, fetching immediately.
+    /// (Re)starts the interval loop, fetching immediately unless `reason` allows
+    /// the fetch to be skipped and the numbers on screen are still fresh.
     ///
     /// Assigning over `_poll` drops any previous loop, so this can be called
     /// freely -- on activation, or after a manual refresh -- without stacking
     /// timers.
-    fn start_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_polling(&mut self, reason: PollReason, window: &mut Window, cx: &mut Context<Self>) {
         if !Self::may_read_usage() {
             return;
         }
+        if reason == PollReason::Activation && self.polled_recently(Utc::now()) {
+            // Still restart the timer -- the loop was dropped when focus was
+            // lost, so without this the numbers would never refresh again.
+            self.restart_timer(window, cx);
+            return;
+        }
         self.refresh(window, cx);
+        self.restart_timer(window, cx);
+    }
+
+    /// The interval loop on its own, with no immediate fetch.
+    fn restart_timer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._poll = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
@@ -337,6 +387,25 @@ impl AgentUsageIndicator {
         }));
     }
 
+    /// Whether a read was attempted recently enough that regaining focus can skip
+    /// asking again.
+    ///
+    /// Keyed on the attempt, not on the answer. Nothing has been asked yet when
+    /// `last_polled_at` is `None`, so the very first activation — the one the user
+    /// actually notices — is never the one that gets skipped.
+    ///
+    /// A clock stepped backwards by an NTP correction can make this read `true`
+    /// early. That only suppresses the on-focus fetch, never the unconditional
+    /// 60-second loop, so it self-heals within one interval and cannot leave the
+    /// indicator permanently stale.
+    fn polled_recently(&self, now: DateTime<Utc>) -> bool {
+        let Ok(cutoff) = chrono::Duration::from_std(ACTIVATION_MIN_INTERVAL) else {
+            return false;
+        };
+        self.last_polled_at
+            .is_some_and(|polled_at| now - polled_at < cutoff)
+    }
+
     /// Reads both agents' quota once, concurrently.
     ///
     /// Silently does nothing while a fetch is already in flight: the caller may be
@@ -346,6 +415,9 @@ impl AgentUsageIndicator {
             return;
         }
         self.fetching = true;
+        // Stamped here rather than on the answer: this is the moment a request
+        // goes out, and it is requests the throttle is trying not to duplicate.
+        self.last_polled_at = Some(Utc::now());
         cx.notify();
 
         let http_client = cx.http_client();
@@ -391,6 +463,7 @@ impl AgentUsageIndicator {
                 SourceState::new(AgentId::new(project::CODEX_AGENT_ID.to_string())),
             ],
             fetching: false,
+            last_polled_at: None,
             _poll: None,
             _fetch: None,
             _activation: None,
@@ -455,7 +528,7 @@ impl AgentUsageIndicator {
     /// Restarts the loop rather than firing a bare fetch, so the next automatic
     /// read is a full interval after this one instead of arriving moments later.
     pub(crate) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.start_polling(window, cx);
+        self.start_polling(PollReason::Manual, window, cx);
     }
 }
 
@@ -1136,6 +1209,123 @@ mod tests {
                 Outcome::Clear(_),
             ),
             "a payload this build cannot read will not fix itself between ticks"
+        );
+    }
+
+    /// Regaining focus used to fetch unconditionally, so alt-tabbing in and out
+    /// was one request per tab — against an endpoint this editor shares with the
+    /// Claude Code CLI on one token. These are the conditions under which that
+    /// immediate fetch may be skipped.
+    #[test]
+    fn an_attempt_made_recently_lets_activation_skip_asking_again() {
+        let now = Utc::now();
+        let mut indicator = AgentUsageIndicator::test_new();
+
+        assert!(
+            !indicator.polled_recently(now),
+            "nothing has been asked yet — the first activation is the one the user \
+             notices, and it must not be the one that is skipped"
+        );
+
+        indicator.last_polled_at = Some(now);
+        assert!(indicator.polled_recently(now), "just asked");
+        assert!(
+            indicator.polled_recently(now + chrono::Duration::seconds(29)),
+            "still inside the window"
+        );
+        assert!(
+            !indicator.polled_recently(now + chrono::Duration::seconds(31)),
+            "past the window, ask again"
+        );
+    }
+
+    /// The throttle must key on the attempt, never on the answer.
+    ///
+    /// An earlier version asked "is every source's data fresh?" — which reads as
+    /// the careful choice and is exactly backwards. `Outcome::Keep` never stamps a
+    /// source, so a persistent 429 left the throttle permanently disengaged, and
+    /// every activation during an outage then cost a whole retry chain instead of
+    /// one request: the sustained-rate-limit case, the one this feature exists
+    /// for, made several times worse rather than better.
+    #[test]
+    fn a_failing_source_does_not_disengage_the_throttle() {
+        let now = Utc::now();
+        let mut indicator = AgentUsageIndicator::test_new();
+        indicator.last_polled_at = Some(now);
+
+        indicator.apply(
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RateLimited)),
+            Outcome::Keep("codex would not start".into()),
+            now,
+        );
+        assert!(
+            indicator.polled_recently(now),
+            "a 429 is still an attempt; asking again immediately is what earned it"
+        );
+        assert_eq!(
+            indicator.sources[0].fetched_at, None,
+            "and nothing about it made the data fresh — which is why the throttle \
+             must not be asking that question"
+        );
+    }
+
+    /// The common case, not an edge case: most users have no Codex CLI, so that
+    /// source is `Clear` forever and its `fetched_at` is `None` forever. Keying
+    /// the throttle on success would have meant it never engaged for them at all.
+    #[test]
+    fn a_source_that_will_never_answer_does_not_disengage_the_throttle() {
+        let now = Utc::now();
+        let mut indicator = AgentUsageIndicator::test_new();
+        indicator.last_polled_at = Some(now);
+
+        indicator.apply(
+            Outcome::Windows(Vec::new()),
+            Outcome::from(Err::<Vec<_>, _>(codex::Unavailable::NotInstalled)),
+            now,
+        );
+        assert_eq!(
+            indicator.sources[1].fetched_at, None,
+            "Clear nulls it, and an uninstalled CLI never un-nulls it"
+        );
+        assert!(
+            indicator.polled_recently(now),
+            "the throttle still works for a Claude-only user"
+        );
+    }
+
+    /// Being asked too often says nothing about whether the numbers already on
+    /// screen are still true, so they stay.
+    #[test]
+    fn rate_limiting_keeps_the_numbers_it_already_had() {
+        let now = Utc::now();
+        let mut indicator = AgentUsageIndicator::test_new();
+        indicator.apply(
+            Outcome::Windows(vec![UsageWindow {
+                percent: 42,
+                resets_at: None,
+                label: None,
+                kind: WindowKind::Session,
+            }]),
+            Outcome::Windows(Vec::new()),
+            now,
+        );
+
+        indicator.apply(
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RateLimited)),
+            Outcome::Windows(Vec::new()),
+            now,
+        );
+        assert_eq!(
+            indicator.sources[0].windows.len(),
+            1,
+            "the 42% must survive a 429"
+        );
+        assert!(
+            indicator.sources[0]
+                .reason
+                .as_ref()
+                .is_some_and(|reason| reason.contains("rate limiting")),
+            "and the tooltip must say why it is not fresh"
         );
     }
 
