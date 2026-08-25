@@ -1,4 +1,3 @@
-pub mod agent_registry_store;
 pub mod agent_server_store;
 pub mod bookmark_store;
 pub mod buffer_store;
@@ -43,11 +42,10 @@ use crate::{
     trusted_worktrees::{PathTrust, RemoteHostLocation, TrustedWorktrees},
     worktree_store::WorktreeIdCounter,
 };
-pub use agent_registry_store::{AgentRegistryStore, RegistryAgent};
 pub use agent_server_store::{
-    AgentBinary, AgentBinaryMissing, AgentId, AgentServerStore, AgentServersUpdated,
-    BUILTIN_AGENTS, BuiltinAgent, CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID, ExternalAgentSource,
-    builtin_agent,
+    ANTIGRAVITY_AGENT_ID, AgentBinary, AgentBinaryMissing, AgentId, AgentServerStore,
+    AgentServersUpdated, BUILTIN_AGENTS, BuiltinAgent, CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID,
+    COPILOT_AGENT_ID, ExternalAgentSource, builtin_agent,
 };
 pub use git_store::{
     ConflictRegion, ConflictSet, ConflictSetSnapshot, ConflictSetUpdate,
@@ -1355,15 +1353,7 @@ impl Project {
                 )
             });
 
-            let agent_server_store = cx.new(|cx| {
-                AgentServerStore::local(
-                    node.clone(),
-                    fs.clone(),
-                    environment.clone(),
-                    client.http_client(),
-                    cx,
-                )
-            });
+            let agent_server_store = cx.new(|cx| AgentServerStore::local(environment.clone(), cx));
 
             cx.subscribe(&lsp_store, Self::on_lsp_store_event).detach();
 

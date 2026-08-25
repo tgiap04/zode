@@ -4315,7 +4315,6 @@ name = "extensions_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "client",
  "cloud_api_types",
  "collections",
  "db",
@@ -11044,7 +11043,6 @@ dependencies = [
  "node_runtime",
  "parking_lot",
  "paths",
- "percent-encoding",
  "postage",
  "prettier",
  "pretty_assertions",
