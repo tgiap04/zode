@@ -1,6 +1,6 @@
 ---
 title: Agent Usage Indicator
-description: What the status bar shows about your Claude Code and Codex subscription quota, the panel and menu it opens, where the numbers come from, and when it goes blank.
+description: What the status bar shows about your Claude Code and Codex subscription quota, the panel and menu it opens, where the numbers come from, when it goes blank, and why Antigravity and Copilot are absent from it.
 ---
 
 # Agent Usage Indicator
@@ -63,6 +63,35 @@ The indicator draws no icon and reserves no space for a source with nothing to s
 - Codex answered, but this build couldn't find the expected fields in the response
 
 Open the panel for the specific reason — it keeps a row for a silent agent and says why it is silent, which is the one thing the status bar itself cannot tell you. A request that simply failed keeps showing the last numbers it had rather than clearing them — clearing only happens for the reasons above, where the old numbers would no longer be a true answer.
+
+## Why Antigravity and Copilot have no numbers
+
+The rail offers four agents; this indicator reports on two. That is not an oversight
+waiting on implementation — it is what probing the other two CLIs turned up.
+
+**Copilot** publishes no route to subscription quota that this editor could read:
+
+- `copilot --help` carries no usage or quota flag, and no subcommand for one.
+- Its `/usage` slash command is described by the CLI itself as "Display session usage
+  metrics and statistics" — how much this _conversation_ consumed, not how much of a
+  subscription remains. It is a different number from the one this indicator shows, and
+  it exists only inside the interactive TUI.
+- Its ACP server (`copilot --acp`) advertises `loadSession`, prompt capabilities and
+  session listing, and nothing about an account. `account/rateLimits/read` — the method
+  the Codex route uses — answers `-32601 Method not found`, as do
+  `account/usage/read`, `usage/read`, `account/read`, `rateLimits/read` and
+  `account/subscription/read`.
+- Its own logs name a single host, `api.individual.githubcopilot.com`, and contain no
+  quota, premium-request, entitlement or rate-limit vocabulary at all.
+
+GitHub does meter premium requests, so a REST route may well exist. It was not pursued:
+reaching it would mean this editor holding a GitHub credential of its own, and the Codex
+route was deliberately chosen over exactly that trade for Claude's sibling. If such a
+route is ever wanted here, it is a decision about credential scope first and an
+implementation second.
+
+**Antigravity** has not been probed. Its CLI (`agy`) was not installed on the machine
+where the other three were examined, so nothing is claimed about it in either direction.
 
 ## Polling
 
