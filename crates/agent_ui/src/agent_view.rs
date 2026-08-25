@@ -13,14 +13,16 @@ use zed_actions::agent::AgentViewMode;
 
 use util::ResultExt as _;
 
-/// The rail draws hard-coded buttons for the two built-in agents, and the tab has
-/// to carry the same glyph. Two match arms rather than a lookup through
-/// `AgentServerStore`: `project` cannot depend on the icon crate, and a third
+/// The rail draws hard-coded buttons for the built-in agents, and the tab has to
+/// carry the same glyph. Match arms rather than a lookup through
+/// `AgentServerStore`: `project` cannot depend on the icon crate, and another
 /// agent is a deliberate change to both places, not an accident.
 pub fn agent_icon(agent: &str) -> IconName {
     match agent {
         project::CLAUDE_CODE_AGENT_ID => IconName::AiClaude,
         project::CODEX_AGENT_ID => IconName::AiOpenAi,
+        project::ANTIGRAVITY_AGENT_ID => IconName::AiAntigravity,
+        project::COPILOT_AGENT_ID => IconName::AiCopilot,
         _ => IconName::Sparkle,
     }
 }

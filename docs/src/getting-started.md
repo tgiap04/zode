@@ -64,8 +64,9 @@ See [Languages](./languages.md) for language-specific setup instructions.
 
 Zode includes built-in AI assistance. An agent opens as a tab beside your files rather than in a separate panel:
 
-- Click the Claude Code or Codex icon in the sidebar rail to open that agent — it runs as a terminal session of the agent's own CLI, in a tab beside your files.
-- To start a second session of an agent that's already open, use the `+` menu in the tab bar and pick "New Claude Code" or "New Codex".
+- Click the Claude Code, Codex, Antigravity, or Copilot icon in the sidebar rail to open that agent — it runs as a terminal session of the agent's own CLI, in a tab beside your files.
+- Each agent needs its own CLI installed: `claude`, `codex`, `agy`, and `copilot` respectively. Clicking an agent whose CLI is missing offers you the vendor's install command rather than failing silently.
+- To start a second session of an agent that's already open, use the `+` menu in the tab bar and pick "New Claude Code", "New Codex", "New Antigravity", or "New Copilot".
 
 For inline assistance, use `Ctrl+Enter` (macOS, Linux, and Windows all use the same key here).
 
