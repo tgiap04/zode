@@ -392,7 +392,11 @@ impl AutoUpdater {
         cx.default_global::<GlobalAutoUpdate>().0.clone()
     }
 
-    fn new(current_version: Version, http_client: Arc<dyn HttpClient>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        current_version: Version,
+        http_client: Arc<dyn HttpClient>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // On windows, executable files cannot be overwritten while they are
         // running, so we must wait to overwrite the application until quitting
         // or restarting. When quitting the app, we spawn the auto update helper

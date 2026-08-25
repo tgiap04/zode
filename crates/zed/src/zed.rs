@@ -5024,6 +5024,7 @@ mod tests {
                 "agents_sidebar",
                 "app_menu",
                 "assistant",
+                "auto_update",
                 "branch_picker",
                 "branches",
                 "buffer_search",

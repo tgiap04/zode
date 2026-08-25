@@ -21,15 +21,15 @@ The updater request was simple on its face — "a button in the IDE that updates
 
 **"Keep the 15 version tests" was incoherent with "cut the nightly branch"** and I did not notice while writing it. Eight of those fifteen tested `VersionCheckType::Sha`, which only the nightly path used. Cutting the path left them testing nothing. They were deleted, not kept — and the plan now says so rather than leaving a number nobody can reconcile.
 
-**The repo already had a GitHub release helper and the plan did not know.** `http_client::github::latest_github_release` exists. Reusing it would have been wrong in a way that would not have shown up in any test: it reads the `/releases` *list* rather than `/releases/latest`, and it attaches an ambient `GITHUB_TOKEN` when one is exported. Both together mean that on a developer machine with a token in the shell, **unpublished draft releases become visible to the updater** — destroying the exact property the whole release flow leans on ("keep releases as drafts, publish by hand"). The local `github_get` sends no credential at all. This is the one place where not reusing existing code was the correct call, and it needed a comment saying why, because the next reader's instinct will be to consolidate them.
+**The repo already had a GitHub release helper and the plan did not know.** `http_client::github::latest_github_release` exists. Reusing it would have been wrong in a way that would not have shown up in any test: it reads the `/releases` _list_ rather than `/releases/latest`, and it attaches an ambient `GITHUB_TOKEN` when one is exported. Both together mean that on a developer machine with a token in the shell, **unpublished draft releases become visible to the updater** — destroying the exact property the whole release flow leans on ("keep releases as drafts, publish by hand"). The local `github_get` sends no credential at all. This is the one place where not reusing existing code was the correct call, and it needed a comment saying why, because the next reader's instinct will be to consolidate them.
 
-**A behaviour change got made that is easy to describe as a cleanup and is not one.** Dropping the nightly branch means a Nightly-channel install is now offered the newest *stable* release, because `/releases/latest` passes over prereleases. That is a defensible outcome for a manual-only updater and it is still a change in what a user experiences, so it is recorded as one.
+**A behaviour change got made that is easy to describe as a cleanup and is not one.** Dropping the nightly branch means a Nightly-channel install is now offered the newest _stable_ release, because `/releases/latest` passes over prereleases. That is a defensible outcome for a manual-only updater and it is still a change in what a user experiences, so it is recorded as one.
 
 ## Technical Details
 
 ### The version-stamping trap, and why `rerun-if-env-changed` is load-bearing
 
-`script/determine-release-channel` writes `RELEASE_VERSION` from the git tag into the job environment before every bundling step. Nothing read it. The app took its version from `CARGO_PKG_VERSION`, and that same script's comments state outright that the tag is *not* required to match `Cargo.toml`.
+`script/determine-release-channel` writes `RELEASE_VERSION` from the git tag into the job environment before every bundling step. Nothing read it. The app took its version from `CARGO_PKG_VERSION`, and that same script's comments state outright that the tag is _not_ required to match `Cargo.toml`.
 
 Harmless while nothing compares the two. The moment a version check exists, it becomes a loop: the check sees a newer tag, downloads 106 MB, installs, and finds the same old number still reported. Then does it again.
 

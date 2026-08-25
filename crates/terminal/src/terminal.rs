@@ -2781,7 +2781,9 @@ mod tests {
             if content.contains(expected) {
                 return content;
             }
-            cx.background_executor.timer(Duration::from_millis(10)).await;
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
         }
         panic!("timed out waiting for {expected:?} in terminal content, got: {content:?}");
     }
