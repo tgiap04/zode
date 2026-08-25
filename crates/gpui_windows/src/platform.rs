@@ -388,6 +388,50 @@ impl Platform for WindowsPlatform {
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
 
+    fn can_keep_display_awake(&self) -> bool {
+        true
+    }
+
+    fn keep_display_awake(&self, _reason: &str) -> Option<DisplayWakeLock> {
+        // `reason` is dropped on the floor here, and that is the API's doing, not
+        // an oversight: `SetThreadExecutionState` takes flags and nothing else.
+        // Nothing on Windows will show why the display is being held, so the
+        // status-bar indicator is the only place a user can find out.
+        //
+        // The call returns the flags that were in force before it, and `0` means
+        // it failed. Restoring that previous value on drop, rather than blindly
+        // setting `ES_CONTINUOUS`, is what keeps this from stamping on a hold
+        // somebody else established: the state is per-thread and this API
+        // overwrites rather than nesting, so there is no reference count to lean
+        // on.
+        //
+        // Per-thread also means the release has to happen on the thread that took
+        // it. Nothing in the type can enforce that. It holds here because the
+        // policy layer lives on the foreground thread and `DisplayWakeLock` is
+        // dropped from the same entity that created it.
+        // Both flags, not just the display one. On macOS a single
+        // `PreventUserIdleDisplaySleep` assertion covers both halves, because a lit
+        // panel is by definition not an idle system. Windows does not work that
+        // way: `ES_DISPLAY_REQUIRED` and `ES_SYSTEM_REQUIRED` reset two
+        // independent idle timers. With only the first, a machine nobody touches
+        // can still reach its system-sleep timer and blank the screen on the way
+        // down, while the indicator goes on claiming the display is held -- which
+        // is the exact case this feature exists for.
+        let previous = unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)
+        };
+        if previous == EXECUTION_STATE(0) {
+            log::warn!("Windows refused to keep the display awake");
+            return None;
+        }
+        Some(DisplayWakeLock::new(move || {
+            let restored = unsafe { SetThreadExecutionState(previous) };
+            if restored == EXECUTION_STATE(0) {
+                log::warn!("could not restore the previous execution state");
+            }
+        }))
+    }
+
     fn on_battery(&self) -> Option<bool> {
         let mut status = SYSTEM_POWER_STATUS::default();
         // SAFETY: `status` is a valid, fully-initialised out parameter of exactly

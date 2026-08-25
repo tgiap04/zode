@@ -5843,6 +5843,7 @@ dependencies = [
  "x11-clipboard",
  "x11rb",
  "xkbcommon",
+ "zbus",
  "zed-scap",
  "zed-xim",
 ]
