@@ -208,6 +208,36 @@ thing that gate exists to check, so it stays false until a person says otherwise
   a user gets is the `"Agent Servers (unsupported)"` label, and that is written down in
   `docs/src/extensions.md` rather than left for someone to discover.
 
+### Antigravity keeps nothing on this machine
+
+`agy` was installed and signed in after the first pass, which unblocked the phase that had
+been waiting on it. The investigation closed it the other way.
+
+`agy` 1.1.20, authenticated (proven by `agy models` fetching the list from the server), was
+run twice — once with `-p`, once with `-c`. It answered both times, `-c` recalled the previous
+turn, and it wrote **zero bytes** anywhere under the home directory or the working directory.
+`strings` on the binary explains it: `#/v1/conversations/{conversation_id}` and
+`backend.cachedConversation`. The conversations persist, server-side, behind a credential the
+CLI holds.
+
+That closes both halves of the phase, and not for want of effort:
+
+- `SessionProvider`'s doc comment (`provider.rs:6-9`) says _"Every method is blocking: these
+  read files and sqlite."_ There is no file. A provider would have to make an authenticated
+  HTTPS call to Google on the session panel's `list()` path — that is changing the trait's
+  contract, not implementing it.
+- The usage half hits the same wall and adds the credential problem the Codex route was
+  deliberately built to avoid.
+
+The plan had named this exact scenario in advance — _"`agy` không ghi session ra đĩa"_ was
+listed as a medium risk with the disposition "then there is no provider; write it down and
+close". Writing the risk down before it happened is what made it a five-minute decision
+instead of an argument.
+
+Two prompts were spent on the user's own account to learn this. That is the whole cost of
+the answer, and it is a better answer than any amount of reading a 179 MB Go binary's
+strings would have produced.
+
 ## Lesson
 
 `./script/clippy` exiting 0 is not "the gates pass". Read the workflow definitions and run

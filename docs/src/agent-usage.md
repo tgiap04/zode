@@ -90,8 +90,15 @@ route was deliberately chosen over exactly that trade for Claude's sibling. If s
 route is ever wanted here, it is a decision about credential scope first and an
 implementation second.
 
-**Antigravity** has not been probed. Its CLI (`agy`) was not installed on the machine
-where the other three were examined, so nothing is claimed about it in either direction.
+**Antigravity** keeps nothing on this machine to read. `agy` 1.1.20 was installed, signed
+in, and run twice; it wrote **zero bytes** anywhere under the home directory or the working
+directory, and `agy -c` still recalled the previous turn. Its conversations — and therefore
+anything the server knows about quota — live behind `/v1/conversations/{conversation_id}`,
+reachable only with the credential the CLI holds.
+
+That is the same wall Copilot hits, for a different reason: not a missing method, but a
+missing local store. Reading it would mean this editor borrowing a Google credential, which
+is the trade the Codex route exists to avoid.
 
 ## Polling
 
