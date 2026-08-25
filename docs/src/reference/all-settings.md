@@ -2356,6 +2356,16 @@ Example:
 
 `boolean` values
 
+## Keep Display Awake
+
+- Description: Whether to keep the display lit while an agent's CLI is still working. Released automatically while running on battery, and whenever no agent is working. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
+- Setting: `keep_display_awake`
+- Default: `true`
+
+**Options**
+
+`boolean` values
+
 ## Indent Guides
 
 - Description: Configuration related to indent guides. Indent guides can be configured separately for each language.
