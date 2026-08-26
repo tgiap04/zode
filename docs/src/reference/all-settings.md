@@ -2366,6 +2366,16 @@ Example:
 
 `boolean` values
 
+## Project Footprint Indicator
+
+- Description: Whether to show the combined CPU and RAM footprint of every tracked project's child processes -- its language servers and its terminals -- in the status bar. Click the badge for a per-project breakdown. Zode hosts every project in one OS process, so its own heap and CPU cannot be attributed per project and are not counted. See [Project Footprint Indicator](../project-footprint-indicator.md) for what is measured, the polling cost, and privacy.
+- Setting: `project_footprint_indicator`
+- Default: `true`
+
+**Options**
+
+`boolean` values
+
 ## Indent Guides
 
 - Description: Configuration related to indent guides. Indent guides can be configured separately for each language.
