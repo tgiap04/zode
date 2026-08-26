@@ -159,6 +159,12 @@ pub struct SettingsContent {
     /// Default: true
     pub keep_display_awake: Option<bool>,
 
+    /// Whether to show the combined CPU and RAM footprint of each tracked
+    /// project's child processes in the status bar.
+    ///
+    /// Default: true
+    pub project_footprint_indicator: Option<bool>,
+
     pub database: Option<DatabaseSettingsContent>,
 
     pub journal: Option<JournalSettingsContent>,

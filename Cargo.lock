@@ -11123,6 +11123,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "project_footprint"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "log",
+ "project",
+ "settings",
+ "sysinfo 0.37.2",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "project_panel"
 version = "0.1.0"
 dependencies = [
@@ -19331,6 +19345,7 @@ dependencies = [
  "pretty_assertions",
  "profiling",
  "project",
+ "project_footprint",
  "project_panel",
  "project_symbols",
  "rayon",
