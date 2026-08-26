@@ -5016,6 +5016,60 @@ impl Project {
         self.has_active_debug_session(cx) || self.autosave_would_race_hibernate(cx)
     }
 
+    /// The PIDs of this project's running language servers. Private:
+    /// `resource_stats` uses it for RSS measurement, and
+    /// `child_process_root_pids` unions it with terminal PIDs for the
+    /// public accessor. On a remote/guest project (no local language
+    /// servers to query) this is empty.
+    fn language_server_pids(&self, cx: &App) -> Vec<Pid> {
+        self.lsp_store
+            .read(cx)
+            .as_local()
+            .map(|local| {
+                local
+                    .language_servers
+                    .values()
+                    .filter_map(|state| match state {
+                        LanguageServerState::Running { server, .. } => server.process_id(),
+                        LanguageServerState::Starting { .. } => None,
+                    })
+                    .map(Pid::from_u32)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The foreground PIDs of this project's local terminals (task
+    /// terminals included). Private: `child_process_root_pids` unions it
+    /// with language-server PIDs for the public accessor. A closed
+    /// terminal's `WeakEntity` simply drops out via `upgrade()`.
+    fn terminal_pids(&self, cx: &App) -> Vec<Pid> {
+        self.local_terminal_handles()
+            .iter()
+            .filter_map(|handle| handle.upgrade())
+            .filter_map(|terminal| terminal.read(cx).pid())
+            .collect()
+    }
+
+    /// Phase 01 of per-project-cpu-ram-footer: the root PIDs of
+    /// every child process this project directly owns — its running
+    /// language servers plus its local terminals' foreground processes —
+    /// de-duplicated. Descendants of these processes (e.g. a shell
+    /// spawned inside a terminal) are **not** included here; a later
+    /// discovery pass is responsible for walking the process tree from
+    /// these roots. On a remote/guest project this is empty, since there
+    /// are no local processes to report. Performs no syscalls — it only
+    /// reads already-maintained entity state — so it is safe to call from
+    /// a caller that polls on the foreground thread (e.g. every 3s).
+    pub fn child_process_root_pids(&self, cx: &App) -> Vec<Pid> {
+        let mut seen = HashSet::default();
+        self.language_server_pids(cx)
+            .into_iter()
+            .chain(self.terminal_pids(cx))
+            .filter(|pid| seen.insert(*pid))
+            .collect()
+    }
+
     /// FR1/FR2 (Phase 6): counts + child-process RSS described by
     /// `ProjectResourceStats`. Cheap: every count here reads an
     /// already-maintained summary or length rather than scanning
@@ -5037,19 +5091,7 @@ impl Project {
                     .count()
             })
             .unwrap_or(0);
-        let server_pids: Vec<Pid> = local_lsp_store
-            .map(|local| {
-                local
-                    .language_servers
-                    .values()
-                    .filter_map(|state| match state {
-                        LanguageServerState::Running { server, .. } => server.process_id(),
-                        LanguageServerState::Starting { .. } => None,
-                    })
-                    .map(Pid::from_u32)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let server_pids: Vec<Pid> = self.language_server_pids(cx);
         let language_server_rss_bytes = if server_pids.is_empty() {
             None
         } else {
