@@ -503,6 +503,14 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let keep_awake = cx
             .can_keep_display_awake()
             .then(|| cx.new(|cx| keep_awake::KeepAwake::new(workspace, &workspace_handle, cx)));
+        let project_footprint = cx.new(|cx| {
+            project_footprint::ProjectFootprintIndicator::new(
+                workspace,
+                &workspace_handle,
+                window,
+                cx,
+            )
+        });
         let agent_usage_panel_handle = agent_usage.read(cx).panel_handle();
         workspace.register_action(move |_, _: &agent_usage::ToggleUsagePanel, window, cx| {
             agent_usage_panel_handle.toggle(window, cx);
@@ -523,6 +531,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             if let Some(keep_awake) = keep_awake {
                 status_bar.add_left_item(keep_awake, window, cx);
             }
+            // Leftmost of the right-hand group: a running total the eye can
+            // rest on, kept clear of the buffer-specific controls that follow
+            // and out of the left group, which grows and shifts as activity
+            // indicators come and go.
+            status_bar.add_right_item(project_footprint, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
             status_bar.add_right_item(active_toolchain_language, window, cx);

@@ -118,6 +118,7 @@ paths.workspace = true
 picker.workspace = true
 profiling.workspace = true
 project.workspace = true
+project_footprint.workspace = true
 project_panel.workspace = true
 project_symbols.workspace = true
 recent_projects.workspace = true
