@@ -412,6 +412,28 @@ impl AgentUsageIndicator {
             .is_some_and(|polled_at| now - polled_at < cutoff)
     }
 
+    /// Which agents a refresh should actually ask.
+    ///
+    /// A pure function, deliberately separate from `refresh`: `may_read_usage()`
+    /// disables all real I/O under `test-support` (see its doc comment above), so
+    /// no test in this repo can observe an HTTP request or a subprocess spawn
+    /// being skipped. This decision -- which agents are even worth asking -- is
+    /// what stays provable once the I/O around it is untestable.
+    fn agents_to_fetch(settings: &StatusBarSettings) -> (bool, bool) {
+        (settings.claude_usage_button, settings.codex_usage_button)
+    }
+
+    /// What a switched-off agent's source becomes instead of a real fetch.
+    ///
+    /// `Clear`, not `Keep`: it nulls the source's windows along with skipping the
+    /// request, releasing the memory the same way an entitlement failure does.
+    /// The numbers are not on screen for a disabled agent anyway, and leaving a
+    /// stale `fetched_at` on a source nobody is watching would only distort the
+    /// activation throttle for the agent that *is* still being asked.
+    fn disabled_outcome() -> Outcome {
+        Outcome::Clear("switched off in status bar settings".into())
+    }
+
     /// Reads both agents' quota once, concurrently.
     ///
     /// Silently does nothing while a fetch is already in flight: the caller may be
@@ -420,6 +442,19 @@ impl AgentUsageIndicator {
         if self.fetching {
             return;
         }
+
+        let (claude_on, codex_on) = Self::agents_to_fetch(StatusBarSettings::get_global(cx));
+        if !claude_on && !codex_on {
+            // Nothing to ask -- and returning here, before `fetching` and
+            // `last_polled_at` are stamped, is load-bearing: stamping them and
+            // then never landing an `apply` to clear `fetching` would wedge the
+            // indicator, disabling the click and the poll loop for good. This is
+            // also defensive rather than the normal path: with both agents off,
+            // `has_anything_to_show` is false and the entity is usually gone
+            // before a tick ever reaches here.
+            return;
+        }
+
         self.fetching = true;
         // Stamped here rather than on the answer: this is the moment a request
         // goes out, and it is requests the throttle is trying not to duplicate.
@@ -428,17 +463,34 @@ impl AgentUsageIndicator {
 
         let http_client = cx.http_client();
         let executor = cx.background_executor().clone();
+        let claude_executor = executor.clone();
+        let codex_executor = executor;
         self._fetch = Some(cx.spawn_in(window, async move |this, cx| {
             // Concurrently, and neither waits on the other: one agent being
-            // absent must not delay the other's numbers by a process spawn.
-            let (claude_result, codex_result) = futures::future::join(
-                claude::fetch(http_client, executor.clone()),
-                codex::fetch(executor),
-            )
-            .await;
+            // absent must not delay the other's numbers by a process spawn. A
+            // disabled agent substitutes a `ready` future rather than dropping
+            // out of the `join`, so the concurrency shape is unchanged whichever
+            // agents are on.
+            let claude_future = if claude_on {
+                futures::future::Either::Left(async move {
+                    Outcome::from(claude::fetch(http_client, claude_executor).await)
+                })
+            } else {
+                futures::future::Either::Right(std::future::ready(Self::disabled_outcome()))
+            };
+            let codex_future = if codex_on {
+                futures::future::Either::Left(async move {
+                    Outcome::from(codex::fetch(codex_executor).await)
+                })
+            } else {
+                futures::future::Either::Right(std::future::ready(Self::disabled_outcome()))
+            };
+
+            let (claude_outcome, codex_outcome) =
+                futures::future::join(claude_future, codex_future).await;
 
             this.update(cx, |this, cx| {
-                this.apply(claude_result.into(), codex_result.into(), Utc::now());
+                this.apply(claude_outcome, codex_outcome, Utc::now());
                 cx.notify();
             })
             .ok();
@@ -1121,7 +1173,91 @@ mod tests {
             claude_usage_button: true,
             codex_usage_button: true,
             agent_usage_display: AgentUsageDisplay::Detailed,
+            activity_indicator: true,
+            active_toolchain_button: true,
+            vim_mode_button: true,
+            image_info_button: true,
         }
+    }
+
+    /// The seam `refresh` leans on to decide which agents to ask.
+    ///
+    /// `may_read_usage()` disables all real I/O under `test-support`, so no test
+    /// here can observe an HTTP request or a subprocess spawn actually being
+    /// skipped -- this is what can be proven instead: the decision is read
+    /// straight off the settings, independently per agent.
+    #[test]
+    fn agents_to_fetch_reflects_each_agent_independently() {
+        assert_eq!(
+            AgentUsageIndicator::agents_to_fetch(&all_agents_shown()),
+            (true, true),
+            "defaults: both agents are asked"
+        );
+
+        let mut claude_off = all_agents_shown();
+        claude_off.claude_usage_button = false;
+        assert_eq!(
+            AgentUsageIndicator::agents_to_fetch(&claude_off),
+            (false, true),
+            "Claude switched off, Codex untouched"
+        );
+
+        let mut codex_off = all_agents_shown();
+        codex_off.codex_usage_button = false;
+        assert_eq!(
+            AgentUsageIndicator::agents_to_fetch(&codex_off),
+            (true, false),
+            "Codex switched off, Claude untouched"
+        );
+
+        let mut both_off = all_agents_shown();
+        both_off.claude_usage_button = false;
+        both_off.codex_usage_button = false;
+        assert_eq!(
+            AgentUsageIndicator::agents_to_fetch(&both_off),
+            (false, false),
+            "both off: nothing to fetch"
+        );
+    }
+
+    /// Clearing a disabled agent's source must not disturb the agent still on
+    /// screen.
+    ///
+    /// This is the guarantee the substitution in `refresh` leans on: `apply`
+    /// writes each source independently, so an `Outcome::Clear` standing in for
+    /// a disabled Claude cannot bleed into Codex's windows.
+    #[test]
+    fn clearing_one_source_leaves_the_other_untouched() {
+        let now = Utc::now();
+        let mut indicator = AgentUsageIndicator::test_new();
+        indicator.apply(
+            Outcome::Windows(vec![a_window()]),
+            Outcome::Windows(vec![a_window()]),
+            now,
+        );
+
+        // Codex gets `Keep`, not another `Windows` or a `Clear`: this isolates
+        // the assertion to `apply`'s independence between sources rather than
+        // to what a real second fetch would have returned.
+        indicator.apply(
+            AgentUsageIndicator::disabled_outcome(),
+            Outcome::Keep("still up to date".into()),
+            now,
+        );
+
+        assert!(
+            indicator.sources[0].windows.is_empty(),
+            "the disabled agent's windows are cleared"
+        );
+        assert_eq!(
+            indicator.sources[0].fetched_at, None,
+            "and its read time goes with them"
+        );
+        assert_eq!(
+            indicator.sources[1].windows.len(),
+            1,
+            "the agent still on screen is untouched by the other's Clear"
+        );
     }
 
     /// `Keep` holds the numbers; `Clear` takes them away.
