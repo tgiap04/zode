@@ -217,16 +217,44 @@ pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
     }
 }
 
+/// Brings a bare distro image up to the minimum a job needs before `actions/checkout`
+/// runs. Only for container jobs — a hosted runner image already has all of this.
+///
+/// `git` is not optional: without it `actions/checkout` silently falls back to
+/// downloading a source tarball and leaves no `.git` behind, and
+/// `script/bundle-linux` runs `git rev-parse HEAD` — so the job would die at packaging
+/// time, after paying for the whole build. `ca-certificates` because a bare `ubuntu`
+/// image ships none, and both the rustup bootstrap and every crates.io fetch are HTTPS.
+///
+/// The `$GITHUB_PATH` line is what makes `cargo` reachable: `script/linux` installs
+/// rustup into `$HOME/.cargo/bin` but only edits shell rc files, and the `bash -e` that
+/// GitHub runs each step with is non-login, so it never sources them. Written before the
+/// directory exists, which is harmless — `$GITHUB_PATH` applies to later steps only.
+pub fn bootstrap_container() -> Step<Run> {
+    named::bash(indoc::indoc! {r#"
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl git
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+    "#})
+}
+
 /// Reclaims space on the runner before a bundle build. Hosted runners document 14 GB of
 /// free disk, against a release `target/` dir that runs to tens of GB.
 ///
 /// The trailing `df`/`Get-PSDrive` is load-bearing for tuning: it puts the real number in
 /// the job log so the next adjustment is made against a measurement, not a guess.
+///
+/// The Linux arm reclaims far less than the other two, because the Linux bundle jobs run
+/// inside a container (see `run_bundling::bundle_linux`): there is no `sudo` and no
+/// `docker` in the image, and the host directories the other platforms delete
+/// (`/usr/share/dotnet`, `/opt/ghc`, the android SDK) are not mounted into it. `/__t` is,
+/// being the host tool cache, so CodeQL is still worth removing. If a run ever fails on
+/// ENOSPC the fix is to mount the host root into the container (`volumes: ["/:/host"]`)
+/// and delete through that, not to move the job back out of the container.
 pub fn free_disk_space(platform: Platform) -> Step<Run> {
     match platform {
         Platform::Linux => named::bash(indoc::indoc! {r#"
-            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-            sudo docker image prune --all --force || true
+            rm -rf /__t/CodeQL || true
             df -h /
         "#}),
         // No equivalent windfall exists here, which makes the 7 GB / 14 GB arm64 mac

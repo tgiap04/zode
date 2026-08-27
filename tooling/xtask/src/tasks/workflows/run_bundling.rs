@@ -121,15 +121,34 @@ pub(crate) fn bundle_linux(
         Arch::X86_64 => assets::LINUX_X86_64,
         Arch::AARCH64 => assets::LINUX_AARCH64,
     };
+    // The runner label is only a Docker host; the userland the binary is linked against
+    // comes from this image, and with it the glibc floor. `ubuntu:22.04` is glibc 2.35,
+    // which is what `script/check-glibc-floor` enforces below. Deliberately the plain tag
+    // rather than a digest: this is a build environment, not a shipped artifact, and a
+    // digest would trade a modest supply-chain gain for a recurring manual bump.
+    fn check_glibc_floor(artifact_name: &str) -> Step<Run> {
+        named::bash(format!(
+            "./script/check-glibc-floor target/release/{artifact_name}"
+        ))
+    }
+
     NamedJob {
         name: format!("bundle_linux_{arch}"),
         job: bundle_job(deps)
             .runs_on(arch.linux_bundler())
+            .container(Container::new("ubuntu:22.04"))
             .envs(bundle_envs(platform))
-            // Unversioned on purpose: upstream pinned clang-18, which exists only on the
-            // 20.04 image its bundler used. On 24.04 the default `clang` already is 18.
+            // Jammy's default `clang` is 14, not 24.04's 18. That is fine: this fork
+            // compiles no C++ (no `webrtc`/`livekit` in `Cargo.lock`, no `.cpp`/`.cc` in
+            // the tree), so the C++20 requirement that forced clang-18 upstream is gone.
+            // Only C `-sys` crates are built, and clang 14 handles those.
             .add_env(Env::new("CC", "clang"))
             .add_env(Env::new("CXX", "clang++"))
+            // Job-level, not exported inside a step: `script/linux` apt-installs from a
+            // different step and `tzdata` will sit waiting for a timezone forever in a
+            // bare container without this.
+            .add_env(Env::new("DEBIAN_FRONTEND", "noninteractive"))
+            .add_step(steps::bootstrap_container())
             .add_step(checkout_for(release_channel))
             .when_some(release_channel, |job, release_channel| {
                 job.add_step(set_release_channel(platform, release_channel))
@@ -137,6 +156,7 @@ pub(crate) fn bundle_linux(
             .add_step(steps::free_disk_space(platform))
             .map(steps::install_linux_dependencies)
             .add_step(steps::script("./script/bundle-linux"))
+            .add_step(check_glibc_floor(artifact_name))
             .add_step(upload_artifact(&format!("target/release/{artifact_name}"))),
     }
 }
