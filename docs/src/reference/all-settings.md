@@ -5212,11 +5212,11 @@ Float values between `0.0` and `0.9`, where:
 
 - Description: The name of the font to use for text in the UI.
 - Setting: `ui_font_family`
-- Default: `.ZedSans`. This currently aliases to [Inter](https://rsms.me/inter/).
+- Default: `Inter`. [Inter](https://rsms.me/inter/) ships with Zode, so this default works on a machine with no fonts installed.
 
 **Options**
 
-The name of any font family installed on the system, `".ZedSans"` to use the Zode-provided default, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
+The name of any font family installed on the system, `".ZedSans"` to follow whichever sans Zode ships with rather than naming it, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
 
 ## UI Font Features
 

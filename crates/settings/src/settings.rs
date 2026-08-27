@@ -236,12 +236,16 @@ mod tests {
             "the SIL Open Font License must ship with the fonts it covers"
         );
 
-        // The UI font reaches its files through an alias, so the chain has three
-        // links and a break in any one is invisible: `default.json` names
-        // `.ZedSans`, `gpui` decides what that means, and only then does a file
-        // have to exist. Walk all three rather than trusting the middle one.
-        assert_eq!(defaults["ui_font_family"], ".ZedSans");
-        let ui_family = gpui::font_name_with_fallbacks(".ZedSans", ".SystemUIFont");
+        // Whatever `default.json` names, run it through the same resolver `gpui`
+        // uses and require the answer to be a font whose files ship. Deliberately
+        // not pinned to `.ZedSans`: the default has been both a literal family
+        // name and an alias, `font_name_with_fallbacks` passes a plain name
+        // straight through, and a test that pinned the *shape* would go red on a
+        // change that broke nothing.
+        let declared = defaults["ui_font_family"]
+            .as_str()
+            .expect("ui_font_family must be a string");
+        let ui_family = gpui::font_name_with_fallbacks(declared, ".SystemUIFont");
         assert_eq!(
             ui_family, "Inter",
             "the UI default resolves to a font this test does not know how to locate"
