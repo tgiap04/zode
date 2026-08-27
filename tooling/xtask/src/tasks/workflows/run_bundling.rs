@@ -43,9 +43,16 @@ pub fn run_bundling() -> Workflow {
         })
 }
 
-fn bundle_job(deps: &[&NamedJob]) -> Job {
+/// `release_channel`, not `deps.is_empty()`, decides whether the `run-bundling` label
+/// condition belongs on the job. The two used to be the same signal only by coincidence:
+/// every caller that passed a channel also passed a gate. `release` no longer gates its
+/// bundles (they run beside the tests, and `upload_release_assets` is what waits), so
+/// inferring from `deps` would have stamped a label condition that is false on a tag push
+/// onto all six bundles -- a release that succeeds with no assets attached and nothing in
+/// the log saying why.
+fn bundle_job(deps: &[&NamedJob], release_channel: Option<ReleaseChannel>) -> Job {
     dependant_job(deps)
-        .when(deps.len() == 0, |job|
+        .when(release_channel.is_none(), |job|
             job.cond(Expression::new(
                 indoc! {
                     r#"(github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -80,7 +87,7 @@ pub(crate) fn bundle_mac(
     };
     NamedJob {
         name: format!("bundle_mac_{arch}"),
-        job: bundle_job(deps)
+        job: bundle_job(deps, release_channel)
             .runs_on(arch.mac_bundler())
             .envs(bundle_envs(platform))
             .add_step(checkout_for(release_channel))
@@ -134,7 +141,7 @@ pub(crate) fn bundle_linux(
 
     NamedJob {
         name: format!("bundle_linux_{arch}"),
-        job: bundle_job(deps)
+        job: bundle_job(deps, release_channel)
             .runs_on(arch.linux_bundler())
             .container(Container::new("ubuntu:22.04"))
             .envs(bundle_envs(platform))
@@ -182,7 +189,7 @@ pub(crate) fn bundle_windows(
     };
     NamedJob {
         name: format!("bundle_windows_{arch}"),
-        job: bundle_job(deps)
+        job: bundle_job(deps, release_channel)
             .runs_on(runners::WINDOWS_DEFAULT)
             .envs(bundle_envs(platform))
             .add_step(checkout_for(release_channel))

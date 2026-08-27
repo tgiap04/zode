@@ -15,6 +15,17 @@ pub(crate) fn release() -> Workflow {
     // to every release. This is a deliberate reduction in coverage, not an optimisation:
     // a Windows-only or macOS-only regression will no longer stop a release. `run_tests`
     // still covers all three platforms on pull requests.
+    //
+    // These three run *beside* the bundles rather than in front of them, and
+    // `upload_release_assets` is what waits for them. Measured on v0.1.1: the bundles all
+    // started at t=47m because `run_tests_linux` took 47m, and the longest bundle then ran
+    // to t=145m. Nothing in those 47 minutes was new information -- a `v*` tag is cut from
+    // `main`, and `run_tests` has already run this exact tree on the push that put it
+    // there. Moving the gate off the bundles' critical path and onto the upload's costs no
+    // coverage: a bundle whose gate failed still produces an artifact, but the upload that
+    // would attach it to the release is skipped, so no asset can reach a release from a
+    // tree that failed. It costs runner minutes on a build that turns out to be doomed,
+    // which on a public repository is free (see `runners.rs`).
     let linux_tests = run_tests::run_platform_tests_no_filter(Platform::Linux);
     let linux_clippy = run_tests::clippy(Platform::Linux, None);
     let check_scripts = run_tests::check_scripts();
@@ -22,6 +33,7 @@ pub(crate) fn release() -> Workflow {
     let create_draft_release = create_draft_release();
 
     let gate: &[&NamedJob] = &[&linux_tests, &linux_clippy, &check_scripts];
+    let ungated: &[&NamedJob] = &[];
 
     // Every bundling job resolves the channel from the tag itself. The bundling
     // scripts read `crates/zed/RELEASE_CHANNEL`, and a job that leaves it alone
@@ -30,15 +42,17 @@ pub(crate) fn release() -> Workflow {
     let channel = Some(ReleaseChannel::FromTag);
 
     let bundle = ReleaseBundleJobs {
-        linux_aarch64: bundle_linux(Arch::AARCH64, channel, gate),
-        linux_x86_64: bundle_linux(Arch::X86_64, channel, gate),
-        mac_aarch64: bundle_mac(Arch::AARCH64, channel, gate),
-        mac_x86_64: bundle_mac(Arch::X86_64, channel, gate),
-        windows_aarch64: bundle_windows(Arch::AARCH64, channel, gate),
-        windows_x86_64: bundle_windows(Arch::X86_64, channel, gate),
+        linux_aarch64: bundle_linux(Arch::AARCH64, channel, ungated),
+        linux_x86_64: bundle_linux(Arch::X86_64, channel, ungated),
+        mac_aarch64: bundle_mac(Arch::AARCH64, channel, ungated),
+        mac_x86_64: bundle_mac(Arch::X86_64, channel, ungated),
+        windows_aarch64: bundle_windows(Arch::AARCH64, channel, ungated),
+        windows_x86_64: bundle_windows(Arch::X86_64, channel, ungated),
     };
 
-    let upload_release_assets = upload_release_assets(&[&create_draft_release], &bundle);
+    let mut upload_deps = vec![&create_draft_release];
+    upload_deps.extend_from_slice(gate);
+    let upload_release_assets = upload_release_assets(&upload_deps, &bundle);
     let validate_release_assets = validate_release_assets(&[&upload_release_assets]);
 
     named::workflow()
@@ -240,4 +254,95 @@ fn create_draft_release() -> NamedJob {
             .add_step(generate_release_notes())
             .add_step(create_release()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::workflows::run_bundling::run_bundling;
+    use serde_yaml::Value;
+
+    const GATE: [&str; 3] = ["run_tests_linux", "clippy_linux", "check_scripts"];
+    const BUNDLES: [&str; 6] = [
+        "bundle_linux_aarch64",
+        "bundle_linux_x86_64",
+        "bundle_mac_aarch64",
+        "bundle_mac_x86_64",
+        "bundle_windows_aarch64",
+        "bundle_windows_x86_64",
+    ];
+
+    /// Asserts against the serialised YAML rather than the builder objects: the YAML is
+    /// what GitHub reads, and a job graph that is right in Rust but serialises wrong is
+    /// still a broken release.
+    fn jobs_of(workflow: Workflow) -> Value {
+        let yaml = workflow.to_string().expect("workflow serialises to YAML");
+        let parsed: Value = serde_yaml::from_str(&yaml).expect("generated YAML parses");
+        parsed["jobs"].clone()
+    }
+
+    fn needs_of(jobs: &Value, job: &str) -> Vec<String> {
+        assert!(!jobs[job].is_null(), "no job named {job}");
+        match &jobs[job]["needs"] {
+            Value::Sequence(items) => items
+                .iter()
+                .map(|item| item.as_str().unwrap_or_default().to_owned())
+                .collect(),
+            Value::String(only) => vec![only.clone()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// `bundle_job` used to infer "this job is triggered by the `run-bundling` label" from
+    /// `deps.is_empty()`. The two agreed only by coincidence -- every caller that passed a
+    /// release channel also passed a gate. Taking the gate off the release bundles under
+    /// that old rule stamped `if: github.event.action == 'labeled'` onto all six, which is
+    /// false on a tag push: the release would have finished green with no asset attached
+    /// and nothing in the log saying why.
+    #[test]
+    fn ungating_the_release_bundles_did_not_hand_them_a_label_condition() {
+        let jobs = jobs_of(release());
+        for bundle in BUNDLES {
+            assert!(
+                jobs[bundle]["if"].is_null(),
+                "release bundle {bundle} carries a condition it should not have: {:?}",
+                jobs[bundle]["if"]
+            );
+            assert!(
+                needs_of(&jobs, bundle).is_empty(),
+                "release bundle {bundle} still waits on {:?}, so it is back on the critical path",
+                needs_of(&jobs, bundle)
+            );
+        }
+    }
+
+    /// The other half of that same rule. `run_bundling` is the on-demand workflow, and the
+    /// label condition is the only thing stopping every pull request from bundling six
+    /// targets.
+    #[test]
+    fn the_on_demand_bundling_workflow_keeps_its_label_condition() {
+        let jobs = jobs_of(run_bundling());
+        for bundle in BUNDLES {
+            let condition = jobs[bundle]["if"].as_str().unwrap_or_default();
+            assert!(
+                condition.contains("run-bundling"),
+                "on-demand bundle {bundle} lost its label gate: {condition:?}"
+            );
+        }
+    }
+
+    /// What makes ungating the bundles safe. They no longer wait for the gate, but the
+    /// upload does -- and a skipped `needs` skips the upload -- so an artifact built from a
+    /// tree that failed its tests never reaches the release.
+    #[test]
+    fn no_asset_reaches_a_release_whose_gate_failed() {
+        let jobs = jobs_of(release());
+        let waits_for = needs_of(&jobs, "upload_release_assets");
+        for gate in GATE {
+            assert!(
+                waits_for.contains(&gate.to_owned()),
+                "upload_release_assets does not wait for {gate}, so a failed gate cannot stop it: {waits_for:?}"
+            );
+        }
+    }
 }
