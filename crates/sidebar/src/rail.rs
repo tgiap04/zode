@@ -202,6 +202,28 @@ impl Sidebar {
                         window.dispatch_action(Box::new(workspace::Open::DEFAULT), cx);
                     }),
             )
+            .child(
+                // `OpenSettings` is the settings *window*; `OpenSettingsFile` is
+                // settings.json as a tab. Worth checking twice, because
+                // `OpenSettingsFile` claims the string "zed_actions::OpenSettings"
+                // as a deprecated alias -- so that old spelling now resolves to
+                // the JSON file, and a keymap copied from anywhere older wires
+                // the wrong one of the two.
+                IconButton::new("project-rail-open-settings", IconName::Settings)
+                    .icon_size(RAIL_ICON_SIZE)
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action("Open Settings", &zed_actions::OpenSettings, cx)
+                    })
+                    // Dispatched rather than called, but not for the panel
+                    // toggle's reason above: `on_click` hands out `&mut App`, so
+                    // there is no `Sidebar` borrow here to be reentrant with.
+                    // This crate simply has no `settings_ui` dependency to call
+                    // into, and going through the action keeps the button on the
+                    // same path as the command palette and any keybinding.
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
+                    }),
+            )
             .into_any_element()
     }
 }
