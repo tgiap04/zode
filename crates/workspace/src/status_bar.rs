@@ -1,11 +1,14 @@
+use crate::status_bar_toggles::{self, StatusBarItemSpec};
 use crate::{ItemHandle, MultiWorkspace, Pane};
 use gpui::{
-    AnyView, App, Context, Decorations, Entity, IntoElement, ParentElement, Render, Styled,
+    Anchor, AnyView, App, Context, Decorations, Entity, IntoElement, ParentElement, Render, Styled,
     Subscription, WeakEntity, Window,
 };
+use settings::SettingsStore;
 use std::any::TypeId;
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
 use ui::prelude::*;
+use ui::{ContextMenu, right_click_menu};
 use util::ResultExt;
 
 pub trait StatusItemView: Render {
@@ -50,11 +53,50 @@ impl SidebarStatus {
     }
 }
 
+/// Which side of the bar a slot lives on. `Right` renders reversed (see
+/// `render_right_tools`), so keeping storage sorted by rank on both sides is
+/// what gets correct visual order on the right without reasoning about the
+/// reversal anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusBarSide {
+    Left,
+    Right,
+}
+
+/// An item together with the rank it was registered at. Ranks are assigned
+/// once, in registration order, and never recomputed -- they are what lets
+/// an item that is removed and later reinserted at its own rank return to
+/// its original position instead of the end of its group.
+struct Slot {
+    rank: usize,
+    item: Box<dyn StatusItemViewHandle>,
+}
+
+/// Where a slot of `rank` belongs in a vector already sorted by rank.
+/// `partition_point` is O(log n): the vector is sorted by construction,
+/// since ranks only ever increase and every insertion preserves that order.
+/// A duplicate `rank` sorts before the existing entry that shares it, which
+/// keeps the result deterministic rather than depending on comparison order.
+fn insertion_index(present_ranks: &[usize], rank: usize) -> usize {
+    present_ranks.partition_point(|&present| present < rank)
+}
+
 pub struct StatusBar {
-    left_items: Vec<Box<dyn StatusItemViewHandle>>,
-    right_items: Vec<Box<dyn StatusItemViewHandle>>,
+    left_items: Vec<Slot>,
+    right_items: Vec<Slot>,
+    next_rank: usize,
     active_pane: Entity<Pane>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+    /// Registered by `register_toggleable_item`. `pub(crate)` rather than
+    /// private so the registration and reconciliation logic
+    /// (`status_bar_toggles.rs`) can live outside this file -- the field
+    /// itself has to be declared here because Rust requires every field of
+    /// a type to be declared where the type itself is declared.
+    pub(crate) specs: Vec<StatusBarItemSpec>,
+    /// Reconciles `specs` against the settings in force on every settings
+    /// change (see `status_bar_toggles::StatusBar::reconcile`). Dropped
+    /// with `StatusBar`; nothing else holds this subscription.
+    _settings: Subscription,
     _observe_active_pane: Subscription,
 }
 
@@ -64,7 +106,11 @@ impl Render for StatusBar {
 
         h_flex()
             .w_full()
-            .justify_between()
+            // No `justify_between`: the filler child between the two groups
+            // (`render_toggle_menu_surface`) is `flex_1`, so it already
+            // absorbs all the free space `justify_between` would have
+            // distributed -- keeping both would just make the second one a
+            // no-op.
             .gap(DynamicSpacing::Base08.rems(cx))
             .p(DynamicSpacing::Base04.rems(cx))
             .bg(cx.theme().colors().status_bar_background)
@@ -85,6 +131,7 @@ impl Render for StatusBar {
                     .border_color(cx.theme().colors().status_bar_background),
             })
             .child(self.render_left_tools())
+            .child(self.render_toggle_menu_surface())
             .child(self.render_right_tools())
     }
 }
@@ -95,7 +142,7 @@ impl StatusBar {
             .gap_1()
             .min_w_0()
             .overflow_x_hidden()
-            .children(self.left_items.iter().map(|item| item.to_any()))
+            .children(self.left_items.iter().map(|slot| slot.item.to_any()))
     }
 
     fn render_right_tools(&self) -> impl IntoElement {
@@ -103,7 +150,36 @@ impl StatusBar {
             .flex_shrink_0()
             .gap_1()
             .overflow_x_hidden()
-            .children(self.right_items.iter().rev().map(|item| item.to_any()))
+            .children(self.right_items.iter().rev().map(|slot| slot.item.to_any()))
+    }
+
+    /// The empty gap between the two groups, made right-clickable to list
+    /// every registered item. A sibling of the two groups and never a
+    /// wrapper around them: GPUI dispatches the bubble phase in *reverse*
+    /// registration order (`gpui/src/window.rs:4396`), and
+    /// `RightClickMenu::paint` registers its listener *after* painting its
+    /// child, so a menu wrapping the whole bar would register last, fire
+    /// first, and swallow every right-click meant for an item's own menu
+    /// (e.g. `agent-usage-toggles`).
+    ///
+    /// `flex_1` is what actually absorbs the space `justify_between` used
+    /// to (see the comment in `render`). The `min_w` keeps a right-clickable
+    /// sliver alive even after the left group's `min_w_0()` +
+    /// `overflow_x_hidden()` has shrunk it as far as it will go on a
+    /// crowded, narrow window -- without it, the gap could reach zero width
+    /// and take the feature with it exactly when a user most wants to prune
+    /// the bar.
+    fn render_toggle_menu_surface(&self) -> impl IntoElement {
+        right_click_menu::<ContextMenu>("status-bar-empty-area")
+            // Stated rather than left to the default corner, which opens
+            // downward off the bottom of the window and relies on
+            // `snap_to_window_with_margin` to shove it back -- a fix that
+            // stops landing correctly once the menu grows tall, and this
+            // one has fifteen rows and two headers.
+            .anchor(Anchor::BottomLeft)
+            .attach(Anchor::TopLeft)
+            .menu(status_bar_toggles::build_item_menu(&self.specs))
+            .trigger(|_is_open, _window, _cx| div().flex_1().min_w(px(24.)).h_full())
     }
 }
 
@@ -117,10 +193,21 @@ impl StatusBar {
         let mut this = Self {
             left_items: Default::default(),
             right_items: Default::default(),
+            next_rank: 0,
             active_pane: active_pane.clone(),
             multi_workspace,
+            specs: Vec::new(),
             _observe_active_pane: cx.observe_in(active_pane, window, |this, _, window, cx| {
                 this.update_active_pane_item(window, cx)
+            }),
+            _settings: cx.observe_global_in::<SettingsStore>(window, |_this, window, cx| {
+                // Rebuilding an item calls back into `this` from inside this
+                // observer; if the settings change was itself triggered from
+                // inside a `Workspace` update, doing that synchronously would
+                // double-borrow and panic. Deferring moves the reconcile pass
+                // out of the active update -- one frame, imperceptible for a
+                // settings change.
+                cx.defer_in(window, |this, window, cx| this.reconcile(window, cx));
             }),
         };
         this.update_active_pane_item(window, cx);
@@ -136,41 +223,81 @@ impl StatusBar {
         cx.notify();
     }
 
-    pub fn add_left_item<T>(&mut self, item: Entity<T>, window: &mut Window, cx: &mut Context<Self>)
+    /// Allocates the next rank, in registration order. The counter is owned
+    /// here (not derived from any table) so it never collides with ranks
+    /// already assigned to the dock buttons `Workspace::new` adds before
+    /// `initialize_workspace` runs.
+    fn allocate_rank(&mut self) -> usize {
+        let rank = self.next_rank;
+        self.next_rank += 1;
+        rank
+    }
+
+    fn items_for_side(&self, side: StatusBarSide) -> &Vec<Slot> {
+        match side {
+            StatusBarSide::Left => &self.left_items,
+            StatusBarSide::Right => &self.right_items,
+        }
+    }
+
+    fn items_for_side_mut(&mut self, side: StatusBarSide) -> &mut Vec<Slot> {
+        match side {
+            StatusBarSide::Left => &mut self.left_items,
+            StatusBarSide::Right => &mut self.right_items,
+        }
+    }
+
+    pub fn add_left_item<T>(
+        &mut self,
+        item: Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize
     where
         T: 'static + StatusItemView,
     {
         let active_pane_item = self.active_pane.read(cx).active_item();
         item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
 
-        self.left_items.push(Box::new(item));
+        let rank = self.allocate_rank();
+        self.left_items.push(Slot {
+            rank,
+            item: Box::new(item),
+        });
         cx.notify();
+        rank
     }
 
     pub fn item_of_type<T: StatusItemView>(&self) -> Option<Entity<T>> {
         self.left_items
             .iter()
             .chain(self.right_items.iter())
-            .find_map(|item| item.to_any().downcast().log_err())
+            .find_map(|slot| slot.item.to_any().downcast().log_err())
     }
 
     pub fn position_of_item<T>(&self) -> Option<usize>
     where
         T: StatusItemView,
     {
-        for (index, item) in self.left_items.iter().enumerate() {
-            if item.item_type() == TypeId::of::<T>() {
+        for (index, slot) in self.left_items.iter().enumerate() {
+            if slot.item.item_type() == TypeId::of::<T>() {
                 return Some(index);
             }
         }
-        for (index, item) in self.right_items.iter().enumerate() {
-            if item.item_type() == TypeId::of::<T>() {
+        for (index, slot) in self.right_items.iter().enumerate() {
+            if slot.item.item_type() == TypeId::of::<T>() {
                 return Some(index + self.left_items.len());
             }
         }
         None
     }
 
+    /// Inserts at a flat left-then-right index, unrelated to rank order.
+    /// This always allocates the newest (largest) rank but can insert
+    /// anywhere in the vector, so it can leave that side's slots out of
+    /// rank order. Harmless today since nothing calls this alongside
+    /// `insert_item_at_rank`/`remove_item_by_rank`, but new callers should
+    /// prefer the rank-based API.
     pub fn insert_item_after<T>(
         &mut self,
         position: usize,
@@ -183,11 +310,17 @@ impl StatusBar {
         let active_pane_item = self.active_pane.read(cx).active_item();
         item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
 
+        let rank = self.allocate_rank();
+        let slot = Slot {
+            rank,
+            item: Box::new(item),
+        };
+
         if position < self.left_items.len() {
-            self.left_items.insert(position + 1, Box::new(item))
+            self.left_items.insert(position + 1, slot)
         } else {
             self.right_items
-                .insert(position + 1 - self.left_items.len(), Box::new(item))
+                .insert(position + 1 - self.left_items.len(), slot)
         }
         cx.notify()
     }
@@ -206,14 +339,74 @@ impl StatusBar {
         item: Entity<T>,
         window: &mut Window,
         cx: &mut Context<Self>,
+    ) -> usize
+    where
+        T: 'static + StatusItemView,
+    {
+        let active_pane_item = self.active_pane.read(cx).active_item();
+        item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
+
+        let rank = self.allocate_rank();
+        self.right_items.push(Slot {
+            rank,
+            item: Box::new(item),
+        });
+        cx.notify();
+        rank
+    }
+
+    /// Inserts `item` on `side` so that side's slots stay sorted by rank --
+    /// this is what lets an item removed by `remove_item_by_rank` come back
+    /// at the same position instead of the end of its group.
+    pub fn insert_item_at_rank<T>(
+        &mut self,
+        side: StatusBarSide,
+        rank: usize,
+        item: Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) where
         T: 'static + StatusItemView,
     {
         let active_pane_item = self.active_pane.read(cx).active_item();
         item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
 
-        self.right_items.push(Box::new(item));
+        let items = self.items_for_side_mut(side);
+        let present_ranks: Vec<usize> = items.iter().map(|slot| slot.rank).collect();
+        let index = insertion_index(&present_ranks, rank);
+        items.insert(
+            index,
+            Slot {
+                rank,
+                item: Box::new(item),
+            },
+        );
         cx.notify();
+    }
+
+    /// Removes the slot carrying `rank` on `side`, if present. Returns
+    /// whether a slot was removed.
+    pub fn remove_item_by_rank(
+        &mut self,
+        side: StatusBarSide,
+        rank: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let items = self.items_for_side_mut(side);
+        match items.binary_search_by_key(&rank, |slot| slot.rank) {
+            Ok(index) => {
+                items.remove(index);
+                cx.notify();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    pub fn contains_rank(&self, side: StatusBarSide, rank: usize) -> bool {
+        self.items_for_side(side)
+            .binary_search_by_key(&rank, |slot| slot.rank)
+            .is_ok()
     }
 
     pub fn set_active_pane(
@@ -231,8 +424,9 @@ impl StatusBar {
 
     fn update_active_pane_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_pane_item = self.active_pane.read(cx).active_item();
-        for item in self.left_items.iter().chain(&self.right_items) {
-            item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
+        for slot in self.left_items.iter().chain(&self.right_items) {
+            slot.item
+                .set_active_pane_item(active_pane_item.as_deref(), window, cx);
         }
     }
 }
@@ -263,3 +457,7 @@ impl From<&dyn StatusItemViewHandle> for AnyView {
         val.to_any()
     }
 }
+
+#[cfg(test)]
+#[path = "status_bar_tests.rs"]
+mod tests;

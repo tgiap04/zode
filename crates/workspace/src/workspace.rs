@@ -22,6 +22,7 @@ use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
 pub mod focus_follows_mouse;
 mod status_bar;
+mod status_bar_toggles;
 pub mod tasks;
 mod theme_preview;
 mod toast_layer;
@@ -120,6 +121,7 @@ use sqlez::{
 };
 use status_bar::StatusBar;
 pub use status_bar::StatusItemView;
+pub use status_bar_toggles::{StatusBarItemBuilder, StatusBarItemSpec, StatusBarSide};
 use std::{
     any::TypeId,
     borrow::Cow,

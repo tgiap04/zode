@@ -233,6 +233,10 @@ pub struct StatusBarSettings {
     pub claude_usage_button: bool,
     pub codex_usage_button: bool,
     pub agent_usage_display: AgentUsageDisplay,
+    pub activity_indicator: bool,
+    pub active_toolchain_button: bool,
+    pub vim_mode_button: bool,
+    pub image_info_button: bool,
 }
 
 impl Settings for StatusBarSettings {
@@ -248,6 +252,40 @@ impl Settings for StatusBarSettings {
             claude_usage_button: status_bar.claude_usage_button.unwrap(),
             codex_usage_button: status_bar.codex_usage_button.unwrap(),
             agent_usage_display: status_bar.agent_usage_display.unwrap(),
+            activity_indicator: status_bar.activity_indicator.unwrap(),
+            active_toolchain_button: status_bar.active_toolchain_button.unwrap(),
+            vim_mode_button: status_bar.vim_mode_button.unwrap(),
+            image_info_button: status_bar.image_info_button.unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use settings::SettingsStore;
+
+    /// The four items that previously had no visibility switch
+    /// (`activity_indicator`, `active_toolchain_button`, `vim_mode_button`,
+    /// `image_info_button`) must default to shown, matching the unconditional
+    /// way the status bar renders them today. Resolved through a real
+    /// `SettingsStore` built from `default.json` rather than asserted on the
+    /// struct literal, so a missing or wrong `default.json` entry fails this
+    /// test instead of panicking `SettingsStore` construction for every other
+    /// test in the binary.
+    #[gpui::test]
+    fn newly_switched_items_default_to_shown(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            StatusBarSettings::register(cx);
+
+            let settings = StatusBarSettings::get_global(cx);
+            assert!(settings.activity_indicator);
+            assert!(settings.active_toolchain_button);
+            assert!(settings.vim_mode_button);
+            assert!(settings.image_info_button);
+        });
     }
 }
