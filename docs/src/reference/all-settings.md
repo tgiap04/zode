@@ -5212,7 +5212,7 @@ Float values between `0.0` and `0.9`, where:
 
 - Description: The name of the font to use for text in the UI.
 - Setting: `ui_font_family`
-- Default: `.ZedSans`. This currently aliases to [IBM Plex](https://www.ibm.com/plex/).
+- Default: `.ZedSans`. This currently aliases to [Inter](https://rsms.me/inter/).
 
 **Options**
 

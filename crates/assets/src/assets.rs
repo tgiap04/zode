@@ -91,5 +91,18 @@ mod tests {
                 );
             }
         }
+
+        // `ui_font_family` defaults to `.ZedSans`, which resolves to Inter
+        // (`gpui::font_name_with_fallbacks`). Only these four styles: the UI asks
+        // for regular and semibold, upright and italic, and `Assets::load_fonts`
+        // takes `.ttf` alone -- the `.otf` and variable builds Inter also ships
+        // would be skipped in silence.
+        for style in ["Regular", "Italic", "SemiBold", "SemiBoldItalic"] {
+            let path = format!("fonts/inter/Inter-{style}.ttf");
+            assert!(
+                embedded.contains(&path),
+                "not embedded: {path}\nembedded fonts: {embedded:#?}"
+            );
+        }
     }
 }

@@ -40,7 +40,7 @@ The `icon_theme` setting still exists — it defaults to `"Material Icon Theme"`
 
 ```json [settings]
   // UI Font. Use ".SystemUIFont" to use the default system font (SF Pro on macOS),
-  // or ".ZedSans" for the bundled default (currently IBM Plex)
+  // or ".ZedSans" for the bundled default (currently Inter)
   "ui_font_family": ".SystemUIFont",
   "ui_font_weight": 400, // Font weight in standard CSS units from 100 to 900.
   "ui_font_size": 16,

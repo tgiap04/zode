@@ -236,6 +236,34 @@ mod tests {
             "the SIL Open Font License must ship with the fonts it covers"
         );
 
+        // The UI font reaches its files through an alias, so the chain has three
+        // links and a break in any one is invisible: `default.json` names
+        // `.ZedSans`, `gpui` decides what that means, and only then does a file
+        // have to exist. Walk all three rather than trusting the middle one.
+        assert_eq!(defaults["ui_font_family"], ".ZedSans");
+        let ui_family = gpui::font_name_with_fallbacks(".ZedSans", ".SystemUIFont");
+        assert_eq!(
+            ui_family, "Inter",
+            "the UI default resolves to a font this test does not know how to locate"
+        );
+        let ui_fonts =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/inter");
+        // Regular and SemiBold, upright and italic -- the four the UI actually
+        // asks for. A missing weight is synthesised into a fake by the platform
+        // rather than reported.
+        for style in ["Regular", "Italic", "SemiBold", "SemiBoldItalic"] {
+            let file = ui_fonts.join(format!("Inter-{style}.ttf"));
+            assert!(
+                file.is_file(),
+                "UI default font not bundled: {}",
+                file.display()
+            );
+        }
+        assert!(
+            ui_fonts.join("OFL.txt").is_file(),
+            "the SIL Open Font License must ship with the fonts it covers"
+        );
+
         // Merged with the platform defaults, so this covers glyphs JetBrains
         // Mono has no design for at all -- CJK being the obvious one.
         for fallbacks in [

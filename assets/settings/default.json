@@ -58,7 +58,7 @@
   "buffer_line_height": "comfortable",
   // The name of a font to use for rendering text in the UI
   // You can set this to ".SystemUIFont" to use the system font
-  // ".ZedSans" currently aliases to "IBM Plex Sans", but this may
+  // ".ZedSans" currently aliases to "Inter", but this may
   // change in the future
   "ui_font_family": ".ZedSans",
   // Set the UI's font fallbacks, this will be merged with the platform's
