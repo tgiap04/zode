@@ -33,11 +33,13 @@ one line saying what is actually happening:
 | The display is being held awake | An agent is working and the hold is in place       |
 | No agent is working             | Nothing to hold it for                             |
 | Paused - running on battery     | An agent is working, but the machine is on battery |
-| Turned off in settings          | You switched it off                                |
 | The system refused the request  | Everything says yes and the OS still said no       |
 
-The line exists because four of those five states are the same dimmed icon. The
+The line exists because three of those four states are the same dimmed icon. The
 tooltip names the agent responsible when there is one.
+
+There is no "turned off" row in that table: switching the feature off does not
+dim this icon, it removes it — see [What lets it go](#what-lets-it-go).
 
 ## What lets it go
 
@@ -45,8 +47,14 @@ tooltip names the agent responsible when there is one.
 - The machine starts running on battery. The hold returns when you plug back in;
   the power source is re-checked about once a minute, so expect up to a minute
   of lag either way.
-- You set `keep_display_awake` to `false`. This takes effect immediately,
-  including on a hold already in place — no restart.
+- You set `keep_display_awake` to `false` — by hand, from the Settings Editor,
+  or by right-clicking an empty part of the status bar and switching off
+  **Keep Display Awake** in the menu that opens (see [Status Bar
+  settings](./visual-customization.md#status-bar)). This takes effect
+  immediately, including on a hold already in place — no restart. It also
+  removes the bolt icon from the bar itself, rather than leaving it dimmed:
+  hiding a status-bar item this way drops the item's entity, and the icon is
+  that entity.
 
 ## What this costs you
 

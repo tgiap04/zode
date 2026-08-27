@@ -1630,19 +1630,37 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 
 ## Status Bar
 
-- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere.
+- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere — the search, language-server and diagnostics buttons live under `editor.search.button`, `global_lsp_settings.button` and `diagnostics.button`, and the CPU/RAM badge and the keep-display-awake indicator under the top-level `project_footprint_indicator` and `keep_display_awake`.
 - Setting: `status_bar`
 - Default:
 
 ```json [settings]
 {
   "status_bar": {
+    "show_active_file": false,
     "active_language_button": true,
     "cursor_position_button": true,
-    "line_endings_button": false
+    "line_endings_button": false,
+    "active_encoding_button": "non_utf8",
+    "claude_usage_button": true,
+    "codex_usage_button": true,
+    "agent_usage_display": "detailed",
+    "activity_indicator": true,
+    "active_toolchain_button": true,
+    "vim_mode_button": true,
+    "image_info_button": true
   }
 }
 ```
+
+Right-clicking an empty part of the status bar opens a menu of these switches, grouped by which
+side of the bar the item sits on. Hiding an item through that menu writes the same setting a hand
+edit would, and does not merely stop drawing it: the item is removed from the bar and its entity
+dropped, so any polling or background work it was doing stops with it.
+
+`active_encoding_button` takes `always`, `non_utf8` or `never` rather than a boolean; the right-click
+menu treats `never` as off and turns it back on as `non_utf8`, so a value of `always` is not
+preserved across a hide and show.
 
 There is an experimental setting that completely hides the status bar. This causes major usability problems (you will be unable to use many of Zode's features), but is provided for those who value screen real-estate above all else.
 

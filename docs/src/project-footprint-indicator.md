@@ -111,3 +111,9 @@ nobody has run it on either platform yet.
 Set `project_footprint_indicator` to `false` and the badge, the popover, and
 the polling loop behind them all stop — there is no partial state where the
 loop keeps running with nothing to show.
+
+The same setting is also reachable by right-clicking an empty part of the
+status bar and switching off **Project Footprint** in the menu that opens —
+see [Status Bar settings](./visual-customization.md#status-bar). That menu
+writes the exact same setting a hand edit would, so the effect is identical
+either way: the badge disappears and its polling loop stops with it.

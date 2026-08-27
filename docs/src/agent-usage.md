@@ -31,9 +31,9 @@ Opening the panel, expanding a row, and switching Detailed/Compact all read stat
 
 Right-clicking the indicator opens a menu of two tick-boxes: **Claude Usage** and **Codex Usage**. Each writes straight to the matching `status_bar.*` setting (see [Status Bar settings](./visual-customization.md#status-bar)).
 
-This menu is only about the two usage indicators — it doesn't cover the other `status_bar.*` items (active file name, active language, cursor position, line endings, active encoding). Those are still fully settable, just from the Settings Editor or the settings file directly, not from here.
+This menu is only about the two usage indicators — it doesn't cover the other `status_bar.*` items (active file name, active language, cursor position, line endings, active encoding, and the rest). Those are settable from the Settings Editor, the settings file, or from a second, separate menu: right-clicking an _empty_ part of the status bar (not the indicator itself) opens a menu of every switchable status-bar item, grouped by side — see [All Settings § Status Bar](./reference/all-settings.md#status-bar). That menu carries a single **Agent Usage** row that switches Claude Usage and Codex Usage together, rather than duplicating this menu's two rows.
 
-One thing worth knowing before you use it: **switching off both Claude Usage and Codex Usage removes the indicator from the status bar entirely** — and with it, the only right-click target this menu has. This is a known, accepted limitation rather than a bug, and it matters more now that the menu has nothing else to right-click onto. If that happens, get back to `true` from the Settings Editor ({#kb zed::OpenSettings}) or by editing `claude_usage_button` / `codex_usage_button` back to `true` in your settings file — see [Settings Files](./configuring-zed.md#settings-files).
+**Switching off both Claude Usage and Codex Usage removes the indicator from the status bar entirely** — and with it, the only right-click target this menu has. That is no longer a dead end: right-click an empty part of the status bar and switch **Agent Usage** back on there, or get back to `true` from the Settings Editor ({#kb zed::OpenSettings}), or by editing `claude_usage_button` / `codex_usage_button` back to `true` in your settings file — see [Settings Files](./configuring-zed.md#settings-files).
 
 ## Where the numbers come from
 
@@ -105,6 +105,8 @@ is the trade the Codex route exists to avoid.
 ## Polling
 
 Both agents are read together every 60 seconds, but only while the window is focused. Regaining focus reads both again immediately — unless the last attempt was under 30 seconds ago, in which case it trusts what is on screen and just restarts the interval. Clicking the refresh glyph — on the status bar or in the panel — always reads, throttle or not: the point of pressing it is to distrust what is showing. Opening the panel or the menu reads state already in hand and triggers no extra request.
+
+A switched-off agent — `claude_usage_button: false` or `codex_usage_button: false` — is skipped on every tick rather than fetched and then hidden: no HTTP request for Claude, no `codex app-server` subprocess for Codex. Switching it back on (from either right-click menu, the Settings Editor, or a hand-edited settings file) picks it back up on the next 60-second tick or the next manual refresh.
 
 That 30-second floor exists because Claude's endpoint is shared with the Claude Code CLI on one token, so alt-tabbing in and out used to be one request per tab against an endpoint that answers `429` when asked too often.
 

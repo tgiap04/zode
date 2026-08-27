@@ -310,8 +310,13 @@ TBD: Centered layout related settings
 
 `claude_usage_button` and `codex_usage_button` are also reachable by right-clicking the status bar's usage indicator; `agent_usage_display` is reachable from the Detailed/Compact switch in the usage panel (left-click the indicator to open it) — see [Agent Usage Indicator](./agent-usage.md) for the panel and menu that go with them.
 
+Right-clicking an _empty_ part of the status bar (not on any button) opens a menu of every switchable item below, plus four more that live outside `status_bar` — the search, language-server, diagnostics, project-footprint and keep-display-awake buttons. See [All Settings § Status Bar](./reference/all-settings.md#status-bar) for the full list, how the menu groups them by side, and what hiding an item through it actually does (it drops the item's entity, not just its render).
+
 ```json [settings]
   "status_bar": {
+    // Show/hide the active buffer's file name.
+    // Defaults to false.
+    "show_active_file": false,
     // Show/hide a button that displays the active buffer's language.
     // Clicking the button brings up the language selector.
     // Defaults to true.
@@ -337,7 +342,20 @@ TBD: Centered layout related settings
     // How much of an agent's quota the status bar and usage panel show.
     // "detailed" shows every window the agent reports; "compact" shows only
     // the window closest to running out. Defaults to "detailed".
-    "agent_usage_display": "detailed"
+    "agent_usage_display": "detailed",
+    // Show/hide the activity indicator (language-server status, extension
+    // operations, updates and git operations).
+    // Defaults to true.
+    "activity_indicator": true,
+    // Show/hide the active toolchain button.
+    // Defaults to true.
+    "active_toolchain_button": true,
+    // Show/hide the Vim mode indicator.
+    // Defaults to true.
+    "vim_mode_button": true,
+    // Show/hide image dimensions and size for the active image.
+    // Defaults to true.
+    "image_info_button": true
   },
   "global_lsp_settings": {
     // Show/hide the LSP button in the status bar.
