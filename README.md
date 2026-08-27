@@ -82,9 +82,10 @@ SmartScreen system-wide:
   directory inside the archive is `zed.app`, not `zode.app` — the bundle keeps upstream's
   layout so `libexec/zed-editor` stays where the database drivers look for it.
 
-Linux builds are produced on Ubuntu 24.04, so they need **glibc 2.39 or newer**. Older
-distributions — including Ubuntu 22.04 — will fail with a `GLIBC_2.39 not found` error;
-build from source there.
+Linux builds need **glibc 2.35 or newer** (Ubuntu 22.04 and newer, Debian 12 and newer).
+They are built inside an `ubuntu:22.04` container so that floor holds regardless of which
+runner image GitHub offers, and `script/check-glibc-floor` fails the build if anything in
+the bundle asks for more.
 
 ### From source
 
