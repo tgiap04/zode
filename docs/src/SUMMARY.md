@@ -157,6 +157,7 @@
 - [Worktree Trust](./worktree-trust.md)
 - [Telemetry](./telemetry.md)
 - [Agent Usage Indicator](./agent-usage.md)
+- [Agent Sessions Across Restarts](./agent-sessions.md)
 - [Keeping the Display Awake](./keep-display-awake.md)
 - [Project Footprint Indicator](./project-footprint-indicator.md)
 

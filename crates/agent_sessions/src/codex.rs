@@ -16,6 +16,16 @@ use std::{
 const DB_PREFIX: &str = "state_";
 const DB_SUFFIX: &str = ".sqlite";
 
+/// Deliberately without `archived = 0`, which [`LIST_QUERY`] carries.
+///
+/// The panel hides archived threads because they are not what someone is
+/// browsing for. `find` answers a different question — does this id still name a
+/// session the CLI could resume — and archiving does not take that away. Filtering
+/// here would report a tab's own session as gone the moment it was archived.
+const FIND_QUERY: &str = "select id, title, preview, first_user_message, cwd, git_branch, model, \
+     coalesce(recency_at_ms, updated_at_ms, updated_at * 1000) as at_ms, rollout_path \
+     from threads where id = ?1 limit 1";
+
 const LIST_QUERY: &str = "select id, title, preview, first_user_message, cwd, git_branch, model, \
      coalesce(recency_at_ms, updated_at_ms, updated_at * 1000) as at_ms, rollout_path \
      from threads where archived = 0 order by at_ms desc";
@@ -142,19 +152,7 @@ impl SessionProvider for CodexProvider {
         let rows = self.with_connection(|connection| {
             let mut statement = connection.prepare(LIST_QUERY)?;
             let rows = statement
-                .query_map([], |row| {
-                    Ok(Row {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        preview: row.get(2)?,
-                        first_user_message: row.get(3)?,
-                        cwd: row.get(4)?,
-                        branch: row.get(5)?,
-                        model: row.get(6)?,
-                        at_ms: row.get(7)?,
-                        rollout: row.get(8)?,
-                    })
-                })?
+                .query_map([], Row::from_sqlite)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         });
@@ -168,6 +166,34 @@ impl SessionProvider for CodexProvider {
             }
         };
         Ok(rows.into_iter().map(Row::into_summary).collect())
+    }
+
+    /// One indexed row, not the whole table — `id` is the primary key.
+    fn find(&self, id: &str) -> Result<Option<SessionSummary>> {
+        let id = id.to_string();
+        let row = self.with_connection(move |connection| {
+            let mut statement = connection.prepare(FIND_QUERY)?;
+            let mut rows = statement.query_map([&id], Row::from_sqlite)?;
+            Ok(rows.next().transpose()?)
+        });
+        // Same rule as `list`: a store that cannot be read is a state, not a
+        // failure. Whoever has never run Codex asked a question with the answer
+        // "no", not a question that should error.
+        match row {
+            Ok(row) => Ok(row.map(Row::into_summary)),
+            Err(error) => {
+                log::warn!("Codex thread store unreadable: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+        // `codex resume` takes an id that already exists; there is no flag to
+        // start a session *under* an id of our choosing. Returning `None` is what
+        // keeps the caller from assigning an id Codex will never write down —
+        // the same reason `resume_command` refuses `Fork::New`.
+        None
     }
 
     fn counts(&self, session: &SessionSummary) -> Result<SessionCounts> {
@@ -226,6 +252,26 @@ struct Row {
 }
 
 impl Row {
+    /// The one place column order is written down.
+    ///
+    /// `LIST_QUERY` and `FIND_QUERY` select the same columns in the same order,
+    /// and a mapping written out once per query would misparse silently the day
+    /// one of them gained a column — every field would still have a type that
+    /// fits, just the wrong value in it.
+    fn from_sqlite(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            preview: row.get(2)?,
+            first_user_message: row.get(3)?,
+            cwd: row.get(4)?,
+            branch: row.get(5)?,
+            model: row.get(6)?,
+            at_ms: row.get(7)?,
+            rollout: row.get(8)?,
+        })
+    }
+
     fn into_summary(self) -> SessionSummary {
         let preview =
             non_empty(self.preview).or_else(|| non_empty(self.first_user_message.clone()));
@@ -394,6 +440,80 @@ mod tests {
         assert_eq!(session.branch.as_deref(), Some("main"));
         assert_eq!(session.model.as_deref(), Some("gpt-5.6-terra"));
         assert_eq!(session.agent, AgentKind::Codex);
+    }
+
+    #[test]
+    fn find_returns_the_thread_the_store_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = thread_store(dir.path());
+        connection
+            .execute(
+                "insert into threads (id, rollout_path, created_at, updated_at, source, \
+                 model_provider, cwd, title, sandbox_policy, approval_mode, git_branch, \
+                 first_user_message, model, preview, recency_at_ms) \
+                 values ('wanted', '/nowhere/rollout.jsonl', 1, 2, 'cli', 'openai', '/w/two', \
+                 'the one', 'ro', 'auto', 'main', 'the one', 'gpt-5', 'the one', 1787416263443)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let provider = CodexProvider::new(dir.path().to_path_buf());
+        let found = provider.find("wanted").unwrap().expect("held");
+        assert_eq!(&*found.id, "wanted");
+        assert_eq!(found.cwd, PathBuf::from("/w/two"));
+        assert!(provider.find("absent").unwrap().is_none());
+    }
+
+    /// The panel hides archived threads; a tab asking after its own session must
+    /// still be told it exists, or archiving a thread would report it as gone.
+    #[test]
+    fn find_sees_an_archived_thread_that_the_list_hides() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = thread_store(dir.path());
+        connection
+            .execute(
+                "insert into threads (id, rollout_path, created_at, updated_at, source, \
+                 model_provider, cwd, title, sandbox_policy, approval_mode, archived, \
+                 git_branch, first_user_message, model, preview, recency_at_ms) \
+                 values ('filed', '/nowhere/rollout.jsonl', 1, 2, 'cli', 'openai', '/w/one', \
+                 'filed away', 'ro', 'auto', 1, 'main', 'filed away', 'gpt-5', 'filed away', 1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let provider = CodexProvider::new(dir.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "the list is the surface that hides archived threads"
+        );
+        assert!(
+            provider.find("filed").unwrap().is_some(),
+            "existence is a different question from listability"
+        );
+    }
+
+    #[test]
+    fn find_is_none_when_the_store_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = CodexProvider::new(dir.path().to_path_buf());
+        assert!(
+            provider.find("anything").unwrap().is_none(),
+            "no database is Ok(None), matching how list treats it"
+        );
+    }
+
+    #[test]
+    fn codex_cannot_be_told_which_id_to_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = CodexProvider::new(dir.path().to_path_buf());
+        assert!(
+            provider
+                .new_session_command("some-id", Path::new("/w/one"))
+                .is_none(),
+            "no flag exists, so declining is the only honest answer"
+        );
     }
 
     #[test]

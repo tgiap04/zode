@@ -43,6 +43,19 @@ pub fn default_providers() -> Vec<Arc<dyn SessionProvider>> {
     ]
 }
 
+/// The store for one agent.
+///
+/// Built on demand rather than looked up in a registry: a provider is a path and
+/// nothing else, so constructing one costs less than caching it would. Kept
+/// beside [`default_providers`] so the roster of known stores stays in one place.
+pub fn provider_for(agent: AgentKind) -> Arc<dyn SessionProvider> {
+    match agent {
+        AgentKind::Claude => Arc::new(ClaudeProvider::new(ClaudeProvider::default_root())),
+        AgentKind::Codex => Arc::new(CodexProvider::new(CodexProvider::default_root())),
+        AgentKind::Copilot => Arc::new(CopilotProvider::new(CopilotProvider::default_root())),
+    }
+}
+
 /// Every session every provider can see, newest first.
 ///
 /// A provider that fails is logged and skipped rather than failing the sweep: one

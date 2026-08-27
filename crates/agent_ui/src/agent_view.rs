@@ -1,4 +1,5 @@
 use crate::RenameAgent;
+use agent_sessions::{AgentKind, Fork, ResumeCommand};
 use editor::Editor;
 use gpui::{
     AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
@@ -28,9 +29,8 @@ pub fn agent_icon(agent: &str) -> IconName {
 }
 
 pub struct AgentView {
-    /// Set only for a view opened from the history: the CLI arguments and working
-    /// directory that continue an existing session.
-    resume: Option<ResumeTarget>,
+    /// Which session this tab belongs to. See [`SessionIntent`].
+    intent: SessionIntent,
     agent: AgentId,
     display_name: SharedString,
     /// What the user called this session, if they named it. Two Claude Code tabs
@@ -54,6 +54,18 @@ enum State {
     /// The agent's own CLI is not on this machine. Carries what the install
     /// screen needs, so the view never has to ask which agent it is showing for.
     MissingBinary(AgentBinaryMissing),
+    /// This tab owns a session id, the agent's store no longer holds it, and this
+    /// agent cannot be told to start one under that id.
+    ///
+    /// Reachable for Codex and Copilot only. Claude's `--session-id` means
+    /// `new_session_command` always answers, so the branch that leads here is
+    /// unreachable for it — deliberately left as a real state rather than an
+    /// assertion, so the day Claude drops that flag this simply starts working.
+    ///
+    /// Silently opening a blank session instead would be worse: a tab that looks
+    /// like a continuation and has none of the context is the failure this whole
+    /// feature exists to prevent.
+    SessionGone,
     Failed(SharedString),
 }
 
@@ -179,13 +191,14 @@ impl AgentView {
                         return;
                     }
 
+                    let intent = intent_for_new_tab(&agent_id);
                     let view = cx.new(|cx| {
                         Self::new(
                             agent_id,
                             mode,
                             project,
                             workspace.weak_handle(),
-                            None,
+                            intent,
                             window,
                             cx,
                         )
@@ -288,12 +301,12 @@ impl AgentView {
         mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
-        resume: Option<ResumeTarget>,
+        intent: SessionIntent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
-            resume,
+            intent,
             display_name: display_name(&agent),
             agent,
             custom_name: None,
@@ -316,10 +329,14 @@ impl AgentView {
     /// Always a new tab: resuming is not "show me the agent", it is "run this
     /// conversation again", and the session it continues may have nothing to do
     /// with whatever tab is already open.
-    pub fn open_resumed(
+    /// Takes the session id alone, not a built command. The flags that resume it
+    /// are the agent store's business, and rebuilding them here would be a second
+    /// place to update the day a CLI changes one. The cost is one store lookup on
+    /// the click path, on a background thread.
+    pub fn open_tracked(
         workspace: &mut Workspace,
         agent: &str,
-        resume: ResumeTarget,
+        intent: SessionIntent,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -338,7 +355,7 @@ impl AgentView {
                             AgentViewMode::Terminal,
                             project,
                             weak_workspace,
-                            Some(resume),
+                            intent,
                             window,
                             cx,
                         )
@@ -369,10 +386,11 @@ impl AgentView {
         mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
+        intent: SessionIntent,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            resume: None,
+            intent,
             display_name: display_name(&agent),
             agent,
             custom_name: None,
@@ -403,7 +421,9 @@ impl AgentView {
     pub fn terminal(&self) -> Option<&Entity<TerminalView>> {
         match &self.state {
             State::Terminal(view) => Some(view),
-            State::Starting | State::MissingBinary(_) | State::Failed(_) => None,
+            State::Starting | State::MissingBinary(_) | State::SessionGone | State::Failed(_) => {
+                None
+            }
         }
     }
 
@@ -558,7 +578,7 @@ impl AgentView {
 
         match previous {
             State::Terminal(view) => watch("terminal", view, cx),
-            State::Starting | State::MissingBinary(_) | State::Failed(_) => {}
+            State::Starting | State::MissingBinary(_) | State::SessionGone | State::Failed(_) => {}
         }
     }
 
@@ -577,10 +597,18 @@ impl AgentView {
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
-        let resume = self.resume.clone();
+        let intent = self.intent.clone();
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
+        // Read here, on the main thread, because the decision about where a
+        // never-run session should start is made on a background thread where the
+        // project cannot be read.
+        let default_cwd = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
 
         self._startup = Some(cx.spawn_in(window, async move |this, cx| {
             // `store` and `project` are strong handles owned by this task, so the
@@ -612,10 +640,29 @@ impl AgentView {
                 }
             };
 
+            // Reading the agent's own session store is blocking file and sqlite
+            // work, so it goes to a background thread — and it happens here, in
+            // the task that was already awaiting the binary, rather than at
+            // construction, because a tab has to be able to exist before it knows
+            // whether its session is still on disk.
+            let session = match resolve_session(&agent, &intent, default_cwd, cx).await {
+                SessionStart::Fresh => None,
+                SessionStart::Command(command) => Some(command),
+                SessionStart::Gone => {
+                    this.update(cx, |this, cx| {
+                        this.state = State::SessionGone;
+                        cx.emit(AgentViewEvent::UpdateTab);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
             let terminal = project
                 .update(cx, |project, cx| {
                     project.create_terminal_task(
-                        agent_task(&agent, binary, resume.as_ref(), project, cx),
+                        agent_task(&agent, binary, session.as_ref(), project, cx),
                         cx,
                     )
                 })
@@ -683,18 +730,191 @@ fn remember_mode(agent: &AgentId, mode: AgentViewMode, cx: &mut App) {
 /// holds the agent itself: closing the tab ends the session, and no stray shell
 /// outlives it. The summary, command echo and rerun button are all off — this is
 /// an interactive program, not a build step whose exit code the user waits on.
-/// A session to pick up where it left off: the CLI arguments that resume it and
-/// the directory it ran in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResumeTarget {
-    pub args: Vec<String>,
-    pub cwd: std::path::PathBuf,
+/// What session, if any, this tab is bound to.
+///
+/// Replaces an `Option<ResumeTarget>` that was about to have to mean three
+/// things — no identity, an id this editor chose, and an id from the agent's own
+/// store — which is how the next reader gets it wrong.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum SessionIntent {
+    /// No identity. The agent's CLI picks its own session, and this tab cannot be
+    /// brought back onto a conversation.
+    #[default]
+    Untracked,
+    /// This tab owns this id. Whether spawning *resumes* it or *starts* it is
+    /// decided at spawn time by whether the agent's store holds it — an id
+    /// assigned to a tab nobody has typed in yet has no session on disk, and that
+    /// is a normal state rather than an error.
+    Tracked(SharedString),
 }
 
+/// The intent a stored `session_id` column stands for.
+///
+/// The value reaches this from SQLite as free text and ends up as an element of a
+/// spawned process's argv. It goes as its own argument rather than through a
+/// shell, so there is no injection path — but `--session-id` accepts only a UUID,
+/// and a row that is not one would make the CLI fail in a way nobody could read
+/// from the tab. So it is parsed, and anything that will not parse is treated as
+/// no id at all: the tab still opens, it simply is not tracked.
+fn intent_from_stored(session_id: Option<&str>) -> SessionIntent {
+    let Some(id) = session_id else {
+        return SessionIntent::Untracked;
+    };
+    match uuid::Uuid::parse_str(id) {
+        Ok(_) => SessionIntent::Tracked(id.to_string().into()),
+        Err(error) => {
+            log::warn!("ignoring a stored agent session id that is not a UUID: {error}");
+            SessionIntent::Untracked
+        }
+    }
+}
+
+/// The identity a freshly opened tab starts life with.
+///
+/// An id is only assigned where the agent's CLI can be told to use it — Claude's
+/// `--session-id`. For Codex and Copilot the CLI picks its own id and never tells
+/// anyone, so assigning one here would write down an id that is not going to be
+/// there to resume: a tab that looks tracked and comes back on nothing.
+///
+/// Generated at construction rather than at spawn because the tab has to be able
+/// to write its id down before it has spawned anything — serialization can happen
+/// first.
+fn intent_for_new_tab(agent: &AgentId) -> SessionIntent {
+    let Some(kind) = AgentKind::from_builtin_agent_id(agent.as_ref()) else {
+        return SessionIntent::Untracked;
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    // Only *whether* the agent accepts an id is read here; the directory is
+    // irrelevant to that answer and this tab has none yet. Asking the provider
+    // rather than keeping a list of capable agents is what makes the day Codex
+    // gains such a flag a one-line change in one crate.
+    if agent_sessions::provider_for(kind)
+        .new_session_command(&id, std::path::Path::new(""))
+        .is_some()
+    {
+        SessionIntent::Tracked(id.into())
+    } else {
+        SessionIntent::Untracked
+    }
+}
+
+/// The command that puts a tab back on its session, or `None` to let the CLI
+/// choose for itself.
+///
+/// An [`SessionIntent::Untracked`] tab has nothing to look up. A `Tracked` one
+/// asks the agent's own store: a session that is there is resumed, and one that
+/// is not is started fresh **under the same id**, which is what keeps a tab that
+/// was opened and never typed in from coming back broken — Claude writes its
+/// transcript only after the first message.
+///
+/// Every failure lands on `None`, which spawns the agent with no session
+/// arguments. That is the same thing every tab did before this feature existed,
+/// so the worst case is the old behaviour rather than a dead tab.
+async fn resolve_session(
+    agent: &AgentId,
+    intent: &SessionIntent,
+    default_cwd: Option<std::path::PathBuf>,
+    cx: &mut gpui::AsyncApp,
+) -> SessionStart {
+    let SessionIntent::Tracked(id) = intent else {
+        return SessionStart::Fresh;
+    };
+    let Some(kind) = AgentKind::from_builtin_agent_id(agent.as_ref()) else {
+        // A user-configured agent: this editor reads three stores and has no
+        // business guessing at a fourth's.
+        return SessionStart::Fresh;
+    };
+    let provider = agent_sessions::provider_for(kind);
+    let id = id.to_string();
+    cx.background_spawn(async move {
+        match provider.find(&id) {
+            Ok(found) => session_start(provider.as_ref(), &id, default_cwd, found),
+            // An unreadable store is not the same as a deleted session, and
+            // refusing to start on a transient failure would strand the tab. Fall
+            // back to the behaviour every tab had before this feature existed.
+            Err(error) => {
+                log::warn!("looking up session {id}: {error}");
+                SessionStart::Fresh
+            }
+        }
+    })
+    .await
+}
+
+/// The decision, once the store has answered.
+///
+/// Split from [`resolve_session`] because that function's other half is blocking
+/// file and sqlite work behind an `AsyncApp`, and this half is the part with the
+/// reasoning in it. Both `resume_command` and `new_session_command` are pure, so
+/// this is directly testable without a window, a store on disk, or a fake.
+fn session_start(
+    provider: &dyn agent_sessions::SessionProvider,
+    id: &str,
+    default_cwd: Option<std::path::PathBuf>,
+    found: Option<agent_sessions::SessionSummary>,
+) -> SessionStart {
+    if let Some(session) = found {
+        return provider
+            .resume_command(&session, Fork::Continue)
+            .map(SessionStart::Command)
+            // An agent that cannot resume a session it *does* hold is not a state
+            // this editor has ever seen, but `resume_command` is allowed to say
+            // no. Starting fresh beats refusing to start.
+            .unwrap_or(SessionStart::Fresh);
+    }
+
+    // The tab owns this id but the store has no session under it. Almost always
+    // because nobody has typed in the tab yet — Claude writes its transcript only
+    // after the first message — so the right move is to start fresh *under the
+    // same id*: that keeps the tab's identity and means the next restart finds a
+    // real session.
+    //
+    // The directory is this window's, not the session's: the session never ran,
+    // so it has no directory of its own to prefer. `default_cwd` is that window's
+    // first worktree, read before this ran — `agent_task`'s own fallback cannot be
+    // relied on here, because a command it is handed carries a `cwd` and that is
+    // the one it uses.
+    //
+    // An agent with no flag for this cannot do it at all, and opening an
+    // *unrelated* fresh session in a tab that presents itself as a continuation
+    // would be the silent lie. It says so instead.
+    let Some(cwd) = default_cwd else {
+        // No worktree to start in. Rather than invent one, fall back to the
+        // behaviour of every tab before this feature: let the CLI choose.
+        return SessionStart::Fresh;
+    };
+    match provider.new_session_command(id, &cwd) {
+        Some(command) => SessionStart::Command(command),
+        None => SessionStart::Gone,
+    }
+}
+
+/// What `start` should do about this tab's session.
+enum SessionStart {
+    /// Spawn with no session arguments and let the CLI decide — either the tab is
+    /// untracked, or looking its session up failed in a way that should not cost
+    /// the tab.
+    Fresh,
+    Command(ResumeCommand),
+    /// Tracked, gone, and unrecoverable for this agent. See [`State::SessionGone`].
+    Gone,
+}
+
+/// Turns a resolved binary and an already-decided session command into the task
+/// the terminal runs.
+///
+/// `session` carries the arguments and the directory but **not** the program:
+/// that comes from `binary`, which `AgentServerStore` resolved against the real
+/// `PATH`. A `ResumeCommand`'s own `program` is the bare name the agent's store
+/// records (`"claude"`), which is not what should be executed.
+///
+/// Which command it is — resume this session, start one under a chosen id, or
+/// nothing at all — is decided in `start`, where the store can be read on a
+/// background thread. This function does not choose.
 fn agent_task(
     agent: &AgentId,
     binary: std::path::PathBuf,
-    resume: Option<&ResumeTarget>,
+    session: Option<&ResumeCommand>,
     project: &Project,
     cx: &App,
 ) -> SpawnInTerminal {
@@ -708,10 +928,12 @@ fn agent_task(
         label,
         command_label: binary.to_string_lossy().into_owned(),
         command: Some(binary.to_string_lossy().into_owned()),
-        args: resume.map(|resume| resume.args.clone()).unwrap_or_default(),
+        args: session
+            .map(|session| session.args.clone())
+            .unwrap_or_default(),
         // A resumed session runs where it ran before, not where this window
         // happens to be pointed: the conversation's context is that directory.
-        cwd: resume.map(|resume| resume.cwd.clone()).or_else(|| {
+        cwd: session.map(|session| session.cwd.clone()).or_else(|| {
             project
                 .visible_worktrees(cx)
                 .next()
@@ -846,12 +1068,17 @@ impl workspace::item::SerializableItem for AgentView {
         cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
     }
 
-    /// Restores the tab, not the conversation.
+    /// Restores the tab *and* points it back at its conversation.
     ///
-    /// The agent, the mode and the name are all that is kept: a thread is the
-    /// agent's own state, reachable through its CLI (`claude --resume`) rather
-    /// than anything this editor could reconstruct. Restoring a tab and lying
-    /// about its history would be worse than restoring an empty one.
+    /// The conversation itself is never reconstructed here — it is the agent's own
+    /// state, and an editor that rebuilt a transcript would be inventing one. What
+    /// is restored is the tab's **identity**: the session id it owns, handed back
+    /// to the agent's own CLI so that `--resume` does the continuing. That is why
+    /// this can be faithful rather than a plausible-looking lie.
+    ///
+    /// Whether the id resumes or starts fresh is not decided here. `start` asks
+    /// the agent's store at spawn time, because a tab that was opened and never
+    /// typed in has an id and no session on disk yet.
     ///
     /// Starting the agent is the point rather than a side effect — a restored tab
     /// that will not answer until it is clicked is a picture of an agent, not an
@@ -866,8 +1093,9 @@ impl workspace::item::SerializableItem for AgentView {
     ) -> Task<anyhow::Result<Entity<Self>>> {
         let db = persistence::AgentViewDb::global(cx);
         window.spawn(cx, async move |cx| {
-            let (agent, mode, name) = db.get_agent(item_id, workspace_id)?;
-            let mode = mode_from_name(&mode);
+            let row = db.get_agent(item_id, workspace_id)?;
+            let mode = mode_from_name(&row.mode);
+            let intent = intent_from_stored(row.session_id.as_deref());
 
             cx.update(|window, cx| {
                 Ok(cx.new(|cx| {
@@ -875,18 +1103,18 @@ impl workspace::item::SerializableItem for AgentView {
                     // serialized pane flexes, and forcing a remembered width on
                     // top of them would fight the layout the user actually left.
                     let mut view = Self::new(
-                        AgentId::new(agent),
+                        AgentId::new(row.agent),
                         mode,
                         project,
                         workspace,
-                        None,
+                        intent,
                         window,
                         cx,
                     );
                     // Set directly rather than through `restore_custom_name`,
                     // which notifies: nothing is watching a view that is still
                     // being constructed.
-                    view.custom_name = name.map(SharedString::from);
+                    view.custom_name = row.name.map(SharedString::from);
                     view
                 }))
             })?
@@ -902,15 +1130,18 @@ impl workspace::item::SerializableItem for AgentView {
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<()>>> {
         let workspace_id = workspace.database_id()?;
-        let agent = self.agent.to_string();
-        let mode = mode_name(self.mode);
-        let name = self.custom_name.as_ref().map(|name| name.to_string());
+        let row = persistence::AgentViewRow {
+            agent: self.agent.to_string(),
+            mode: mode_name(self.mode).to_string(),
+            name: self.custom_name.as_ref().map(|name| name.to_string()),
+            session_id: match &self.intent {
+                SessionIntent::Untracked => None,
+                SessionIntent::Tracked(id) => Some(id.to_string()),
+            },
+        };
 
         let db = persistence::AgentViewDb::global(cx);
-        Some(cx.background_spawn(async move {
-            db.save_agent(item_id, workspace_id, agent, mode.to_string(), name)
-                .await
-        }))
+        Some(cx.background_spawn(async move { db.save_agent(item_id, workspace_id, row).await }))
     }
 
     /// `UpdateTab` is the one event worth a write, and it is worth one.
@@ -939,6 +1170,57 @@ impl Render for AgentView {
             State::MissingBinary(missing) => {
                 crate::missing_binary::render(&cx.entity(), &self.display_name, missing, cx)
             }
+            State::SessionGone => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(Icon::new(IconName::HistoryRerun).color(Color::Muted))
+                .child(
+                    Label::new(format!(
+                        "This {} session is no longer on this machine.",
+                        self.display_name
+                    ))
+                    .color(Color::Muted),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("start-a-new-session", "Start a New Session").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    // Drops the id rather than keeping it: the
+                                    // session it named is gone and this agent
+                                    // cannot recreate it, so holding the id would
+                                    // only put the tab back here on the next
+                                    // restart.
+                                    this.intent = SessionIntent::Untracked;
+                                    this.state = State::Starting;
+                                    this.start(window, cx);
+                                    cx.emit(AgentViewEvent::UpdateTab);
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(
+                            Button::new("close-this-tab", "Close Tab")
+                                .style(ButtonStyle::Subtle)
+                                // Dispatched rather than reaching for the pane:
+                                // which pane holds this tab is the workspace's
+                                // business, and this action already resolves it
+                                // through the focused item.
+                                .on_click(cx.listener(|_, _, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(workspace::CloseActiveItem {
+                                            save_intent: None,
+                                            close_pinned: true,
+                                        }),
+                                        cx,
+                                    );
+                                })),
+                        ),
+                )
+                .into_any_element(),
             State::Failed(error) => centered_message(IconName::Warning, error.clone(), None, cx),
         };
         let colors = cx.theme().colors();
@@ -1026,7 +1308,11 @@ mod tests {
         let (fresh, resumed) = cx.update(|cx| {
             let project = project.read(cx);
             let fresh = super::agent_task(&agent, binary.clone(), None, project, cx);
-            let resume = super::ResumeTarget {
+            // A `ResumeCommand` as the agent's own store hands one over. Its
+            // `program` is the bare name the store records and is deliberately
+            // ignored below — the executed program is the resolved `binary`.
+            let resume = ResumeCommand {
+                program: "claude".into(),
                 args: vec!["--resume".into(), "abc-123".into(), "--fork-session".into()],
                 cwd: std::path::PathBuf::from("/elsewhere"),
             };
@@ -1053,7 +1339,265 @@ mod tests {
             "a resumed session runs where the conversation ran, not where this \
              window is pointed"
         );
-        assert_eq!(resumed.command, Some("/bin/claude".to_string()));
+        assert_eq!(
+            resumed.command,
+            Some("/bin/claude".to_string()),
+            "the resolved binary runs, not the bare name the store recorded"
+        );
+    }
+
+    fn summary(agent: AgentKind, id: &str) -> agent_sessions::SessionSummary {
+        agent_sessions::SessionSummary {
+            id: id.into(),
+            agent,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: std::path::PathBuf::from("/w/one"),
+            branch: None,
+            model: None,
+            updated_at: std::time::UNIX_EPOCH,
+            log_path: None,
+            log_bytes: 0,
+        }
+    }
+
+    /// A session the store no longer holds, for an agent that cannot be told
+    /// which id to start under, is the one case that has nothing to offer but the
+    /// truth.
+    #[test]
+    fn a_session_that_vanished_from_an_agent_that_cannot_recreate_it_is_gone() {
+        for kind in [AgentKind::Codex, AgentKind::Copilot] {
+            let provider = agent_sessions::provider_for(kind);
+            assert!(
+                matches!(
+                    session_start(
+                        provider.as_ref(),
+                        "44444444-4444-4444-4444-444444444444",
+                        Some(std::path::PathBuf::from("/w/one")),
+                        None
+                    ),
+                    SessionStart::Gone
+                ),
+                "{} has no --session-id, so a vanished session has no way back",
+                kind.label()
+            );
+        }
+    }
+
+    /// The reachability claim on `State::SessionGone`, asserted rather than left
+    /// as prose: Claude can always start under its own id, so the branch that
+    /// leads to that state never fires for it.
+    #[test]
+    fn a_claude_session_that_vanished_starts_fresh_under_the_same_id() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let id = "55555555-5555-5555-5555-555555555555";
+        let SessionStart::Command(command) = session_start(
+            provider.as_ref(),
+            id,
+            Some(std::path::PathBuf::from("/w/here")),
+            None,
+        ) else {
+            panic!("Claude must never reach the gone state");
+        };
+        assert_eq!(
+            command.args,
+            vec!["--session-id".to_string(), id.to_string()],
+            "the tab keeps the id it owns rather than being handed a new one"
+        );
+        assert_eq!(
+            command.cwd,
+            std::path::PathBuf::from("/w/here"),
+            "a session that never ran starts in this window's worktree, not in \
+             whatever `.` happens to be"
+        );
+    }
+
+    /// The bug this asserts against: handing `agent_task` a command whose `cwd`
+    /// is a placeholder. `agent_task` uses the `cwd` of any command it is given
+    /// and never reaches its own fallback, so a placeholder would silently start
+    /// the CLI in the wrong directory.
+    #[test]
+    fn with_no_worktree_to_start_in_the_cli_chooses_for_itself() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        assert!(
+            matches!(
+                session_start(
+                    provider.as_ref(),
+                    "77777777-7777-7777-7777-777777777777",
+                    None,
+                    None
+                ),
+                SessionStart::Fresh
+            ),
+            "no directory is not a reason to invent one"
+        );
+    }
+
+    #[test]
+    fn a_session_the_store_still_holds_is_resumed() {
+        let provider = agent_sessions::provider_for(AgentKind::Codex);
+        let id = "66666666-6666-6666-6666-666666666666";
+        let SessionStart::Command(command) = session_start(
+            provider.as_ref(),
+            id,
+            Some(std::path::PathBuf::from("/somewhere/else")),
+            Some(summary(AgentKind::Codex, id)),
+        ) else {
+            panic!("a session that is there is resumed");
+        };
+        assert_eq!(command.args, vec!["resume".to_string(), id.to_string()]);
+        assert_eq!(
+            command.cwd,
+            std::path::PathBuf::from("/w/one"),
+            "the directory comes back with the session, not from this window"
+        );
+    }
+
+    /// **The commission.** Two tabs of one agent, two conversations, and each has
+    /// to come back on its own — which is exactly what a shared "most recent
+    /// session" flag (`claude --continue`) could never do.
+    #[gpui::test]
+    async fn two_tabs_of_one_agent_keep_separate_ids(cx: &mut TestAppContext) {
+        init_test(cx);
+        let workspaces = cx.update(|cx| workspace::WorkspaceDb::global(cx));
+        let workspace_id = workspaces.next_id().await.unwrap();
+        let db = cx.update(|cx| persistence::AgentViewDb::global(cx));
+
+        let first = "11111111-1111-1111-1111-111111111111";
+        let second = "22222222-2222-2222-2222-222222222222";
+        db.save_agent(
+            1,
+            workspace_id,
+            row("claude-acp", "terminal", Some("auth refactor"), Some(first)),
+        )
+        .await
+        .unwrap();
+        db.save_agent(
+            2,
+            workspace_id,
+            row("claude-acp", "terminal", Some("ui font"), Some(second)),
+        )
+        .await
+        .unwrap();
+
+        let restored_first = db.get_agent(1, workspace_id).unwrap();
+        let restored_second = db.get_agent(2, workspace_id).unwrap();
+        assert_eq!(restored_first.session_id.as_deref(), Some(first));
+        assert_eq!(restored_second.session_id.as_deref(), Some(second));
+        assert_ne!(
+            restored_first.session_id, restored_second.session_id,
+            "two tabs of the same agent must not share a session"
+        );
+
+        // And the ids survive the read back into an intent, which is what `start`
+        // actually acts on.
+        assert_eq!(
+            intent_from_stored(restored_first.session_id.as_deref()),
+            SessionIntent::Tracked(first.into())
+        );
+        assert_eq!(
+            intent_from_stored(restored_second.session_id.as_deref()),
+            SessionIntent::Tracked(second.into())
+        );
+    }
+
+    #[gpui::test]
+    async fn a_session_id_survives_being_written_down_and_brought_back(cx: &mut TestAppContext) {
+        init_test(cx);
+        let workspaces = cx.update(|cx| workspace::WorkspaceDb::global(cx));
+        let workspace_id = workspaces.next_id().await.unwrap();
+        let db = cx.update(|cx| persistence::AgentViewDb::global(cx));
+
+        let id = "33333333-3333-3333-3333-333333333333";
+        db.save_agent(
+            7,
+            workspace_id,
+            row("claude-acp", "terminal", None, Some(id)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_agent(7, workspace_id).unwrap().session_id.as_deref(),
+            Some(id)
+        );
+
+        // An untracked tab writes NULL, which is what every row saved before this
+        // column existed also reads as — a different answer from "".
+        db.save_agent(8, workspace_id, row("codex-acp", "terminal", None, None))
+            .await
+            .unwrap();
+        let untracked = db.get_agent(8, workspace_id).unwrap();
+        assert_eq!(untracked.session_id, None);
+        assert_eq!(
+            intent_from_stored(untracked.session_id.as_deref()),
+            SessionIntent::Untracked
+        );
+    }
+
+    #[test]
+    fn a_claude_tab_is_given_a_session_id() {
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let SessionIntent::Tracked(id) = intent_for_new_tab(&agent) else {
+            panic!("Claude has --session-id, so a fresh tab must own an id");
+        };
+        uuid::Uuid::parse_str(&id).expect("--session-id accepts only a UUID");
+    }
+
+    /// The guard against writing down an id the CLI will never agree to. Codex
+    /// and Copilot mint their own and tell nobody, so a tab claiming one would
+    /// come back on nothing at all.
+    #[test]
+    fn an_agent_that_cannot_be_told_an_id_is_not_given_one() {
+        for id in [
+            project::CODEX_AGENT_ID,
+            project::COPILOT_AGENT_ID,
+            "some-agent-this-editor-never-heard-of",
+        ] {
+            assert_eq!(
+                intent_for_new_tab(&AgentId::new(id.to_string())),
+                SessionIntent::Untracked,
+                "{id} has no way to accept an id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stored_id_that_is_not_a_uuid_restores_as_untracked() {
+        assert_eq!(intent_from_stored(None), SessionIntent::Untracked);
+        for hostile in [
+            "",
+            "not-a-uuid",
+            "../../etc/passwd",
+            "11111111-2222-3333-4444",
+        ] {
+            assert_eq!(
+                intent_from_stored(Some(hostile)),
+                SessionIntent::Untracked,
+                "{hostile:?} must not reach argv"
+            );
+        }
+        let good = "11111111-2222-3333-4444-555555555555";
+        assert_eq!(
+            intent_from_stored(Some(good)),
+            SessionIntent::Tracked(good.into())
+        );
+    }
+
+    /// Shorthand for a stored row, so a test reads as what it is asserting
+    /// rather than as four positional arguments of which two are strings.
+    fn row(
+        agent: &str,
+        mode: &str,
+        name: Option<&str>,
+        session_id: Option<&str>,
+    ) -> persistence::AgentViewRow {
+        persistence::AgentViewRow {
+            agent: agent.to_string(),
+            mode: mode.to_string(),
+            name: name.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+        }
     }
 
     fn init_test(cx: &mut TestAppContext) {
@@ -1107,7 +1651,7 @@ mod tests {
         });
 
         let agent_view = cx.new_window_entity(|_window, cx| AgentView {
-            resume: None,
+            intent: SessionIntent::Untracked,
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
             custom_name: None,
@@ -1208,33 +1752,25 @@ mod tests {
             "an item nobody recorded must not resolve to a tab"
         );
 
-        db.save_agent(
-            1,
-            workspace_id,
-            "claude-acp".into(),
-            "terminal".into(),
-            None,
-        )
-        .await
-        .unwrap();
+        db.save_agent(1, workspace_id, row("claude-acp", "terminal", None, None))
+            .await
+            .unwrap();
         db.save_agent(
             2,
             workspace_id,
-            "codex-acp".into(),
-            "chat".into(),
-            Some("refactor".into()),
+            row("codex-acp", "chat", Some("refactor"), None),
         )
         .await
         .unwrap();
 
         assert_eq!(
             db.get_agent(1, workspace_id).unwrap(),
-            ("claude-acp".into(), "terminal".into(), None),
+            row("claude-acp", "terminal", None, None),
             "a tab never renamed must come back without a name, not with a blank one"
         );
         assert_eq!(
             db.get_agent(2, workspace_id).unwrap(),
-            ("codex-acp".into(), "chat".into(), Some("refactor".into())),
+            row("codex-acp", "chat", Some("refactor"), None),
             "the name a session was given is the whole reason two Claude tabs \
              can be told apart"
         );
@@ -1243,14 +1779,12 @@ mod tests {
         db.save_agent(
             2,
             workspace_id,
-            "codex-acp".into(),
-            "chat".into(),
-            Some("review".into()),
+            row("codex-acp", "chat", Some("review"), None),
         )
         .await
         .unwrap();
         assert_eq!(
-            db.get_agent(2, workspace_id).unwrap().2,
+            db.get_agent(2, workspace_id).unwrap().name,
             Some("review".into()),
             "renaming twice must leave the second name, not the first"
         );
@@ -1393,7 +1927,7 @@ mod tests {
                     AgentViewMode::Terminal,
                     project.clone(),
                     workspace.downgrade(),
-                    None,
+                    SessionIntent::Untracked,
                     window,
                     cx,
                 )
@@ -1769,7 +2303,14 @@ mod tests {
             workspace.update_in(cx, |workspace, window, cx| {
                 let handle = workspace.weak_handle();
                 let view = cx.new(|cx| {
-                    AgentView::test_new(agent, AgentViewMode::Terminal, project, handle, cx)
+                    AgentView::test_new(
+                        agent,
+                        AgentViewMode::Terminal,
+                        project,
+                        handle,
+                        SessionIntent::Untracked,
+                        cx,
+                    )
                 });
                 workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
             });
@@ -1972,6 +2513,21 @@ mod persistence {
     };
     use workspace::{ItemId, WorkspaceDb, WorkspaceId};
 
+    /// One row of `agent_views`.
+    ///
+    /// A struct rather than a tuple because the tuple had already reached three
+    /// fields of which two were `String` — a four-field version would be a shape
+    /// where swapping two arguments compiles and restores the wrong thing.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AgentViewRow {
+        pub agent: String,
+        pub mode: String,
+        pub name: Option<String>,
+        /// `None` for a tab with no session identity, and for every row written
+        /// before the column existed.
+        pub session_id: Option<String>,
+    }
+
     pub struct AgentViewDb(ThreadSafeConnection);
 
     impl Domain for AgentViewDb {
@@ -2021,6 +2577,21 @@ mod persistence {
             sql!(
                 ALTER TABLE agent_views ADD COLUMN name TEXT;
             ),
+            // The session this tab belongs to, so reopening the app puts it back
+            // on that conversation rather than on a fresh one.
+            //
+            // One column, and only the id. The arguments that resume it are
+            // derivable from the id through the agent's own session provider,
+            // which is the single place that knows each CLI's flags — storing
+            // them here would mean a row spawning a stale command the day one of
+            // those flags changes, with nothing to catch it. The directory comes
+            // back with the session the provider finds.
+            //
+            // Nullable and read as such: every row written before this column
+            // existed has no id, and NULL is a different answer from "".
+            sql!(
+                ALTER TABLE agent_views ADD COLUMN session_id TEXT;
+            ),
         ];
     }
 
@@ -2067,20 +2638,30 @@ mod persistence {
             &self,
             item_id: ItemId,
             workspace_id: WorkspaceId,
-            agent: String,
-            mode: String,
-            name: Option<String>,
+            row: AgentViewRow,
         ) -> anyhow::Result<()> {
             self.write(move |connection| {
                 let sql_stmt = sql!(
-                    INSERT OR REPLACE INTO agent_views(item_id, workspace_id, agent, mode, name)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO agent_views(item_id, workspace_id, agent, mode, name, session_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 );
-                let mut query = connection
-                    .exec_bound::<(ItemId, WorkspaceId, String, String, Option<String>)>(
-                        sql_stmt,
-                    )?;
-                query((item_id, workspace_id, agent, mode, name)).context(format!(
+                let mut query = connection.exec_bound::<(
+                    ItemId,
+                    WorkspaceId,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                )>(sql_stmt)?;
+                query((
+                    item_id,
+                    workspace_id,
+                    row.agent,
+                    row.mode,
+                    row.name,
+                    row.session_id,
+                ))
+                .context(format!(
                     "exec_bound failed to execute or parse for: {}",
                     sql_stmt
                 ))
@@ -2088,19 +2669,28 @@ mod persistence {
             .await
         }
 
-        /// The agent, mode and name a tab was left in.
+        /// What a tab was left as.
         pub fn get_agent(
             &self,
             item_id: ItemId,
             workspace_id: WorkspaceId,
-        ) -> anyhow::Result<(String, String, Option<String>)> {
+        ) -> anyhow::Result<AgentViewRow> {
             let sql_stmt = sql!(
-                SELECT agent, mode, name FROM agent_views WHERE item_id = ? AND workspace_id = ?
+                SELECT agent, mode, name, session_id FROM agent_views WHERE item_id = ? AND workspace_id = ?
             );
-            self.select_row_bound::<(ItemId, WorkspaceId), (String, String, Option<String>)>(
-                sql_stmt,
-            )?((item_id, workspace_id))?
-            .context("no agent tab was recorded under that item")
+            let row = self.select_row_bound::<(ItemId, WorkspaceId), (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+            )>(sql_stmt)?((item_id, workspace_id))?
+            .context("no agent tab was recorded under that item")?;
+            Ok(AgentViewRow {
+                agent: row.0,
+                mode: row.1,
+                name: row.2,
+                session_id: row.3,
+            })
         }
 
         /// Drops the rows of tabs the workspace did not bring back.

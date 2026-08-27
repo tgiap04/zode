@@ -1,6 +1,6 @@
 use crate::{
     AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
-    Speaker,
+    Speaker, provider::is_safe_component,
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -198,6 +198,29 @@ impl SessionProvider for CopilotProvider {
         }
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(sessions)
+    }
+
+    /// One directory, reached directly: the store names each session's directory
+    /// by its id, so there is nothing to search.
+    fn find(&self, id: &str) -> Result<Option<SessionSummary>> {
+        if !is_safe_component(id) || !self.availability().is_ready() {
+            return Ok(None);
+        }
+        let dir = self.session_state_dir.join(id);
+        if !dir.is_dir() {
+            return Ok(None);
+        }
+        // Unlike a missing directory, a directory that will not read is an error:
+        // answering "not held" would send the caller off to start a session on
+        // top of one that exists.
+        self.summary_for(&dir)
+    }
+
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+        // `--resume=<id>` takes an id the CLI already wrote; there is no flag for
+        // choosing the id of a new session. See the Codex impl for why inventing
+        // one would be worse than declining.
+        None
     }
 
     fn counts(&self, session: &SessionSummary) -> Result<SessionCounts> {
@@ -643,5 +666,55 @@ mod tests {
         let sessions = provider.list().unwrap();
         assert_eq!(sessions[0].title, "Kept");
         assert_eq!(sessions[0].cwd, PathBuf::from("/w"));
+    }
+    #[test]
+    fn find_returns_the_session_the_store_holds() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "6454ea85-a0cc-4961-8f75-26c414f668e1",
+            Some(EVENTS),
+            WORKSPACE,
+        );
+
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        let found = provider
+            .find("6454ea85-a0cc-4961-8f75-26c414f668e1")
+            .unwrap()
+            .expect("held");
+        assert_eq!(&*found.id, "6454ea85-a0cc-4961-8f75-26c414f668e1");
+        assert_eq!(found.cwd, PathBuf::from("/work/project"));
+        assert!(provider.find("no-such-session").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_is_none_when_the_store_does_not_exist() {
+        let provider = CopilotProvider::new(PathBuf::from("/nonexistent-copilot-sessions"));
+        assert!(provider.find("anything").unwrap().is_none());
+    }
+
+    /// The id is joined straight onto the store root here, so this is the join
+    /// site the traversal guard exists for.
+    #[test]
+    fn find_refuses_an_id_that_is_not_a_single_path_component() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(root.path(), "real", Some(EVENTS), WORKSPACE);
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        for hostile in ["../real", "a/b", "..", ".", ""] {
+            assert!(
+                provider.find(hostile).unwrap().is_none(),
+                "{hostile:?} must not be looked up"
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_cannot_be_told_which_id_to_use() {
+        let provider = CopilotProvider::new(PathBuf::from("/anywhere"));
+        assert!(
+            provider
+                .new_session_command("some-id", Path::new("/w/one"))
+                .is_none()
+        );
     }
 }

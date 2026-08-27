@@ -115,6 +115,7 @@ dependencies = [
  "time_format",
  "ui",
  "util",
+ "uuid",
  "workspace",
  "zed_actions",
 ]

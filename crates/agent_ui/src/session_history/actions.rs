@@ -1,4 +1,4 @@
-use crate::{AgentView, session_history::panel::AgentHistoryPanel};
+use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
 use agent_sessions::{Fork, SessionProvider, SessionSummary};
 use gpui::{App, ClipboardItem, Context, Window};
 use std::sync::Arc;
@@ -25,20 +25,28 @@ impl AgentHistoryPanel {
         let Some(provider) = self.provider_for(session) else {
             return;
         };
-        let Some(command) = provider.resume_command(session, fork) else {
+        // Asked only so the control stays disabled where the agent cannot honour
+        // it — Codex has no fork. The command itself is rebuilt at spawn time from
+        // the id, so what comes back here is discarded.
+        if provider.resume_command(session, fork).is_none() {
             return;
-        };
+        }
         if !cwd_exists(session) {
             return;
         }
         let agent = session.agent.builtin_agent_id();
-        let target = crate::agent_view::ResumeTarget {
-            args: command.args,
-            cwd: command.cwd,
+        // A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint
+        // a *new* id, so a tab carrying the id we resumed from would come back on
+        // the original conversation rather than the fork — the one failure this
+        // whole feature exists to avoid, and silent. Until a flag exists to name a
+        // fork's id, a forked tab is an untracked tab.
+        let intent = match fork {
+            Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
+            Fork::New => SessionIntent::Untracked,
         };
         self.workspace()
             .update(cx, |workspace, cx| {
-                AgentView::open_resumed(workspace, agent, target, window, cx);
+                AgentView::open_tracked(workspace, agent, intent, window, cx);
             })
             .log_err();
     }
