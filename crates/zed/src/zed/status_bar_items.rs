@@ -613,7 +613,7 @@ pub(crate) fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{BorrowAppContext as _, TestAppContext};
     use settings::SettingsStore;
 
     #[test]
@@ -681,6 +681,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The round trip the other table tests never exercised: `set_shown`
+    /// writes, and the *same* `is_shown` the menu row reads must see it.
+    /// `every_row_writes_a_setting_when_hidden` only proves a write differs
+    /// from the default, which stays green even if the getter and the setter
+    /// address different keys entirely -- the exact shape of a row that
+    /// clicks, saves, and changes nothing.
+    #[gpui::test]
+    fn set_shown_round_trips_through_the_settings_store(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            EditorSettings::register(cx);
+            ProjectSettings::register(cx);
+            StatusBarSettings::register(cx);
+            KeepDisplayAwakeSetting::register(cx);
+            ProjectFootprintSetting::register(cx);
+
+            for item in ALL_DESCRIPTORS {
+                // Both directions, and hidden first: a getter reading a key
+                // whose default is already `true` would pass a shown-only
+                // check by accident.
+                for wanted in [false, true, false] {
+                    cx.update_global::<SettingsStore, ()>(|store, cx| {
+                        store.update_user_settings(cx, |content| (item.set_shown)(content, wanted));
+                    });
+                    assert_eq!(
+                        (item.is_shown)(cx),
+                        wanted,
+                        "{} wrote {wanted} but read back {}",
+                        item.id,
+                        (item.is_shown)(cx)
+                    );
+                }
+            }
+        });
     }
 
     #[gpui::test]
