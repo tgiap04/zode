@@ -80,7 +80,7 @@ To disable this behavior use:
 }
 ```
 
-### Status Bar
+### Line Indicator and Dock Panel Buttons
 
 ```json [settings]
 {
