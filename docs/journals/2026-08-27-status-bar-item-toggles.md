@@ -130,7 +130,16 @@ have disagreed the first time anyone edited either.
   disappearing or returning. Seventeen manual checks across the plans are recorded unticked.
 - **Two visual unknowns:** whether `min_w(px(24.))` leaves a crowded narrow bar looking right,
   and whether a fifteen-row menu opens upward correctly.
-- **`KeepAwake::render`'s `Status::Disabled` branch is now unreachable** and should be removed.
+- **`KeepAwake`'s `Status::Disabled` branch stays**, and the claim in this entry's first draft
+  that it should be removed was wrong. `Holds::status()` still produces that variant on every
+  render when the setting is off, so deleting only the `explanation()` arm does not compile, and
+  deleting the variant means deleting its producer — after which `status()` reports "The system
+  refused the request" for a state whose truth is "you switched it off", because the `Disabled`
+  check sits ahead of the `running.is_empty()` check. It is also not provably dead: on a settings
+  change the `StatusBar` reconciler and `KeepAwake`'s own observer both fire, GPUI does not specify
+  their order, and a frame may paint before the entity is removed. Dead-but-correct beats
+  live-and-wrong. What was genuinely wrong was the documentation, which described it as a dimmed
+  icon the user would see; that is fixed.
 - **`cargo clippy -p workspace --all-targets` fails** with a pre-existing `E0004` at
   `persistence.rs:1618` from cargo feature unification. The real gate (`./script/clippy`) exits 0
   and never surfaces it, and the diff touches neither that file nor the `remote` crate. I did not
