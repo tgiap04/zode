@@ -1,14 +1,15 @@
 use crate::status_bar_toggles::{self, StatusBarItemSpec};
 use crate::{ItemHandle, MultiWorkspace, Pane};
 use gpui::{
-    Anchor, AnyView, App, Context, Decorations, Entity, IntoElement, ParentElement, Render, Styled,
-    Subscription, WeakEntity, Window,
+    AnyView, App, Context, Decorations, DismissEvent, Entity, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Point, Render, Styled, Subscription, WeakEntity, Window,
+    anchored, deferred,
 };
 use settings::SettingsStore;
 use std::any::TypeId;
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
+use ui::ContextMenu;
 use ui::prelude::*;
-use ui::{ContextMenu, right_click_menu};
 use util::ResultExt;
 
 pub trait StatusItemView: Render {
@@ -93,6 +94,9 @@ pub struct StatusBar {
     /// itself has to be declared here because Rust requires every field of
     /// a type to be declared where the type itself is declared.
     pub(crate) specs: Vec<StatusBarItemSpec>,
+    /// The show/hide menu while it is open, with the point it was opened at.
+    /// Cleared by its own `DismissEvent` subscription.
+    toggle_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// Reconciles `specs` against the settings in force on every settings
     /// change (see `status_bar_toggles::StatusBar::reconcile`). Dropped
     /// with `StatusBar`; nothing else holds this subscription.
@@ -131,8 +135,19 @@ impl Render for StatusBar {
                     .border_color(cx.theme().colors().status_bar_background),
             })
             .child(self.render_left_tools())
-            .child(self.render_toggle_menu_surface())
+            .child(self.render_toggle_menu_surface(cx))
             .child(self.render_right_tools())
+            .children(self.toggle_menu.as_ref().map(|(menu, position, _)| {
+                deferred(
+                    anchored()
+                        .position(*position)
+                        // The bar is at the bottom of the window, so the menu has
+                        // to grow upward from the click rather than down off-screen.
+                        .anchor(gpui::Anchor::BottomLeft)
+                        .child(menu.clone()),
+                )
+                .with_priority(1)
+            }))
     }
 }
 
@@ -169,17 +184,48 @@ impl StatusBar {
     /// crowded, narrow window -- without it, the gap could reach zero width
     /// and take the feature with it exactly when a user most wants to prune
     /// the bar.
-    fn render_toggle_menu_surface(&self) -> impl IntoElement {
-        right_click_menu::<ContextMenu>("status-bar-empty-area")
-            // Stated rather than left to the default corner, which opens
-            // downward off the bottom of the window and relies on
-            // `snap_to_window_with_margin` to shove it back -- a fix that
-            // stops landing correctly once the menu grows tall, and this
-            // one has fifteen rows and two headers.
-            .anchor(Anchor::BottomLeft)
-            .attach(Anchor::TopLeft)
-            .menu(status_bar_toggles::build_item_menu(&self.specs))
-            .trigger(|_is_open, _window, _cx| div().flex_1().min_w(px(24.)).h_full())
+    /// The empty gap between the two groups, made right-clickable.
+    ///
+    /// Deliberately NOT `right_click_menu`. That element requests its layout with
+    /// `gpui::Style::default()` (`ui/src/components/right_click_menu.rs`), so as a
+    /// flex child it never grows no matter what its trigger asks for, and it does
+    /// not implement `Styled` so growth cannot be put on it from outside. The first
+    /// version did exactly that and the surface collapsed to `min_w`: the whole bar
+    /// packed to the left, and the real empty area -- the part a user actually
+    /// right-clicks -- was not part of the hit region at all.
+    ///
+    /// Also deliberately not a handler on the bar's own container: GPUI dispatches
+    /// bubble listeners in reverse registration order, so a parent's handler runs
+    /// before its children's and would take the right-click meant for the
+    /// agent-usage indicator's own menu.
+    fn render_toggle_menu_surface(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().flex_1().min_w(px(24.)).h_full().on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.deploy_toggle_menu(event.position, window, cx);
+            }),
+        )
+    }
+
+    /// Opens the show/hide menu at the pointer. Anchored `BottomLeft` because the
+    /// bar sits at the bottom of the window, so a menu with fifteen rows and two
+    /// headers has to open upward rather than rely on
+    /// `snap_to_window_with_margin` shoving it back on screen.
+    fn deploy_toggle_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = status_bar_toggles::build_item_menu(&self.specs)(window, cx);
+        // Dismissing the menu must clear it, or the next render keeps drawing a
+        // menu the user already closed.
+        let subscription = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.toggle_menu.take();
+            cx.notify();
+        });
+        self.toggle_menu = Some((menu, position, subscription));
+        cx.notify();
     }
 }
 
@@ -197,6 +243,7 @@ impl StatusBar {
             active_pane: active_pane.clone(),
             multi_workspace,
             specs: Vec::new(),
+            toggle_menu: None,
             _observe_active_pane: cx.observe_in(active_pane, window, |this, _, window, cx| {
                 this.update_active_pane_item(window, cx)
             }),
