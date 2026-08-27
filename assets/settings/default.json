@@ -1534,6 +1534,14 @@
     // 2. Only the window closest to running out:
     //      "agent_usage_display": "compact"
     "agent_usage_display": "detailed",
+    // Whether to show the activity indicator (background task spinner) in the status bar.
+    "activity_indicator": true,
+    // Whether to show the active toolchain button in the status bar.
+    "active_toolchain_button": true,
+    // Whether to show the Vim mode indicator in the status bar.
+    "vim_mode_button": true,
+    // Whether to show the image info button in the status bar.
+    "image_info_button": true,
   },
   // Settings specific to the terminal
   "terminal": {
