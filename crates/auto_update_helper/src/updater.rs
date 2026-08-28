@@ -21,6 +21,17 @@ use windows::{
 
 use crate::windows_impl::WM_JOB_UPDATED;
 
+/// The app binary's name inside the install directory.
+///
+/// `script/bundle-windows.ps1` copies `zode.exe` to `Zode.exe` and `zed.iss` installs that
+/// name, so this is the file the update has to move aside and replace. It was `Zed.exe`
+/// here for as long as the helper went unrun: every job below failed to find that file,
+/// rolled back, and reported success at rolling back.
+///
+/// The `bin\` entries keep the `Zed` spelling on purpose -- `bundle-windows.ps1` renames
+/// the CLI to `bin\zed.exe`, and Windows paths are case-insensitive, so those resolve.
+pub(crate) const APP_EXE: &str = "Zode.exe";
+
 pub(crate) struct Job {
     pub apply: Box<dyn Fn(&Path) -> Result<()> + Send + Sync>,
     pub rollback: Box<dyn Fn(&Path) -> Result<()> + Send + Sync>,
@@ -172,7 +183,7 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         // Move old files
         // Not deleting because installing new files can fail
         Job::mkdir(p("old")),
-        Job::move_file(p("Zed.exe"), p("old\\Zed.exe")),
+        Job::move_file(p("Zode.exe"), p("old\\Zode.exe")),
         Job::mkdir(p("old\\bin")),
         Job::move_file(p("bin\\Zed.exe"), p("old\\bin\\Zed.exe")),
         Job::move_file(p("bin\\zed"), p("old\\bin\\zed")),
@@ -189,7 +200,7 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         //
         Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
         // Copy new files
-        Job::move_file(p("install\\Zed.exe"), p("Zed.exe")),
+        Job::move_file(p("install\\Zode.exe"), p("Zode.exe")),
         Job::move_file(p("install\\bin\\Zed.exe"), p("bin\\Zed.exe")),
         Job::move_file(p("install\\bin\\zed"), p("bin\\zed")),
         //
@@ -279,7 +290,7 @@ pub(crate) static JOBS: LazyLock<[Job; 9]> = LazyLock::new(|| {
 fn release_file_handles(app_dir: &Path) -> Result<()> {
     // Files that commonly get locked by Explorer or other processes
     let files_to_release = [
-        app_dir.join("Zed.exe"),
+        app_dir.join("Zode.exe"),
         app_dir.join("bin\\Zed.exe"),
         app_dir.join("bin\\zed"),
         app_dir.join("conpty.dll"),
@@ -428,7 +439,13 @@ pub(crate) fn perform_update(app_dir: &Path, hwnd: Option<isize>, launch: bool) 
 
     if launch {
         #[allow(clippy::disallowed_methods, reason = "doesn't run in the main binary")]
-        let _ = std::process::Command::new(app_dir.join("Zed.exe")).spawn();
+        if let Err(error) = std::process::Command::new(app_dir.join(APP_EXE)).spawn() {
+            // The update itself has already succeeded at this point, so this is not a
+            // rollback case -- but the user is left staring at a closed editor, and a
+            // silent failure here is indistinguishable from the app simply never coming
+            // back. Say so in the log the dialog surfaces.
+            log::error!("update installed, but relaunching {APP_EXE} failed: {error:#}");
+        }
     }
     log::info!("Update completed successfully");
     Ok(())
