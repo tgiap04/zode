@@ -19,7 +19,10 @@ use std::collections::BTreeSet;
 const ALLOWED_TO_DIFFER: &[(&str, &str)] = &[
     // The harness builds its own `AppState` and drives windows itself, so the
     // app's startup-only wiring has no counterpart in it.
-    ("auto_update", "checks GitHub on a timer; a test must not"),
+    (
+        "auto_update",
+        "reaches the network when asked; a test must not",
+    ),
     (
         "auto_update_ui",
         "surfaces auto_update, which the harness omits",

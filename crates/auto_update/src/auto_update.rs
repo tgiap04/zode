@@ -8,6 +8,7 @@ use http_client::{HttpClient, HttpRequestExt as _, RedirectPolicy, Request};
 use release_channel::ReleaseChannel;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use smol::fs::File;
 use smol::{fs, io::AsyncReadExt};
 use std::mem;
@@ -160,6 +161,11 @@ pub struct AutoUpdater {
 pub struct ReleaseAsset {
     pub version: String,
     pub url: String,
+    /// Lowercase hex SHA-256 the download must hash to, taken from the `digest` GitHub
+    /// reports for the asset. Required, not optional: an update whose bytes cannot be
+    /// checked is refused rather than installed, so there is no state in which this is
+    /// absent and the install still proceeds.
+    pub sha256: String,
     /// The release body, rendered as the release notes. `None` when the release has none.
     pub notes: Option<String>,
 }
@@ -176,6 +182,62 @@ struct LatestRelease {
 struct LatestReleaseAsset {
     name: String,
     browser_download_url: String,
+    /// GitHub reports this as `"sha256:<hex>"`. Optional in the payload -- assets
+    /// uploaded before GitHub began reporting digests carry `null` -- which is why the
+    /// absent case has to be a decision rather than a default. See `require_sha256`.
+    digest: Option<String>,
+}
+
+/// The hosts a release asset may legitimately be downloaded from.
+///
+/// Checked before the request goes out, not after: the URL arrives inside a JSON body, so
+/// without this the app would connect to whatever host that body named. The digest check
+/// in `download_release` is what makes the *bytes* trustworthy; this is what stops the
+/// request being made to a stranger in the first place.
+const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// Rejects a download URL that is not HTTPS on one of [`ALLOWED_DOWNLOAD_HOSTS`].
+///
+/// Compares the parsed host exactly rather than by prefix: `https://github.com.example/`
+/// starts with the expected text and is not GitHub.
+fn ensure_download_host_is_trusted(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).with_context(|| format!("unparsable asset url: {url:?}"))?;
+    anyhow::ensure!(
+        parsed.scheme() == "https",
+        "release asset url is not https: {url:?}"
+    );
+    let host = parsed.host_str().unwrap_or_default();
+    anyhow::ensure!(
+        ALLOWED_DOWNLOAD_HOSTS.contains(&host),
+        "release asset url points at {host:?}, which is not a GitHub release host. \
+         Refusing to download an update from an unexpected host."
+    );
+    Ok(())
+}
+
+/// Pulls the lowercase hex SHA-256 out of GitHub's `"sha256:<hex>"` digest field.
+///
+/// Fails closed. An asset with no digest, or a digest in some other algorithm or shape,
+/// means the download cannot be checked against anything -- and an update that cannot be
+/// checked is refused, because installing it is the one action that is hard to undo.
+fn require_sha256(asset_name: &str, digest: Option<&str>) -> Result<String> {
+    let digest = digest.map(str::trim).unwrap_or_default();
+    let hex = digest.strip_prefix("sha256:").with_context(|| {
+        format!(
+            "release asset {asset_name} carries no sha256 digest (got {digest:?}). \
+             Refusing to offer an update whose contents cannot be verified."
+        )
+    })?;
+    let hex = hex.to_ascii_lowercase();
+    anyhow::ensure!(
+        hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "release asset {asset_name} lists a malformed sha256: {digest:?}"
+    );
+    Ok(hex)
 }
 
 /// Reads a path under this repository's releases API.
@@ -500,11 +562,10 @@ impl AutoUpdater {
         // Name both sides on a miss. This is the failure mode when the bundling scripts
         // rename an asset and this table is not updated with them, and knowing only one
         // half of the mismatch makes that a guessing game.
-        let asset_url = release
+        let asset = release
             .assets
             .iter()
             .find(|asset| asset.name == wanted_asset)
-            .map(|asset| asset.browser_download_url.clone())
             .with_context(|| {
                 let published = release
                     .assets
@@ -518,13 +579,20 @@ impl AutoUpdater {
                 )
             })?;
 
+        // Both checks happen here, before anything is downloaded: an update that could
+        // only be rejected after pulling a few hundred megabytes should never be offered
+        // as available in the first place.
+        ensure_download_host_is_trusted(&asset.browser_download_url)?;
+        let sha256 = require_sha256(&asset.name, asset.digest.as_deref())?;
+
         Ok(ReleaseAsset {
             version: release
                 .tag_name
                 .strip_prefix('v')
                 .unwrap_or(&release.tag_name)
                 .to_string(),
-            url: asset_url,
+            url: asset.browser_download_url.clone(),
+            sha256,
             notes: release.body,
         })
     }
@@ -743,12 +811,28 @@ impl AutoUpdater {
     }
 }
 
+/// Downloads `release` to `target_path`, refusing it unless the bytes hash to the SHA-256
+/// GitHub published for the asset.
+///
+/// The bytes land in a temp file beside the target and are only renamed into place once
+/// the digest matches, so `target_path` never holds an unverified payload -- not even
+/// briefly, and not if the process dies mid-download. Everything downstream of this
+/// function mounts, extracts or executes what it finds there.
+///
+/// Redirects are still followed, which is safe precisely because of the digest: wherever
+/// the bytes end up being served from, they have to be the bytes GitHub named.
 async fn download_release(
     target_path: &Path,
     release: ReleaseAsset,
     client: Arc<dyn HttpClient>,
 ) -> Result<()> {
-    let mut target_file = File::create(&target_path).await?;
+    ensure_download_host_is_trusted(&release.url)?;
+
+    let parent = target_path
+        .parent()
+        .context("update download path has no parent directory")?;
+    let temp = tempfile::Builder::new().tempfile_in(parent)?;
+    let mut temp_file = File::create(temp.path()).await?;
 
     let mut response = client.get(&release.url, Default::default(), true).await?;
     anyhow::ensure!(
@@ -756,8 +840,35 @@ async fn download_release(
         "failed to download update: {:?}",
         response.status()
     );
-    smol::io::copy(response.body_mut(), &mut target_file).await?;
-    log::info!("downloaded update. path:{:?}", target_path);
+
+    // Hashed while streaming so a release artifact is never held entirely in memory.
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = response.body_mut().read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        smol::io::AsyncWriteExt::write_all(&mut temp_file, &buffer[..read]).await?;
+    }
+    smol::io::AsyncWriteExt::flush(&mut temp_file).await?;
+    drop(temp_file);
+
+    let actual = hex::encode(hasher.finalize());
+    anyhow::ensure!(
+        actual == release.sha256,
+        "checksum mismatch for the {} update: GitHub published {}, the download hashed \
+         to {actual}. Refusing to install it.",
+        release.version,
+        release.sha256
+    );
+
+    // Only now does anything appear at the path the installer will read.
+    temp.persist(target_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("could not move the verified update into {target_path:?}"))?;
+    log::info!("downloaded and verified update. path:{:?}", target_path);
 
     Ok(())
 }
@@ -972,6 +1083,14 @@ mod tests {
     pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
     impl Global for InstallOverride {}
 
+    /// The body the fake download serves, and its digest. Written out rather than computed
+    /// so that a change to the payload has to be a deliberate change to the digest too --
+    /// a fixture that hashes itself would keep passing through exactly the tampering these
+    /// tests exist to catch.
+    const FAKE_UPDATE_BODY: &str = "<fake-zed-update>";
+    const FAKE_UPDATE_SHA256: &str =
+        "8db332cc94a1b4c638f6a6a30296ed6481ad6f0f187158e23127a27e7807e96c";
+
     #[gpui::test]
     async fn test_auto_update_downloads(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
@@ -1000,13 +1119,22 @@ mod tests {
                 let latest_path = latest_path.clone();
                 async move {
                     if latest_path == req.uri().path() {
+                        // A real GitHub release host, because the updater now refuses to
+                        // download from anywhere else. The fake client still routes on
+                        // the path alone.
                         let (version, download) = if release_available {
-                            ("0.100.1", "https://test.example/new-download")
+                            (
+                                "0.100.1",
+                                "https://objects.githubusercontent.com/new-download",
+                            )
                         } else {
-                            ("0.100.0", "https://test.example/old-download")
+                            (
+                                "0.100.0",
+                                "https://objects.githubusercontent.com/old-download",
+                            )
                         };
                         let body = format!(
-                            r#"{{"tag_name":"v{version}","body":"notes for {version}","assets":[{{"name":"{asset}","browser_download_url":"{download}"}}]}}"#
+                            r#"{{"tag_name":"v{version}","body":"notes for {version}","assets":[{{"name":"{asset}","browser_download_url":"{download}","digest":"sha256:{FAKE_UPDATE_SHA256}"}}]}}"#
                         );
                         return Ok(Response::builder().status(200).body(body.into()).unwrap());
                     } else if req.uri().path() == "/new-download" {
@@ -1068,7 +1196,7 @@ mod tests {
             }
         );
 
-        dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
+        dmg_tx.send(FAKE_UPDATE_BODY.to_owned()).unwrap();
 
         let tmp_dir = Arc::new(tempdir().unwrap());
 
@@ -1101,7 +1229,110 @@ mod tests {
         cx.update(|cx| cx.restart());
         let path = will_restart.await.unwrap().unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), FAKE_UPDATE_BODY);
+    }
+
+    /// The point of the digest is to reject bytes that are not the published ones, and a
+    /// test that only ever feeds it matching bytes would pass just as happily if the
+    /// comparison were deleted. This one serves a payload GitHub did not vouch for.
+    #[gpui::test]
+    async fn a_download_that_does_not_match_its_digest_is_refused_and_left_behind(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let client = FakeHttpClient::create(|_| async move {
+            Ok(Response::builder()
+                .status(200)
+                .body("<tampered-update>".into())
+                .unwrap())
+        });
+
+        let dir = tempdir().unwrap();
+        let target_path = dir.path().join("Zode.dmg");
+        let release = ReleaseAsset {
+            version: "0.100.1".to_owned(),
+            url: "https://objects.githubusercontent.com/new-download".to_owned(),
+            // The digest of the body the updater *expected*, not the one served.
+            sha256: FAKE_UPDATE_SHA256.to_owned(),
+            notes: None,
+        };
+
+        let error = download_release(&target_path, release, client)
+            .await
+            .expect_err("a payload that does not match its digest must be refused");
+        assert!(
+            error.to_string().contains("checksum mismatch"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !target_path.exists(),
+            "rejected bytes must not be left where the installer would read them"
+        );
+    }
+
+    /// The digest is the whole defence, so an asset without one must stop the update
+    /// rather than fall through to an unchecked install.
+    #[test]
+    fn an_asset_without_a_digest_is_refused() {
+        let error = require_sha256("Zode-aarch64.dmg", None)
+            .expect_err("an asset with no digest must not yield a checksum");
+        assert!(
+            error.to_string().contains("no sha256 digest"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_or_foreign_digest_is_refused() {
+        for bad in [
+            "sha256:not-hex-at-all",
+            "sha256:abc",
+            "md5:8db332cc94a1b4c638f6a6a30296ed6481ad6f0f187158e23127a27e7807e96c",
+            "8db332cc94a1b4c638f6a6a30296ed6481ad6f0f187158e23127a27e7807e96c",
+            "",
+        ] {
+            assert!(
+                require_sha256("asset", Some(bad)).is_err(),
+                "should have rejected digest {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_well_formed_digest_is_normalized() {
+        let upper = format!("sha256:{}", FAKE_UPDATE_SHA256.to_ascii_uppercase());
+        assert_eq!(
+            require_sha256("asset", Some(&upper)).unwrap(),
+            FAKE_UPDATE_SHA256
+        );
+    }
+
+    /// A prefix comparison would accept the first two of these. The parsed host must be
+    /// compared whole.
+    #[test]
+    fn only_github_release_hosts_are_downloaded_from() {
+        for bad in [
+            "https://github.com.example.test/zode.dmg",
+            "https://objects.githubusercontent.com.attacker.test/zode.dmg",
+            "http://github.com/zode.dmg",
+            "file:///etc/passwd",
+            "https://example.test/zode.dmg",
+            "not a url",
+        ] {
+            assert!(
+                ensure_download_host_is_trusted(bad).is_err(),
+                "should have rejected {bad:?}"
+            );
+        }
+
+        for good in [
+            "https://github.com/tgiap04/zode/releases/download/v0.1.1/Zode-aarch64.dmg",
+            "https://objects.githubusercontent.com/anything",
+            "https://release-assets.githubusercontent.com/anything",
+        ] {
+            ensure_download_host_is_trusted(good)
+                .unwrap_or_else(|error| panic!("should have accepted {good:?}: {error}"));
+        }
     }
 
     #[test]

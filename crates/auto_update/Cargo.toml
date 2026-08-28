@@ -16,15 +16,18 @@ doctest = false
 anyhow.workspace = true
 db.workspace = true
 gpui.workspace = true
+hex.workspace = true
 http_client = { workspace = true, features = ["test-support"] }
 log.workspace = true
 release_channel.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 settings.workspace = true
 smol.workspace = true
 tempfile.workspace = true
+url.workspace = true
 util.workspace = true
 workspace.workspace = true
 
