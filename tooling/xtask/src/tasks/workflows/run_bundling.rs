@@ -23,7 +23,7 @@ pub fn run_bundling() -> Workflow {
     // No Nix jobs: they authenticate against upstream's Nix binary cache through a
     // Namespace-only cache action, so they cannot run here. This workflow's remaining
     // purpose is on-demand bundling via the `run-bundling` label.
-    named::workflow()
+    named::workflow!()
         .on(Event::default().pull_request(
             PullRequest::default().types([PullRequestType::Labeled, PullRequestType::Synchronize]),
         ))
@@ -78,7 +78,7 @@ pub(crate) fn bundle_mac(
     deps: &[&NamedJob],
 ) -> NamedJob {
     pub fn bundle_mac(arch: Arch) -> Step<Run> {
-        named::bash(&format!("./script/bundle-mac {arch}-apple-darwin"))
+        named::bash!(&format!("./script/bundle-mac {arch}-apple-darwin"))
     }
     let platform = Platform::Mac;
     let artifact_name = match arch {
@@ -134,7 +134,7 @@ pub(crate) fn bundle_linux(
     // rather than a digest: this is a build environment, not a shipped artifact, and a
     // digest would trade a modest supply-chain gain for a recurring manual bump.
     fn check_glibc_floor(artifact_name: &str) -> Step<Run> {
-        named::bash(format!(
+        named::bash!(format!(
             "./script/check-glibc-floor target/release/{artifact_name}"
         ))
     }
@@ -179,8 +179,8 @@ pub(crate) fn bundle_windows(
     // script derives that path itself via `ParseZedWorkspace`.
     pub fn bundle_windows(arch: Arch) -> Step<Run> {
         match arch {
-            Arch::X86_64 => named::pwsh("script/bundle-windows.ps1 -Architecture x86_64"),
-            Arch::AARCH64 => named::pwsh("script/bundle-windows.ps1 -Architecture aarch64"),
+            Arch::X86_64 => named::pwsh!("script/bundle-windows.ps1 -Architecture x86_64"),
+            Arch::AARCH64 => named::pwsh!("script/bundle-windows.ps1 -Architecture aarch64"),
         }
     }
     let artifact_name = match arch {
@@ -225,13 +225,13 @@ fn set_release_channel_from_tag(platform: Platform) -> Step<Run> {
 
 fn set_release_channel_to_nightly(platform: Platform) -> Step<Run> {
     match platform {
-        Platform::Linux | Platform::Mac => named::bash(indoc::indoc! {r#"
+        Platform::Linux | Platform::Mac => named::bash!(indoc::indoc! {r#"
             set -eu
             version=$(git rev-parse --short HEAD)
             echo "Publishing version: ${version} on release channel nightly"
             echo "nightly" > crates/zed/RELEASE_CHANNEL
         "#}),
-        Platform::Windows => named::pwsh(indoc::indoc! {r#"
+        Platform::Windows => named::pwsh!(indoc::indoc! {r#"
             $ErrorActionPreference = "Stop"
             $version = git rev-parse --short HEAD
             Write-Host "Publishing version: $version on release channel nightly"

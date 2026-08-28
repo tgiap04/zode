@@ -11,9 +11,9 @@ pub(crate) fn run_unit_evals() -> Workflow {
     let model_name = WorkflowInput::string("model_name", None);
     let commit_sha = WorkflowInput::string("commit_sha", None);
 
-    let unit_evals = named::job(unit_evals(Some(&commit_sha)));
+    let unit_evals = named::job!(unit_evals(Some(&commit_sha)));
 
-    named::workflow()
+    named::workflow!()
         .name("run_unit_evals")
         .on(Event::default().workflow_dispatch(
             WorkflowDispatch::default()
@@ -40,7 +40,7 @@ fn add_api_keys(step: Step<Run>) -> Step<Run> {
 pub(crate) fn run_cron_unit_evals() -> Workflow {
     let unit_evals = cron_unit_evals();
 
-    named::workflow()
+    named::workflow!()
         .name("run_cron_unit_evals")
         .on(Event::default()
             // .schedule([
@@ -58,7 +58,7 @@ pub(crate) fn run_cron_unit_evals() -> Workflow {
 
 fn cron_unit_evals() -> NamedJob {
     fn send_failure_to_slack() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "slackapi",
             "slack-github-action",
             "b0fa283ad8fea605de13dc3f449259339835fc52",
@@ -72,7 +72,7 @@ fn cron_unit_evals() -> NamedJob {
         "#}))
     }
 
-    named::job(cron_unit_evals_job().add_step(send_failure_to_slack()))
+    named::job!(cron_unit_evals_job().add_step(send_failure_to_slack()))
 }
 
 const UNIT_EVAL_MODELS: &[&str] = &[

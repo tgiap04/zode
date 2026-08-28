@@ -55,7 +55,7 @@ pub(crate) fn release() -> Workflow {
     let upload_release_assets = upload_release_assets(&upload_deps, &bundle);
     let validate_release_assets = validate_release_assets(&[&upload_release_assets]);
 
-    named::workflow()
+    named::workflow!()
         .on(Event::default().push(Push::default().tags(vec!["v*".to_string()])))
         .concurrency(vars::one_workflow_per_non_main_branch())
         .add_env(("CARGO_TERM_COLOR", "always"))
@@ -146,17 +146,17 @@ fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
     // push access, so a `contents: read` token gets `release not found` for a release that
     // is plainly there -- which is exactly how v0.1.0 failed here after all six bundles and
     // the upload had already succeeded.
-    named::job(
+    named::job!(
         steps::writes_to_releases(dependant_job(deps))
             .runs_on(runners::LINUX_SMALL)
             .add_step(
-                named::bash(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
+                named::bash!(&validation_script).add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
             ),
     )
 }
 
 pub(crate) fn download_workflow_artifacts() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "actions",
         "download-artifact",
         "018cc2cf5baa6db3ef3c5f8a56943fffe632ef53", // v6.0.0
@@ -171,14 +171,14 @@ pub(crate) fn prep_release_artifacts() -> Step<Run> {
         script_lines.push(mv_command)
     }
 
-    named::bash(&script_lines.join("\n"))
+    named::bash!(&script_lines.join("\n"))
 }
 
 fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> NamedJob {
     let mut deps = deps.to_vec();
     deps.extend(bundle.jobs());
 
-    named::job(
+    named::job!(
         steps::writes_to_releases(dependant_job(&deps))
             .runs_on(runners::LINUX_MEDIUM)
             .add_step(download_workflow_artifacts())
@@ -198,7 +198,7 @@ fn create_draft_release() -> NamedJob {
     // and point at the wrong project. Nothing here can fail on a first release: with no
     // prior tag it simply says so.
     fn generate_release_notes() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             prior_tag=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
             {
                 if [ -n "$prior_tag" ]; then
@@ -222,7 +222,7 @@ fn create_draft_release() -> NamedJob {
     // next is misled. Warn, never fail -- releasing straight from a tag without a bump
     // commit is a deliberate property of this fork (see script/determine-release-channel).
     fn warn_on_version_divergence() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             # The first `version =` in the manifest is the one under [package].
             manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zed/Cargo.toml | head -1)
             if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
@@ -234,11 +234,11 @@ fn create_draft_release() -> NamedJob {
     }
 
     fn create_release() -> Step<Run> {
-        named::bash("script/create-draft-release target/release-notes.md")
+        named::bash!("script/create-draft-release target/release-notes.md")
             .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))
     }
 
-    named::job(
+    named::job!(
         steps::writes_to_releases(release_job(&[]))
             .runs_on(runners::LINUX_SMALL)
             // Full history, not a fixed depth: `git describe --tags` has to be able to

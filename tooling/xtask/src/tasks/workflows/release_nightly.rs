@@ -41,7 +41,7 @@ pub fn release_nightly() -> Workflow {
 
     let publish_nightly = publish_nightly_job(&bundle);
 
-    named::workflow()
+    named::workflow!()
         .on(Event::default()
             // Fire every day at 7:00am UTC (Roughly before EU workday and after US workday)
             .schedule([Schedule::new("0 7 * * *")])
@@ -85,7 +85,7 @@ fn main_moved_since_nightly() -> NamedJob {
 
     let output = StepOutput::new(&compare, MAIN_MOVED_OUTPUT);
 
-    named::job(
+    named::job!(
         Job::default()
             .with_repository_owner_guard()
             .runs_on(runners::LINUX_SMALL)
@@ -121,7 +121,7 @@ fn check_style() -> NamedJob {
         .add_step(steps::checkout_repo().with_ref("main"))
         .add_step(steps::cargo_fmt());
 
-    named::job(job)
+    named::job!(job)
 }
 
 fn release_job(deps: &[&NamedJob]) -> Job {
@@ -139,7 +139,7 @@ fn release_job(deps: &[&NamedJob]) -> Job {
 /// bucket, so nothing external is needed and old builds do not accumulate.
 fn publish_nightly_job(bundle: &ReleaseBundleJobs) -> NamedJob {
     fn move_nightly_tag() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             if [ "$(git rev-parse nightly 2>/dev/null || true)" = "$(git rev-parse HEAD)" ]; then
               echo "Nightly tag already points to current commit. Skipping tagging."
               exit 0
@@ -155,7 +155,7 @@ fn publish_nightly_job(bundle: &ReleaseBundleJobs) -> NamedJob {
     // of a new release per run. The tag has to move first, or `gh release create` would
     // point the release at the previous commit.
     fn publish_rolling_prerelease() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             gh release view nightly --repo="$GITHUB_REPOSITORY" \
               || gh release create nightly --repo="$GITHUB_REPOSITORY" \
                    --prerelease --target main --title "Nightly" \

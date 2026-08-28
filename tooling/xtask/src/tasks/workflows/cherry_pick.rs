@@ -12,7 +12,7 @@ pub fn cherry_pick() -> Workflow {
     let channel = WorkflowInput::string("channel", None);
     let pr_number = WorkflowInput::string("pr_number", None);
     let cherry_pick = run_cherry_pick(&branch, &commit, &channel);
-    named::workflow()
+    named::workflow!()
         .run_name(format!("cherry_pick to {channel} #{pr_number}"))
         .on(Event::default().workflow_dispatch(
             WorkflowDispatch::default()
@@ -35,7 +35,7 @@ fn run_cherry_pick(
         channel: &WorkflowInput,
         token: &StepOutput,
     ) -> Step<Run> {
-        named::bash(r#"./script/cherry-pick "$BRANCH" "$COMMIT" "$CHANNEL""#)
+        named::bash!(r#"./script/cherry-pick "$BRANCH" "$COMMIT" "$CHANNEL""#)
             .add_env(("BRANCH", branch.to_string()))
             .add_env(("COMMIT", commit.to_string()))
             .add_env(("CHANNEL", channel.to_string()))
@@ -61,7 +61,7 @@ fn run_cherry_pick(
         ])
         .into();
 
-    named::job(
+    named::job!(
         Job::default()
             .runs_on(runners::LINUX_SMALL)
             .add_step(steps::checkout_repo())
