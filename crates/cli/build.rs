@@ -10,6 +10,12 @@ fn main() {
         println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=10.15.7");
     }
 
+    // `main.rs` reads RELEASE_VERSION through `option_env!`, which cargo does not track
+    // as a dependency. Without this, a warm build cache keeps whatever version was baked
+    // in first -- so a retagged build reports the older number to anyone running
+    // `zode --version`. Same reasoning as crates/zed/build.rs.
+    println!("cargo:rerun-if-env-changed=RELEASE_VERSION");
+
     // Populate git sha environment variable if git is available
     println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     if let Some(output) = Command::new("git")
