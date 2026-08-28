@@ -1280,21 +1280,44 @@ fn inhibit_screensaver(reason: &str, executor: BackgroundExecutor) -> Option<Dis
     };
 
     Some(DisplayWakeLock::new(move || {
-        // The proxy holds its own `Arc` clone of the connection, so capturing the
-        // connection here is belt-and-braces rather than load-bearing -- but the
-        // release has the same unbounded-wait problem as the take, and the same
-        // answer.
-        let released = smol::block_on(async {
-            let work = async { proxy.un_inhibit(cookie).await.map_err(|e| e.to_string()) };
-            let expired = async {
-                releasing.timer(BUS_TIMEOUT).await;
-                Err("timed out".to_owned())
-            };
-            smol::future::or(work, expired).await
-        });
-        if let Err(error) = released {
-            log::warn!("could not release the screensaver inhibit: {error}");
-        }
-        drop(connection);
+        /// How many times to retry `un_inhibit` off-thread before giving up.
+        ///
+        /// Chosen with `RETRY_INTERVAL` below to total a few seconds -- generous
+        /// against a bus that is merely slow to answer, and short enough that a
+        /// genuinely dead bus does not hold the connection open forever.
+        const MAX_ATTEMPTS: u32 = 10;
+        /// How long to wait between retries.
+        const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+        // Unlike the take above, nothing is waiting on this closure's return
+        // value -- it runs from `Drop`. That means it can afford to keep trying
+        // off-thread instead of racing one bounded attempt and abandoning it: the
+        // task below owns `connection` and `proxy` for as long as it keeps
+        // retrying, so dropping this closure right after spawning does not race
+        // the retries against a socket they still need.
+        let timer_executor = releasing.clone();
+        releasing
+            .spawn(async move {
+                // Keep `connection` alive for the lifetime of the retries even
+                // though `proxy` holds its own `Arc` clone -- belt-and-braces
+                // rather than load-bearing.
+                let _connection = connection;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    match proxy.un_inhibit(cookie).await {
+                        Ok(()) => return,
+                        Err(error) => {
+                            if attempt == MAX_ATTEMPTS {
+                                log::warn!(
+                                    "could not release the screensaver inhibit after \
+                                     {MAX_ATTEMPTS} attempts: {error}"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    timer_executor.timer(RETRY_INTERVAL).await;
+                }
+            })
+            .detach();
     }))
 }
