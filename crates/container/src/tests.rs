@@ -8,10 +8,17 @@
 //! The second kind is `#[ignore]`d, and this is the correction of a claim that
 //! used to stand here -- that Docker is on every machine and in CI, so they
 //! always run. Both halves were wrong. A runner may have the CLI and no daemon,
-//! and in that state `docker` does not fail, it *waits*: three of these hit
-//! nextest's 60-second timeout on Windows CI while passing on every machine
-//! that happened to have a daemon up. A test whose result depends on what is
-//! installed and running is a report about the machine, not about this crate.
+//! and in that state `docker` does not fail, it *waits*: these hit nextest's
+//! 60-second timeout on Windows CI while passing on every machine that happened
+//! to have a daemon up. A test whose result depends on what is installed and
+//! running is a report about the machine, not about this crate.
+//!
+//! The first pass at this ignored three and missed two. The two it missed were
+//! the ones whose own doc comments said the backend "answers" when the engine is
+//! absent -- true only where the CLI is absent too, and silent about the case
+//! where the CLI is present and the daemon is not. They stayed green until a
+//! Windows run found exactly that. What decides is whether a test calls an
+//! engine, not whether it has been caught hanging yet.
 //!
 //! Run them deliberately, on a machine with an engine:
 //!
@@ -45,11 +52,13 @@ fn the_fake_satisfies_the_shared_suite() {
 
 /// The suite must run against a real engine, not only the fake.
 ///
-/// Docker is on the machine of anyone working on this and in CI. When it is not,
-/// the backend answers `EngineMissing`/`EngineNotRunning` and the suite returns
-/// early rather than failing -- so this test is honest on a machine without
-/// Docker instead of red.
+/// The early-return on `EngineMissing`/`EngineNotRunning` makes this honest only
+/// where the CLI is absent or answers. Where the CLI exists and the daemon does
+/// not -- Windows CI -- `docker` waits instead, and the early return is never
+/// reached: the test dies on nextest's 60-second timeout. That is a report about
+/// the machine, so it joins the other engine tests behind `--run-ignored all`.
 #[test]
+#[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
 fn real_docker_satisfies_the_shared_suite() {
     let backend = DockerBackend::docker();
     let reached = block_on(shared_suite(&backend)).expect("real docker must satisfy the suite");
@@ -493,9 +502,11 @@ mod kubernetes {
     /// The shared suite, with the second backend. This is what phase 04 is for.
     ///
     /// On a machine with no cluster the backend answers `NotConfigured` and the
-    /// suite stops early rather than failing -- so this is honest here instead of
-    /// red, exactly as it is for Docker when Docker is absent.
+    /// suite stops early rather than failing. Where `kubectl` is installed but has
+    /// nothing to talk to, it waits instead of answering, and that early return is
+    /// never reached -- the same 60-second timeout Docker hit on Windows CI.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn kubernetes_satisfies_the_shared_suite() {
         let backend = KubernetesBackend::new();
         let reached = block_on(shared_suite(&backend))
