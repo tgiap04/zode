@@ -202,7 +202,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
     }
 
     fn keep_display_awake(&self, reason: &str) -> Option<DisplayWakeLock> {
-        inhibit_screensaver(reason)
+        inhibit_screensaver(reason, self.background_executor())
     }
 
     fn on_battery(&self) -> Option<bool> {
@@ -1236,12 +1236,18 @@ trait ScreenSaver {
 /// `Status::Unsupported` instead of the indicator claiming a hold it never got.
 /// Doing this on a background task would hand back a lock before knowing whether
 /// there was anything behind it.
-fn inhibit_screensaver(reason: &str) -> Option<DisplayWakeLock> {
+fn inhibit_screensaver(reason: &str, executor: BackgroundExecutor) -> Option<DisplayWakeLock> {
     /// Generous by two orders of magnitude against a healthy bus, and short
     /// enough that the pathological case is a hitch rather than a hang.
     const BUS_TIMEOUT: Duration = Duration::from_millis(250);
 
     let reason = reason.to_owned();
+    // The timeout comes from GPUI's clock rather than `smol::Timer`, which the
+    // repo disallows. Safe to await from inside `block_on` on this thread: the
+    // Linux dispatcher fires `dispatch_after` from a dedicated timer thread with
+    // an event loop of its own, so the wake does not depend on the main loop
+    // that this call is currently blocking.
+    let releasing = executor.clone();
     let taken = smol::block_on(async move {
         let work = async {
             let connection = zbus::Connection::session()
@@ -1257,7 +1263,7 @@ fn inhibit_screensaver(reason: &str) -> Option<DisplayWakeLock> {
             Ok((connection, proxy, cookie))
         };
         let expired = async {
-            smol::Timer::after(BUS_TIMEOUT).await;
+            executor.timer(BUS_TIMEOUT).await;
             Err(format!(
                 "the session bus did not answer within {BUS_TIMEOUT:?}"
             ))
@@ -1281,7 +1287,7 @@ fn inhibit_screensaver(reason: &str) -> Option<DisplayWakeLock> {
         let released = smol::block_on(async {
             let work = async { proxy.un_inhibit(cookie).await.map_err(|e| e.to_string()) };
             let expired = async {
-                smol::Timer::after(BUS_TIMEOUT).await;
+                releasing.timer(BUS_TIMEOUT).await;
                 Err("timed out".to_owned())
             };
             smol::future::or(work, expired).await
