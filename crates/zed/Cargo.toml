@@ -72,6 +72,7 @@ extensions_ui.workspace = true
 feature_flags.workspace = true
 feedback.workspace = true
 file_finder.workspace = true
+floating_pane.workspace = true
 fs.workspace = true
 futures.workspace = true
 git.workspace = true

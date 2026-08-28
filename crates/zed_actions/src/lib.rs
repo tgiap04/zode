@@ -815,6 +815,24 @@ pub mod container {
     );
 }
 
+pub mod floating_pane {
+    use gpui::actions;
+
+    actions!(
+        floating_pane,
+        [
+            /// Opens the floating window over the editor, or puts it away.
+            ToggleFloatingPane,
+            /// Opens a terminal as a tab in the floating window.
+            NewTerminal,
+            /// Opens an unsaved markdown note as a tab in the floating window.
+            NewMarkdownNote,
+            /// Opens an existing markdown file as a tab in the floating window.
+            OpenMarkdownNote,
+        ]
+    );
+}
+
 pub mod agents_sidebar {
     use gpui::actions;
 

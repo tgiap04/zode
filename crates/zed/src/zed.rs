@@ -4989,6 +4989,7 @@ mod tests {
                 "encoding_selector",
                 "feedback",
                 "file_finder",
+                "floating_pane",
                 "git",
                 "git_graph",
                 "git_onboarding",
@@ -5227,6 +5228,7 @@ mod tests {
             agent_ui::init(cx);
             database_ui::init(cx);
             container_ui::init(cx);
+            floating_pane::init(cx);
 
             repl::init(app_state.fs.clone(), cx);
             repl::notebook::init(cx);
