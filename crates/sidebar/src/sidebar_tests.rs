@@ -12,6 +12,13 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings_store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         project::DisableAiSettings::register(cx);
+        // Registers the container actions, so a test can press the rail button
+        // the way a person does rather than calling the handler behind it. A
+        // button wired to nothing is a defect this repo has shipped once already
+        // -- see `crates/zed/src/zed/init_list_tests.rs`.
+        container_ui::init(cx);
+        container_ui::use_fake_engines_for_test(cx);
+        database_ui::init(cx);
     });
 }
 

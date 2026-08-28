@@ -138,10 +138,45 @@ impl Sidebar {
                         }
                     }))),
             )
-            .children(panels)
-            .child(self.render_rail_database(window, cx))
-            .child(self.render_rail_agents(window, cx))
+            // The blocks between the project list and the footer scroll as a
+            // group once they no longer fit.
+            //
+            // They used to be `flex_shrink_0` siblings of the footer, which on a
+            // short window meant the scrolling project list collapsed to nothing
+            // and then the *footer* was cut off -- taking Settings and Open
+            // Project with it, the two buttons a person needs most when the rail
+            // has run out of room. Nothing changes on a window tall enough to
+            // hold them: a scroll container with room to spare draws no
+            // scrollbar and takes no space.
+            .child(
+                v_flex()
+                    .id("project-rail-blocks")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(panels)
+                    .child(self.render_rail_tools(window, cx))
+                    .child(self.render_rail_agents(window, cx)),
+            )
             .child(self.render_rail_footer(cx))
+            .into_any_element()
+    }
+
+    /// The buttons for the two tools that open as editor tabs.
+    ///
+    /// One block, because they are one group: both open a tab of their own the
+    /// way the agent buttons below them do, and the person who asked for the
+    /// container button asked for it here, beside the database. Neither is a
+    /// panel of the tool dock, so `render_rail_panels` would never draw either.
+    fn render_rail_tools(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .flex_shrink_0()
+            .py(RAIL_ICON_GAP)
+            .gap(RAIL_ICON_GAP)
+            .items_center()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(self.render_rail_database(window, cx))
+            .child(self.render_rail_container(window, cx))
             .into_any_element()
     }
 

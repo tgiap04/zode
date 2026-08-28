@@ -80,6 +80,7 @@ pub enum IconName {
     DiffSplitAuto,
     DiffUnified,
     Disconnected,
+    Docker,
     Download,
     EditorAtom,
     EditorCursor,

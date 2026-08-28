@@ -4975,6 +4975,7 @@ mod tests {
                 "collab",
                 "command_palette",
                 "console",
+                "container",
                 "context_server",
                 "csv",
                 "database",
@@ -5223,6 +5224,7 @@ mod tests {
             git_graph::init(cx);
             agent_ui::init(cx);
             database_ui::init(cx);
+            container_ui::init(cx);
 
             repl::init(app_state.fs.clone(), cx);
             repl::notebook::init(cx);

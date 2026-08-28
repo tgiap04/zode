@@ -796,6 +796,25 @@ pub mod database {
     );
 }
 
+pub mod container {
+    use gpui::actions;
+
+    actions!(
+        container,
+        [
+            /// Opens the container tab, or steps back to the tab that was being
+            /// read.
+            ToggleContainer,
+            /// Opens a second container tab beside the code, where
+            /// `ToggleContainer` brings the existing one forward.
+            OpenInEditorTab,
+            /// Opens the container list in a window of its own that floats above
+            /// other applications.
+            OpenInFloatingWindow,
+        ]
+    );
+}
+
 pub mod agents_sidebar {
     use gpui::actions;
 

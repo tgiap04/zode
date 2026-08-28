@@ -58,6 +58,7 @@ dap_adapters.workspace = true
 db.workspace = true
 debug_adapter_extension.workspace = true
 debugger_tools.workspace = true
+container_ui.workspace = true
 database_ui.workspace = true
 debugger_ui.workspace = true
 dev_container.workspace = true

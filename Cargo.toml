@@ -24,6 +24,7 @@ members = [
     "crates/component",
     "crates/component_preview",
     "crates/container",
+    "crates/container_ui",
     "crates/context_server",
     "crates/credentials_provider",
     "crates/csv_preview",
@@ -252,6 +253,7 @@ component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }
 console = "0.16"
 container = { path = "crates/container" }
+container_ui = { path = "crates/container_ui" }
 context_server = { path = "crates/context_server" }
 credentials_provider = { path = "crates/credentials_provider" }
 crossbeam = "0.8.4"
