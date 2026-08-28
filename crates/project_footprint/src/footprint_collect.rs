@@ -110,7 +110,7 @@ fn sum(
     let mut cpu_percent: Option<f32> = None;
     for pid in pids {
         if let Some(&rss) = rss_by_pid.get(pid) {
-            rss_bytes = Some(rss_bytes.unwrap_or(0) + rss);
+            rss_bytes = Some(rss_bytes.unwrap_or(0).saturating_add(rss));
         }
         if let Some(Some(cpu)) = cpu_by_pid.get(pid) {
             cpu_percent = Some(cpu_percent.unwrap_or(0.0) + cpu);

@@ -88,7 +88,7 @@ impl Footprints {
         let mut cpu_percent: Option<f32> = None;
         for (_, _, footprint) in &self.0 {
             if let Some(rss) = footprint.rss_bytes {
-                rss_bytes = Some(rss_bytes.unwrap_or(0) + rss);
+                rss_bytes = Some(rss_bytes.unwrap_or(0).saturating_add(rss));
             }
             if let Some(cpu) = footprint.cpu_percent {
                 cpu_percent = Some(cpu_percent.unwrap_or(0.0) + cpu);

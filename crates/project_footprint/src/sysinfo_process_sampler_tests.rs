@@ -112,6 +112,37 @@ fn shrinking_the_discovered_set_evicts_the_retained_map() {
 }
 
 #[test]
+fn a_pid_seen_only_by_a_narrow_tick_does_not_survive_the_next_discovery() {
+    // A PID sysinfo will never find, standing in for a real process that a
+    // narrow tick was handed (per `footprint_indicator`'s per-tick
+    // `collect_roots` call, which reaches `sample` even outside a discovery
+    // pass) and that had already exited by the time the next discovery tick
+    // ran. Before Fix 1, `sample` never wrote to `tracked`, so this PID had no
+    // ledger row, the `discovered.is_superset(&self.tracked)` guard in
+    // `descendants` never saw it as missing, and it stayed in `narrow`
+    // forever -- the unbounded leak this test pins shut.
+    const PHANTOM_PID: Pid = 999_999;
+
+    let mut sampler = SysinfoProcessSampler::new();
+    sampler.sample(&[PHANTOM_PID]);
+    assert!(
+        sampler.is_tracked(PHANTOM_PID),
+        "sample() must fold every PID it was handed into `tracked`, even one \
+         sysinfo could not find, or the eviction ledger can never learn about it"
+    );
+
+    // Self is not an ancestor of the phantom PID, so it is absent from this
+    // discovery pass's `discovered` set.
+    sampler.descendants(&[self_pid()]);
+
+    assert!(
+        !sampler.is_tracked(PHANTOM_PID),
+        "a PID that only a narrow sample ever touched must not survive a \
+         discovery pass once it is gone -- otherwise it leaks in `narrow` forever"
+    );
+}
+
+#[test]
 fn no_roots_means_no_enumeration() {
     let mut sampler = SysinfoProcessSampler::new();
     assert!(sampler.descendants(&[]).is_empty());

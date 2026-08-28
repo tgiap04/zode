@@ -171,7 +171,15 @@ impl ProjectFootprintIndicator {
                             .collect(),
                     );
                     if this
-                        .update(cx, |this, cx| this.apply(footprints, cx))
+                        .update(cx, |this, cx| {
+                            // Same "replaced wholesale, never merged" rule as
+                            // the normal path below: every project has zero
+                            // roots this tick, so nothing is tracked, and a
+                            // stale entry left behind here would be a PID this
+                            // sampler is no longer even looking at.
+                            this.known_pids.clear();
+                            this.apply(footprints, cx)
+                        })
                         .is_err()
                     {
                         break;

@@ -194,6 +194,21 @@ impl ProcessSampler for SysinfoProcessSampler {
             })
             .collect();
         self.primed = true;
+
+        // A PID handed only to a narrow tick (e.g. a terminal opened and
+        // closed inside one ~30 s discovery window) is what `refresh_processes_specifics`
+        // above just planted an entry for in `narrow`. `tracked` is otherwise
+        // written only by `descendants`, so without this union that entry has
+        // no ledger row and `discovered.is_superset(&self.tracked)` in
+        // `descendants` can never see it die -- an unbounded leak, which the
+        // repo's rules forbid outright. Folding every narrow-tick PID in here
+        // means the superset check fails, and therefore rebuilds, more often
+        // than it used to: `narrow` loses its CPU baseline (see `primed`)
+        // whenever any PID it has ever held -- not just ones `descendants`
+        // itself found -- turns out to be gone. That is the deliberate price
+        // of not leaking.
+        self.tracked.extend(pids.iter().copied());
+
         samples
     }
 
@@ -210,5 +225,9 @@ impl SysinfoProcessSampler {
 
     pub(crate) fn enumerations(&self) -> usize {
         self.enumerations
+    }
+
+    pub(crate) fn is_tracked(&self, pid: Pid) -> bool {
+        self.tracked.contains(&pid)
     }
 }
