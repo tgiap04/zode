@@ -64,12 +64,16 @@ See [Languages](./languages.md) for language-specific setup instructions.
 
 Zode includes built-in AI assistance. An agent opens as a tab beside your files rather than in a separate panel:
 
-- Click the Claude Code or Codex icon in the sidebar rail to open that agent — it runs as a terminal session of the agent's own CLI, in a tab beside your files.
-- To start a second session of an agent that's already open, use the `+` menu in the tab bar and pick "New Claude Code" or "New Codex".
+- Click the Claude Code, Codex, Antigravity, or Copilot icon in the sidebar rail to open that agent — it runs as a terminal session of the agent's own CLI, in a tab beside your files.
+- Each agent needs its own CLI installed: `claude`, `codex`, `agy`, and `copilot` respectively. Clicking an agent whose CLI is missing offers you the vendor's install command rather than failing silently.
+- To start a second session of an agent that's already open, use the `+` menu in the tab bar and pick "New Claude Code", "New Codex", "New Antigravity", or "New Copilot".
+
+Two things are uneven across the four, because the CLIs themselves are uneven:
+
+- **Session history** covers Claude Code, Codex and Copilot, each of which writes its conversations somewhere on this machine. Antigravity does not — `agy` keeps its conversations server-side and leaves nothing on disk, so it has no rows in the history panel.
+- **Subscription quota** on the status bar covers Claude Code and Codex only. Neither Antigravity nor Copilot publishes a way to read it that does not require this editor to hold a credential of its own — see [Agent Usage Indicator](./agent-usage.md) for what was tried.
 
 For inline assistance, use `Ctrl+Enter` (macOS, Linux, and Windows all use the same key here).
-
-The status bar also shows each signed-in agent's subscription quota — see [Agent Usage Indicator](./agent-usage.md).
 
 ## Coming from Another Editor?
 

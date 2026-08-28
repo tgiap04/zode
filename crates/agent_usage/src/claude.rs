@@ -12,6 +12,7 @@
 //! never written anywhere.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::AsyncReadExt as _;
@@ -23,6 +24,22 @@ use crate::{UsageWindow, WindowKind};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// How many times to ask, in total, before giving up on a transient answer.
+const MAX_ATTEMPTS: usize = 3;
+/// Waits between attempts, used when the server does not say how long to wait.
+const BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+/// Ceiling on any single wait, including one the server asked for.
+///
+/// A `Retry-After` of ten minutes is a perfectly legal answer, and honouring it
+/// literally would hold a background task open long past the point where the
+/// 60-second poll makes the whole attempt moot. Clamping keeps the retry chain
+/// shorter than `POLL_INTERVAL`, so a retry never overlaps the next poll and
+/// doubles the load this exists to reduce.
+const MAX_WAIT: Duration = Duration::from_secs(5);
+/// Client-side statuses that mean "later", not "no": too many requests, a request
+/// timeout, and an early-data rejection.
+const RETRYABLE_STATUSES: [u16; 3] = [408, 425, 429];
 
 /// The environment variables that mean "I am not talking to my subscription".
 ///
@@ -51,6 +68,15 @@ pub enum Unavailable {
     UnsupportedPlan,
     /// The request or the parse failed. Carries a short reason, never a token.
     Request(SharedString),
+    /// The endpoint refused for tempo rather than for cause, and kept refusing
+    /// across every attempt.
+    ///
+    /// Separate from [`Self::Request`] because it means something different to
+    /// the person reading the tooltip: nothing is misconfigured and nothing is
+    /// broken, the account is simply being asked too often — most likely by this
+    /// editor and the Claude Code CLI at once, since they share one undocumented
+    /// endpoint and one token.
+    RateLimited,
 }
 
 /// The parts of Claude Code's credential file this needs.
@@ -282,40 +308,280 @@ pub async fn fetch(
         .filter(|token| !token.trim().is_empty())
         .ok_or(Unavailable::NoCredentials)?;
 
-    let request = Request::builder()
+    fetch_with_token(http_client, executor, &token).await
+}
+
+/// The request-and-retry half of [`fetch`], with the credential already in hand.
+///
+/// Split out so a test can drive the retry behaviour: `fetch` reads the OS
+/// keychain and the user's home directory, neither of which a test can stub, and
+/// the retry policy is the part worth testing.
+async fn fetch_with_token(
+    http_client: Arc<dyn HttpClient>,
+    executor: BackgroundExecutor,
+    token: &str,
+) -> Result<Vec<UsageWindow>, Unavailable> {
+    // Attempt, wait, attempt. A 429 here is routine rather than exceptional:
+    // this endpoint is shared with the Claude Code CLI on the same token, so two
+    // clients on one account collide, and a single collision used to leave the
+    // indicator blank until the next poll a minute later.
+    let mut last_retryable = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        match request_once(&http_client, token).await {
+            Attempt::Done(windows) => return Ok(windows),
+            Attempt::Fatal(reason) => return Err(reason),
+            Attempt::Retry { after, reason } => {
+                last_retryable = Some(reason);
+                let Some(backoff) = BACKOFF.get(attempt) else {
+                    break;
+                };
+                let wait = after.unwrap_or(*backoff).min(MAX_WAIT);
+                executor.timer(wait).await;
+            }
+        }
+    }
+
+    Err(last_retryable.unwrap_or(Unavailable::RateLimited))
+}
+
+/// One request, classified. Nothing here waits or retries — that is the caller's
+/// job, so this stays a straight line that a test can drive one answer at a time.
+enum Attempt {
+    Done(Vec<UsageWindow>),
+    /// Worth asking again. `after` is what the server asked for, when it said.
+    Retry {
+        after: Option<Duration>,
+        reason: Unavailable,
+    },
+    /// Asking again would not help, and for 401/403 would make it worse.
+    Fatal(Unavailable),
+}
+
+async fn request_once(http_client: &Arc<dyn HttpClient>, token: &str) -> Attempt {
+    let request = match Request::builder()
         .uri(USAGE_URL)
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {token}"))
         .header("anthropic-beta", OAUTH_BETA)
         .body(AsyncBody::default())
-        .map_err(|_| Unavailable::Request("the usage request could not be built".into()))?;
+    {
+        Ok(request) => request,
+        Err(_) => {
+            return Attempt::Fatal(Unavailable::Request(
+                "the usage request could not be built".into(),
+            ));
+        }
+    };
 
-    let mut response = http_client
-        .send(request)
-        .await
-        .map_err(|_| Unavailable::Request("the usage endpoint could not be reached".into()))?;
+    let mut response = match http_client.send(request).await {
+        Ok(response) => response,
+        // A transport failure is the other thing that clears up on its own.
+        Err(_) => {
+            return Attempt::Retry {
+                after: None,
+                reason: Unavailable::Request("the usage endpoint could not be reached".into()),
+            };
+        }
+    };
 
-    if !response.status().is_success() {
+    let status = response.status();
+    if !status.is_success() {
         // The status, never the body: an error body from an authenticated
         // endpoint is exactly the sort of thing that echoes a credential back.
-        return Err(Unavailable::Request(
-            format!("the usage endpoint answered {}", response.status().as_u16()).into(),
-        ));
+        let reason = if status.as_u16() == 429 {
+            Unavailable::RateLimited
+        } else {
+            Unavailable::Request(format!("the usage endpoint answered {}", status.as_u16()).into())
+        };
+        // 429 is a tempo problem, 5xx is the server's problem, and 408 and 425 are
+        // transient by definition — all four are worth asking again. Any other 4xx
+        // is about this request: retrying a 401 just spends the rate limit on an
+        // answer that will not change.
+        return if RETRYABLE_STATUSES.contains(&status.as_u16()) || status.is_server_error() {
+            Attempt::Retry {
+                after: retry_after(&response),
+                reason,
+            }
+        } else {
+            Attempt::Fatal(reason)
+        };
     }
 
     let mut body = String::new();
-    response
-        .body_mut()
-        .read_to_string(&mut body)
-        .await
-        .map_err(|_| Unavailable::Request("the usage response could not be read".into()))?;
+    if response.body_mut().read_to_string(&mut body).await.is_err() {
+        return Attempt::Retry {
+            after: None,
+            reason: Unavailable::Request("the usage response could not be read".into()),
+        };
+    }
 
-    parse_windows(&body)
+    match parse_windows(&body) {
+        Ok(windows) => Attempt::Done(windows),
+        // A body that arrived but did not parse is a shape change, not a hiccup.
+        Err(reason) => Attempt::Fatal(reason),
+    }
+}
+
+/// `Retry-After` in seconds, when the server sent one that reads as seconds.
+///
+/// The header also allows an HTTP-date. That form is not parsed: pulling in a
+/// date parser for a hint that the backoff already covers is a poor trade, and
+/// an unparsed header falls back to the backoff rather than to zero.
+fn retry_after<T>(response: &http_client::Response<T>) -> Option<Duration> {
+    response
+        .headers()
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use http_client::{FakeHttpClient, Response};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A client that answers a scripted list of statuses in order, then repeats
+    /// the last one, and counts how many times it was asked.
+    fn scripted(
+        statuses: Vec<u16>,
+        retry_after: Option<&'static str>,
+    ) -> (Arc<dyn HttpClient>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let client = FakeHttpClient::create(move |_| {
+            let index = seen.fetch_add(1, Ordering::SeqCst);
+            let status = *statuses.get(index).unwrap_or(statuses.last().unwrap());
+            async move {
+                let mut builder = Response::builder().status(status);
+                if let Some(value) = retry_after {
+                    builder = builder.header("retry-after", value);
+                }
+                let body = if status == 200 {
+                    // Well-formed and empty: zero windows is a valid answer, so
+                    // this proves the success path without pinning the payload.
+                    r#"{"limits": []}"#.to_string()
+                } else {
+                    String::new()
+                };
+                Ok(builder.body(body.into()).unwrap())
+            }
+        });
+        (client as Arc<dyn HttpClient>, calls)
+    }
+
+    /// The bug this closes: one transient 429 used to leave the indicator blank
+    /// until the next poll, a minute later.
+    #[gpui::test]
+    async fn a_single_429_is_absorbed_by_a_retry(cx: &mut gpui::TestAppContext) {
+        let (client, calls) = scripted(vec![429, 200], None);
+        let windows = fetch_with_token(client, cx.executor(), "t")
+            .await
+            .expect("the second attempt succeeded");
+        assert_eq!(windows, Vec::new());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "asked once more, not twice more"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_429_that_never_clears_reports_rate_limiting_and_stops(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (client, calls) = scripted(vec![429], None);
+        assert_eq!(
+            fetch_with_token(client, cx.executor(), "t").await,
+            Err(Unavailable::RateLimited),
+            "the reason must say it is tempo, not a bare status code"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            MAX_ATTEMPTS,
+            "bounded: retrying forever would spend the rate limit it is waiting on"
+        );
+    }
+
+    /// A 5xx is the server's problem and clears up; a 401 is this request's
+    /// problem and will not. Retrying the second one spends the shared rate limit
+    /// on an answer that cannot change.
+    #[gpui::test]
+    async fn a_server_error_retries_and_an_auth_error_does_not(cx: &mut gpui::TestAppContext) {
+        let (client, calls) = scripted(vec![503, 200], None);
+        assert!(fetch_with_token(client, cx.executor(), "t").await.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let (client, calls) = scripted(vec![401], None);
+        assert!(matches!(
+            fetch_with_token(client, cx.executor(), "t").await,
+            Err(Unavailable::Request(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "401 must not be retried");
+    }
+
+    /// 408 and 425 read as client errors but mean "later", not "no". Lumping them
+    /// in with 401 would turn a timeout into a permanent blank.
+    #[gpui::test]
+    async fn a_timeout_or_early_data_rejection_is_retried(cx: &mut gpui::TestAppContext) {
+        for status in RETRYABLE_STATUSES {
+            let (client, calls) = scripted(vec![status, 200], None);
+            assert!(
+                fetch_with_token(client, cx.executor(), "t").await.is_ok(),
+                "{status} should have been retried"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{status}");
+        }
+
+        // The neighbours that must not be retried, so this cannot quietly widen.
+        for status in [400u16, 401, 403, 404] {
+            let (client, calls) = scripted(vec![status], None);
+            assert!(fetch_with_token(client, cx.executor(), "t").await.is_err());
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "{status} must be asked once"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn an_absurd_retry_after_does_not_hold_the_task_open(cx: &mut gpui::TestAppContext) {
+        // 600s is a legal answer. Honouring it literally would outlive the
+        // 60-second poll that makes the whole attempt moot.
+        let (client, calls) = scripted(vec![429, 200], Some("600"));
+        assert!(fetch_with_token(client, cx.executor(), "t").await.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn retry_after_reads_seconds_and_ignores_anything_else() {
+        let with = |value: &str| {
+            let response = Response::builder()
+                .status(429)
+                .header("retry-after", value)
+                .body(())
+                .unwrap();
+            retry_after(&response)
+        };
+        assert_eq!(with("2"), Some(Duration::from_secs(2)));
+        assert_eq!(with("  3 "), Some(Duration::from_secs(3)));
+        assert_eq!(
+            with("Wed, 21 Oct 2026 07:28:00 GMT"),
+            None,
+            "the HTTP-date form falls back to the backoff rather than to zero"
+        );
+        assert_eq!(with("-1"), None);
+        assert_eq!(
+            retry_after(&Response::builder().status(429).body(()).unwrap()),
+            None
+        );
+    }
 
     /// The real response, recorded from a live call on 2026-08-21.
     ///

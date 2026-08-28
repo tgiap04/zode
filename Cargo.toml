@@ -9,6 +9,9 @@ members = [
     "crates/askpass",
     "crates/assets",
     "crates/audio",
+    "crates/auto_update",
+    "crates/auto_update_ui",
+    "crates/auto_update_helper",
     "crates/breadcrumbs",
     "crates/buffer_diff",
     "crates/cli",
@@ -20,6 +23,8 @@ members = [
     "crates/command_palette_hooks",
     "crates/component",
     "crates/component_preview",
+    "crates/container",
+    "crates/container_ui",
     "crates/context_server",
     "crates/credentials_provider",
     "crates/csv_preview",
@@ -54,6 +59,7 @@ members = [
     "crates/feedback",
     "crates/file_finder",
     "crates/file_icons",
+    "crates/floating_pane",
     "crates/fs",
     "crates/fs_benchmarks",
     "crates/fuzzy",
@@ -86,6 +92,7 @@ members = [
     "crates/install_cli",
     "crates/journal",
     "crates/json_schema_store",
+    "crates/keep_awake",
     "crates/keymap_editor",
     "crates/language",
     "crates/language_core",
@@ -118,6 +125,7 @@ members = [
     "crates/prettier",
     "crates/project",
     "crates/project_benchmarks",
+    "crates/project_footprint",
     "crates/project_panel",
     "crates/project_symbols",
     "crates/prompt_store",
@@ -229,6 +237,9 @@ agent_ui = { path = "crates/agent_ui" }
 askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
 audio = { path = "crates/audio" }
+auto_update = { path = "crates/auto_update" }
+auto_update_ui = { path = "crates/auto_update_ui" }
+auto_update_helper = { path = "crates/auto_update_helper" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
 cli = { path = "crates/cli" }
@@ -242,6 +253,8 @@ compliance = { path = "tooling/compliance" }
 component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }
 console = "0.16"
+container = { path = "crates/container" }
+container_ui = { path = "crates/container_ui" }
 context_server = { path = "crates/context_server" }
 credentials_provider = { path = "crates/credentials_provider" }
 crossbeam = "0.8.4"
@@ -271,6 +284,7 @@ feature_flags = { path = "crates/feature_flags" }
 feature_flags_macros = { path = "crates/feature_flags_macros" }
 feedback = { path = "crates/feedback" }
 file_finder = { path = "crates/file_finder" }
+floating_pane = { path = "crates/floating_pane" }
 file_icons = { path = "crates/file_icons" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
@@ -304,6 +318,7 @@ inspector_ui = { path = "crates/inspector_ui" }
 install_cli = { path = "crates/install_cli" }
 journal = { path = "crates/journal" }
 json_schema_store = { path = "crates/json_schema_store" }
+keep_awake = { path = "crates/keep_awake" }
 keymap_editor = { path = "crates/keymap_editor" }
 language = { path = "crates/language" }
 language_core = { path = "crates/language_core" }
@@ -338,6 +353,7 @@ picker = { path = "crates/picker" }
 prettier = { path = "crates/prettier" }
 settings_profile_selector = { path = "crates/settings_profile_selector" }
 project = { path = "crates/project" }
+project_footprint = { path = "crates/project_footprint" }
 project_panel = { path = "crates/project_panel" }
 project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
@@ -735,6 +751,7 @@ web-time = "1.1.0"
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", branch = "v29" }
 windows-core = "0.61"
 yawc = "0.2.5"
+zbus = { version = "5.13", default-features = false, features = ["async-io"] }
 zeroize = "1.8"
 zstd = "0.11"
 
@@ -779,6 +796,7 @@ features = [
     "Win32_System_Ole",
     "Win32_System_Performance",
     "Win32_System_Pipes",
+    "Win32_System_Power",
     "Win32_System_RestartManager",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

@@ -22,6 +22,7 @@ use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
 pub mod focus_follows_mouse;
 mod status_bar;
+mod status_bar_toggles;
 pub mod tasks;
 mod theme_preview;
 mod toast_layer;
@@ -120,6 +121,7 @@ use sqlez::{
 };
 use status_bar::StatusBar;
 pub use status_bar::StatusItemView;
+pub use status_bar_toggles::{StatusBarItemBuilder, StatusBarItemSpec, StatusBarSide};
 use std::{
     any::TypeId,
     borrow::Cow,
@@ -1367,6 +1369,14 @@ pub struct Workspace {
     titlebar_item: Option<AnyView>,
     notifications: Notifications,
     suppressed_notifications: HashSet<NotificationId>,
+    /// A view drawn over the centre and the docks, below the notifications.
+    ///
+    /// A registered handle rather than a field of a known type, for the reason
+    /// `MultiWorkspace` holds its sidebar the same way: what goes here lives in
+    /// a crate that depends on `workspace`, so naming its type here would be a
+    /// cycle. Notifications are rendered after it deliberately -- a notification
+    /// hidden behind a floating window is a notification nobody reads.
+    floating_layer: Option<Box<dyn FloatingLayer>>,
     project: Entity<Project>,
     follower_states: HashMap<CollaboratorId, FollowerState>,
     last_leaders_by_pane: HashMap<WeakEntity<Pane>, CollaboratorId>,
@@ -1828,6 +1838,7 @@ impl Workspace {
             titlebar_item: None,
             notifications: Notifications::default(),
             suppressed_notifications: HashSet::default(),
+            floating_layer: None,
             left_dock,
             bottom_dock,
             right_dock,
@@ -6010,6 +6021,21 @@ impl Workspace {
         self.update_window_edited(window, cx);
     }
 
+    /// Puts a view on the layer that floats over the centre and the docks.
+    ///
+    /// One at a time, and the last registration wins: two independent floating
+    /// layers would overlap with nothing deciding which is in front.
+    pub fn register_floating_layer<T: Render>(&mut self, view: Entity<T>, cx: &mut Context<Self>) {
+        self.floating_layer = Some(Box::new(view));
+        cx.notify();
+    }
+
+    fn render_floating_layer(&self) -> Option<AnyView> {
+        self.floating_layer
+            .as_ref()
+            .map(|layer| layer.as_floating_view())
+    }
+
     fn render_notifications(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Div> {
         if self.notifications.is_empty() {
             None
@@ -8649,6 +8675,21 @@ impl Focusable for Workspace {
     }
 }
 
+/// Something that can be drawn on the workspace's floating layer.
+///
+/// A trait rather than an `AnyView` field so the caller keeps its typed handle
+/// and this crate never learns the type -- the same shape `SidebarHandle` uses,
+/// and for the same cycle.
+pub trait FloatingLayer: 'static + Send + Sync {
+    fn as_floating_view(&self) -> AnyView;
+}
+
+impl<T: Render> FloatingLayer for Entity<T> {
+    fn as_floating_view(&self) -> AnyView {
+        self.clone().into()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DraggedDock {
     position: DockPosition,
@@ -9092,6 +9133,7 @@ impl Render for Workspace {
                                     None => div.top_2().bottom_2().left_2().right_2().border_1(),
                                 })
                             }))
+                            .children(self.render_floating_layer())
                             .children(self.render_notifications(window, cx)),
                     )
                     .when(self.status_bar_visible(cx), |parent| {
@@ -9692,7 +9734,7 @@ pub fn join_channel(
                         let detail: SharedString = match err.error_code() {
                             ErrorCode::SignedOut => "Please sign in to continue.".into(),
                             ErrorCode::UpgradeRequired => concat!(
-                                "Your are running an unsupported version of Zed. ",
+                                "Your are running an unsupported version of Zode. ",
                                 "Please update to continue."
                             )
                             .into(),

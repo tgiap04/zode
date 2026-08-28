@@ -499,6 +499,22 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: detailed
     pub agent_usage_display: Option<AgentUsageDisplay>,
+    /// Whether to show the activity indicator (background task spinner) in the status bar.
+    ///
+    /// Default: true
+    pub activity_indicator: Option<bool>,
+    /// Whether to show the active toolchain button in the status bar.
+    ///
+    /// Default: true
+    pub active_toolchain_button: Option<bool>,
+    /// Whether to show the Vim mode indicator in the status bar.
+    ///
+    /// Default: true
+    pub vim_mode_button: Option<bool>,
+    /// Whether to show the image info button in the status bar.
+    ///
+    /// Default: true
+    pub image_info_button: Option<bool>,
 }
 
 /// How much of an agent's quota the status bar shows.

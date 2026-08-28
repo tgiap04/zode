@@ -60,3 +60,9 @@ crates/docs_preprocessor/actions.json
 web/**/node_modules/
 web/**/dist/
 web/**/.vite/
+
+# Planning and session artifacts. These are working notes for whoever is at the
+# keyboard -- blueprints, phase files, verification evidence -- and they change
+# far more often than the code they describe. Kept out of the repo so the history
+# tracks the work, not the notes about the work.
+/plans/

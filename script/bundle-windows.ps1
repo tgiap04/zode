@@ -163,12 +163,18 @@ function GenerateLicenses {
 
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
-    # Build zed.exe and cli.exe. auto_update_helper is gone - this fork has no in-app updater.
-    cargo build --release --package zode --package cli `
+    # auto_update_helper is a separate binary on purpose: Windows will not let a running
+    # .exe be overwritten, so the app hands off to the helper on quit and the helper is what
+    # replaces the app and relaunches it. Without it in `tools`, an in-app update on Windows
+    # cannot complete.
+    cargo build --release --package zode --package cli --package auto_update_helper `
         --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql `
         --target $target
     Copy-Item -Path ".\$CargoOutDir\zode.exe" -Destination "$innoDir\Zode.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
+    # Must land in `tools`: `finalize_auto_update_on_quit` looks for it beside the app at
+    # `tools\auto_update_helper.exe` and nowhere else.
+    Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     # Beside Zode.exe, which is where `driver_path` looks. Unlike cli.exe these
     # are not moved into `bin` later: they are started by the app, not typed by
     # the user, and `bin` is on the user's PATH.

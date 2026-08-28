@@ -1,4 +1,8 @@
 mod app_menus;
+#[cfg(test)]
+mod app_name_tests;
+#[cfg(test)]
+mod init_list_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
@@ -6,6 +10,7 @@ mod open_listener;
 mod open_url_modal;
 mod quick_action_bar;
 pub mod remote_debug;
+mod status_bar_items;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_only_instance;
 
@@ -31,10 +36,8 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, actions, image_cache, img,
     point, px, retain_all,
 };
-use image_viewer::ImageInfo;
 use language::Capability;
 use language_onboarding::BasedPyrightBanner;
-use language_tools::lsp_button::{self, LspButton};
 use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
@@ -70,7 +73,7 @@ use std::{
 use terminal_view::terminal_panel::{self, TerminalPanel};
 use theme::{ActiveTheme, SystemAppearance, ThemeRegistry, deserialize_icon_theme};
 use theme_settings::{ThemeSettings, load_user_theme};
-use ui::{Navigable, NavigableEntry, PopoverMenuHandle, TintColor, prelude::*};
+use ui::{Navigable, NavigableEntry, TintColor, prelude::*};
 use util::markdown::MarkdownString;
 use util::rel_path::RelPath;
 use util::{ResultExt, asset_str, maybe};
@@ -462,62 +465,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             show_software_emulation_warning_if_needed(specs, window, cx);
         }
 
-        let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
-        let diagnostic_summary =
-            cx.new(|cx| diagnostics::items::DiagnosticIndicator::new(workspace, cx));
-        let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
-        let activity_indicator = activity_indicator::ActivityIndicator::new(
-            workspace,
-            workspace.project().read(cx).languages().clone(),
-            window,
-            cx,
-        );
-        let active_buffer_encoding =
-            cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
-        let active_buffer_language =
-            cx.new(|_| language_selector::ActiveBufferLanguage::new(workspace));
-        let active_toolchain_language =
-            cx.new(|cx| toolchain_selector::ActiveToolchain::new(workspace, window, cx));
-        let vim_mode_indicator = cx.new(|cx| vim::ModeIndicator::new(window, cx));
-        let image_info = cx.new(|_cx| ImageInfo::new(workspace));
-
-        let lsp_button_menu_handle = PopoverMenuHandle::default();
-        let lsp_button =
-            cx.new(|cx| LspButton::new(workspace, lsp_button_menu_handle.clone(), window, cx));
-        workspace.register_action({
-            move |_, _: &lsp_button::ToggleMenu, window, cx| {
-                lsp_button_menu_handle.toggle(window, cx);
-            }
-        });
-
-        let cursor_position =
-            cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
-        let line_ending_indicator =
-            cx.new(|_| line_ending_selector::LineEndingIndicator::default());
-        let agent_usage = cx.new(|cx| agent_usage::AgentUsageIndicator::new(window, cx));
-        let agent_usage_panel_handle = agent_usage.read(cx).panel_handle();
-        workspace.register_action(move |_, _: &agent_usage::ToggleUsagePanel, window, cx| {
-            agent_usage_panel_handle.toggle(window, cx);
-        });
-        workspace.status_bar().update(cx, |status_bar, cx| {
-            status_bar.add_left_item(search_button, window, cx);
-            status_bar.add_left_item(lsp_button, window, cx);
-            status_bar.add_left_item(diagnostic_summary, window, cx);
-            status_bar.add_left_item(active_file_name, window, cx);
-            status_bar.add_left_item(activity_indicator, window, cx);
-            // Beside the activity indicator rather than among the right-hand
-            // items: quota is something happening to your account over time, the
-            // way indexing and downloads are, not a property of the buffer in
-            // front of you.
-            status_bar.add_left_item(agent_usage, window, cx);
-            status_bar.add_right_item(active_buffer_encoding, window, cx);
-            status_bar.add_right_item(active_buffer_language, window, cx);
-            status_bar.add_right_item(active_toolchain_language, window, cx);
-            status_bar.add_right_item(line_ending_indicator, window, cx);
-            status_bar.add_right_item(vim_mode_indicator, window, cx);
-            status_bar.add_right_item(cursor_position, window, cx);
-            status_bar.add_right_item(image_info, window, cx);
-        });
+        status_bar_items::register(workspace, &workspace_handle, window, cx);
 
         let panels_task = initialize_panels(window, cx);
         workspace.set_panels_task(panels_task);
@@ -648,8 +596,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let database_panel =
-            database_ui::DatabasePanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
         let agent_history_panel =
             agent_ui::AgentHistoryPanel::load(workspace_handle.clone(), cx.clone());
@@ -674,7 +620,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(agent_history_panel, workspace_handle.clone(), cx.clone()),
         );
@@ -1354,7 +1299,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About Zode".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -5024,6 +4969,7 @@ mod tests {
                 "agents_sidebar",
                 "app_menu",
                 "assistant",
+                "auto_update",
                 "branch_picker",
                 "branches",
                 "buffer_search",
@@ -5031,6 +4977,7 @@ mod tests {
                 "collab",
                 "command_palette",
                 "console",
+                "container",
                 "context_server",
                 "csv",
                 "database",
@@ -5042,6 +4989,7 @@ mod tests {
                 "encoding_selector",
                 "feedback",
                 "file_finder",
+                "floating_pane",
                 "git",
                 "git_graph",
                 "git_onboarding",
@@ -5279,6 +5227,8 @@ mod tests {
             git_graph::init(cx);
             agent_ui::init(cx);
             database_ui::init(cx);
+            container_ui::init(cx);
+            floating_pane::init(cx);
 
             repl::init(app_state.fs.clone(), cx);
             repl::notebook::init(cx);

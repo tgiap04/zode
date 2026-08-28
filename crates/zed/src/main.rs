@@ -65,7 +65,7 @@ use crate::zed::{OpenRequestKind, eager_load_active_theme_and_icon_theme};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
-    let message = "Zed failed to launch";
+    let message = "Zode failed to launch";
     let error_details = errors
         .into_iter()
         .flat_map(|(kind, paths)| {
@@ -147,7 +147,7 @@ fn fail_to_open_window(e: anyhow::Error, _cx: &mut App) {
             proxy
                 .add_notification(
                     notification_id,
-                    Notification::new("Zed failed to launch")
+                    Notification::new("Zode failed to launch")
                         .body(Some(
                             format!(
                                 "{e:?}. See https://zed.dev/docs/linux for troubleshooting steps."
@@ -282,7 +282,11 @@ fn main() {
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
         option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
-    let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), version, app_commit_sha.clone());
+    let app_version = AppVersion::load(
+        option_env!("ZODE_APP_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
+        version,
+        app_commit_sha.clone(),
+    );
 
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(
@@ -290,7 +294,7 @@ fn main() {
             app_commit_sha,
             *release_channel::RELEASE_CHANNEL,
         );
-        println!("Zed System Specs (from CLI):\n{}", system_specs);
+        println!("Zode System Specs (from CLI):\n{}", system_specs);
         return;
     }
 
@@ -597,6 +601,10 @@ fn main() {
         diagnostics::init(cx);
 
         audio::init(cx);
+        // After `release_channel::init`: `AutoUpdater::new` reads the global app version,
+        // and a zero version would make every release look newer than what is installed.
+        auto_update::init(cx.http_client(), cx);
+        auto_update_ui::init(cx);
         workspace::init(app_state.clone(), cx);
         // Used to be reached via `collab_ui::init`; that crate is gone, so the
         // title bar has to be initialized directly or no workspace ever gets
@@ -637,6 +645,8 @@ fn main() {
         git_graph::init(cx);
         agent_ui::init(cx);
         database_ui::init(cx);
+        container_ui::init(cx);
+        floating_pane::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         csv_preview::init(cx);

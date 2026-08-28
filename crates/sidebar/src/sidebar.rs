@@ -14,6 +14,7 @@ mod project_list;
 mod project_menu;
 mod rail;
 mod rail_agents;
+mod rail_container;
 mod rail_database;
 mod rail_item;
 mod rail_panels;

@@ -1,6 +1,6 @@
 ---
 title: Agent Usage Indicator
-description: What the status bar shows about your Claude Code and Codex subscription quota, the panel and menu it opens, where the numbers come from, and when it goes blank.
+description: What the status bar shows about your Claude Code and Codex subscription quota, the panel and menu it opens, where the numbers come from, when it goes blank, and why Antigravity and Copilot are absent from it.
 ---
 
 # Agent Usage Indicator
@@ -31,9 +31,9 @@ Opening the panel, expanding a row, and switching Detailed/Compact all read stat
 
 Right-clicking the indicator opens a menu of two tick-boxes: **Claude Usage** and **Codex Usage**. Each writes straight to the matching `status_bar.*` setting (see [Status Bar settings](./visual-customization.md#status-bar)).
 
-This menu is only about the two usage indicators — it doesn't cover the other `status_bar.*` items (active file name, active language, cursor position, line endings, active encoding). Those are still fully settable, just from the Settings Editor or the settings file directly, not from here.
+This menu is only about the two usage indicators — it doesn't cover the other `status_bar.*` items (active file name, active language, cursor position, line endings, active encoding, and the rest). Those are settable from the Settings Editor, the settings file, or from a second, separate menu: right-clicking an _empty_ part of the status bar (not the indicator itself) opens a menu of every switchable status-bar item, grouped by side — see [All Settings § Status Bar](./reference/all-settings.md#status-bar). That menu carries a single **Agent Usage** row that switches Claude Usage and Codex Usage together, rather than duplicating this menu's two rows.
 
-One thing worth knowing before you use it: **switching off both Claude Usage and Codex Usage removes the indicator from the status bar entirely** — and with it, the only right-click target this menu has. This is a known, accepted limitation rather than a bug, and it matters more now that the menu has nothing else to right-click onto. If that happens, get back to `true` from the Settings Editor ({#kb zed::OpenSettings}) or by editing `claude_usage_button` / `codex_usage_button` back to `true` in your settings file — see [Settings Files](./configuring-zed.md#settings-files).
+**Switching off both Claude Usage and Codex Usage removes the indicator from the status bar entirely** — and with it, the only right-click target this menu has. That is no longer a dead end: right-click an empty part of the status bar and switch **Agent Usage** back on there, or get back to `true` from the Settings Editor ({#kb zed::OpenSettings}), or by editing `claude_usage_button` / `codex_usage_button` back to `true` in your settings file — see [Settings Files](./configuring-zed.md#settings-files).
 
 ## Where the numbers come from
 
@@ -64,8 +64,52 @@ The indicator draws no icon and reserves no space for a source with nothing to s
 
 Open the panel for the specific reason — it keeps a row for a silent agent and says why it is silent, which is the one thing the status bar itself cannot tell you. A request that simply failed keeps showing the last numbers it had rather than clearing them — clearing only happens for the reasons above, where the old numbers would no longer be a true answer.
 
+This includes **Claude answering `429`**: after the retries described in [Polling](#polling) are exhausted, the indicator keeps whatever numbers it already had rather than going quiet, and the panel reports that the account is being rate limited rather than one of the reasons above. Being asked too often says nothing about whether those numbers are still true.
+
+## Why Antigravity and Copilot have no numbers
+
+The rail offers four agents; this indicator reports on two. That is not an oversight
+waiting on implementation — it is what probing the other two CLIs turned up.
+
+**Copilot** publishes no route to subscription quota that this editor could read:
+
+- `copilot --help` carries no usage or quota flag, and no subcommand for one.
+- Its `/usage` slash command is described by the CLI itself as "Display session usage
+  metrics and statistics" — how much this _conversation_ consumed, not how much of a
+  subscription remains. It is a different number from the one this indicator shows, and
+  it exists only inside the interactive TUI.
+- Its ACP server (`copilot --acp`) advertises `loadSession`, prompt capabilities and
+  session listing, and nothing about an account. `account/rateLimits/read` — the method
+  the Codex route uses — answers `-32601 Method not found`, as do
+  `account/usage/read`, `usage/read`, `account/read`, `rateLimits/read` and
+  `account/subscription/read`.
+- Its own logs name a single host, `api.individual.githubcopilot.com`, and contain no
+  quota, premium-request, entitlement or rate-limit vocabulary at all.
+
+GitHub does meter premium requests, so a REST route may well exist. It was not pursued:
+reaching it would mean this editor holding a GitHub credential of its own, and the Codex
+route was deliberately chosen over exactly that trade for Claude's sibling. If such a
+route is ever wanted here, it is a decision about credential scope first and an
+implementation second.
+
+**Antigravity** keeps nothing on this machine to read. `agy` 1.1.20 was installed, signed
+in, and run twice; it wrote **zero bytes** anywhere under the home directory or the working
+directory, and `agy -c` still recalled the previous turn. Its conversations — and therefore
+anything the server knows about quota — live behind `/v1/conversations/{conversation_id}`,
+reachable only with the credential the CLI holds.
+
+That is the same wall Copilot hits, for a different reason: not a missing method, but a
+missing local store. Reading it would mean this editor borrowing a Google credential, which
+is the trade the Codex route exists to avoid.
+
 ## Polling
 
-Both agents are read together every 60 seconds, but only while the window is focused. Regaining focus reads both again immediately rather than waiting for the next tick, and clicking the refresh glyph — on the status bar or in the panel — does the same on demand. This is unchanged by the panel and menu: opening either reads state already in hand and triggers no extra request.
+Both agents are read together every 60 seconds, but only while the window is focused. Regaining focus reads both again immediately — unless the last attempt was under 30 seconds ago, in which case it trusts what is on screen and just restarts the interval. Clicking the refresh glyph — on the status bar or in the panel — always reads, throttle or not: the point of pressing it is to distrust what is showing. Opening the panel or the menu reads state already in hand and triggers no extra request.
+
+A switched-off agent — `claude_usage_button: false` or `codex_usage_button: false` — is skipped on every tick rather than fetched and then hidden: no HTTP request for Claude, no `codex app-server` subprocess for Codex. Switching it back on (from either right-click menu, the Settings Editor, or a hand-edited settings file) picks it back up on the next 60-second tick or the next manual refresh.
+
+That 30-second floor exists because Claude's endpoint is shared with the Claude Code CLI on one token, so alt-tabbing in and out used to be one request per tab against an endpoint that answers `429` when asked too often.
+
+**When Claude answers `429`**, the request is retried up to three times with a short backoff, honouring a `Retry-After` header when one is sent and clamping it to five seconds so a retry never outlives the poll that would supersede it. `408`, `425` and any `5xx` are retried the same way. Every other `4xx` is not: a `401` will answer the same thing next time, and asking again only spends the limit. If the retries are exhausted the indicator keeps whatever numbers it already had and says it is being rate limited — being asked too often says nothing about whether those numbers are still true.
 
 See also: [Telemetry](./telemetry.md#agent-subscription-quota) for how this fits into what this build sends over the network.

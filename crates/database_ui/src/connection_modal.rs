@@ -527,9 +527,10 @@ impl Filled {
         let (workspace, name) = (workspace.clone(), self.name.clone());
         window
             .spawn(cx, async move |cx| {
+                // A pane item now, not a dock panel: the database lives in a tab.
                 let panel = workspace
                     .update(cx, |workspace, cx| {
-                        workspace.panel::<crate::DatabasePanel>(cx)
+                        workspace.items_of_type::<crate::DatabasePanel>(cx).next()
                     })
                     .ok()
                     .flatten()?;

@@ -1,3 +1,0 @@
-    1  cloud_api_types
-
-total errors: 1 across 1 crates

@@ -1630,19 +1630,37 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 
 ## Status Bar
 
-- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere.
+- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere — the search, language-server and diagnostics buttons live under `editor.search.button`, `global_lsp_settings.button` and `diagnostics.button`, and the CPU/RAM badge and the keep-display-awake indicator under the top-level `project_footprint_indicator` and `keep_display_awake`.
 - Setting: `status_bar`
 - Default:
 
 ```json [settings]
 {
   "status_bar": {
+    "show_active_file": false,
     "active_language_button": true,
     "cursor_position_button": true,
-    "line_endings_button": false
+    "line_endings_button": false,
+    "active_encoding_button": "non_utf8",
+    "claude_usage_button": true,
+    "codex_usage_button": true,
+    "agent_usage_display": "detailed",
+    "activity_indicator": true,
+    "active_toolchain_button": true,
+    "vim_mode_button": true,
+    "image_info_button": true
   }
 }
 ```
+
+Right-clicking an empty part of the status bar opens a menu of these switches, grouped by which
+side of the bar the item sits on. Hiding an item through that menu writes the same setting a hand
+edit would, and does not merely stop drawing it: the item is removed from the bar and its entity
+dropped, so any polling or background work it was doing stops with it.
+
+`active_encoding_button` takes `always`, `non_utf8` or `never` rather than a boolean; the right-click
+menu treats `never` as off and turns it back on as `non_utf8`, so a value of `always` is not
+preserved across a hide and show.
 
 There is an experimental setting that completely hides the status bar. This causes major usability problems (you will be unable to use many of Zode's features), but is provided for those who value screen real-estate above all else.
 
@@ -2351,6 +2369,26 @@ Example:
 - Description: Whether or not to enable Helix mode. Enabling `helix_mode` also enables `vim_mode`. See the [Helix documentation](../helix.md) for more details.
 - Setting: `helix_mode`
 - Default: `false`
+
+**Options**
+
+`boolean` values
+
+## Keep Display Awake
+
+- Description: Whether to keep the display lit while an agent's CLI is still working. Released automatically while running on battery, and whenever no agent is working. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
+- Setting: `keep_display_awake`
+- Default: `true`
+
+**Options**
+
+`boolean` values
+
+## Project Footprint Indicator
+
+- Description: Whether to show the combined CPU and RAM footprint of every tracked project's child processes -- its language servers and its terminals -- in the status bar. Click the badge for a per-project breakdown. Zode hosts every project in one OS process, so its own heap and CPU cannot be attributed per project and are not counted. See [Project Footprint Indicator](../project-footprint-indicator.md) for what is measured, the polling cost, and privacy.
+- Setting: `project_footprint_indicator`
+- Default: `true`
 
 **Options**
 
@@ -5174,11 +5212,11 @@ Float values between `0.0` and `0.9`, where:
 
 - Description: The name of the font to use for text in the UI.
 - Setting: `ui_font_family`
-- Default: `.ZedSans`. This currently aliases to [IBM Plex](https://www.ibm.com/plex/).
+- Default: `Inter`. [Inter](https://rsms.me/inter/) ships with Zode, so this default works on a machine with no fonts installed.
 
 **Options**
 
-The name of any font family installed on the system, `".ZedSans"` to use the Zode-provided default, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
+The name of any font family installed on the system, `".ZedSans"` to follow whichever sans Zode ships with rather than naming it, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
 
 ## UI Font Features
 

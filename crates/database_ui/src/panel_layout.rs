@@ -224,23 +224,7 @@ impl DatabasePanel {
     }
 }
 
-impl DatabasePanel {
-    /// Gives the column the whole window, or gives it back.
-    ///
-    /// Only the flag moves. The workspace reads it on the next frame and drops
-    /// the centre and the docks; `MultiWorkspace` reads it and drops the rail.
-    /// Nothing here reaches into either of them, which is what keeps this safe
-    /// to call from a button inside the panel's own render tree.
-    pub(crate) fn toggle_full_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.full_screen = !self.full_screen;
-        // Focused on the way in, so `escape` and the panel's own bindings reach
-        // it rather than whatever had focus behind the column.
-        if self.full_screen {
-            window.focus(&self.focus_handle, cx);
-        }
-        cx.notify();
-    }
-}
+impl DatabasePanel {}
 
 #[cfg(test)]
 mod tests {

@@ -66,6 +66,24 @@ fn main() {
         }
     };
 
+    // `script/determine-release-channel` reads the release tag and writes RELEASE_VERSION
+    // into the job environment before any bundling step runs. The tag is the only source
+    // of truth for a published version -- that script deliberately does not require
+    // Cargo.toml to match it -- so a build that has RELEASE_VERSION must report it. Left
+    // to CARGO_PKG_VERSION, an app built from a tag whose Cargo.toml was not bumped
+    // reports the older number, and the in-app updater then compares the newer tag
+    // against it and reinstalls the same release on every check, forever.
+    //
+    // `rerun-if-env-changed` is load-bearing, not defensive: `option_env!` reads the
+    // environment at compile time and cargo does not track that as a dependency, so with
+    // sccache warm a rebuild would otherwise keep whatever version was baked in first.
+    println!("cargo:rerun-if-env-changed=RELEASE_VERSION");
+    if let Ok(release_version) = std::env::var("RELEASE_VERSION")
+        && !release_version.is_empty()
+    {
+        println!("cargo:rustc-env=ZODE_APP_VERSION={release_version}");
+    }
+
     if let Some(git_sha) = git_sha {
         println!("cargo:rustc-env=ZED_COMMIT_SHA={git_sha}");
 

@@ -95,7 +95,7 @@ pub(crate) fn run_tests() -> Workflow {
             .then(check_postgres_and_protobuf_migrations()),
     ); // could be more specific here?
 
-    named::workflow()
+    named::workflow!()
         .add_event(
             Event::default()
                 .push(
@@ -369,12 +369,12 @@ pub fn tests_pass(jobs: &[NamedJob], extra_job_names: &[&str]) -> NamedJob {
         .add_step(
             env_entries
                 .into_iter()
-                .fold(named::bash(&script), |step, env_item| {
+                .fold(named::bash!(&script), |step, env_item| {
                     step.add_env(env_item)
                 }),
         );
 
-    named::job(job)
+    named::job!(job)
 }
 
 /// Bash script snippet that detects changed extension directories from `$CHANGED_FILES`.
@@ -402,7 +402,7 @@ const TS_QUERY_LS_FILE: &str = "ts_query_ls-x86_64-unknown-linux-gnu.tar.gz";
 const CI_TS_QUERY_RELEASE: &str = "tags/v3.15.1";
 
 pub(crate) fn fetch_ts_query_ls() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "dsaltares",
         "fetch-gh-release-asset",
         "aa37ae5c44d3c9820bc12fe675e8670ecd93bd1c",
@@ -413,7 +413,7 @@ pub(crate) fn fetch_ts_query_ls() -> Step<Use> {
 }
 
 pub(crate) fn run_ts_query_ls() -> Step<Run> {
-    named::bash(formatdoc!(
+    named::bash!(formatdoc!(
         r#"tar -xf "$GITHUB_WORKSPACE/{TS_QUERY_LS_FILE}" -C "$GITHUB_WORKSPACE"
         "$GITHUB_WORKSPACE/ts_query_ls" format --check . || {{
             echo "Found unformatted queries, please format them with ts_query_ls."
@@ -426,7 +426,7 @@ pub(crate) fn run_ts_query_ls() -> Step<Run> {
 
 fn check_style() -> NamedJob {
     fn check_for_typos() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "crate-ci",
             "typos",
             "2d0ce569feab1f8752f1dde43cc2f2aa53236e06",
@@ -434,7 +434,7 @@ fn check_style() -> NamedJob {
         .with(("config", "./typos.toml"))
     }
 
-    named::job(
+    named::job!(
         release_job(&[])
             .runs_on(runners::LINUX_MEDIUM)
             .add_step(steps::checkout_repo())
@@ -452,7 +452,7 @@ fn check_style() -> NamedJob {
 
 fn check_dependencies() -> NamedJob {
     fn install_cargo_machete() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "taiki-e",
             "install-action",
             "02cc5f8ca9f2301050c0c099055816a41ee05507",
@@ -461,11 +461,11 @@ fn check_dependencies() -> NamedJob {
     }
 
     fn run_cargo_machete() -> Step<Run> {
-        named::bash("cargo machete")
+        named::bash!("cargo machete")
     }
 
     fn check_cargo_lock() -> Step<Run> {
-        named::bash("cargo update --locked --workspace")
+        named::bash!("cargo update --locked --workspace")
     }
 
     // Advisory rather than blocking: the action reports "Dependency review is not supported
@@ -473,7 +473,7 @@ fn check_dependencies() -> NamedJob {
     // something a workflow can turn on. Left in place so it starts reporting the moment the
     // setting is enabled, instead of failing every pull request until then.
     fn check_vulnerable_dependencies() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "actions",
             "dependency-review-action",
             "67d4f4bd7a9b17a0db54d2a7519187c65e339de8", // v4
@@ -483,7 +483,7 @@ fn check_dependencies() -> NamedJob {
         .continue_on_error(true)
     }
 
-    named::job(use_clang(
+    named::job!(use_clang(
         release_job(&[])
             .runs_on(runners::LINUX_SMALL)
             .add_step(steps::checkout_repo())
@@ -497,13 +497,13 @@ fn check_dependencies() -> NamedJob {
 
 fn check_wasm() -> NamedJob {
     fn install_nightly_wasm_toolchain() -> Step<Run> {
-        named::bash(
+        named::bash!(
             "rustup toolchain install nightly --component rust-src --target wasm32-unknown-unknown",
         )
     }
 
     fn cargo_check_wasm() -> Step<Run> {
-        named::bash(concat!(
+        named::bash!(concat!(
             "cargo -Zbuild-std=std,panic_abort ",
             "check --target wasm32-unknown-unknown -p gpui_platform",
         ))
@@ -514,7 +514,7 @@ fn check_wasm() -> NamedJob {
         .add_env(("RUSTC_BOOTSTRAP", "1"))
     }
 
-    named::job(
+    named::job!(
         release_job(&[])
             .runs_on(runners::LINUX_LARGE)
             .add_step(steps::checkout_repo())
@@ -529,7 +529,7 @@ fn check_wasm() -> NamedJob {
 }
 
 fn check_workspace_binaries() -> NamedJob {
-    named::job(use_clang(
+    named::job!(use_clang(
         release_job(&[])
             .runs_on(runners::LINUX_LARGE)
             .add_step(steps::checkout_repo())
@@ -691,7 +691,7 @@ fn run_platform_tests_impl(
 
 pub(crate) fn check_postgres_and_protobuf_migrations() -> NamedJob {
     fn ensure_fresh_merge() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             if [ -z "$GITHUB_BASE_REF" ];
             then
               echo "BUF_BASE_BRANCH=$(git merge-base origin/main HEAD)" >> "$GITHUB_ENV"
@@ -704,25 +704,25 @@ pub(crate) fn check_postgres_and_protobuf_migrations() -> NamedJob {
     }
 
     fn bufbuild_setup_action() -> Step<Use> {
-        named::uses("bufbuild", "buf-setup-action", "v1")
+        named::uses!("bufbuild", "buf-setup-action", "v1")
             .add_with(("version", "v1.29.0"))
             .add_with(("github_token", vars::GITHUB_TOKEN))
     }
 
     fn bufbuild_breaking_action() -> Step<Use> {
-        named::uses("bufbuild", "buf-breaking-action", "v1").add_with(("input", "crates/proto/proto/"))
+        named::uses!("bufbuild", "buf-breaking-action", "v1").add_with(("input", "crates/proto/proto/"))
             .add_with(("against", "https://github.com/${GITHUB_REPOSITORY}.git#branch=${BUF_BASE_BRANCH},subdir=crates/proto/proto/"))
     }
 
     fn buf_lint() -> Step<Run> {
-        named::bash("buf lint crates/proto/proto")
+        named::bash!("buf lint crates/proto/proto")
     }
 
     fn check_protobuf_formatting() -> Step<Run> {
-        named::bash("buf format --diff --exit-code crates/proto/proto")
+        named::bash!("buf format --diff --exit-code crates/proto/proto")
     }
 
-    named::job(
+    named::job!(
         release_job(&[])
             .runs_on(runners::LINUX_DEFAULT)
             .add_env(("GIT_AUTHOR_NAME", "Protobuf Action"))
@@ -740,13 +740,13 @@ pub(crate) fn check_postgres_and_protobuf_migrations() -> NamedJob {
 
 fn doctests() -> NamedJob {
     fn run_doctests() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             cargo test --workspace --doc --no-fail-fast
         "#})
         .id("run_doctests")
     }
 
-    named::job(use_clang(
+    named::job!(use_clang(
         release_job(&[])
             .runs_on(runners::LINUX_DEFAULT)
             .add_step(steps::checkout_repo())
@@ -761,7 +761,7 @@ fn doctests() -> NamedJob {
 }
 
 fn check_licenses() -> NamedJob {
-    named::job(
+    named::job!(
         Job::default()
             .runs_on(runners::LINUX_SMALL)
             .add_step(steps::checkout_repo())
@@ -773,7 +773,7 @@ fn check_licenses() -> NamedJob {
 
 fn check_docs() -> NamedJob {
     fn lychee_link_check(dir: &str) -> Step<Use> {
-        named::uses(
+        named::uses!(
             "lycheeverse",
             "lychee-action",
             "82202e5e9c2f4ef1a55a3d02563e1cb6041e5332",
@@ -784,7 +784,7 @@ fn check_docs() -> NamedJob {
     }
 
     fn install_mdbook() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "peaceiris",
             "actions-mdbook",
             "ee69d230fe19748b7abf22df32acaa93833fad08", // v2
@@ -793,13 +793,13 @@ fn check_docs() -> NamedJob {
     }
 
     fn build_docs() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             mkdir -p target/deploy
             mdbook build ./docs --dest-dir=../target/deploy/docs/
         "#})
     }
 
-    named::job(use_clang(
+    named::job!(use_clang(
         release_job(&[])
             .runs_on(runners::LINUX_LARGE)
             .add_step(steps::checkout_repo())
@@ -821,24 +821,24 @@ fn check_docs() -> NamedJob {
 
 pub(crate) fn check_scripts() -> NamedJob {
     fn download_actionlint() -> Step<Run> {
-        named::bash(
+        named::bash!(
             "bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)",
         )
     }
 
     fn run_actionlint() -> Step<Run> {
-        named::bash(r#""$ACTIONLINT_BIN" -color"#).add_env((
+        named::bash!(r#""$ACTIONLINT_BIN" -color"#).add_env((
             "ACTIONLINT_BIN",
             "${{ steps.get_actionlint.outputs.executable }}",
         ))
     }
 
     fn run_shellcheck() -> Step<Run> {
-        named::bash("./script/shellcheck-scripts error")
+        named::bash!("./script/shellcheck-scripts error")
     }
 
     fn check_xtask_workflows() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             cargo xtask workflows
             if ! git diff --exit-code .github; then
               echo "Error: .github directory has uncommitted changes after running 'cargo xtask workflows'"
@@ -848,7 +848,7 @@ pub(crate) fn check_scripts() -> NamedJob {
         "#})
     }
 
-    named::job(
+    named::job!(
         release_job(&[])
             .runs_on(runners::LINUX_SMALL)
             .add_step(steps::checkout_repo())
@@ -880,5 +880,5 @@ fn extension_tests() -> NamedJob<UsesJob> {
         .uses_local(".github/workflows/extension_tests.yml")
         .with(Input::default().add("working-directory", "${{ matrix.extension }}"));
 
-    named::job(job)
+    named::job!(job)
 }

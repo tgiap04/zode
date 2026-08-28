@@ -102,12 +102,13 @@ async fn the_panel_draws_its_rows(cx: &mut TestAppContext) {
         "the list must take the panel's height, got {list:?}"
     );
 
-    // Row 0 is the group header for `/root`; rows 1 and 2 are its two sessions.
+    // Three levels now: row 0 is the agent header, row 1 the `/root` project
+    // header under it, and rows 2 and 3 its two sessions.
     let first = cx
-        .debug_bounds("agent-history-row:1")
+        .debug_bounds("agent-history-row:2")
         .expect("the first session must be drawn — a zero-row uniform_list is silent");
     let second = cx
-        .debug_bounds("agent-history-row:2")
+        .debug_bounds("agent-history-row:3")
         .expect("and so must the second");
     for (which, bounds) in [("first", first), ("second", second)] {
         assert!(
@@ -120,9 +121,10 @@ async fn the_panel_draws_its_rows(cx: &mut TestAppContext) {
         "rows must read top to bottom without overlapping, got {first:?} then {second:?}"
     );
     assert!(
-        cx.debug_bounds("agent-history-row:3").is_none(),
-        "the session from another project must not be drawn: this panel is scoped \
-         to the project its workspace has open"
+        cx.debug_bounds("agent-history-row:4").is_none(),
+        "four rows and no more — one agent header, one project header, two \
+         sessions. The session from another project must not be drawn: this panel \
+         is scoped to the project its workspace has open"
     );
 }
 
@@ -162,9 +164,11 @@ async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestA
     });
     cx.run_until_parked();
 
+    // Row 0 is the agent header, row 1 the project header, so the single session
+    // is row 2.
     let ellipsis = cx
-        .debug_bounds("agent-history-menu:1")
-        .expect("row 1's ellipsis must be drawn");
+        .debug_bounds("agent-history-menu:2")
+        .expect("the session row's ellipsis must be drawn");
     cx.simulate_click(ellipsis.center(), gpui::Modifiers::default());
     cx.run_until_parked();
 

@@ -1,0 +1,52 @@
+[package]
+name = "container_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[features]
+test-support = ["container/test-support"]
+
+[lib]
+path = "src/container_ui.rs"
+
+[dependencies]
+anyhow.workspace = true
+container.workspace = true
+# Direct rather than through an action that `crates/zed` wires up: `agent_ui`,
+# `debugger_ui` and `repl` all take it the same way, and an action carrying a
+# command as payload would be a second, weaker copy of what this trait already
+# hands back. Checked with `cargo tree` -- it brings nothing this crate did not
+# already reach through `workspace`.
+task.workspace = true
+terminal_view.workspace = true
+futures.workspace = true
+gpui.workspace = true
+ui_input.workspace = true
+log.workspace = true
+ui.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
+
+[dev-dependencies]
+# Deliberately minimal, matching `database_ui`: pulling `sidebar` in here to
+# draw the rail would drag `agent_ui` and a feature combination of `remote` that
+# does not build. The rail's own tests live in `sidebar`.
+#
+# `workspace/test-support` is not optional here even though nothing calls into
+# it directly: `project/test-support` brings `RemoteConnectionIdentity::Mock`
+# into being, and the arm that handles it lives behind this feature. Without
+# both, `workspace` fails to compile with a non-exhaustive match.
+container = { workspace = true, features = ["test-support"] }
+fs = { workspace = true, features = ["test-support"] }
+editor.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme.workspace = true
+theme_settings.workspace = true
+workspace = { workspace = true, features = ["test-support"] }

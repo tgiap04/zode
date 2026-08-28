@@ -1256,7 +1256,7 @@ impl Dock {
     /// `BASIS + position` had the two drawing their handles into one id space.
     /// Out of reach today — the columns hold a single panel, so they never draw
     /// a stack — but the collision would land silently the day one holds two.
-    fn stack_element_basis(&self) -> usize {
+    pub(crate) fn stack_element_basis(&self) -> usize {
         let offset = self
             .column
             .element_basis_offset()

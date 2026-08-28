@@ -18,7 +18,7 @@ pub(crate) fn bump_version(args: &GenerateWorkflowArgs) -> Workflow {
 
     let call_bump_version = call_bump_version(args.sha.as_ref(), &determine_bump_type, bump_type);
 
-    named::workflow()
+    named::workflow!()
         .on(Event::default()
             .push(
                 Push::default()
@@ -63,7 +63,7 @@ pub(crate) fn call_bump_version(
         )
         .with_app_secrets();
 
-    named::job(job)
+    named::job!(job)
 }
 
 fn determine_bump_type() -> (NamedJob, StepOutput) {
@@ -74,11 +74,11 @@ fn determine_bump_type() -> (NamedJob, StepOutput) {
         .runs_on(runners::LINUX_SMALL)
         .add_step(get_bump_type)
         .outputs([(output.name.to_owned(), output.to_string())]);
-    (named::job(job), output)
+    (named::job!(job), output)
 }
 
 fn get_bump_type() -> (Step<Run>, StepOutput) {
-    let step = named::bash(
+    let step = named::bash!(
         indoc! {r#"
             if [ "$HAS_MAJOR_LABEL" = "true" ]; then
                 bump_type="major"

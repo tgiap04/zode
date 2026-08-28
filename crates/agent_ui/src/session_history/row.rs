@@ -3,13 +3,71 @@ use crate::session_history::{
     panel::{AgentHistoryPanel, CountState},
 };
 use agent_sessions::{AgentKind, Fork, SessionSummary};
-use gpui::{Anchor, Context, Window};
+use gpui::{Anchor, Context, FontWeight, Window};
 use std::path::{Path, PathBuf};
 use ui::{ContextMenu, ContextMenuEntry, IconName, PopoverMenu, Tooltip, prelude::*};
 
-/// A project group's header: name, how many sessions, and a disclosure.
+/// An agent group's header: vendor mark, name, total, and a disclosure.
+///
+/// The glyph comes from `crate::agent_icon` rather than a match of its own — the
+/// rail, the tab, the session row and this header must all draw the same mark,
+/// and a fourth copy of the mapping is a fourth place to forget.
+pub(crate) fn render_agent_group(
+    ix: usize,
+    agent: AgentKind,
+    count: usize,
+    collapsed: bool,
+    cx: &mut Context<AgentHistoryPanel>,
+) -> impl IntoElement {
+    let colors = cx.theme().colors();
+    h_flex()
+        .id(("agent-history-agent", ix))
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .gap_1p5()
+        .justify_between()
+        .bg(colors.elevated_surface_background)
+        .border_b_1()
+        .border_color(colors.border)
+        .child(
+            h_flex()
+                .gap_1p5()
+                .child(
+                    Icon::new(if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+                )
+                .child(
+                    Icon::new(crate::agent_icon(agent.builtin_agent_id())).size(IconSize::XSmall),
+                )
+                .child(
+                    Label::new(agent.label())
+                        .size(LabelSize::Small)
+                        .weight(FontWeight::MEDIUM),
+                ),
+        )
+        .child(
+            Label::new(count.to_string())
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            if !this.collapsed_agents.remove(&agent) {
+                this.collapsed_agents.insert(agent);
+            }
+            cx.notify();
+        }))
+}
+
+/// The inner header: one project, under the agent that ran there.
 pub(crate) fn render_group(
     ix: usize,
+    agent: AgentKind,
     path: &Path,
     label: &str,
     count: usize,
@@ -21,7 +79,9 @@ pub(crate) fn render_group(
     h_flex()
         .id(("agent-history-group", ix))
         .w_full()
-        .px_2()
+        // Indented past the agent header it belongs to.
+        .pl_5()
+        .pr_2()
         .py_1()
         .gap_1()
         .justify_between()
@@ -48,8 +108,11 @@ pub(crate) fn render_group(
                 .color(Color::Muted),
         )
         .on_click(cx.listener(move |this, _, _window, cx| {
-            if !this.collapsed_groups.remove(&path) {
-                this.collapsed_groups.insert(path.clone());
+            // Keyed by (agent, path): closing a project under one agent must not
+            // close the same project under another.
+            let key = (agent, path.clone());
+            if !this.collapsed_groups.remove(&key) {
+                this.collapsed_groups.insert(key);
             }
             cx.notify();
         }))
@@ -380,11 +443,10 @@ fn render_facts(session: &SessionSummary, panel: &AgentHistoryPanel) -> impl Int
         .w_full()
         .gap_1p5()
         .child(
-            Icon::new(match session.agent {
-                AgentKind::Claude => IconName::AiClaude,
-                AgentKind::Codex => IconName::AiOpenAi,
-            })
-            .size(IconSize::XSmall),
+            // Through `agent_icon` rather than a match of its own: the rail, the
+            // tab and this row must draw the same vendor mark, and three copies
+            // of the mapping is three places to forget when an agent is added.
+            Icon::new(crate::agent_icon(session.agent.builtin_agent_id())).size(IconSize::XSmall),
         )
         .child(
             Label::new(session.agent.label())

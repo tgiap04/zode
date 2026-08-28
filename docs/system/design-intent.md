@@ -70,6 +70,14 @@ slice needed for a user's own SSH-reachable host — consistent with turning a
 backend-dependent multiplayer product into a self-contained, single-user desktop tool with zero
 required external services.
 
+**One instance of that inference has since been falsified.** In-app auto-update was listed above
+as requiring "a hosted backend or a vendor account"; it does not. It was restored in
+`crates/auto_update` reading this repository's own published GitHub releases — no backend, no
+account, no credential, and no identifier sent. The inference still holds for collab, auth, the
+cloud API, AI/edit-prediction and crash reporting; it was simply wrong about this one, and the
+distribution stance it justified (leave updates to package managers) was reversed deliberately.
+See `plans/260824-1914-in-app-update-from-github-releases/`.
+
 ### Why a three-state hibernation model (Active/Warm/Hibernated) instead of open/closed
 
 `docs/system/business-rules.md` § Hibernation Lifecycle states the mechanism: "Each open

@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use crate::tasks::workflows::{
     runners::Platform,
-    steps::named::function_name,
     vars::{self, StepOutput},
 };
 
@@ -21,7 +20,7 @@ pub const PWSH_SHELL: &str = "pwsh";
 pub(crate) struct Nextest(Step<Run>);
 
 pub(crate) fn cargo_nextest(platform: Platform) -> Nextest {
-    Nextest(named::run(
+    Nextest(named::run!(
         platform,
         "cargo nextest run --workspace --no-fail-fast --no-tests=warn",
     ))
@@ -149,7 +148,7 @@ pub fn checkout_repo() -> CheckoutStep {
 }
 
 pub fn setup_pnpm() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "pnpm",
         "action-setup",
         "fe02b34f77f8bc703788d5817da081398fad5dd2", // v4.0.0
@@ -158,7 +157,7 @@ pub fn setup_pnpm() -> Step<Use> {
 }
 
 pub fn setup_node() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "actions",
         "setup-node",
         "49933ea5288caeca8642d1e84afbd3f7d6820020", // v4
@@ -167,15 +166,15 @@ pub fn setup_node() -> Step<Use> {
 }
 
 pub fn prettier() -> Step<Run> {
-    named::bash("./script/prettier")
+    named::bash!("./script/prettier")
 }
 
 pub fn cargo_fmt() -> Step<Run> {
-    named::bash("cargo fmt --all -- --check")
+    named::bash!("cargo fmt --all -- --check")
 }
 
 pub fn cargo_install_nextest() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "taiki-e",
         "install-action",
         "921e2c9f7148d7ba14cd819f417db338f63e733c", // nextest
@@ -184,12 +183,12 @@ pub fn cargo_install_nextest() -> Step<Use> {
 
 pub fn setup_cargo_config(platform: Platform) -> Step<Run> {
     match platform {
-        Platform::Windows => named::pwsh(indoc::indoc! {r#"
+        Platform::Windows => named::pwsh!(indoc::indoc! {r#"
             New-Item -ItemType Directory -Path "./../.cargo" -Force
             Copy-Item -Path "./.cargo/ci-config.toml" -Destination "./../.cargo/config.toml"
         "#}),
 
-        Platform::Linux | Platform::Mac => named::bash(indoc::indoc! {r#"
+        Platform::Linux | Platform::Mac => named::bash!(indoc::indoc! {r#"
             mkdir -p ./../.cargo
             cp ./.cargo/ci-config.toml ./../.cargo/config.toml
         "#}),
@@ -198,10 +197,10 @@ pub fn setup_cargo_config(platform: Platform) -> Step<Run> {
 
 pub fn cleanup_cargo_config(platform: Platform) -> Step<Run> {
     let step = match platform {
-        Platform::Windows => named::pwsh(indoc::indoc! {r#"
+        Platform::Windows => named::pwsh!(indoc::indoc! {r#"
             Remove-Item -Recurse -Path "./../.cargo" -Force -ErrorAction SilentlyContinue
         "#}),
-        Platform::Linux | Platform::Mac => named::bash(indoc::indoc! {r#"
+        Platform::Linux | Platform::Mac => named::bash!(indoc::indoc! {r#"
             rm -rf ./../.cargo
         "#}),
     };
@@ -211,10 +210,31 @@ pub fn cleanup_cargo_config(platform: Platform) -> Step<Run> {
 
 pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
     match platform {
-        Platform::Windows => named::pwsh("./script/clear-target-dir-if-larger-than.ps1 350 200"),
-        Platform::Linux => named::bash("./script/clear-target-dir-if-larger-than 350 200"),
-        Platform::Mac => named::bash("./script/clear-target-dir-if-larger-than 350 200"),
+        Platform::Windows => named::pwsh!("./script/clear-target-dir-if-larger-than.ps1 350 200"),
+        Platform::Linux => named::bash!("./script/clear-target-dir-if-larger-than 350 200"),
+        Platform::Mac => named::bash!("./script/clear-target-dir-if-larger-than 350 200"),
     }
+}
+
+/// Brings a bare distro image up to the minimum a job needs before `actions/checkout`
+/// runs. Only for container jobs — a hosted runner image already has all of this.
+///
+/// `git` is not optional: without it `actions/checkout` silently falls back to
+/// downloading a source tarball and leaves no `.git` behind, and
+/// `script/bundle-linux` runs `git rev-parse HEAD` — so the job would die at packaging
+/// time, after paying for the whole build. `ca-certificates` because a bare `ubuntu`
+/// image ships none, and both the rustup bootstrap and every crates.io fetch are HTTPS.
+///
+/// The `$GITHUB_PATH` line is what makes `cargo` reachable: `script/linux` installs
+/// rustup into `$HOME/.cargo/bin` but only edits shell rc files, and the `bash -e` that
+/// GitHub runs each step with is non-login, so it never sources them. Written before the
+/// directory exists, which is harmless — `$GITHUB_PATH` applies to later steps only.
+pub fn bootstrap_container() -> Step<Run> {
+    named::bash!(indoc::indoc! {r#"
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl git
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+    "#})
 }
 
 /// Reclaims space on the runner before a bundle build. Hosted runners document 14 GB of
@@ -222,20 +242,27 @@ pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
 ///
 /// The trailing `df`/`Get-PSDrive` is load-bearing for tuning: it puts the real number in
 /// the job log so the next adjustment is made against a measurement, not a guess.
+///
+/// The Linux arm reclaims far less than the other two, because the Linux bundle jobs run
+/// inside a container (see `run_bundling::bundle_linux`): there is no `sudo` and no
+/// `docker` in the image, and the host directories the other platforms delete
+/// (`/usr/share/dotnet`, `/opt/ghc`, the android SDK) are not mounted into it. `/__t` is,
+/// being the host tool cache, so CodeQL is still worth removing. If a run ever fails on
+/// ENOSPC the fix is to mount the host root into the container (`volumes: ["/:/host"]`)
+/// and delete through that, not to move the job back out of the container.
 pub fn free_disk_space(platform: Platform) -> Step<Run> {
     match platform {
-        Platform::Linux => named::bash(indoc::indoc! {r#"
-            sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-            sudo docker image prune --all --force || true
+        Platform::Linux => named::bash!(indoc::indoc! {r#"
+            rm -rf /__t/CodeQL || true
             df -h /
         "#}),
         // No equivalent windfall exists here, which makes the 7 GB / 14 GB arm64 mac
         // runner the likeliest of the six targets to fail first.
-        Platform::Mac => named::bash(indoc::indoc! {r#"
+        Platform::Mac => named::bash!(indoc::indoc! {r#"
             sudo rm -rf /Applications/Xcode_15*.app
             df -h /
         "#}),
-        Platform::Windows => named::pwsh(indoc::indoc! {r#"
+        Platform::Windows => named::pwsh!(indoc::indoc! {r#"
             Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
             Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize
         "#}),
@@ -254,7 +281,7 @@ pub fn free_disk_space(platform: Platform) -> Step<Run> {
 /// than the hosted runner's profile directory. Shortening the prefix would clear the limit
 /// by a single character, so the limit is removed instead.
 pub fn windows_enable_long_paths() -> Step<Run> {
-    named::pwsh(indoc::indoc! {r#"
+    named::pwsh!(indoc::indoc! {r#"
         git config --global core.longpaths true
         New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
             -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
@@ -263,23 +290,23 @@ pub fn windows_enable_long_paths() -> Step<Run> {
 
 pub fn clippy(platform: Platform, target: Option<&str>) -> Step<Run> {
     match platform {
-        Platform::Windows => named::pwsh("./script/clippy.ps1"),
+        Platform::Windows => named::pwsh!("./script/clippy.ps1"),
         _ => match target {
-            Some(target) => named::bash(format!("./script/clippy --target {target}")),
-            None => named::bash("./script/clippy"),
+            Some(target) => named::bash!(format!("./script/clippy --target {target}")),
+            None => named::bash!("./script/clippy"),
         },
     }
 }
 
 pub fn install_rustup_target(target: &str) -> Step<Run> {
-    named::bash(format!("rustup target add {target}"))
+    named::bash!(format!("rustup target add {target}"))
 }
 
 /// Caches only the crate sources, never `target/`: the GitHub Actions cache is capped at
 /// 10 GB per repository and a release `target/` dir is many times that, so caching it
 /// would thrash rather than help. Cold compiles are the accepted cost of free runners.
 pub fn cache_rust_dependencies_namespace() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "actions",
         "cache",
         "0057852bfaa89a56745cba8c7296529d2fc39830",
@@ -294,8 +321,8 @@ pub fn cache_rust_dependencies_namespace() -> Step<Use> {
 
 pub fn setup_sccache(platform: Platform) -> Step<Run> {
     let step = match platform {
-        Platform::Windows => named::pwsh("./script/setup-sccache.ps1"),
-        Platform::Linux | Platform::Mac => named::bash("./script/setup-sccache"),
+        Platform::Windows => named::pwsh!("./script/setup-sccache.ps1"),
+        Platform::Linux | Platform::Mac => named::bash!("./script/setup-sccache"),
     };
     step.add_env(("R2_ACCOUNT_ID", vars::R2_ACCOUNT_ID))
         .add_env(("R2_ACCESS_KEY_ID", vars::R2_ACCESS_KEY_ID))
@@ -309,9 +336,9 @@ pub fn show_sccache_stats(platform: Platform) -> Step<Run> {
         // don't take effect until the next step in PowerShell.
         // Check if RUSTC_WRAPPER is set first (it won't be for fork PRs without secrets).
         Platform::Windows => {
-            named::pwsh("if ($env:RUSTC_WRAPPER) { & $env:RUSTC_WRAPPER --show-stats }; exit 0")
+            named::pwsh!("if ($env:RUSTC_WRAPPER) { & $env:RUSTC_WRAPPER --show-stats }; exit 0")
         }
-        Platform::Linux | Platform::Mac => named::bash("sccache --show-stats || true"),
+        Platform::Linux | Platform::Mac => named::bash!("sccache --show-stats || true"),
     }
 }
 
@@ -319,7 +346,7 @@ pub fn show_sccache_stats(platform: Platform) -> Step<Run> {
 /// job ceiling as its only backstop. Installing the dependencies takes a couple of minutes,
 /// so 20 turns an apt mirror stall into a quick, obvious failure that the next run clears.
 pub fn setup_linux() -> Step<Run> {
-    named::bash("./script/linux").timeout_minutes(20u32)
+    named::bash!("./script/linux").timeout_minutes(20u32)
 }
 
 /// Fetches the WASI SDK before anything needs it.
@@ -334,7 +361,7 @@ pub fn setup_linux() -> Step<Run> {
 /// Must come after `clear_target_dir_if_large`: the SDK lands in `target/`, and
 /// clearing that afterwards would take it with it.
 pub(crate) fn download_wasi_sdk() -> Step<Run> {
-    named::bash("./script/download-wasi-sdk")
+    named::bash!("./script/download-wasi-sdk")
 }
 
 pub(crate) fn install_linux_dependencies(job: Job) -> Job {
@@ -483,43 +510,142 @@ pub trait FluentBuilder {
 pub mod named {
     use super::*;
 
-    /// Returns a uses step with the same name as the enclosing function.
-    /// (You shouldn't inline this function into the workflow definition, you must
-    /// wrap it in a new function.)
-    pub fn uses(owner: &str, repo: &str, ref_: &str) -> Step<Use> {
-        Step::new(function_name(1)).uses(owner, repo, ref_)
+    /// The path of the function this expands in, from just after `workflows`.
+    ///
+    /// Compile-time, and that is the whole point of it. This used to be read
+    /// from a runtime backtrace, which needs two things codegen does not
+    /// promise: the frame must survive, and its name must be recoverable. CI
+    /// lowers `[profile.dev] debug` to `"limited"` in `.cargo/ci-config.toml`,
+    /// and at that level a private function with a single caller has no
+    /// resolvable name -- so four jobs in `release.yml` came out under a mangled
+    /// hash (`h1b546bfb5948ff19` and friends) instead of their own names. Every
+    /// local run passed, because a developer's build keeps full debug info.
+    ///
+    /// `type_name` of a function item declared right here gives the enclosing
+    /// path plus `::probe`, which is a fact about the source rather than about
+    /// the build.
+    #[macro_export]
+    macro_rules! __workflow_path {
+        () => {{
+            fn probe() {}
+            fn path_of<T>(_: T) -> &'static str {
+                ::std::any::type_name::<T>()
+            }
+            let full = path_of(probe);
+            $crate::tasks::workflows::steps::named::after_workflows(
+                full.strip_suffix("::probe").unwrap_or(full),
+            )
+        }};
+    }
+    pub use crate::__workflow_path as path;
+
+    /// Trims a module path to the part after `workflows`.
+    ///
+    /// Kept identical to what the backtrace version produced, so no generated
+    /// name changes: `cargo xtask workflows` must leave `.github/workflows/`
+    /// byte-for-byte as it found it.
+    pub fn after_workflows(path: &str) -> String {
+        path.split("::")
+            .skip_while(|segment| *segment != "workflows")
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("::")
     }
 
-    /// Returns a bash-script step with the same name as the enclosing function.
-    /// (You shouldn't inline this function into the workflow definition, you must
-    /// wrap it in a new function.)
-    pub fn bash(script: impl AsRef<str>) -> Step<Run> {
-        Step::new(function_name(1)).run(script.as_ref())
+    /// Returns a uses step named after the enclosing function.
+    #[macro_export]
+    macro_rules! __named_uses {
+        ($($arg:tt)*) => {
+            $crate::tasks::workflows::steps::named::uses_named(
+                $crate::tasks::workflows::steps::named::path!(),
+                $($arg)*
+            )
+        };
     }
+    pub use crate::__named_uses as uses;
 
-    /// Returns a pwsh-script step with the same name as the enclosing function.
-    /// (You shouldn't inline this function into the workflow definition, you must
-    /// wrap it in a new function.)
-    pub fn pwsh(script: &str) -> Step<Run> {
-        Step::new(function_name(1)).run(script).shell(PWSH_SHELL)
+    /// Returns a bash-script step named after the enclosing function.
+    #[macro_export]
+    macro_rules! __named_bash {
+        ($($arg:tt)*) => {
+            $crate::tasks::workflows::steps::named::bash_named(
+                $crate::tasks::workflows::steps::named::path!(),
+                $($arg)*
+            )
+        };
     }
+    pub use crate::__named_bash as bash;
+
+    /// Returns a pwsh-script step named after the enclosing function.
+    #[macro_export]
+    macro_rules! __named_pwsh {
+        ($($arg:tt)*) => {
+            $crate::tasks::workflows::steps::named::pwsh_named(
+                $crate::tasks::workflows::steps::named::path!(),
+                $($arg)*
+            )
+        };
+    }
+    pub use crate::__named_pwsh as pwsh;
 
     /// Runs the command in either powershell or bash, depending on platform.
-    /// (You shouldn't inline this function into the workflow definition, you must
-    /// wrap it in a new function.)
-    pub fn run(platform: Platform, script: &str) -> Step<Run> {
+    #[macro_export]
+    macro_rules! __named_run {
+        ($($arg:tt)*) => {
+            $crate::tasks::workflows::steps::named::run_named(
+                $crate::tasks::workflows::steps::named::path!(),
+                $($arg)*
+            )
+        };
+    }
+    pub use crate::__named_run as run;
+
+    /// Returns a Workflow named after the enclosing module.
+    #[macro_export]
+    macro_rules! __named_workflow {
+        () => {
+            $crate::tasks::workflows::steps::named::workflow_named(
+                $crate::tasks::workflows::steps::named::path!(),
+            )
+        };
+    }
+    pub use crate::__named_workflow as workflow;
+
+    /// Returns a Job named after the enclosing function.
+    #[macro_export]
+    macro_rules! __named_job {
+        ($($arg:tt)*) => {
+            $crate::tasks::workflows::steps::named::job_named(
+                $crate::tasks::workflows::steps::named::path!(),
+                $($arg)*
+            )
+        };
+    }
+    pub use crate::__named_job as job;
+
+    pub fn uses_named(name: String, owner: &str, repo: &str, ref_: &str) -> Step<Use> {
+        Step::new(name).uses(owner, repo, ref_)
+    }
+
+    pub fn bash_named(name: String, script: impl AsRef<str>) -> Step<Run> {
+        Step::new(name).run(script.as_ref())
+    }
+
+    pub fn pwsh_named(name: String, script: &str) -> Step<Run> {
+        Step::new(name).run(script).shell(PWSH_SHELL)
+    }
+
+    pub fn run_named(name: String, platform: Platform, script: &str) -> Step<Run> {
         match platform {
-            Platform::Windows => Step::new(function_name(1)).run(script).shell(PWSH_SHELL),
-            Platform::Linux | Platform::Mac => Step::new(function_name(1)).run(script),
+            Platform::Windows => Step::new(name).run(script).shell(PWSH_SHELL),
+            Platform::Linux | Platform::Mac => Step::new(name).run(script),
         }
     }
 
-    /// Returns a Workflow with the same name as the enclosing module with default
-    /// set for the running shell.
-    pub fn workflow() -> Workflow {
+    pub fn workflow_named(function_path: String) -> Workflow {
         Workflow::default()
             .name(
-                named::function_name(1)
+                function_path
                     .split("::")
                     .collect::<Vec<_>>()
                     .into_iter()
@@ -532,44 +658,21 @@ pub mod named {
             .defaults(Defaults::default().run(RunDefaults::default().shell(BASH_SHELL)))
     }
 
-    /// Returns a Job with the same name as the enclosing function.
     /// (note job names may not contain `::`)
-    pub fn job<J: JobType>(job: Job<J>) -> NamedJob<J> {
+    pub fn job_named<J: JobType>(function_path: String, job: Job<J>) -> NamedJob<J> {
         NamedJob {
-            name: function_name(1).split("::").last().unwrap().to_owned(),
+            name: function_path
+                .rsplit("::")
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
             job,
         }
-    }
-
-    /// Returns the function name N callers above in the stack
-    /// (typically 1).
-    /// This only works because xtask always runs debug builds.
-    pub fn function_name(i: usize) -> String {
-        let mut name = "<unknown>".to_string();
-        let mut count = 0;
-        backtrace::trace(|frame| {
-            if count < i + 3 {
-                count += 1;
-                return true;
-            }
-            backtrace::resolve_frame(frame, |cb| {
-                if let Some(s) = cb.name() {
-                    name = s.to_string()
-                }
-            });
-            false
-        });
-
-        name.split("::")
-            .skip_while(|s| s != &"workflows")
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join("::")
     }
 }
 
 pub fn git_checkout(ref_name: &dyn std::fmt::Display) -> Step<Run> {
-    named::bash(r#"git fetch origin "$REF_NAME" && git checkout "$REF_NAME""#)
+    named::bash!(r#"git fetch origin "$REF_NAME" && git checkout "$REF_NAME""#)
         .add_env(("REF_NAME", ref_name.to_string()))
 }
 
@@ -689,19 +792,26 @@ pub(crate) fn generate_token<'a>(
     app_id_source: &'a str,
     app_secret_source: &'a str,
 ) -> GenerateAppToken<'a> {
-    generate_token_with_job_name(app_id_source, app_secret_source)
+    generate_token_with_job_name(named::path!(), app_id_source, app_secret_source)
 }
 
 pub fn authenticate_as_zippy() -> GenerateAppToken<'static> {
-    generate_token_with_job_name(vars::ZED_ZIPPY_APP_ID, vars::ZED_ZIPPY_APP_PRIVATE_KEY)
+    generate_token_with_job_name(
+        named::path!(),
+        vars::ZED_ZIPPY_APP_ID,
+        vars::ZED_ZIPPY_APP_PRIVATE_KEY,
+    )
 }
 
+/// Takes the caller's name rather than reading it back off the stack, for the
+/// reason given on `named::path!`.
 fn generate_token_with_job_name<'a>(
+    job_name: String,
     app_id_source: &'a str,
     app_secret_source: &'a str,
 ) -> GenerateAppToken<'a> {
     GenerateAppToken {
-        job_name: function_name(1),
+        job_name,
         app_id: app_id_source,
         app_secret: app_secret_source,
         repository_target: None,

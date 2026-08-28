@@ -12,7 +12,7 @@ pub fn publish_extension_cli() -> Workflow {
     let update_sha_in_zed = update_sha_in_zed(&publish);
     let update_sha_in_extensions = update_sha_in_extensions(&publish);
 
-    named::workflow()
+    named::workflow!()
         .on(Event::default().push(Push::default().tags(vec!["extension-cli".to_string()])))
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("CARGO_INCREMENTAL", 0))
@@ -23,11 +23,11 @@ pub fn publish_extension_cli() -> Workflow {
 
 fn publish_job() -> NamedJob {
     fn build_extension_cli() -> Step<Run> {
-        named::bash("cargo build --release --package extension_cli")
+        named::bash!("cargo build --release --package extension_cli")
     }
 
     fn upload_binary() -> Step<Run> {
-        named::bash(r#"script/upload-extension-cli "$GITHUB_SHA""#)
+        named::bash!(r#"script/upload-extension-cli "$GITHUB_SHA""#)
             .add_env((
                 "DIGITALOCEAN_SPACES_ACCESS_KEY",
                 vars::DIGITALOCEAN_SPACES_ACCESS_KEY,
@@ -38,7 +38,7 @@ fn publish_job() -> NamedJob {
             ))
     }
 
-    named::job(
+    named::job!(
         Job::default()
             .with_repository_owner_guard()
             .runs_on(runners::LINUX_DEFAULT)
@@ -55,19 +55,19 @@ fn update_sha_in_zed(publish_job: &NamedJob) -> NamedJob {
         generate_token(vars::ZED_ZIPPY_APP_ID, vars::ZED_ZIPPY_APP_PRIVATE_KEY).into();
 
     fn replace_sha() -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             sed -i "s/ZED_EXTENSION_CLI_SHA: &str = \"[a-f0-9]*\"/ZED_EXTENSION_CLI_SHA: \&str = \"$GITHUB_SHA\"/" \
                 tooling/xtask/src/tasks/workflows/extension_tests.rs
         "#})
     }
 
     fn regenerate_workflows() -> Step<Run> {
-        named::bash("cargo xtask workflows")
+        named::bash!("cargo xtask workflows")
     }
 
     let (get_short_sha_step, short_sha) = get_short_sha();
 
-    named::job(
+    named::job!(
         Job::default()
             .with_repository_owner_guard()
             .needs(vec![publish_job.name.clone()])
@@ -88,7 +88,7 @@ fn create_pull_request_zed(generated_token: &StepOutput, short_sha: &StepOutput)
         short_sha
     );
 
-    named::uses("peter-evans", "create-pull-request", "98357b18bf14b5342f975ff684046ec3b2a07725").with(
+    named::uses!("peter-evans", "create-pull-request", "98357b18bf14b5342f975ff684046ec3b2a07725").with(
         Input::default()
             .add("title", title.clone())
             .add(
@@ -123,7 +123,7 @@ fn update_sha_in_extensions(publish_job: &NamedJob) -> NamedJob {
             .into();
 
     fn checkout_extensions_repo(token: &StepOutput) -> Step<Use> {
-        named::uses(
+        named::uses!(
             "actions",
             "checkout",
             "11bd71901bbe5b1630ceea73d27597364c9af683", // v4
@@ -133,7 +133,7 @@ fn update_sha_in_extensions(publish_job: &NamedJob) -> NamedJob {
     }
 
     fn replace_sha() -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             sed -i "s/ZED_EXTENSION_CLI_SHA: [a-f0-9]*/ZED_EXTENSION_CLI_SHA: $GITHUB_SHA/" \
                 .github/workflows/ci.yml
         "#})
@@ -141,7 +141,7 @@ fn update_sha_in_extensions(publish_job: &NamedJob) -> NamedJob {
 
     let (get_short_sha_step, short_sha) = get_short_sha();
 
-    named::job(
+    named::job!(
         Job::default()
             .with_repository_owner_guard()
             .needs(vec![publish_job.name.clone()])
@@ -160,7 +160,7 @@ fn create_pull_request_extensions(
 ) -> Step<Use> {
     let title = format!("Bump extension CLI version to `{}`", short_sha);
 
-    named::uses("peter-evans", "create-pull-request", "98357b18bf14b5342f975ff684046ec3b2a07725").with(
+    named::uses!("peter-evans", "create-pull-request", "98357b18bf14b5342f975ff684046ec3b2a07725").with(
         Input::default()
             .add("title", title.clone())
             .add(
@@ -185,7 +185,7 @@ fn create_pull_request_extensions(
 }
 
 fn get_short_sha() -> (Step<Run>, StepOutput) {
-    let step = named::bash(indoc::indoc! {r#"
+    let step = named::bash!(indoc::indoc! {r#"
         echo "sha_short=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
     "#})
     .id("short-sha");

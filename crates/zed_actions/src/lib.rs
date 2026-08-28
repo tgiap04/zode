@@ -83,7 +83,6 @@ pub enum ExtensionCategoryFilter {
     Grammars,
     LanguageServers,
     ContextServers,
-    AgentServers,
     Snippets,
     DebugAdapters,
 }
@@ -100,12 +99,6 @@ pub struct Extensions {
     #[serde(default)]
     pub id: Option<String>,
 }
-
-/// Opens the ACP registry.
-#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
-#[serde(deny_unknown_fields)]
-pub struct AcpRegistry;
 
 /// Decreases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
@@ -775,17 +768,16 @@ pub mod database {
     actions!(
         database,
         [
-            /// Shows or hides the database column.
+            /// Opens the database tab, or steps back to the tab that was being
+            /// read.
             ToggleDatabase,
             /// Opens the dialog for adding a database connection.
             AddConnection,
-            /// Gives the database column the whole window, or gives it back.
-            ToggleFullScreen,
-            /// Moves the database out of its column and into an editor tab,
-            /// where it lays itself out by the width it is given.
+            /// Opens a second database tab beside the code, where `ToggleDatabase`
+            /// brings the existing one forward.
             OpenInEditorTab,
-            /// Moves the database out of its column and into a window of its
-            /// own that floats above other applications.
+            /// Opens the database in a window of its own that floats above other
+            /// applications.
             OpenInFloatingWindow,
             /// Closes the connection under the cursor, stopping its driver.
             Disconnect,
@@ -800,6 +792,43 @@ pub mod database {
             PreviousPage,
             /// Copies the page on screen as CSV.
             CopyResultsAsCsv,
+        ]
+    );
+}
+
+pub mod container {
+    use gpui::actions;
+
+    actions!(
+        container,
+        [
+            /// Opens the container tab, or steps back to the tab that was being
+            /// read.
+            ToggleContainer,
+            /// Opens a second container tab beside the code, where
+            /// `ToggleContainer` brings the existing one forward.
+            OpenInEditorTab,
+            /// Opens the container list in a window of its own that floats above
+            /// other applications.
+            OpenInFloatingWindow,
+        ]
+    );
+}
+
+pub mod floating_pane {
+    use gpui::actions;
+
+    actions!(
+        floating_pane,
+        [
+            /// Opens the floating window over the editor, or puts it away.
+            ToggleFloatingPane,
+            /// Opens a terminal as a tab in the floating window.
+            NewTerminal,
+            /// Opens an unsaved markdown note as a tab in the floating window.
+            NewMarkdownNote,
+            /// Opens an existing markdown file as a tab in the floating window.
+            OpenMarkdownNote,
         ]
     );
 }

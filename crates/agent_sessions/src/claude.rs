@@ -1,6 +1,7 @@
 use crate::{
     AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
     claude_log::{self, HeadFacts, TailFacts},
+    provider::is_safe_component,
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -154,6 +155,55 @@ impl SessionProvider for ClaudeProvider {
         }
         sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(sessions)
+    }
+
+    /// One `stat` per project directory, never a read of one.
+    ///
+    /// The directory name is an undecodable encoding of the cwd, so which project
+    /// holds `<id>` cannot be computed — but the file inside it is named by the
+    /// id, so each candidate is a single existence check. That is why this does
+    /// not go through `list`, which reads the head and tail of all 45 transcripts
+    /// to build summaries this caller would throw away.
+    fn find(&self, id: &str) -> Result<Option<SessionSummary>> {
+        if !is_safe_component(id) || !self.availability().is_ready() {
+            return Ok(None);
+        }
+        let file_name = format!("{id}.jsonl");
+        let Ok(projects) = std::fs::read_dir(&self.projects_dir) else {
+            return Ok(None);
+        };
+        for project in projects.flatten() {
+            if !project
+                .file_type()
+                .map(|kind| kind.is_dir())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let candidate = project.path().join(&file_name);
+            if !candidate.is_file() {
+                continue;
+            }
+            return match self.summary_for(&candidate) {
+                Ok(summary) => Ok(summary),
+                // The file is there but unreadable. Answering "not held" would
+                // send the caller off to start a fresh session on top of a
+                // transcript that exists, so this is a real error.
+                Err(error) => Err(error),
+            };
+        }
+        Ok(None)
+    }
+
+    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<ResumeCommand> {
+        // Verified against the installed CLI: the transcript lands at
+        // `~/.claude/projects/<encoded-cwd>/<id>.jsonl` under exactly this id,
+        // which is what makes `find` above able to recognise it later.
+        Some(ResumeCommand {
+            program: "claude".to_string(),
+            args: vec!["--session-id".to_string(), id.to_string()],
+            cwd: cwd.to_path_buf(),
+        })
     }
 
     fn counts(&self, session: &SessionSummary) -> Result<SessionCounts> {
@@ -371,6 +421,137 @@ mod tests {
         let provider = ClaudeProvider::new(root.path().to_path_buf());
         let sessions = provider.list().unwrap();
         assert_eq!(sessions[0].title, "just this once");
+    }
+
+    #[test]
+    fn find_returns_the_session_the_store_holds() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(
+            &dir,
+            "wanted",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"hello"},"cwd":"/w/one"}"#,
+                r#"{"type":"ai-title","aiTitle":"Found me"}"#,
+            ],
+            0,
+        );
+
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let found = provider.find("wanted").unwrap().expect("held");
+        assert_eq!(&*found.id, "wanted");
+        assert_eq!(found.title, "Found me");
+        assert_eq!(
+            found.cwd,
+            PathBuf::from("/w/one"),
+            "the cwd a resume has to run in comes back with the summary"
+        );
+    }
+
+    #[test]
+    fn find_returns_none_for_an_id_the_store_does_not_hold() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(
+            &dir,
+            "present",
+            &[r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#],
+            0,
+        );
+
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.find("absent").unwrap().is_none(),
+            "an id nobody wrote is Ok(None), not an error"
+        );
+    }
+
+    #[test]
+    fn find_is_none_when_the_store_does_not_exist() {
+        let provider = ClaudeProvider::new(PathBuf::from("/nonexistent-claude-projects"));
+        assert!(provider.find("anything").unwrap().is_none());
+    }
+
+    /// The id arrives from a database and is joined onto the store root, so a
+    /// value carrying a separator would read outside it. Answering `None` keeps
+    /// the traversal from ever being attempted.
+    #[test]
+    fn find_refuses_an_id_that_is_not_a_single_path_component() {
+        let root = projects_dir();
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        for hostile in ["../escape", "a/b", "..", ".", "", "a\\b"] {
+            assert!(
+                provider.find(hostile).unwrap().is_none(),
+                "{hostile:?} must not be looked up"
+            );
+        }
+    }
+
+    /// A lookup picks its session out of a crowded store, and out of the right
+    /// project directory — which is the part that cannot be computed, since the
+    /// directory name is an undecodable encoding of the cwd.
+    ///
+    /// This does **not** prove `find` avoids reading the other transcripts. It
+    /// cannot: a `list`-then-filter implementation would pass this too, and
+    /// telling them apart needs a count of files opened, which is more machinery
+    /// than the property is worth. The cheap-lookup shape is stated on `find`
+    /// itself and held by review, not by this test.
+    #[test]
+    fn find_picks_its_session_out_of_a_crowded_store() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        // Twenty decoys, each with content `summary_for` would have to read.
+        for i in 0..20 {
+            session(
+                &dir,
+                &format!("decoy-{i}"),
+                &[
+                    r#"{"type":"user","message":{"role":"user","content":"noise"},"cwd":"/w/one"}"#,
+                    r#"{"type":"ai-title","aiTitle":"Noise"}"#,
+                ],
+                0,
+            );
+        }
+        // In a different project directory from the decoys, so the lookup has to
+        // walk past one directory to reach it.
+        std::fs::create_dir_all(root.path().join("-w-two")).unwrap();
+        session(
+            &root.path().join("-w-two"),
+            "wanted",
+            &[r#"{"type":"user","message":{"role":"user","content":"real"},"cwd":"/w/two"}"#],
+            0,
+        );
+
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let found = provider.find("wanted").unwrap().expect("held");
+        assert_eq!(&*found.id, "wanted");
+        assert_eq!(
+            found.cwd,
+            PathBuf::from("/w/two"),
+            "found in the second project directory, not the one the decoys are in"
+        );
+        assert_eq!(
+            provider.list().unwrap().len(),
+            21,
+            "the decoys are really there — the lookup had a crowd to pick out of"
+        );
+    }
+
+    #[test]
+    fn claude_can_be_told_which_id_to_use() {
+        let provider = ClaudeProvider::new(PathBuf::from("/anywhere"));
+        let command = provider
+            .new_session_command("11111111-2222-3333-4444-555555555555", Path::new("/w/one"))
+            .expect("Claude has --session-id");
+        assert_eq!(command.program, "claude");
+        assert_eq!(
+            command.args,
+            vec![
+                "--session-id".to_string(),
+                "11111111-2222-3333-4444-555555555555".to_string()
+            ]
+        );
+        assert_eq!(command.cwd, PathBuf::from("/w/one"));
     }
 
     #[test]

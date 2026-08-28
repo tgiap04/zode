@@ -7,7 +7,6 @@ use std::time::Duration;
 use std::{ops::Range, sync::Arc};
 
 use anyhow::Context as _;
-use client::zed_urls;
 use cloud_api_types::{ExtensionMetadata, ExtensionProvides};
 use collections::{BTreeMap, BTreeSet};
 use editor::{Editor, EditorElement, EditorStyle};
@@ -68,7 +67,6 @@ pub fn init(cx: &mut App) {
                         ExtensionCategoryFilter::ContextServers => {
                             ExtensionProvides::ContextServers
                         }
-                        ExtensionCategoryFilter::AgentServers => ExtensionProvides::AgentServers,
                         ExtensionCategoryFilter::Snippets => ExtensionProvides::Snippets,
                         ExtensionCategoryFilter::DebugAdapters => ExtensionProvides::DebugAdapters,
                     });
@@ -185,7 +183,12 @@ fn extension_provides_label(provides: ExtensionProvides) -> &'static str {
         ExtensionProvides::Grammars => "Grammars",
         ExtensionProvides::LanguageServers => "Language Servers",
         ExtensionProvides::ContextServers => "MCP Servers",
-        ExtensionProvides::AgentServers => "Agent Servers",
+        // The variant stays because the registry API still returns
+        // `agent-servers` for extensions that declare one, and dropping it from
+        // this wire enum would fail the whole listing rather than one row. This
+        // build no longer runs such an agent, so the label says so instead of
+        // advertising a capability that does nothing here.
+        ExtensionProvides::AgentServers => "Agent Servers (unsupported)",
         ExtensionProvides::SlashCommands => "Slash Commands",
         ExtensionProvides::IndexedDocsProviders => "Indexed Docs Providers",
         ExtensionProvides::Snippets => "Snippets",
@@ -288,19 +291,6 @@ fn keywords_by_feature() -> &'static BTreeMap<Feature, Vec<&'static str>> {
     })
 }
 
-fn acp_registry_upsell_keywords() -> &'static [&'static str] {
-    &[
-        "opencode",
-        "mistral",
-        "auggie",
-        "stakpak",
-        "codebuddy",
-        "autohand",
-        "factory droid",
-        "corust",
-    ]
-}
-
 fn extension_button_id(extension_id: &Arc<str>, operation: ExtensionOperation) -> ElementId {
     (SharedString::from(extension_id.clone()), operation as usize).into()
 }
@@ -327,7 +317,6 @@ pub struct ExtensionsPage {
     _subscriptions: [gpui::Subscription; 2],
     extension_fetch_task: Option<Task<()>>,
     upsells: BTreeSet<Feature>,
-    show_acp_registry_upsell: bool,
 }
 
 impl ExtensionsPage {
@@ -390,7 +379,6 @@ impl ExtensionsPage {
                 _subscriptions: subscriptions,
                 query_editor,
                 upsells: BTreeSet::default(),
-                show_acp_registry_upsell: false,
             };
             this.fetch_extensions(
                 this.search_query(cx),
@@ -1147,7 +1135,7 @@ impl ExtensionsPage {
                                     move |_, cx| {
                                         Tooltip::simple(
                                             format!(
-                                                "v{version} is not compatible with this version of Zed.",
+                                                "v{version} is not compatible with this version of Zode.",
                                             ),
                                              cx,
                                         )
@@ -1403,13 +1391,11 @@ impl ExtensionsPage {
     fn refresh_feature_upsells(&mut self, cx: &mut Context<Self>) {
         let Some(search) = self.search_query(cx) else {
             self.upsells.clear();
-            self.show_acp_registry_upsell = false;
             return;
         };
 
         if let Some(id) = search.strip_prefix("id:") {
             self.upsells.clear();
-            self.show_acp_registry_upsell = false;
 
             let upsell = match id.to_lowercase().as_str() {
                 "ruff" => Some(Feature::ExtensionRuff),
@@ -1441,61 +1427,6 @@ impl ExtensionsPage {
                 self.upsells.remove(feature);
             }
         }
-
-        self.show_acp_registry_upsell = acp_registry_upsell_keywords()
-            .iter()
-            .any(|keyword| search_terms.iter().any(|term| keyword.contains(term)));
-    }
-
-    fn render_acp_registry_upsell(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let registry_url = zed_urls::acp_registry_blog(cx);
-
-        let view_registry = Button::new("view_registry", "View Registry")
-            .style(ButtonStyle::Tinted(ui::TintColor::Warning))
-            .on_click({
-                let registry_url = registry_url.clone();
-                move |_, window, cx| {
-                    telemetry::event!(
-                        "ACP Registry Opened from Extensions",
-                        source = "ACP Registry Upsell",
-                        url = registry_url,
-                    );
-                    window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx)
-                }
-            });
-        let open_registry_button = Button::new("open_registry", "Learn More")
-            .end_icon(
-                Icon::new(IconName::ArrowUpRight)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .on_click({
-                move |_event, _window, cx| {
-                    telemetry::event!(
-                        "ACP Registry Viewed",
-                        source = "ACP Registry Upsell",
-                        url = registry_url,
-                    );
-                    cx.open_url(&registry_url)
-                }
-            });
-
-        div().pt_4().px_4().child(
-            Banner::new()
-                .severity(Severity::Warning)
-                .child(
-                    Label::new(
-                        "Agent Server extensions will be deprecated in favor of the ACP registry.",
-                    )
-                    .mt_0p5(),
-                )
-                .action_slot(
-                    h_flex()
-                        .gap_1()
-                        .child(open_registry_button)
-                        .child(view_registry),
-                ),
-        )
     }
 
     fn render_feature_upsell_banner(
@@ -1578,110 +1509,110 @@ impl ExtensionsPage {
         for feature in &self.upsells {
             let banner = match feature {
                 Feature::AgentClaude => self.render_feature_upsell_banner(
-                    "Claude Agent support is built-in to Zed!".into(),
+                    "Claude Agent support is built-in to Zode!".into(),
                     "https://zed.dev/docs/ai/external-agents#claude-agent".into(),
                     false,
                     cx,
                 ),
                 Feature::AgentCodex => self.render_feature_upsell_banner(
-                    "Codex CLI support is built-in to Zed!".into(),
+                    "Codex CLI support is built-in to Zode!".into(),
                     "https://zed.dev/docs/ai/external-agents#codex-cli".into(),
                     false,
                     cx,
                 ),
                 Feature::AgentGemini => self.render_feature_upsell_banner(
-                    "Gemini CLI support is built-in to Zed!".into(),
+                    "Gemini CLI support is built-in to Zode!".into(),
                     "https://zed.dev/docs/ai/external-agents#gemini-cli".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionBasedpyright => self.render_feature_upsell_banner(
-                    "Basedpyright (Python language server) support is built-in to Zed!".into(),
+                    "Basedpyright (Python language server) support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/python#basedpyright".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionRuff => self.render_feature_upsell_banner(
-                    "Ruff (linter for Python) support is built-in to Zed!".into(),
+                    "Ruff (linter for Python) support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/python#code-formatting--linting".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionTailwind => self.render_feature_upsell_banner(
-                    "Tailwind CSS support is built-in to Zed!".into(),
+                    "Tailwind CSS support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/tailwindcss".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionTy => self.render_feature_upsell_banner(
-                    "Ty (Python language server) support is built-in to Zed!".into(),
+                    "Ty (Python language server) support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/python".into(),
                     false,
                     cx,
                 ),
                 Feature::Git => self.render_feature_upsell_banner(
-                    "Zed comes with basic Git support—more features are coming in the future."
+                    "Zode comes with basic Git support—more features are coming in the future."
                         .into(),
                     "https://zed.dev/docs/git".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageBash => self.render_feature_upsell_banner(
-                    "Shell support is built-in to Zed!".into(),
+                    "Shell support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/bash".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageC => self.render_feature_upsell_banner(
-                    "C support is built-in to Zed!".into(),
+                    "C support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/c".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageCpp => self.render_feature_upsell_banner(
-                    "C++ support is built-in to Zed!".into(),
+                    "C++ support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/cpp".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageGo => self.render_feature_upsell_banner(
-                    "Go support is built-in to Zed!".into(),
+                    "Go support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/go".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguagePython => self.render_feature_upsell_banner(
-                    "Python support is built-in to Zed!".into(),
+                    "Python support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/python".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageReact => self.render_feature_upsell_banner(
-                    "React support is built-in to Zed!".into(),
+                    "React support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/typescript".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageRust => self.render_feature_upsell_banner(
-                    "Rust support is built-in to Zed!".into(),
+                    "Rust support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/rust".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageTypescript => self.render_feature_upsell_banner(
-                    "Typescript support is built-in to Zed!".into(),
+                    "Typescript support is built-in to Zode!".into(),
                     "https://zed.dev/docs/languages/typescript".into(),
                     false,
                     cx,
                 ),
                 Feature::OpenIn => self.render_feature_upsell_banner(
-                    "Zed supports linking to a source line on GitHub and others.".into(),
+                    "Zode supports linking to a source line on GitHub and others.".into(),
                     "https://zed.dev/docs/git#git-integrations".into(),
                     false,
                     cx,
                 ),
                 Feature::Vim => self.render_feature_upsell_banner(
-                    "Vim support is built-in to Zed!".into(),
+                    "Vim support is built-in to Zode!".into(),
                     "https://zed.dev/docs/vim".into(),
                     true,
                     cx,
@@ -1818,11 +1749,6 @@ impl Render for ExtensionsPage {
                                 }),
                         )
                     })),
-            )
-            .when(
-                self.provides_filter == Some(ExtensionProvides::AgentServers)
-                    || self.show_acp_registry_upsell,
-                |this| this.child(self.render_acp_registry_upsell(cx)),
             )
             .child(self.render_feature_upsells(cx))
             .child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {

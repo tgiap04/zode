@@ -20,7 +20,7 @@ pub fn bump_patch_version() -> Workflow {
     let prerelease = WorkflowInput::bool("prerelease", Some(false))
         .description("Tag as a prerelease (v0.1.2-pre) instead of a full release (v0.1.2)");
     let bump_patch_version_job = run_bump_patch_version(&branch, &prerelease);
-    named::workflow()
+    named::workflow!()
         .on(Event::default().workflow_dispatch(
             WorkflowDispatch::default()
                 .add_input(branch.name, branch.input())
@@ -51,7 +51,7 @@ fn run_bump_patch_version(branch: &WorkflowInput, prerelease: &WorkflowInput) ->
     /// the file from that. Reading the file to decide the tag inverted the one rule
     /// this fork actually has, so the caller says which kind of tag they want instead.
     fn bump_version(prerelease: &WorkflowInput) -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             if [[ "$PRERELEASE" == "true" ]]; then
               tag_suffix="-pre"
             else
@@ -70,7 +70,7 @@ fn run_bump_patch_version(branch: &WorkflowInput, prerelease: &WorkflowInput) ->
     }
 
     fn commit_changes(version: &StepOutput, branch: &WorkflowInput) -> Step<Use> {
-        named::uses(
+        named::uses!(
             "IAreKyleW00t",
             "verified-bot-commit",
             "126a6a11889ab05bcff72ec2403c326cd249b84c", // v2.3.0
@@ -90,7 +90,7 @@ fn run_bump_patch_version(branch: &WorkflowInput, prerelease: &WorkflowInput) ->
         tag_suffix: &StepOutput,
         commit_sha: &StepOutput,
     ) -> Step<Use> {
-        named::uses(
+        named::uses!(
             "actions",
             "github-script",
             "f28e40c7f34bde8b3046d885e986cb6290c5673b", // v7
@@ -118,7 +118,7 @@ fn run_bump_patch_version(branch: &WorkflowInput, prerelease: &WorkflowInput) ->
     let commit_step = commit_changes(&version, branch);
     let commit_sha = StepOutput::new_unchecked(&commit_step, "commit");
 
-    named::job(
+    named::job!(
         // Both the commit and the tag are writes, and a plain repository's default
         // token is read-only -- see `writes_to_releases`.
         steps::writes_to_releases(Job::default())

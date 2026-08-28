@@ -5,8 +5,6 @@ mod bookmark_store;
 mod color_extractor;
 mod context_server_store;
 mod debugger;
-mod ext_agent_tests;
-mod extension_agent_tests;
 mod git_store;
 mod image_store;
 mod lsp_command;
@@ -14538,6 +14536,35 @@ async fn test_resource_stats_reports_counts_and_activity(cx: &mut gpui::TestAppC
     });
     project.read_with(cx, |project, cx| {
         assert_eq!(project.resource_stats(cx).activity, ProjectActivity::Warm);
+    });
+}
+
+// Phase 01 (per-project-cpu-ram-footer): `Project::child_process_root_pids`
+// must not change what `resource_stats` publishes. See
+// plans/260826-2107-per-project-cpu-ram-footer/phase-01-project-child-process-pids.md.
+
+#[gpui::test]
+async fn test_child_process_root_pids_empty_when_no_servers_or_terminals(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "a.rs": "x" })).await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+
+    project.read_with(cx, |project, cx| {
+        assert_eq!(
+            project.child_process_root_pids(cx),
+            Vec::new(),
+            "no local language server and no local terminal -- nothing to report"
+        );
+        assert_eq!(
+            project.resource_stats(cx).language_server_rss_bytes,
+            None,
+            "the refactor onto child_process_root_pids's shared helper must not \
+             change what resource_stats publishes"
+        );
     });
 }
 

@@ -1,5 +1,5 @@
-//! The database column: a connection tree, a SQL scratch buffer and a result
-//! grid, standing between the rail's tool dock and the editor.
+//! The database as a tab: a connection tree, a SQL scratch buffer and a result
+//! grid, beside the code.
 //!
 //! Everything it knows about a database arrives over the driver protocol in
 //! [`database`]. Nothing here names an engine -- a driver formats its own
@@ -25,52 +25,36 @@ mod session;
 mod standalone;
 
 pub use connection_store::{ConnectionConfig, DatabaseSettings};
-pub use database_panel::{DatabasePanel, Host};
+pub use database_panel::DatabasePanel;
 pub use standalone::SIDE_BY_SIDE_WIDTH;
 
 use connection_modal::ConnectionModal;
 
 use gpui::App;
 use workspace::Workspace;
-use workspace::dock::DockColumn;
 
 pub fn init(cx: &mut App) {
     driver_registry::init(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
-        // Toggles the column, not the focus.
+        // What the rail button does, and why it is not simply an open: the
+        // button is a toggle, and a lit toggle that does nothing when pressed is
+        // the whole complaint. Same shape as the agent buttons beside it.
         //
-        // `toggle_panel_focus` puts focus in the panel and only closes anything
-        // when `close_panel_on_toggle` is set, which is off by default -- so a
-        // second press of a lit rail button did nothing at all. What the button
-        // says it does is show and hide a column, so that is what it does.
-        //
-        // Hidden rather than closed: `set_open(false)` leaves the panel entity
-        // in the dock, so the tree, the scratch buffer and any open session are
-        // still there when it comes back.
+        // Put away rather than closed: closing would end every open session and
+        // lose a half-written statement over the second press.
         workspace.register_action(
             |workspace, _: &zed_actions::database::ToggleDatabase, window, cx| {
-                let Some(dock) = workspace.dock_for_column(DockColumn::Database).cloned() else {
+                if standalone::put_away(workspace, window, cx) {
                     return;
-                };
-                let showing = dock.read(cx).is_open();
-                dock.update(cx, |dock, cx| {
-                    if showing {
-                        dock.set_open(false, window, cx);
-                    } else {
-                        dock.set_open(true, window, cx);
-                    }
-                });
-                if !showing {
-                    workspace.focus_panel::<DatabasePanel>(window, cx);
                 }
+                standalone::open(workspace, window, cx);
             },
         );
-        // Both take the database out of its column: one into a tab beside the
-        // code, one into a window that floats above other applications. Actions
-        // rather than plain click handlers so the two buttons and a keybinding
-        // reach the same code, and so neither button takes a shorter road that
-        // happens to work -- the note on `AddConnection` below is why that
-        // matters here.
+        // A second tab, deliberately, where `ToggleDatabase` brings the first
+        // forward; and a window of its own. Actions rather than plain click
+        // handlers so buttons and keybindings reach the same code, and so neither
+        // takes a shorter road that happens to work -- the note on `AddConnection`
+        // below is why that matters here.
         workspace.register_action(
             |workspace, _: &zed_actions::database::OpenInEditorTab, window, cx| {
                 standalone::open_in_editor_tab(workspace, window, cx);

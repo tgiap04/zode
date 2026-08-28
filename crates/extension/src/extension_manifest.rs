@@ -107,8 +107,6 @@ pub struct ExtensionManifest {
     #[serde(default)]
     pub context_servers: BTreeMap<Arc<str>, ContextServerManifestEntry>,
     #[serde(default)]
-    pub agent_servers: BTreeMap<Arc<str>, AgentServerManifestEntry>,
-    #[serde(default)]
     pub slash_commands: BTreeMap<Arc<str>, SlashCommandManifestEntry>,
     #[serde(default)]
     pub snippets: Option<ExtensionSnippets>,
@@ -150,10 +148,6 @@ impl ExtensionManifest {
 
         if !self.context_servers.is_empty() {
             provides.insert(ExtensionProvides::ContextServers);
-        }
-
-        if !self.agent_servers.is_empty() {
-            provides.insert(ExtensionProvides::AgentServers);
         }
 
         if self.snippets.is_some() {
@@ -215,46 +209,6 @@ pub fn build_debug_adapter_schema_path(
 pub struct LibManifestEntry {
     pub kind: Option<ExtensionLibraryKind>,
     pub version: Option<Version>,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
-pub struct AgentServerManifestEntry {
-    /// Display name for the agent (shown in menus).
-    pub name: String,
-    /// Environment variables to set when launching the agent server.
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    /// Optional icon path (relative to extension root, e.g., "ai.svg").
-    /// Should be a small SVG icon for display in menus.
-    #[serde(default)]
-    pub icon: Option<String>,
-    /// Per-target configuration for archive-based installation.
-    /// The key format is "{os}-{arch}" where:
-    /// - os: "darwin" (macOS), "linux", "windows"
-    /// - arch: "aarch64" (arm64), "x86_64"
-    ///
-    /// Example:
-    /// ```toml
-    /// [agent_servers.myagent.targets.darwin-aarch64]
-    /// archive = "https://example.com/myagent-darwin-arm64.zip"
-    /// cmd = "./myagent"
-    /// args = ["--serve"]
-    /// sha256 = "abc123..."  # optional
-    /// ```
-    ///
-    /// For Node.js-based agents, you can use "node" as the cmd to automatically
-    /// use Zed's managed Node.js runtime instead of relying on the user's PATH:
-    /// ```toml
-    /// [agent_servers.nodeagent.targets.darwin-aarch64]
-    /// archive = "https://example.com/nodeagent.zip"
-    /// cmd = "node"
-    /// args = ["index.js", "--port", "3000"]
-    /// ```
-    ///
-    /// Note: All commands are executed with the archive extraction directory as the
-    /// working directory, so relative paths in args (like "index.js") will resolve
-    /// relative to the extracted archive contents.
-    pub targets: HashMap<String, TargetConfig>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
@@ -461,7 +415,6 @@ fn manifest_from_old_manifest(
             .collect(),
         language_servers: Default::default(),
         context_servers: BTreeMap::default(),
-        agent_servers: BTreeMap::default(),
         slash_commands: BTreeMap::default(),
         snippets: None,
         capabilities: Vec::new(),
@@ -498,7 +451,6 @@ mod tests {
             grammars: BTreeMap::default(),
             language_servers: BTreeMap::default(),
             context_servers: BTreeMap::default(),
-            agent_servers: BTreeMap::default(),
             slash_commands: BTreeMap::default(),
             snippets: None,
             capabilities: vec![],
@@ -673,13 +625,25 @@ mod tests {
         );
     }
 
+    /// Agent-server extensions are no longer supported: the `agent_servers`
+    /// field is gone and nothing in this build runs one.
+    ///
+    /// The manifest must still PARSE, though, and that is what this locks in.
+    /// `ExtensionManifest` carries no `deny_unknown_fields`, so the stanza is
+    /// ignored rather than fatal — which means an extension that provides an
+    /// agent server *and* a grammar keeps its grammar instead of failing to
+    /// install outright. The cost is that the agent stanza does nothing and says
+    /// nothing; `extension_provides_label` renders the registry's
+    /// `agent-servers` tag as "Agent Servers (unsupported)" so the listing is at
+    /// least honest about it.
     #[test]
-    fn parse_manifest_with_agent_server_archive_launcher() {
+    fn a_manifest_declaring_an_agent_server_still_parses_and_provides_nothing() {
         let toml_src = indoc! {r#"
             id = "example.agent-server-ext"
             name = "Agent Server Example"
             version = "1.0.0"
             schema_version = 0
+            grammars = { foo = { repository = "https://example.com/foo", commit = "abc" } }
 
             [agent_servers.foo]
             name = "Foo Agent"
@@ -692,12 +656,7 @@ mod tests {
 
         let manifest: ExtensionManifest = toml::from_str(toml_src).expect("manifest should parse");
         assert_eq!(manifest.id.as_ref(), "example.agent-server-ext");
-        assert!(manifest.agent_servers.contains_key("foo"));
-        let entry = manifest.agent_servers.get("foo").unwrap();
-        assert!(entry.targets.contains_key("linux-x86_64"));
-        let target = entry.targets.get("linux-x86_64").unwrap();
-        assert_eq!(target.archive, "https://example.com/agent-linux-x64.tar.gz");
-        assert_eq!(target.cmd, "./agent");
-        assert_eq!(target.args, vec!["--serve"]);
+        // The rest of the extension survives the ignored stanza.
+        assert!(manifest.provides().contains(&ExtensionProvides::Grammars));
     }
 }

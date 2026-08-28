@@ -62,25 +62,42 @@ releases are built from the tag; `nightly` is a single rolling pre-release rebui
 
 Three limits are real, not caveats to skim:
 
-1. **The binaries are not code-signed or notarized.** Your OS will say so, and it is
-   right to: nothing has verified where these came from except you. You are choosing to
-   trust an unsigned build. If that is not a trade you want, build from source below.
-2. **There is no in-app updater.** Nothing will tell you a new version exists; you have
-   to come back here and download it.
+1. **The binaries carry an ad-hoc signature only, and are not notarized.** `codesign -dv`
+   on a release bundle reports `Signature=adhoc` and `TeamIdentifier=not set` — enough for
+   Apple silicon to execute them at all, and nothing beyond that. No Developer ID vouches
+   for where they came from, so your OS will say so and it is right to: nothing has
+   verified their origin except you. If that is not a trade you want, build from source
+   below.
+2. **Updates are manual, but they are in-app.** Nothing checks in the background and
+   nothing phones home. When you want to know, use *Help → Check for Updates*: it reads
+   this repository's latest published release, and if there is a newer one it downloads
+   and installs it for you. A published release only — a draft is invisible to it.
 3. **Debug symbols are stripped in release builds**, so a crash backtrace will be mostly
    empty. Reproduce against a source build if you want a useful one.
 
 To open despite the warning — do this for the one file, and never disable Gatekeeper or
 SmartScreen system-wide:
 
-- **macOS**: `xattr -d com.apple.quarantine /Applications/Zode.app`, or open it once via
-  right-click → Open.
+- **macOS**: `xattr -dr com.apple.quarantine /Applications/Zode.app`. Recursive, and not
+  `-d`: the flag lands on 18 paths inside the bundle, six of them executables —
+  `Contents/MacOS/{cli,git,zode,zode-db-mysql,zode-db-postgres,zode-db-sqlite}`. Clearing
+  only the bundle root leaves the other seventeen flagged, and `script/bundle-mac` notes
+  what that costs: a driver Gatekeeper blocks fails silently, so every database connection
+  just fails to start one with nothing saying why.
+  Control-click → *Open* is gone — Apple removed that bypass in macOS 15, so on 15 and
+  newer it does nothing. The GUI route is *System Settings → Privacy & Security* → the
+  blocked-app notice → *Open Anyway*. That records an approval for the app; it does not
+  clear the attribute, so the flags stay where they were. The `xattr` line is the one that
+  actually removes them.
 - **Windows**: on the SmartScreen prompt, *More info* → *Run anyway*.
-- **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zode.app/bin/zed`.
+- **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zed.app/bin/zed`. The
+  directory inside the archive is `zed.app`, not `zode.app` — the bundle keeps upstream's
+  layout so `libexec/zed-editor` stays where the database drivers look for it.
 
-Linux builds are produced on Ubuntu 24.04, so they need **glibc 2.39 or newer**. Older
-distributions — including Ubuntu 22.04 — will fail with a `GLIBC_2.39 not found` error;
-build from source there.
+Linux builds need **glibc 2.35 or newer** (Ubuntu 22.04 and newer, Debian 12 and newer).
+They are built inside an `ubuntu:22.04` container so that floor holds regardless of which
+runner image GitHub offers, and `script/check-glibc-floor` fails the build if anything in
+the bundle asks for more.
 
 ### From source
 

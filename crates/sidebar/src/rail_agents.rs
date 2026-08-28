@@ -19,6 +19,12 @@ const RAIL_AGENTS: &[(&str, IconName, &str)] = &[
         "Claude Code",
     ),
     (project::CODEX_AGENT_ID, IconName::AiOpenAi, "Codex"),
+    (
+        project::ANTIGRAVITY_AGENT_ID,
+        IconName::AiAntigravity,
+        "Antigravity",
+    ),
+    (project::COPILOT_AGENT_ID, IconName::AiCopilot, "Copilot"),
 ];
 
 impl Sidebar {

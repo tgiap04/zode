@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
+    time::Duration,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use std::{
@@ -10,7 +11,6 @@ use std::{
     fs::File,
     io::Read as _,
     os::fd::{AsFd, FromRawFd, IntoRawFd},
-    time::Duration,
 };
 
 use anyhow::{Context as _, anyhow};
@@ -24,8 +24,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
-    ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    DisplayWakeLock, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
     WindowButtonLayout, WindowParams,
 };
@@ -188,6 +188,25 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
+    }
+
+    fn can_keep_display_awake(&self) -> bool {
+        // `true` without probing. Whether the request will actually succeed comes
+        // down to a service being on the session bus, and there is no cheap
+        // honest way to ask that in advance: `DBUS_SESSION_BUS_ADDRESS` is not
+        // always set even where a bus exists. A refused attempt surfaces as
+        // `Status::Unsupported` in the indicator, which is the truthful answer --
+        // claiming no support up front would hide the feature on machines where
+        // it works.
+        true
+    }
+
+    fn keep_display_awake(&self, reason: &str) -> Option<DisplayWakeLock> {
+        inhibit_screensaver(reason, self.background_executor())
+    }
+
+    fn on_battery(&self) -> Option<bool> {
+        read_mains_online()
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
@@ -1120,4 +1139,185 @@ mod tests {
             Point::new(px(5.0), px(5.1))
         ),);
     }
+}
+
+/// Whether any mains supply is present and connected, read from sysfs.
+///
+/// Deliberately files rather than D-Bus: this answers a yes/no question that the
+/// kernel already publishes, and a D-Bus round trip would add a dependency and a
+/// session requirement for nothing. `None` when no mains supply exists at all,
+/// which is the ordinary shape of a desktop and must not be read as "on battery".
+fn read_mains_online() -> Option<bool> {
+    let entries = match std::fs::read_dir("/sys/class/power_supply") {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn_once(format_args!("cannot list /sys/class/power_supply: {error}"));
+            return None;
+        }
+    };
+    let mut mains_seen = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let kind = match std::fs::read_to_string(path.join("type")) {
+            Ok(kind) => kind,
+            Err(error) => {
+                warn_once(format_args!("cannot read {}: {error}", path.display()));
+                continue;
+            }
+        };
+        if kind.trim() != "Mains" {
+            continue;
+        }
+        mains_seen = true;
+        // Any connected mains supply settles it; keep looking only while every
+        // one seen so far is disconnected.
+        match std::fs::read_to_string(path.join("online")) {
+            Ok(online) if online.trim() == "1" => return Some(false),
+            Ok(_) => {}
+            Err(error) => {
+                warn_once(format_args!("cannot read {}: {error}", path.display()));
+            }
+        }
+    }
+    mains_seen.then_some(true)
+}
+
+/// Logs the first power-supply read failure and stays quiet after that.
+///
+/// The caller runs on a timer while an agent works, so an unreadable sysfs would
+/// otherwise produce a line a minute for hours. One line is a diagnostic; sixty
+/// an hour is noise that buries everything else.
+fn warn_once(message: std::fmt::Arguments<'_>) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!("{message}");
+    }
+}
+
+/// `org.freedesktop.ScreenSaver`, the convention every mainstream Linux desktop
+/// implements -- GNOME, KDE and the rest -- on X11 and Wayland alike.
+///
+/// Chosen over the Wayland `zwp_idle_inhibit_manager_v1` protocol, which the
+/// plan for this originally called for, because this route needs no surface, no
+/// compositor global and no display-server code at all: it works the same under
+/// both backends and touches neither client. The protocol route remains the
+/// better answer for a compositor that advertises idle-inhibit but runs no
+/// screensaver service, and is worth adding later as a preferred path with this
+/// as the fallback.
+///
+/// The known limitation, and it cannot be detected from this side: some
+/// environments answer this call successfully and then do not actually hold the
+/// screen. The indicator will say the display is being held while it sleeps
+/// anyway. That is written down in the documentation rather than left for
+/// somebody to discover.
+#[zbus::proxy(
+    interface = "org.freedesktop.ScreenSaver",
+    default_service = "org.freedesktop.ScreenSaver",
+    default_path = "/org/freedesktop/ScreenSaver"
+)]
+trait ScreenSaver {
+    fn inhibit(&self, application_name: &str, reason: &str) -> zbus::Result<u32>;
+    fn un_inhibit(&self, cookie: u32) -> zbus::Result<()>;
+}
+
+/// Takes an inhibit cookie, released when the returned lock is dropped.
+///
+/// Synchronous because `Platform::keep_display_awake` is, and **bounded** because
+/// this runs on the foreground thread. Every caller reaches it through
+/// `keep_awake`'s `Holds::sync`, which runs on GPUI's single UI thread: an agent
+/// tab starting or finishing, a settings edit, or the power-check timer's
+/// `update`. A session-bus connect is normally a millisecond or two, but nothing
+/// in zbus bounds it -- `blocking::Connection::session()` is a `block_on` with no
+/// deadline anywhere in the chain -- so a bus that is slow to accept, or wedged,
+/// would freeze the whole editor rather than just this indicator. An expectation
+/// is not a limit; the timeout below is the limit.
+///
+/// Answering synchronously is what lets a refused hold be reported as
+/// `Status::Unsupported` instead of the indicator claiming a hold it never got.
+/// Doing this on a background task would hand back a lock before knowing whether
+/// there was anything behind it.
+fn inhibit_screensaver(reason: &str, executor: BackgroundExecutor) -> Option<DisplayWakeLock> {
+    /// Generous by two orders of magnitude against a healthy bus, and short
+    /// enough that the pathological case is a hitch rather than a hang.
+    const BUS_TIMEOUT: Duration = Duration::from_millis(250);
+
+    let reason = reason.to_owned();
+    // The timeout comes from GPUI's clock rather than `smol::Timer`, which the
+    // repo disallows. Safe to await from inside `block_on` on this thread: the
+    // Linux dispatcher fires `dispatch_after` from a dedicated timer thread with
+    // an event loop of its own, so the wake does not depend on the main loop
+    // that this call is currently blocking.
+    let releasing = executor.clone();
+    let taken = smol::block_on(async move {
+        let work = async {
+            let connection = zbus::Connection::session()
+                .await
+                .map_err(|error| format!("no session bus: {error}"))?;
+            let proxy = ScreenSaverProxy::new(&connection)
+                .await
+                .map_err(|error| format!("no org.freedesktop.ScreenSaver: {error}"))?;
+            let cookie = proxy
+                .inhibit("zode", &reason)
+                .await
+                .map_err(|error| format!("the screensaver service refused: {error}"))?;
+            Ok((connection, proxy, cookie))
+        };
+        let expired = async {
+            executor.timer(BUS_TIMEOUT).await;
+            Err(format!(
+                "the session bus did not answer within {BUS_TIMEOUT:?}"
+            ))
+        };
+        smol::future::or(work, expired).await
+    });
+
+    let (connection, proxy, cookie) = match taken {
+        Ok(taken) => taken,
+        Err(reason) => {
+            log::warn!("cannot keep the display awake: {reason}");
+            return None;
+        }
+    };
+
+    Some(DisplayWakeLock::new(move || {
+        /// How many times to retry `un_inhibit` off-thread before giving up.
+        ///
+        /// Chosen with `RETRY_INTERVAL` below to total a few seconds -- generous
+        /// against a bus that is merely slow to answer, and short enough that a
+        /// genuinely dead bus does not hold the connection open forever.
+        const MAX_ATTEMPTS: u32 = 10;
+        /// How long to wait between retries.
+        const RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
+        // Unlike the take above, nothing is waiting on this closure's return
+        // value -- it runs from `Drop`. That means it can afford to keep trying
+        // off-thread instead of racing one bounded attempt and abandoning it: the
+        // task below owns `connection` and `proxy` for as long as it keeps
+        // retrying, so dropping this closure right after spawning does not race
+        // the retries against a socket they still need.
+        let timer_executor = releasing.clone();
+        releasing
+            .spawn(async move {
+                // Keep `connection` alive for the lifetime of the retries even
+                // though `proxy` holds its own `Arc` clone -- belt-and-braces
+                // rather than load-bearing.
+                let _connection = connection;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    match proxy.un_inhibit(cookie).await {
+                        Ok(()) => return,
+                        Err(error) => {
+                            if attempt == MAX_ATTEMPTS {
+                                log::warn!(
+                                    "could not release the screensaver inhibit after \
+                                     {MAX_ATTEMPTS} attempts: {error}"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    timer_executor.timer(RETRY_INTERVAL).await;
+                }
+            })
+            .detach();
+    }))
 }
