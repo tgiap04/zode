@@ -18,7 +18,7 @@
 //! lock, runs no timer, and wakes for nothing.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_ui::AgentView;
 use gpui::{
@@ -86,6 +86,20 @@ pub enum Status {
 /// process more often.
 const POWER_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How long to leave a failed acquisition alone before trying again.
+///
+/// `sync` is reachable from `observe_global::<SettingsStore>`, which fires on
+/// *any* settings change anywhere in the app, and from the 60-second
+/// `power_check` timer. Without a cooldown, a machine whose session bus never
+/// answers (or whose ScreenSaver service refuses) pays the acquisition
+/// attempt's up-to-250ms foreground stall on every single one of those --
+/// which on an unrelated settings edit is a UI hitch with no connection to
+/// anything the user just did. Thirty seconds is long enough that normal
+/// editing does not retrigger the stall, short enough that a bus which comes
+/// back (e.g. a session started before `dbus` finished starting) is picked up
+/// without a restart.
+const FAILED_ACQUISITION_COOLDOWN: Duration = Duration::from_secs(30);
+
 /// Holds one display-wake lock for as long as any agent tab's CLI is running.
 pub struct KeepAwake {
     holds: Holds,
@@ -116,6 +130,12 @@ struct Holds {
     /// Bounded by the number of open agent tabs: every insert is matched either
     /// by the completion task or by `ItemRemoved`.
     running: HashMap<EntityId, SharedString>,
+    /// When the most recent acquisition attempt was refused, so `sync` can
+    /// leave it alone for `FAILED_ACQUISITION_COOLDOWN` instead of retrying an
+    /// identical call on every settings change. Cleared as soon as the
+    /// situation changes in a way that could plausibly change the outcome --
+    /// see the branch in `sync` that returns early with nothing to hold.
+    last_failed_at: Option<Instant>,
 }
 
 /// What is kept alive per agent tab.
@@ -169,6 +189,12 @@ impl Holds {
             || !KeepDisplayAwakeSetting::is_enabled(cx)
             || cx.on_battery() == Some(true)
         {
+            // Nothing eligible to hold for. Clearing the latch here, rather than
+            // only on a timeout, is what makes the setting being toggled or the
+            // charger coming back count as "something that could plausibly
+            // change the outcome": the next time this becomes eligible again it
+            // is treated as a fresh attempt, not a retry still in cooldown.
+            self.last_failed_at = None;
             return self.lock.take().is_some();
         }
         // Already held. Deliberately not retaken to refresh the reason: the name
@@ -179,12 +205,22 @@ impl Holds {
         if self.lock.is_some() {
             return false;
         }
+        if let Some(last_failed_at) = self.last_failed_at
+            && cx.background_executor().now() - last_failed_at < FAILED_ACQUISITION_COOLDOWN
+        {
+            // Still cooling down from a refusal, and nothing about the
+            // situation has changed since. Skip the attempt rather than pay
+            // its foreground stall for a call almost certain to fail again.
+            return false;
+        }
         let reason = self.reason();
         self.lock = cx.keep_display_awake(&reason);
         if self.lock.is_none() {
+            self.last_failed_at = Some(cx.background_executor().now());
             log::warn!("this platform will not keep the display awake for {reason}");
             return false;
         }
+        self.last_failed_at = None;
         true
     }
 

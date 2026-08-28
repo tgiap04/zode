@@ -402,6 +402,79 @@ fn being_turned_off_outranks_being_idle(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(holds.status(cx), Status::Disabled));
 }
 
+/// The defect this guards against: `sync` is reachable from any settings
+/// change anywhere in the app, so a refused acquisition retried on every one
+/// of them costs a foreground stall unrelated to what the user just did.
+/// Flipping `display_wake_supported` to `true` right after the refusal proves
+/// the *skip* is real -- if `sync` retried anyway, this would take the lock
+/// immediately rather than waiting out the cooldown.
+#[gpui::test]
+fn a_failed_acquisition_is_not_retried_before_the_cooldown_elapses(cx: &mut TestAppContext) {
+    init_settings(cx);
+    set_enabled(cx, true);
+    cx.set_on_battery(Some(false));
+    cx.set_display_wake_supported(false);
+    let claude = tab(cx);
+    let mut holds = Holds::default();
+
+    cx.update(|cx| assert!(!holds.set(claude, "Claude Code".into(), cx)));
+    assert!(cx.display_wake_reasons().is_empty());
+
+    // The platform would now succeed, but nothing has happened that could
+    // plausibly change the outcome, and the cooldown has not elapsed.
+    cx.set_display_wake_supported(true);
+    cx.update(|cx| {
+        assert!(!holds.sync(cx), "still cooling down from the refusal");
+    });
+    assert!(
+        cx.display_wake_reasons().is_empty(),
+        "a sync shortly after a failure must not re-attempt acquisition"
+    );
+
+    cx.executor().advance_clock(FAILED_ACQUISITION_COOLDOWN);
+    cx.update(|cx| {
+        assert!(
+            holds.sync(cx),
+            "the cooldown has elapsed, so this may retry"
+        );
+    });
+    assert_eq!(
+        cx.display_wake_reasons().len(),
+        1,
+        "a sync once the cooldown has elapsed must retry"
+    );
+}
+
+/// The setting being toggled off and back on is one of the two events allowed
+/// to end a cooldown early -- see the note on `Holds::sync`. Without it, a
+/// user who notices the refusal, is told by the tooltip to check their
+/// session bus, and flips the setting off and back on to force a retry would
+/// instead sit out the rest of the cooldown.
+#[gpui::test]
+fn toggling_the_setting_ends_a_cooldown_early(cx: &mut TestAppContext) {
+    init_settings(cx);
+    set_enabled(cx, true);
+    cx.set_on_battery(Some(false));
+    cx.set_display_wake_supported(false);
+    let claude = tab(cx);
+    let mut holds = Holds::default();
+
+    cx.update(|cx| assert!(!holds.set(claude, "Claude Code".into(), cx)));
+
+    cx.set_display_wake_supported(true);
+    set_enabled(cx, false);
+    cx.update(|cx| assert!(!holds.sync(cx), "nothing to hold while disabled"));
+
+    set_enabled(cx, true);
+    cx.update(|cx| {
+        assert!(
+            holds.sync(cx),
+            "toggling the setting back on must not still be cooling down"
+        );
+    });
+    assert_eq!(cx.display_wake_reasons().len(), 1);
+}
+
 #[gpui::test]
 fn the_reason_names_one_agent_and_counts_several(cx: &mut TestAppContext) {
     let claude = tab(cx);
