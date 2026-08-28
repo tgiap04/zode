@@ -1,6 +1,8 @@
 mod app_menus;
 #[cfg(test)]
 mod app_name_tests;
+#[cfg(test)]
+mod init_list_tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_only_instance;
 mod migrate;
