@@ -27,6 +27,12 @@ impl Drop for Reaped {
     fn drop(&mut self) {
         // Best effort by nature: the process may already be gone, which is the
         // outcome being asked for anyway.
+        //
+        // Known limitation: this kills the single tracked PID (`libc::kill`),
+        // not a process group. If the `docker`/`kubectl` CLI forks a helper
+        // process, that grandchild is reparented to PID 1 and survives this
+        // kill. Fixing that needs process-group semantics in `util::command`,
+        // which is out of scope here.
         if let Err(error) = self.0.kill() {
             log::debug!("could not kill a finished event process: {error}");
         }
@@ -44,6 +50,11 @@ where
 {
     command.stdout(Stdio::piped());
     command.stderr(Stdio::null());
+    // Belt-and-braces: `Reaped` below already kills the child on drop, but that
+    // guard only exists once `spawn` returns. Setting this here means even a
+    // future refactor that moves work between `spawn` and the guard's
+    // construction cannot reintroduce a silent leak.
+    command.kill_on_drop(true);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {

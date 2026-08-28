@@ -210,16 +210,27 @@ impl ContainerPanel {
         let finding = self.plan_prune(container::PruneScope::Reclaimable, cx);
         // `spawn_in` and not `spawn`: opening a modal needs a `Window`, and only
         // an `AsyncWindowContext` carries one across the await.
-        self.actions
-            .push(cx.spawn_in(window, async move |this, cx| {
-                let Some(plan) = finding.await else {
-                    return;
-                };
-                this.update_in(cx, |this, window, cx| {
-                    this.open_confirmation(plan, window, cx);
-                })
-                .ok();
-            }));
+        let action_id = self.next_action_id;
+        self.next_action_id += 1;
+        self.actions.insert(
+            action_id,
+            cx.spawn_in(window, async move |this, cx| {
+                if let Some(plan) = finding.await {
+                    if let Err(error) = this.update_in(cx, |this, window, cx| {
+                        this.open_confirmation(plan, window, cx);
+                    }) {
+                        log::debug!("panel closed before the prune dialog could open: {error}");
+                    }
+                }
+                // See the matching comment in `ContainerPanel::act`: removing
+                // our own map entry as the very last statement is safe.
+                if let Err(error) = this.update(cx, |this, _cx| {
+                    this.actions.remove(&action_id);
+                }) {
+                    log::debug!("panel closed before its prune finding could self-remove: {error}");
+                }
+            }),
+        );
     }
 
     fn open_confirmation(

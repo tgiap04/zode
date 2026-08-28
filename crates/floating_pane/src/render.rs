@@ -5,6 +5,8 @@
 //! the outer element is `absolute` and `size_full`, and everything inside it is
 //! positioned by hand.
 
+use std::sync::LazyLock;
+
 use gpui::{
     Anchor, Bounds, ClickEvent, DragMoveEvent, MouseButton, MouseDownEvent, Pixels, Point, Size, px,
 };
@@ -29,16 +31,23 @@ enum Entry {
     Agent(&'static str, IconName, &'static str),
 }
 
+/// Built once, not on every render: `render_menu` and `render_empty_state`
+/// both call `Entry::all()` on every frame, and `Entry` is `Copy`, so there is
+/// nothing to gain from a fresh `Vec` each time.
+static ENTRIES: LazyLock<Vec<Entry>> = LazyLock::new(|| {
+    let mut entries = vec![Entry::Terminal, Entry::NewNote, Entry::OpenNote];
+    entries.extend(
+        AGENTS
+            .iter()
+            .copied()
+            .map(|(agent, icon, label)| Entry::Agent(agent, icon, label)),
+    );
+    entries
+});
+
 impl Entry {
-    fn all() -> Vec<Entry> {
-        let mut entries = vec![Entry::Terminal, Entry::NewNote, Entry::OpenNote];
-        entries.extend(
-            AGENTS
-                .iter()
-                .copied()
-                .map(|(agent, icon, label)| Entry::Agent(agent, icon, label)),
-        );
-        entries
+    fn all() -> &'static [Entry] {
+        &ENTRIES
     }
 
     fn label(self) -> &'static str {

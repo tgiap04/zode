@@ -745,6 +745,38 @@ mod lifecycle {
         );
     }
 
+    /// A panel left open all day must not accumulate a finished `Task` per
+    /// click: each entry in `actions` is expected to remove itself once its
+    /// action completes, so the map stays bounded by what is genuinely still
+    /// running rather than growing for the panel's whole lifetime.
+    #[gpui::test]
+    async fn a_finished_action_removes_itself_rather_than_accumulating(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend = Arc::new(FakeBackend::docker());
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
+            assert_eq!(
+                panel.actions.len(),
+                1,
+                "the action is tracked while it is running"
+            );
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.actions.is_empty(),
+                "a completed action must remove its own entry, or the map \
+                 leaks one `Task` per click for as long as the panel is open"
+            );
+        });
+    }
+
     /// A failure must reach the person who asked, with the engine's own words.
     #[gpui::test]
     async fn a_failed_action_is_shown_and_can_be_dismissed(cx: &mut TestAppContext) {

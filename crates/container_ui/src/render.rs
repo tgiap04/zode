@@ -440,7 +440,7 @@ impl ContainerPanel {
         // the kind. An image row therefore does not react to a click, because
         // there would be nothing behind it.
         let rows_open = self.rows_open_a_detail();
-        let clickable = std::rc::Rc::new(resources.to_vec());
+        let clickable = resources.clone();
         let row_handle = handle.clone();
 
         div()

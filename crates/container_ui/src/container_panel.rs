@@ -81,8 +81,20 @@ pub struct ContainerPanel {
     /// reach the person who asked for it, and `stderr` is the only text that says
     /// *why* the engine refused.
     pub(crate) last_error: Option<ContainerError>,
-    /// One per running action, dropped with the panel.
-    pub(crate) actions: Vec<Task<()>>,
+    /// One per running action, keyed by an id private to this panel.
+    ///
+    /// A plain `Vec` here would only ever grow: the panel is meant to be left
+    /// open all day, and GPUI's `Task` has no `is_finished()` to poll for
+    /// completed entries to drop. Each spawned action instead removes its own
+    /// entry as the last thing it does (see `act` and `destroy`), so the map
+    /// only ever holds the actions genuinely still running.
+    pub(crate) actions: HashMap<usize, Task<()>>,
+    /// The id the next entry in `actions` is given.
+    ///
+    /// Monotonic rather than reused: reusing a finished id could let a
+    /// straggling removal from an old action delete a new, unrelated one that
+    /// was assigned the same slot.
+    pub(crate) next_action_id: usize,
     /// The row that was clicked, with its logs, or `None` when the list is what
     /// is on screen.
     pub(crate) detail: Option<crate::detail::Detail>,
@@ -158,7 +170,8 @@ impl ContainerPanel {
             watch: None,
             in_flight: HashMap::default(),
             last_error: None,
-            actions: Vec::new(),
+            actions: HashMap::default(),
+            next_action_id: 0,
             detail: None,
             logs_build: None,
             workspace: None,
@@ -313,21 +326,37 @@ impl ContainerPanel {
         self.last_error = None;
         cx.notify();
 
-        self.actions.push(cx.spawn(async move |this, cx| {
-            let outcome = backend.act(kind, action, &id).await;
-            this.update(cx, |this, cx| {
-                this.in_flight.remove(&id);
-                match outcome {
-                    Ok(()) => {}
-                    Err(error) => this.last_error = Some(error),
+        let action_id = self.next_action_id;
+        self.next_action_id += 1;
+        self.actions.insert(
+            action_id,
+            cx.spawn(async move |this, cx| {
+                let outcome = backend.act(kind, action, &id).await;
+                if let Err(error) = this.update(cx, |this, cx| {
+                    this.in_flight.remove(&id);
+                    match outcome {
+                        Ok(()) => {}
+                        Err(error) => this.last_error = Some(error),
+                    }
+                    // Whether it worked or not: the engine is the only thing
+                    // that knows the resulting state.
+                    this.reload(cx);
+                    cx.notify();
+                }) {
+                    log::debug!("panel closed before its action finished: {error}");
                 }
-                // Whether it worked or not: the engine is the only thing that
-                // knows the resulting state.
-                this.reload(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
+                // Removing our own entry from inside the task's own body is
+                // safe here: this is the task's last statement, so it is not
+                // being polled again, and the removal only drops the (now
+                // redundant) `Task` handle keeping it alive. If the panel is
+                // already gone, there is nothing left to remove from.
+                if let Err(error) = this.update(cx, |this, _cx| {
+                    this.actions.remove(&action_id);
+                }) {
+                    log::debug!("panel closed before its action could self-remove: {error}");
+                }
+            }),
+        );
     }
 
     /// Whether the kind on screen can be removed at all.
@@ -390,17 +419,30 @@ impl ContainerPanel {
         };
         self.last_error = None;
         cx.notify();
-        self.actions.push(cx.spawn(async move |this, cx| {
-            let outcome = backend.destroy(&plan).await;
-            this.update(cx, |this, cx| {
-                if let Err(error) = outcome {
-                    this.last_error = Some(error);
+        let action_id = self.next_action_id;
+        self.next_action_id += 1;
+        self.actions.insert(
+            action_id,
+            cx.spawn(async move |this, cx| {
+                let outcome = backend.destroy(&plan).await;
+                if let Err(error) = this.update(cx, |this, cx| {
+                    if let Err(error) = outcome {
+                        this.last_error = Some(error);
+                    }
+                    this.reload(cx);
+                    cx.notify();
+                }) {
+                    log::debug!("panel closed before its destroy finished: {error}");
                 }
-                this.reload(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
+                // See the matching comment in `act`: removing our own map
+                // entry as the very last statement is safe.
+                if let Err(error) = this.update(cx, |this, _cx| {
+                    this.actions.remove(&action_id);
+                }) {
+                    log::debug!("panel closed before its destroy could self-remove: {error}");
+                }
+            }),
+        );
     }
 
     pub(crate) fn dismiss_error(&mut self, cx: &mut Context<Self>) {
