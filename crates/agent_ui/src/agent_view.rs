@@ -9,7 +9,7 @@ use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal_view::TerminalView;
 use ui::prelude::*;
-use workspace::Workspace;
+use workspace::{Pane, Workspace};
 use zed_actions::agent::AgentViewMode;
 
 use util::ResultExt as _;
@@ -142,11 +142,43 @@ impl AgentView {
         Self::open_inner(workspace, agent, mode, true, window, cx);
     }
 
+    /// Starts a fresh thread in a pane the caller names.
+    ///
+    /// For panes that are not the editor's -- the floating window is the only
+    /// caller today. Always a new thread, and never the one already running: an
+    /// item lives in exactly one pane, so reusing an open thread would move it
+    /// out of wherever somebody left it.
+    pub fn open_in_pane(
+        workspace: &mut Workspace,
+        pane: Entity<Pane>,
+        agent: &str,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::open_into(workspace, agent, None, true, Some(pane), window, cx);
+    }
+
     fn open_inner(
         workspace: &mut Workspace,
         agent: &str,
         mode: Option<AgentViewMode>,
         always_new: bool,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::open_into(workspace, agent, mode, always_new, None, window, cx);
+    }
+
+    /// The one body behind every entry point above.
+    ///
+    /// `destination` of `None` means the workspace's active pane, which is what
+    /// every caller but the floating window wants.
+    fn open_into(
+        workspace: &mut Workspace,
+        agent: &str,
+        mode: Option<AgentViewMode>,
+        always_new: bool,
+        destination: Option<Entity<Pane>>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -207,7 +239,21 @@ impl AgentView {
                     // being read rather than in a place of its own. The other
                     // half of that bargain is that a file opened from here joins
                     // the same tab bar — which is the point, not a leak.
-                    workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+                    //
+                    // Unless a caller named somewhere else, which only a pane
+                    // outside the editor ever does.
+                    match destination {
+                        Some(pane) => pane.update(cx, |pane: &mut Pane, cx| {
+                            pane.add_item(Box::new(view), true, true, None, window, cx);
+                        }),
+                        None => workspace.add_item_to_active_pane(
+                            Box::new(view),
+                            None,
+                            true,
+                            window,
+                            cx,
+                        ),
+                    }
                 })
                 .log_err();
         })
