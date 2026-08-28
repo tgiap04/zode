@@ -205,6 +205,7 @@ jobs:
       run: |
         apt-get update
         apt-get install -y --no-install-recommends ca-certificates curl git
+        git config --system --add safe.directory "$GITHUB_WORKSPACE"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -251,6 +252,7 @@ jobs:
       run: |
         apt-get update
         apt-get install -y --no-install-recommends ca-certificates curl git
+        git config --system --add safe.directory "$GITHUB_WORKSPACE"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd

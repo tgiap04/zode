@@ -229,10 +229,23 @@ pub fn clear_target_dir_if_large(platform: Platform) -> Step<Run> {
 /// rustup into `$HOME/.cargo/bin` but only edits shell rc files, and the `bash -e` that
 /// GitHub runs each step with is non-login, so it never sources them. Written before the
 /// directory exists, which is harmless — `$GITHUB_PATH` applies to later steps only.
+///
+/// `safe.directory` is ours to set because `actions/checkout` will not do it for us: it
+/// writes that entry under a `HOME` it overrides for the duration of the action and then
+/// throws away, so nothing survives into the steps that follow. The workspace is owned by
+/// the runner's uid on the host while this container is root, so the first `git` call in
+/// `script/bundle-linux` -- `git rev-parse HEAD`, at packaging time, after the whole build
+/// is paid for — dies with "detected dubious ownership". A hosted runner never hits this,
+/// because there the job runs as the uid that owns the checkout.
+///
+/// `--system` rather than `--global` deliberately: `/etc/gitconfig` is read whatever `HOME`
+/// happens to be, and `HOME` is demonstrably not stable here — rustup warns in this very
+/// job that it differs from the euid-obtained one.
 pub fn bootstrap_container() -> Step<Run> {
     named::bash!(indoc::indoc! {r#"
         apt-get update
         apt-get install -y --no-install-recommends ca-certificates curl git
+        git config --system --add safe.directory "$GITHUB_WORKSPACE"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
     "#})
 }
