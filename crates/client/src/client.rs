@@ -1,6 +1,5 @@
 pub mod telemetry;
 pub mod user;
-pub mod zed_urls;
 
 use anyhow::Result;
 use async_tungstenite::tungstenite::{error::Error as WebsocketError, http::StatusCode};

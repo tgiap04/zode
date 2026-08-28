@@ -57,7 +57,7 @@ pub(crate) fn extension_bump() -> Workflow {
         &app_secret,
     );
 
-    named::workflow()
+    named::workflow!()
         .add_event(
             Event::default().workflow_call(
                 WorkflowCall::default()
@@ -113,7 +113,7 @@ fn check_version_changed() -> (NamedJob, StepOutput, StepOutput) {
         .add_step(steps::checkout_repo().with_full_history())
         .add_step(compare_versions);
 
-    (named::job(job), version_changed, current_version)
+    (named::job!(job), version_changed, current_version)
 }
 
 fn create_version_label(
@@ -141,11 +141,11 @@ fn create_version_label(
         .add_step(determine_tag_step)
         .add_step(create_version_tag(&tag, generated_token));
 
-    (named::job(job), tag)
+    (named::job!(job), tag)
 }
 
 fn create_version_tag(tag: &StepOutput, generated_token: StepOutput) -> Step<Use> {
-    named::uses(
+    named::uses!(
         "actions",
         "github-script",
         "f28e40c7f34bde8b3046d885e986cb6290c5673b", // v7
@@ -168,7 +168,7 @@ fn create_version_tag(tag: &StepOutput, generated_token: StepOutput) -> Step<Use
 }
 
 fn determine_tag(current_version: &JobOutput) -> (Step<Run>, StepOutput) {
-    let step = named::bash(formatdoc! {r#"
+    let step = named::bash!(formatdoc! {r#"
         EXTENSION_ID="$(sed -n 's/^id = "\(.*\)"/\1/p' < extension.toml | head -1 | tr -d '[:space:]')"
 
         if [[ "$WORKING_DIR" == "." || -z "$WORKING_DIR" ]]; then
@@ -189,7 +189,7 @@ fn determine_tag(current_version: &JobOutput) -> (Step<Run>, StepOutput) {
 
 /// Compares the current and previous commit and checks whether versions changed inbetween.
 pub(crate) fn compare_versions() -> (Step<Run>, StepOutput, StepOutput) {
-    let check_needs_bump = named::bash(formatdoc! {
+    let check_needs_bump = named::bash!(formatdoc! {
     r#"
         CURRENT_VERSION="$({VERSION_CHECK})"
 
@@ -252,11 +252,11 @@ fn bump_extension_version(
             branch_name,
         ));
 
-    named::job(job)
+    named::job!(job)
 }
 
 fn install_bump_2_version() -> Step<Run> {
-    named::run(
+    named::run!(
         runners::Platform::Linux,
         "pip install bump2version --break-system-packages",
     )
@@ -266,7 +266,7 @@ fn bump_version(
     current_version: &JobOutput,
     bump_type: &WorkflowInput,
 ) -> (Step<Run>, StepOutput, StepOutput, StepOutput, StepOutput) {
-    let step = named::bash(formatdoc! {r#"
+    let step = named::bash!(formatdoc! {r#"
         BUMP_FILES=("extension.toml")
         if [[ -f "Cargo.toml" ]]; then
             BUMP_FILES+=("Cargo.toml")
@@ -327,7 +327,7 @@ fn create_pull_request(
     generated_token: StepOutput,
     branch_name: StepOutput,
 ) -> Step<Use> {
-    named::uses(
+    named::uses!(
         "peter-evans",
         "create-pull-request",
         "98357b18bf14b5342f975ff684046ec3b2a07725",
@@ -377,11 +377,11 @@ fn trigger_release(
             generated_token,
         ));
 
-    named::job(job)
+    named::job!(job)
 }
 
 fn get_extension_id() -> (Step<Run>, StepOutput) {
-    let step = named::bash(indoc! {
+    let step = named::bash!(indoc! {
     r#"
         EXTENSION_ID="$(sed -n 's/id = \"\(.*\)\"/\1/p' < extension.toml)"
 
@@ -399,7 +399,7 @@ fn release_action(
     tag: JobOutput,
     generated_token: &StepOutput,
 ) -> (Step<Use>, StepOutput) {
-    let step = named::uses(
+    let step = named::uses!(
         "huacnlee",
         "zed-extension-action",
         "82920ff0876879f65ffbcfa3403589114a8919c6",
@@ -419,7 +419,7 @@ fn enable_automerge_if_staff(
     pull_request_number: StepOutput,
     generated_token: StepOutput,
 ) -> Step<Use> {
-    named::uses(
+    named::uses!(
         "actions",
         "github-script",
         "f28e40c7f34bde8b3046d885e986cb6290c5673b", // v7

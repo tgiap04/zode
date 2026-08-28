@@ -66,6 +66,10 @@ mod tests {
             claude_usage_button: true,
             codex_usage_button: false,
             agent_usage_display: settings::AgentUsageDisplay::Detailed,
+            activity_indicator: true,
+            active_toolchain_button: true,
+            vim_mode_button: true,
+            image_info_button: true,
         }
     }
 

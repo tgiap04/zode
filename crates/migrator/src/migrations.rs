@@ -364,3 +364,9 @@ pub(crate) mod m_2026_07_27 {
 
     pub(crate) use settings::remove_dead_subsystem_settings;
 }
+
+pub(crate) mod m_2026_08_24 {
+    mod settings;
+
+    pub(crate) use settings::remove_registry_and_extension_agent_servers;
+}

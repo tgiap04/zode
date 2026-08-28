@@ -157,6 +157,15 @@ jobs:
         ref: ${{ github.ref }}
     - name: script/determine-release-channel
       run: script/determine-release-channel
+    - name: release::create_draft_release::warn_on_version_divergence
+      run: |
+        # The first `version =` in the manifest is the one under [package].
+        manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zed/Cargo.toml | head -1)
+        if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
+            echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
+        else
+            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml says ${manifest_version}; the binary reports the tag, so consider bumping the manifest to match"
+        fi
     - name: mkdir -p target/
       run: mkdir -p target/
     - name: release::create_draft_release::generate_release_notes
@@ -171,7 +180,7 @@ jobs:
                 echo "- First release."
             fi
             echo
-            echo "Not code-signed, and there is no in-app updater. See the README before installing."
+            echo "Not code-signed. See the README before installing."
         } > target/release-notes.md
         cat target/release-notes.md
     - name: release::create_draft_release::create_release
@@ -180,10 +189,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 360
   bundle_linux_aarch64:
-    needs:
-    - run_tests_linux
-    - clippy_linux
-    - check_scripts
     runs-on: ubuntu-24.04-arm
     env:
       CARGO_INCREMENTAL: 0
@@ -194,7 +199,13 @@ jobs:
       ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
       CC: clang
       CXX: clang++
+      DEBIAN_FRONTEND: noninteractive
     steps:
+    - name: steps::bootstrap_container
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl git
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
@@ -203,8 +214,7 @@ jobs:
       run: script/determine-release-channel
     - name: steps::free_disk_space
       run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force || true
+        rm -rf /__t/CodeQL || true
         df -h /
     - name: steps::setup_linux
       run: ./script/linux
@@ -213,18 +223,18 @@ jobs:
       run: ./script/download-wasi-sdk
     - name: ./script/bundle-linux
       run: ./script/bundle-linux
+    - name: run_bundling::bundle_linux::check_glibc_floor
+      run: ./script/check-glibc-floor target/release/zode-linux-aarch64.tar.gz
     - name: '@actions/upload-artifact zode-linux-aarch64.tar.gz'
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
       with:
         name: zode-linux-aarch64.tar.gz
         path: target/release/zode-linux-aarch64.tar.gz
         if-no-files-found: error
+    container:
+      image: ubuntu:22.04
     timeout-minutes: 360
   bundle_linux_x86_64:
-    needs:
-    - run_tests_linux
-    - clippy_linux
-    - check_scripts
     runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: 0
@@ -235,7 +245,13 @@ jobs:
       ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
       CC: clang
       CXX: clang++
+      DEBIAN_FRONTEND: noninteractive
     steps:
+    - name: steps::bootstrap_container
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl git
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
     - name: steps::checkout_repo
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
@@ -244,8 +260,7 @@ jobs:
       run: script/determine-release-channel
     - name: steps::free_disk_space
       run: |
-        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force || true
+        rm -rf /__t/CodeQL || true
         df -h /
     - name: steps::setup_linux
       run: ./script/linux
@@ -254,18 +269,18 @@ jobs:
       run: ./script/download-wasi-sdk
     - name: ./script/bundle-linux
       run: ./script/bundle-linux
+    - name: run_bundling::bundle_linux::check_glibc_floor
+      run: ./script/check-glibc-floor target/release/zode-linux-x86_64.tar.gz
     - name: '@actions/upload-artifact zode-linux-x86_64.tar.gz'
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
       with:
         name: zode-linux-x86_64.tar.gz
         path: target/release/zode-linux-x86_64.tar.gz
         if-no-files-found: error
+    container:
+      image: ubuntu:22.04
     timeout-minutes: 360
   bundle_mac_aarch64:
-    needs:
-    - run_tests_linux
-    - clippy_linux
-    - check_scripts
     runs-on: macos-15
     env:
       CARGO_INCREMENTAL: 0
@@ -304,10 +319,6 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 360
   bundle_mac_x86_64:
-    needs:
-    - run_tests_linux
-    - clippy_linux
-    - check_scripts
     runs-on: macos-15-intel
     env:
       CARGO_INCREMENTAL: 0
@@ -346,10 +357,6 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 360
   bundle_windows_aarch64:
-    needs:
-    - run_tests_linux
-    - clippy_linux
-    - check_scripts
     runs-on: windows-2025
     env:
       CARGO_INCREMENTAL: 0
@@ -398,10 +405,6 @@ jobs:
         if-no-files-found: error
     timeout-minutes: 360
   bundle_windows_x86_64:
-    needs:
-    - run_tests_linux
-    - clippy_linux
-    - check_scripts
     runs-on: windows-2025
     env:
       CARGO_INCREMENTAL: 0
@@ -452,6 +455,9 @@ jobs:
   upload_release_assets:
     needs:
     - create_draft_release
+    - run_tests_linux
+    - clippy_linux
+    - check_scripts
     - bundle_linux_aarch64
     - bundle_linux_x86_64
     - bundle_mac_aarch64

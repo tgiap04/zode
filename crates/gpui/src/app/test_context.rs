@@ -354,6 +354,22 @@ impl TestAppContext {
         self.test_platform.opened_url.borrow().clone()
     }
 
+    /// The reasons currently holding the display awake. Empty when nothing does.
+    pub fn display_wake_reasons(&self) -> Vec<String> {
+        self.test_platform.display_wake_reasons.borrow().clone()
+    }
+
+    /// Sets what the platform reports for `on_battery`. `None` is "cannot tell".
+    pub fn set_on_battery(&self, on_battery: Option<bool>) {
+        *self.test_platform.on_battery.borrow_mut() = on_battery;
+    }
+
+    /// Sets whether the platform can hold the display awake at all. `false`
+    /// stands in for a platform with no implementation.
+    pub fn set_display_wake_supported(&self, supported: bool) {
+        *self.test_platform.display_wake_supported.borrow_mut() = supported;
+    }
+
     /// Simulates the user resizing the window to the new size.
     pub fn simulate_window_resize(&self, window_handle: AnyWindowHandle, size: Size<Pixels>) {
         self.test_window(window_handle).simulate_resize(size);

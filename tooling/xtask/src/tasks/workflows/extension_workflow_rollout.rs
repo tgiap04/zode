@@ -37,7 +37,7 @@ pub(crate) fn extension_workflow_rollout() -> Workflow {
     );
     let create_tag = create_rollout_tag(&rollout_workflows, &filter_repos_input);
 
-    named::workflow()
+    named::workflow!()
         .on(Event::default().workflow_dispatch(
             WorkflowDispatch::default()
                 .add_input(filter_repos_input.name, filter_repos_input.input())
@@ -51,7 +51,7 @@ pub(crate) fn extension_workflow_rollout() -> Workflow {
 
 fn fetch_extension_repos(filter_repos_input: &WorkflowInput) -> (NamedJob, JobOutput, JobOutput) {
     fn get_repositories(filter_repos_input: &WorkflowInput) -> (Step<Use>, StepOutput) {
-        let step = named::uses("actions", "github-script", "f28e40c7f34bde8b3046d885e986cb6290c5673b")
+        let step = named::uses!("actions", "github-script", "f28e40c7f34bde8b3046d885e986cb6290c5673b")
             .id("list-repos")
             .add_with((
                 "script",
@@ -91,7 +91,7 @@ fn fetch_extension_repos(filter_repos_input: &WorkflowInput) -> (NamedJob, JobOu
     }
 
     fn get_previous_tag_commit() -> (Step<Run>, StepOutput) {
-        let step = named::bash(formatdoc! {r#"
+        let step = named::bash!(formatdoc! {r#"
             PREV_COMMIT=$(git rev-parse "{ROLLOUT_TAG_NAME}^{{commit}}" 2>/dev/null || echo "")
             if [ -z "$PREV_COMMIT" ]; then
                 echo "::error::No previous rollout tag '{ROLLOUT_TAG_NAME}' found. Cannot determine file changes."
@@ -108,7 +108,7 @@ fn fetch_extension_repos(filter_repos_input: &WorkflowInput) -> (NamedJob, JobOu
     }
 
     fn get_removed_files(prev_commit: &StepOutput) -> (Step<Run>, StepOutput, StepOutput) {
-        let step = named::bash(indoc! {r#"
+        let step = named::bash!(indoc! {r#"
             for workflow_type in "ci" "shared"; do
                 if [ "$workflow_type" = "ci" ]; then
                     WORKFLOW_DIR="extensions/workflows"
@@ -137,14 +137,14 @@ fn fetch_extension_repos(filter_repos_input: &WorkflowInput) -> (NamedJob, JobOu
     }
 
     fn generate_workflow_files() -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             cargo xtask workflows "$COMMIT_SHA"
         "#})
         .add_env(("COMMIT_SHA", "${{ github.sha }}"))
     }
 
     fn upload_workflow_files() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "actions",
             "upload-artifact",
             "330a01c490aca151604b8cf639adc76d48f6c5d4", // v5
@@ -178,7 +178,7 @@ fn fetch_extension_repos(filter_repos_input: &WorkflowInput) -> (NamedJob, JobOu
         .add_step(generate_workflow_files())
         .add_step(upload_workflow_files());
 
-    let job = named::job(job);
+    let job = named::job!(job);
     let (removed_ci, removed_shared) = (
         removed_ci.as_job_output(&job),
         removed_shared.as_job_output(&job),
@@ -202,7 +202,7 @@ fn rollout_workflows_to_extension(
     }
 
     fn download_workflow_files() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "actions",
             "download-artifact",
             "018cc2cf5baa6db3ef3c5f8a56943fffe632ef53", // v6.0.0
@@ -212,7 +212,7 @@ fn rollout_workflows_to_extension(
     }
 
     fn sync_workflow_files(removed_ci: JobOutput, removed_shared: JobOutput) -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             mkdir -p extension/.github/workflows
 
             if [ "$MATRIX_REPO" = "workflows" ]; then
@@ -245,7 +245,7 @@ fn rollout_workflows_to_extension(
     }
 
     fn get_short_sha() -> (Step<Run>, StepOutput) {
-        let step = named::bash(indoc! {r#"
+        let step = named::bash!(indoc! {r#"
             echo "sha_short=$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
         "#})
         .id("short-sha");
@@ -270,7 +270,7 @@ fn rollout_workflows_to_extension(
         "#,
         };
 
-        named::uses(
+        named::uses!(
             "peter-evans",
             "create-pull-request",
             "98357b18bf14b5342f975ff684046ec3b2a07725",
@@ -296,7 +296,7 @@ fn rollout_workflows_to_extension(
     }
 
     fn enable_auto_merge(token: &StepOutput) -> Step<gh_workflow::Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             if [ -n "$PR_NUMBER" ]; then
                 gh pr merge "$PR_NUMBER" --auto --squash
             fi
@@ -348,7 +348,7 @@ fn rollout_workflows_to_extension(
         .add_step(create_pull_request(&token, &short_sha, extra_context_input))
         .add_step(enable_auto_merge(&token));
 
-    named::job(job)
+    named::job!(job)
 }
 
 fn create_rollout_tag(rollout_job: &NamedJob, filter_repos_input: &WorkflowInput) -> NamedJob {
@@ -357,7 +357,7 @@ fn create_rollout_tag(rollout_job: &NamedJob, filter_repos_input: &WorkflowInput
     }
 
     fn update_rollout_tag() -> Step<Run> {
-        named::bash(formatdoc! {r#"
+        named::bash!(formatdoc! {r#"
             if git rev-parse "{ROLLOUT_TAG_NAME}" >/dev/null 2>&1; then
                 git tag -d "{ROLLOUT_TAG_NAME}"
                 git push origin ":refs/tags/{ROLLOUT_TAG_NAME}" || true
@@ -370,7 +370,7 @@ fn create_rollout_tag(rollout_job: &NamedJob, filter_repos_input: &WorkflowInput
     }
 
     fn configure_git() -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             git config user.name "zed-zippy[bot]"
             git config user.email "234243425+zed-zippy[bot]@users.noreply.github.com"
         "#})
@@ -395,5 +395,5 @@ fn create_rollout_tag(rollout_job: &NamedJob, filter_repos_input: &WorkflowInput
         .add_step(configure_git())
         .add_step(update_rollout_tag());
 
-    named::job(job)
+    named::job!(job)
 }

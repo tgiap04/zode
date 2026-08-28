@@ -1,0 +1,40 @@
+[package]
+name = "keep_awake"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+# No `test-support` feature, unlike `agent_usage` which has one to switch itself
+# off under test. That feature exists there because `agent_usage` does its own
+# I/O -- keychain, HTTP, spawning a CLI -- which the deterministic test scheduler
+# reports as non-determinism. This crate reaches the OS only through the
+# `Platform` trait, and every test runs against `TestPlatform`, so there is no
+# real I/O to gate off.
+
+[lib]
+path = "src/keep_awake.rs"
+doctest = false
+
+[dependencies]
+# `agent_ui` is a deliberate dependency, unlike in `agent_usage` which avoids it
+# on purpose. This crate's whole question is "is an agent tab's CLI still
+# running", and `AgentView` is the only thing that knows.
+agent_ui.workspace = true
+fs.workspace = true
+gpui.workspace = true
+log.workspace = true
+settings.workspace = true
+terminal.workspace = true
+ui.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# For `SettingsStore::test` and `update_user_settings`: the setting is a
+# user-facing switch, so the tests read it through a real store rather than
+# through the `try_get` fallback.
+settings = { workspace = true, features = ["test-support"] }

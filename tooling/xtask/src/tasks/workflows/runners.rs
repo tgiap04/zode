@@ -8,14 +8,25 @@ pub const LINUX_XL: Runner = Runner("ubuntu-24.04");
 pub const LINUX_LARGE: Runner = Runner("ubuntu-24.04");
 pub const LINUX_MEDIUM: Runner = Runner("ubuntu-24.04");
 
-// 24.04, which sets the glibc floor at 2.39. Upstream targeted 20.04 (glibc 2.31) for a
-// lower floor, but GitHub retired that image, and 22.04 does not work here: `script/linux`
-// only installs clang-18 on its 20.04 branch, webrtc-sys needs clang 17+, and while the
-// x86 22.04 image happens to carry clang-18 the arm one does not. 24.04 ships clang-18 as
-// the default `clang` on both architectures.
+// Docker hosts, nothing more. The glibc floor no longer comes from these labels: the
+// bundle jobs run inside `container: ubuntu:22.04` (see `run_bundling::bundle_linux`), so
+// the floor is 2.35 and `script/check-glibc-floor` fails the build if anything exceeds it.
 //
-// Lowering the floor again means building inside a container -- `Dockerfile-distros` is
-// already in the repository for that.
+// `runs-on: ubuntu-22.04` would have been the smaller change and was rejected: that label's
+// deprecation begins 2026-09-17 and it is unsupported from 2027-04-17
+// (actions/runner-images#14254). Putting the userland in a container decouples the floor
+// from whatever GitHub calls its hosted image next, so these two labels can be bumped to
+// 26.04 and beyond without touching what we link against. Upstream instead holds a 20.04
+// floor by paying for Namespace.so runner profiles, which this fork has no access to.
+//
+// An earlier version of this comment said 22.04 was impossible because webrtc-sys needs
+// clang 17+ and `script/linux` only installs clang-18 on its 20.04 branch. That is dead
+// upstream baggage: this fork compiles no C++ at all (zero `webrtc`/`livekit` rows in
+// `Cargo.lock`, zero `.cpp`/`.cc` under `crates/` or `tooling/`), so jammy's default
+// clang-14 is enough. The same comment claimed the x86 22.04 image carries clang-18; it
+// ships 13/14/15. Both claims were inherited rather than measured.
+//
+// `Dockerfile-distros` is the local reproduction harness for this container build.
 pub const LINUX_X86_BUNDLER: Runner = Runner("ubuntu-24.04");
 pub const LINUX_ARM_BUNDLER: Runner = Runner("ubuntu-24.04-arm");
 

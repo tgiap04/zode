@@ -214,7 +214,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SectionHeader("Security"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Trust All Projects By Default",
-                description: "When opening Zed, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
+                description: "When opening Zode, avoid Restricted Mode by auto-trusting all projects, enabling use of all features without having to give permission to each new project.",
                 field: Box::new(SettingField {
                     json_path: Some("session.trust_all_projects"),
                     pick: |settings_content| {
@@ -262,7 +262,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Restore On Startup",
-                description: "What to restore from the previous session when opening Zed.",
+                description: "What to restore from the previous session when opening Zode.",
                 field: Box::new(SettingField {
                     json_path: Some("restore_on_startup"),
                     pick: |settings_content| settings_content.workspace.restore_on_startup.as_ref(),
@@ -282,7 +282,7 @@ fn general_page(cx: &App) -> SettingsPage {
             SettingsPageItem::SettingItem(SettingItem {
                 files: USER,
                 title: "Preview Channel",
-                description: "Which settings should be activated only in Preview build of Zed.",
+                description: "Which settings should be activated only in Preview build of Zode.",
                 field: Box::new(
                     SettingField {
                         json_path: Some("preview_channel_settings"),
@@ -336,7 +336,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Telemetry Metrics",
-                description: "Send anonymized usage data like what languages you're using Zed with.",
+                description: "Send anonymized usage data like what languages you're using Zode with.",
                 field: Box::new(SettingField {
                     json_path: Some("telemetry.metrics"),
                     pick: |settings_content| {
@@ -3093,7 +3093,7 @@ fn search_and_files_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("File Scan"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Exclusions",
-                description: "Files or globs of files that will be excluded by Zed entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
+                description: "Files or globs of files that will be excluded by Zode entirely. They will be skipped during file scans, file searches, and not be displayed in the project file tree. Takes precedence over \"File Scan Inclusions\"",
                 field: Box::new(
                     SettingField {
                         json_path: Some("file_scan_exclusions"),
@@ -3115,7 +3115,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Inclusions",
-                description: "Files or globs of files that will be included by Zed, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zed's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
+                description: "Files or globs of files that will be included by Zode, even when ignored by git. This is useful for files that are not tracked by git, but are still important to your project. Note that globs that are overly broad can slow down Zode's file scanning. \"File Scan Exclusions\" takes precedence over these inclusions",
                 field: Box::new(
                     SettingField {
                         json_path: Some("file_scan_inclusions"),
@@ -3175,7 +3175,7 @@ fn search_and_files_page() -> SettingsPage {
 }
 
 fn window_and_layout_page() -> SettingsPage {
-    fn status_bar_section() -> [SettingsPageItem; 13] {
+    fn status_bar_section() -> [SettingsPageItem; 17] {
         [
             SettingsPageItem::SectionHeader("Status Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -3403,6 +3403,94 @@ fn window_and_layout_page() -> SettingsPage {
                             .status_bar
                             .get_or_insert_default()
                             .agent_usage_display = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Activity Indicator",
+                description: "Show the activity indicator in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.activity_indicator"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .activity_indicator
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .activity_indicator = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Active Toolchain Button",
+                description: "Show the active toolchain button in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.active_toolchain_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .active_toolchain_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .active_toolchain_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Vim Mode Button",
+                description: "Show the Vim mode indicator in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.vim_mode_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .vim_mode_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .vim_mode_button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Image Info Button",
+                description: "Show image dimensions and size in the status bar.",
+                field: Box::new(SettingField {
+                    json_path: Some("status_bar.image_info_button"),
+                    pick: |settings_content| {
+                        settings_content
+                            .status_bar
+                            .as_ref()?
+                            .image_info_button
+                            .as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .status_bar
+                            .get_or_insert_default()
+                            .image_info_button = value;
                     },
                 }),
                 metadata: None,
@@ -4133,7 +4221,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Decorations",
-                description: "(Linux only) whether Zed or your compositor should draw window decorations.",
+                description: "(Linux only) whether Zode or your compositor should draw window decorations.",
                 field: Box::new(SettingField {
                     json_path: Some("window_decorations"),
                     pick: |settings_content| settings_content.workspace.window_decorations.as_ref(),
@@ -5446,7 +5534,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Save Breakpoints",
-                description: "Whether breakpoints should be reused across Zed sessions.",
+                description: "Whether breakpoints should be reused across Zode sessions.",
                 field: Box::new(SettingField {
                     json_path: Some("debugger.save_breakpoints"),
                     pick: |settings_content| {
@@ -5481,7 +5569,7 @@ fn debugger_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Log DAP Communications",
-                description: "Whether to log messages between active debug adapters and Zed.",
+                description: "Whether to log messages between active debug adapters and Zode.",
                 field: Box::new(SettingField {
                     json_path: Some("debugger.log_dap_communications"),
                     pick: |settings_content| {
@@ -6354,7 +6442,7 @@ fn version_control_page() -> SettingsPage {
                 discriminant: SettingItem {
                     files: USER,
                     title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Zed.",
+                    description: "Disable all Git integration features in Zode.",
                     field: Box::new(SettingField::<bool> {
                         json_path: Some("git.disable_git"),
                         pick: |settings_content| {
@@ -7266,7 +7354,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Autoclose"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Autoclose",
-                description: "Whether to automatically type closing characters for you. For example, when you type '(', Zed will automatically add a closing ')' at the correct position.",
+                description: "Whether to automatically type closing characters for you. For example, when you type '(', Zode will automatically add a closing ')' at the correct position.",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).use_autoclose"),
                     pick: |settings_content| {
@@ -7285,7 +7373,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Use Auto Surround",
-                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zed will automatically surround text with ().",
+                description: "Whether to automatically surround text with characters for you. For example, when you select text and type '(', Zode will automatically surround text with ().",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).use_auto_surround"),
                     pick: |settings_content| {

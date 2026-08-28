@@ -43,14 +43,14 @@ use crate::InspectorElementRegistry;
 use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena,
     ArenaBox, Asset, AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle,
-    DispatchPhase, DisplayId, EventEmitter, FocusHandle, FocusMap, ForegroundExecutor, Global,
-    KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
-    PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
-    PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
-    SharedString, SubscriberSet, Subscription, SvgRenderer, Task, TextRenderingMode, TextSystem,
-    ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
-    WindowInvalidator,
+    DispatchPhase, DisplayId, DisplayWakeLock, EventEmitter, FocusHandle, FocusMap,
+    ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu,
+    MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
+    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
+    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task,
+    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
+    WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -1155,6 +1155,25 @@ impl App {
     /// Returns the current thermal state of the system.
     pub fn thermal_state(&self) -> ThermalState {
         self.platform.thermal_state()
+    }
+
+    /// Asks the OS to keep the display lit until the returned handle is dropped.
+    ///
+    /// `None` when the platform cannot make the request. See
+    /// [`DisplayWakeLock`] for why the handle releases on drop.
+    pub fn keep_display_awake(&self, reason: &str) -> Option<DisplayWakeLock> {
+        self.platform.keep_display_awake(reason)
+    }
+
+    /// Whether [`App::keep_display_awake`] can ever succeed on this platform.
+    pub fn can_keep_display_awake(&self) -> bool {
+        self.platform.can_keep_display_awake()
+    }
+
+    /// Whether the machine is running from a battery rather than mains power.
+    /// `None` means unknown, which callers must read as "not on battery".
+    pub fn on_battery(&self) -> Option<bool> {
+        self.platform.on_battery()
     }
 
     /// Invokes a handler when the thermal state changes

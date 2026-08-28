@@ -254,6 +254,7 @@ pub fn migrate_settings(text: &str) -> Result<Option<String>> {
             migrations::m_2026_04_17::promote_show_branch_icon_true_to_show_branch_status_icon,
         ),
         MigrationType::Json(migrations::m_2026_07_27::remove_dead_subsystem_settings),
+        MigrationType::Json(migrations::m_2026_08_24::remove_registry_and_extension_agent_servers),
     ];
     run_migrations(text, migrations)
 }

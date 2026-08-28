@@ -13,7 +13,7 @@ pub(crate) fn deploy_collab() -> Workflow {
     let publish = publish(&[&style, &tests]);
     let deploy = deploy(&[&publish]);
 
-    named::workflow()
+    named::workflow!()
         .on(Event::default().push(Push::default().add_tag("collab-production")))
         .add_env(("DOCKER_BUILDKIT", "1"))
         .add_job(style.name, style.job)
@@ -23,7 +23,7 @@ pub(crate) fn deploy_collab() -> Workflow {
 }
 
 fn style() -> NamedJob {
-    named::job(use_clang(
+    named::job!(use_clang(
         dependant_job(&[])
             .name("Check formatting and Clippy lints")
             .with_repository_owner_guard()
@@ -39,10 +39,10 @@ fn style() -> NamedJob {
 
 fn tests(deps: &[&NamedJob]) -> NamedJob {
     fn run_collab_tests() -> Step<Run> {
-        named::bash("cargo nextest run --package collab --no-fail-fast")
+        named::bash!("cargo nextest run --package collab --no-fail-fast")
     }
 
-    named::job(use_clang(
+    named::job!(use_clang(
         dependant_job(deps)
             .name("Run tests")
             .runs_on(runners::LINUX_XL)
@@ -70,16 +70,16 @@ fn tests(deps: &[&NamedJob]) -> NamedJob {
 
 fn publish(deps: &[&NamedJob]) -> NamedJob {
     fn install_doctl() -> Step<Use> {
-        named::uses("digitalocean", "action-doctl", "v2")
+        named::uses!("digitalocean", "action-doctl", "v2")
             .add_with(("token", vars::DIGITALOCEAN_ACCESS_TOKEN))
     }
 
     fn sign_into_registry() -> Step<Run> {
-        named::bash("doctl registry login")
+        named::bash!("doctl registry login")
     }
 
     fn build_docker_image() -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             docker build -f Dockerfile-collab \
               --build-arg "GITHUB_SHA=$GITHUB_SHA" \
               --tag "registry.digitalocean.com/zed/collab:$GITHUB_SHA" \
@@ -88,14 +88,14 @@ fn publish(deps: &[&NamedJob]) -> NamedJob {
     }
 
     fn publish_docker_image() -> Step<Run> {
-        named::bash(r#"docker push "registry.digitalocean.com/zed/collab:${GITHUB_SHA}""#)
+        named::bash!(r#"docker push "registry.digitalocean.com/zed/collab:${GITHUB_SHA}""#)
     }
 
     fn prune_docker_system() -> Step<Run> {
-        named::bash("docker system prune --filter 'until=72h' -f")
+        named::bash!("docker system prune --filter 'until=72h' -f")
     }
 
-    named::job(
+    named::job!(
         dependant_job(deps)
             .name("Publish collab server image")
             .runs_on(runners::LINUX_XL)
@@ -110,19 +110,19 @@ fn publish(deps: &[&NamedJob]) -> NamedJob {
 
 fn deploy(deps: &[&NamedJob]) -> NamedJob {
     fn install_doctl() -> Step<Use> {
-        named::uses("digitalocean", "action-doctl", "v2")
+        named::uses!("digitalocean", "action-doctl", "v2")
             .add_with(("token", vars::DIGITALOCEAN_ACCESS_TOKEN))
     }
 
     fn sign_into_kubernetes() -> Step<Run> {
-        named::bash(
+        named::bash!(
             r#"doctl kubernetes cluster kubeconfig save --expiry-seconds 600 "$CLUSTER_NAME""#,
         )
         .add_env(("CLUSTER_NAME", vars::CLUSTER_NAME))
     }
 
     fn start_rollout() -> Step<Run> {
-        named::bash(indoc! {r#"
+        named::bash!(indoc! {r#"
             set -eu
             if [[ $GITHUB_REF_NAME = "collab-production" ]]; then
               export ZED_KUBE_NAMESPACE=production
@@ -162,7 +162,7 @@ fn deploy(deps: &[&NamedJob]) -> NamedJob {
         "#})
     }
 
-    named::job(
+    named::job!(
         dependant_job(deps)
             .name("Deploy new server image")
             .runs_on(runners::LINUX_XL)

@@ -9,6 +9,7 @@ use std::{path::PathBuf, sync::Arc, time::SystemTime};
 pub enum AgentKind {
     Claude,
     Codex,
+    Copilot,
 }
 
 impl AgentKind {
@@ -16,6 +17,7 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Copilot => "Copilot",
         }
     }
 
@@ -25,7 +27,24 @@ impl AgentKind {
         match self {
             Self::Claude => "claude-acp",
             Self::Codex => "codex-acp",
+            Self::Copilot => "github-copilot-cli",
         }
+    }
+
+    /// The inverse of [`Self::builtin_agent_id`], for a caller holding only the
+    /// id — an open tab knows which agent it runs but not which history store
+    /// that agent keeps.
+    ///
+    /// `None` for a user-configured agent: this crate reads three stores and has
+    /// nothing to say about a fourth.
+    ///
+    /// Kept beside its inverse so the table is one thing read two ways rather
+    /// than two tables that can disagree — `the_kind_bridge_round_trips` is what
+    /// holds them together.
+    pub fn from_builtin_agent_id(id: &str) -> Option<Self> {
+        [Self::Claude, Self::Codex, Self::Copilot]
+            .into_iter()
+            .find(|kind| kind.builtin_agent_id() == id)
     }
 }
 
@@ -211,5 +230,24 @@ mod tests {
             awkward.to_shell_string(),
             r#"'/Users/a b/claude' --resume 'it'\''s'"#
         );
+    }
+    /// `builtin_agent_id` and `from_builtin_agent_id` are one table read two
+    /// ways. Nothing makes them agree at compile time, so this is what does.
+    #[test]
+    fn the_kind_bridge_round_trips() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Copilot] {
+            assert_eq!(
+                AgentKind::from_builtin_agent_id(kind.builtin_agent_id()),
+                Some(kind),
+                "{} does not survive the round trip",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_this_crate_does_not_read_has_no_kind() {
+        assert_eq!(AgentKind::from_builtin_agent_id("some-other-agent"), None);
+        assert_eq!(AgentKind::from_builtin_agent_id(""), None);
     }
 }

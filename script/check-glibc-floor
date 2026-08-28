@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+#
+# Fails when any ELF in a Linux bundle needs a newer glibc than we publish against.
+#
+# Takes a .tar.gz or an already-extracted directory. Every glibc symbol a bundled
+# file references is a *requirement*: glibc itself is never bundled (`find_libs` in
+# script/bundle-linux filters libc/libm/libgcc_s/libstdc++/libpthread/libdl/libasound
+# out of the copied libraries), so nothing here can be exporting a GLIBC_ node.
+#
+# Deliberately no GLIBCXX_/CXXABI_ check. This fork compiles no C++ -- there is no
+# libstdc++.so.6 in DT_NEEDED and no such symbol in the binaries -- so a second floor
+# would encode a constraint that does not exist.
+#
+# `objdump -T` rather than `readelf --dyn-syms` so this runs unchanged on a developer
+# machine (Apple's objdump is llvm-objdump) and in CI (GNU binutils). The two differ
+# only in wrapping the version in parentheses, which the extraction below ignores.
+
+set -euo pipefail
+
+# The glibc floor for every published Linux build. 2.35 is Ubuntu 22.04.
+# Raising this number drops support for every distribution below the new value --
+# it is a product decision, not a build detail. The bundle jobs build inside an
+# ubuntu:22.04 container precisely so this stays satisfiable.
+MAX_GLIBC="2.35"
+
+usage() {
+  echo "Usage: $0 <bundle.tar.gz | extracted-dir>" >&2
+  exit 2
+}
+
+[ $# -eq 1 ] || usage
+input="$1"
+
+# Is $1 a strictly greater version than $2? Compares dot-separated fields
+# numerically, so 2.9 sorts below 2.35 the way glibc means it to.
+version_gt() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    na = split(a, A, "."); nb = split(b, B, ".");
+    n = (na > nb ? na : nb);
+    for (i = 1; i <= n; i++) {
+      x = (i <= na ? A[i] + 0 : 0); y = (i <= nb ? B[i] + 0 : 0);
+      if (x > y) { print 1; exit } ; if (x < y) { print 0; exit }
+    }
+    print 0
+  }'
+}
+
+root="$input"
+if [ -f "$input" ]; then
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  tar -xzf "$input" -C "$tmp"
+  root="$tmp"
+elif [ ! -d "$input" ]; then
+  echo "check-glibc-floor: no such file or directory: $input" >&2
+  exit 2
+fi
+
+checked=0
+overall_max="0"
+saw_editor=0
+saw_cli=0
+report=""
+failures=""
+
+while IFS= read -r -d '' file; do
+  # objdump exits non-zero on anything that is not an object file, which is the
+  # cheapest available "is this an ELF" test that works with both objdumps.
+  if ! dynsyms="$(objdump -T "$file" 2>/dev/null)"; then
+    continue
+  fi
+  checked=$((checked + 1))
+  relative="${file#"$root"/}"
+  case "$relative" in
+    */libexec/zed-editor) saw_editor=1 ;;
+    */bin/zed) saw_cli=1 ;;
+  esac
+
+  file_max=""
+  while IFS= read -r version; do
+    [ -n "$version" ] || continue
+    if [ -z "$file_max" ] || [ "$(version_gt "$version" "$file_max")" = 1 ]; then
+      file_max="$version"
+    fi
+  done < <(grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' <<<"$dynsyms" | sed 's/^GLIBC_//' | sort -u)
+
+  if [ -z "$file_max" ]; then
+    report+="  ${relative}: no glibc requirement"$'\n'
+    continue
+  fi
+  report+="  ${relative}: GLIBC_${file_max}"$'\n'
+  if [ "$(version_gt "$file_max" "$overall_max")" = 1 ]; then
+    overall_max="$file_max"
+  fi
+
+  if [ "$(version_gt "$file_max" "$MAX_GLIBC")" = 1 ]; then
+    offending="$(grep -E 'GLIBC_[0-9]+(\.[0-9]+)+' <<<"$dynsyms" | while IFS= read -r line; do
+      line_version="$(grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' <<<"$line" | head -1 | sed 's/^GLIBC_//')"
+      if [ "$(version_gt "$line_version" "$MAX_GLIBC")" = 1 ]; then
+        echo "$line"
+      fi
+    done)"
+    failures+="${relative} requires GLIBC_${file_max}:"$'\n'"${offending}"$'\n'
+  fi
+done < <(find "$root" -type f -print0)
+
+# A layout change must not produce a silent green: an empty walk, or one that
+# never reached the two binaries users actually run, is a failure of this gate
+# rather than a passing bundle.
+if [ "$checked" -eq 0 ]; then
+  echo "check-glibc-floor: no ELF binaries checked under ${input} -- refusing to pass" >&2
+  exit 1
+fi
+if [ "$saw_editor" -ne 1 ] || [ "$saw_cli" -ne 1 ]; then
+  echo "check-glibc-floor: did not find both libexec/zed-editor and bin/zed under ${input}" >&2
+  echo "checked ${checked} binaries:" >&2
+  printf '%s' "$report" >&2
+  exit 1
+fi
+
+if [ -n "$failures" ]; then
+  echo "check-glibc-floor: FAIL -- the bundle needs a newer glibc than GLIBC_${MAX_GLIBC}" >&2
+  echo >&2
+  printf '%s' "$failures" >&2
+  echo >&2
+  echo "The floor is MAX_GLIBC=\"${MAX_GLIBC}\" in script/check-glibc-floor." >&2
+  echo "Build against an older glibc rather than raising it: raising the floor drops" >&2
+  echo "every distribution below the new value." >&2
+  exit 1
+fi
+
+printf '%s' "$report"
+echo "OK: ${checked} binaries, max GLIBC_${overall_max} <= GLIBC_${MAX_GLIBC}"

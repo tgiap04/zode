@@ -1,0 +1,38 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "metadata": {
+        "name": "web-7d9f8b6c4-xk2mp",
+        "namespace": "production",
+        "ownerReferences": [
+          { "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "web-7d9f8b6c4", "uid": "aaa" }
+        ]
+      },
+      "spec": { "containers": [ { "name": "web", "image": "nginx:1.27" } ] },
+      "status": { "phase": "Running" }
+    },
+    {
+      "metadata": { "name": "one-off-debug", "namespace": "production" },
+      "spec": { "containers": [ { "name": "shell", "image": "ubuntu:22.04" } ] },
+      "status": { "phase": "Running" }
+    },
+    {
+      "metadata": {
+        "name": "migrate-abc12",
+        "namespace": "production",
+        "ownerReferences": [
+          { "apiVersion": "batch/v1", "kind": "Job", "name": "migrate", "uid": "bbb" }
+        ]
+      },
+      "spec": { "containers": [ { "name": "migrate", "image": "app:1.4" } ] },
+      "status": { "phase": "Succeeded" }
+    },
+    {
+      "metadata": { "name": "starting-up", "namespace": "staging" },
+      "spec": { "containers": [ { "name": "app", "image": "app:1.5" } ] },
+      "status": { "phase": "Pending" }
+    }
+  ]
+}

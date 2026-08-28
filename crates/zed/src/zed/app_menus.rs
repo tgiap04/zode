@@ -289,6 +289,9 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Help".into(),
             disabled: false,
             items: vec![
+                MenuItem::action("Check for Updates", auto_update::Check),
+                MenuItem::action("Release Notes", auto_update::ViewReleaseNotes),
+                MenuItem::separator(),
                 MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
                 MenuItem::action("Show Welcome", onboarding::ShowWelcome),
                 MenuItem::separator(),

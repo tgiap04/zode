@@ -34,19 +34,6 @@ impl Render for DatabasePanel {
                     this.copy_page_as_csv(cx)
                 }),
             )
-            .on_action(
-                cx.listener(|this, _: &actions::ToggleFullScreen, window, cx| {
-                    this.toggle_full_screen(window, cx)
-                }),
-            )
-            // Escape leaves full screen and nothing else: it is the gesture
-            // everyone tries first, and with the rail hidden the button is the
-            // only other way back.
-            .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
-                if this.full_screen {
-                    this.toggle_full_screen(window, cx);
-                }
-            }))
             .size_full()
             .min_h_0()
             // For the measuring canvas below, which is positioned against this.
@@ -61,40 +48,36 @@ impl Render for DatabasePanel {
             // can decide how to lay itself out, and nothing tells it -- a tab is
             // as wide as its pane and a window as wide as it was dragged. A
             // `canvas` is the only place a real width can be read, so it is read
-            // there and used on the next frame. Absent in the column, which has
-            // no such question to answer.
-            .when(self.is_standalone(), |element| {
+            // there and used on the next frame.
+            .child({
                 let this = cx.entity().downgrade();
-                element.child(
-                    gpui::canvas(
-                        move |bounds: gpui::Bounds<Pixels>, _window, cx: &mut App| {
-                            let width = bounds.size.width;
-                            // Deferred rather than applied here: this runs inside
-                            // the prepaint of the very view it would update, and
-                            // the width is wanted for the *next* frame anyway.
-                            cx.defer(move |cx| {
-                                this.update(cx, |this, cx| {
-                                    this.note_measured_width(width, cx);
-                                })
-                                .ok();
-                            });
-                        },
-                        |_, _, _, _| {},
-                    )
-                    // Absolute and full size, so it measures the container it
-                    // overlays and claims no room in the column it sits in. Drawn
-                    // first, so it paints under everything and cannot come
-                    // between the pointer and a button.
-                    .absolute()
-                    .size_full(),
+                gpui::canvas(
+                    move |bounds: gpui::Bounds<Pixels>, _window, cx: &mut App| {
+                        let width = bounds.size.width;
+                        // Deferred rather than applied here: this runs inside the
+                        // prepaint of the very view it would update, and the width
+                        // is wanted for the *next* frame anyway.
+                        cx.defer(move |cx| {
+                            this.update(cx, |this, cx| {
+                                this.note_measured_width(width, cx);
+                            })
+                            .ok();
+                        });
+                    },
+                    |_, _, _, _| {},
                 )
+                // Absolute and full size, so it measures the container it
+                // overlays and claims no room. Drawn first, so it paints under
+                // everything and cannot come between the pointer and a button.
+                .absolute()
+                .size_full()
             })
             .child(self.render_header(cx))
             .map(|element| {
                 if self.connections.is_empty() {
                     element.child(self.render_empty())
                 } else if self.side_by_side() {
-                    element.child(self.render_full_screen(window, cx))
+                    element.child(self.render_side_by_side(window, cx))
                 } else {
                     element
                         .child(self.render_tree(cx))
@@ -132,11 +115,12 @@ impl DatabasePanel {
     /// what you came to read, so they take the top and the height nobody has to
     /// drag back. The statement sits under them, where it is typed into.
     ///
-    /// Everything on the right is drawn whether or not a connection is open --
-    /// unlike the column, where the same two regions would be empty boxes. Here
-    /// they are the layout that was asked for, and the data view says in words
-    /// that it is waiting for a table.
-    fn render_full_screen(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The wide layout: the table list beside the data rather than above it.
+    ///
+    /// Everything on the right is drawn whether or not a connection is open. At
+    /// this width they are the layout that was asked for, and the data view says
+    /// in words that it is waiting for a table.
+    fn render_side_by_side(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_1()
             .min_h_0()
@@ -157,7 +141,6 @@ impl DatabasePanel {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_run = self.active.is_some();
-        let full_screen = self.full_screen;
         h_flex()
             .flex_none()
             .w_full()
@@ -183,76 +166,29 @@ impl DatabasePanel {
                                 })),
                         )
                     })
-                    // Three ways out of the column, offered only *from* the
-                    // column. Standing in a tab or a window of its own, a button
-                    // to take the window is offering what it already has, and
-                    // one to open a tab would open a second view of itself.
-                    .when(!self.is_standalone(), |element| {
-                        element
-                            .child(
-                                IconButton::new(
-                                    "database-full-screen",
-                                    if self.full_screen {
-                                        IconName::Minimize
-                                    } else {
-                                        IconName::Maximize
-                                    },
+                    // The one place left to go: a window of its own. There is
+                    // no full-screen button (a tab already fills its pane, and
+                    // the pane has its own zoom) and no open-in-a-tab button
+                    // (this *is* the tab).
+                    //
+                    // Dispatched rather than called, for the reason spelled out
+                    // on the add-connection button below: the workspace action is
+                    // the one road, so the button and a keybinding cannot drift
+                    // apart.
+                    .child(
+                        IconButton::new("database-open-in-window", IconName::OpenNewWindow)
+                            .icon_size(IconSize::Small)
+                            .tooltip(|_window, cx| {
+                                Tooltip::for_action(
+                                    "Open in a floating window",
+                                    &actions::OpenInFloatingWindow,
+                                    cx,
                                 )
-                                .icon_size(IconSize::Small)
-                                .tooltip(move |_window, cx| {
-                                    Tooltip::for_action(
-                                        if full_screen {
-                                            "Exit full screen"
-                                        } else {
-                                            "Full screen"
-                                        },
-                                        &actions::ToggleFullScreen,
-                                        cx,
-                                    )
-                                })
-                                .on_click(cx.listener(
-                                    |this, _event, window, cx| {
-                                        this.toggle_full_screen(window, cx);
-                                    },
-                                )),
-                            )
-                            // Dispatched rather than called, for the reason
-                            // spelled out on the add-connection button below:
-                            // the workspace action is the one road, so the
-                            // button and a keybinding cannot drift apart.
-                            .child(
-                                IconButton::new("database-open-in-tab", IconName::ArrowUpRight)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::for_action(
-                                            "Open in editor tab",
-                                            &actions::OpenInEditorTab,
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(|_event, window, cx| {
-                                        window
-                                            .dispatch_action(Box::new(actions::OpenInEditorTab), cx)
-                                    }),
-                            )
-                            .child(
-                                IconButton::new("database-open-in-window", IconName::OpenNewWindow)
-                                    .icon_size(IconSize::Small)
-                                    .tooltip(|_window, cx| {
-                                        Tooltip::for_action(
-                                            "Open in a floating window",
-                                            &actions::OpenInFloatingWindow,
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(|_event, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(actions::OpenInFloatingWindow),
-                                            cx,
-                                        )
-                                    }),
-                            )
-                    })
+                            })
+                            .on_click(|_event, window, cx| {
+                                window.dispatch_action(Box::new(actions::OpenInFloatingWindow), cx)
+                            }),
+                    )
                     .child(
                         IconButton::new("database-add-connection", IconName::Plus)
                             .icon_size(IconSize::Small)

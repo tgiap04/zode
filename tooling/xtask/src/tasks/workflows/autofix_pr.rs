@@ -11,7 +11,7 @@ pub fn autofix_pr() -> Workflow {
     let run_clippy = WorkflowInput::bool("run_clippy", Some(true));
     let run_autofix = run_autofix(&pr_number, &run_clippy);
     let commit_changes = commit_changes(&pr_number, &run_autofix);
-    named::workflow()
+    named::workflow!()
         .run_name(format!("autofix PR #{pr_number}"))
         .on(Event::default().workflow_dispatch(
             WorkflowDispatch::default()
@@ -45,7 +45,7 @@ fn upload_patch_artifact() -> Step<Use> {
 }
 
 fn download_patch_artifact() -> Step<Use> {
-    named::uses(
+    named::uses!(
         "actions",
         "download-artifact",
         "018cc2cf5baa6db3ef3c5f8a56943fffe632ef53", // v6.0.0
@@ -55,13 +55,13 @@ fn download_patch_artifact() -> Step<Use> {
 
 fn run_autofix(pr_number: &WorkflowInput, run_clippy: &WorkflowInput) -> NamedJob {
     fn checkout_pr(pr_number: &WorkflowInput) -> Step<Run> {
-        named::bash(r#"gh pr checkout "$PR_NUMBER""#)
+        named::bash!(r#"gh pr checkout "$PR_NUMBER""#)
             .add_env(("PR_NUMBER", pr_number.to_string()))
             .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))
     }
 
     fn install_cargo_machete() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "taiki-e",
             "install-action",
             "02cc5f8ca9f2301050c0c099055816a41ee05507",
@@ -70,31 +70,31 @@ fn run_autofix(pr_number: &WorkflowInput, run_clippy: &WorkflowInput) -> NamedJo
     }
 
     fn run_cargo_fmt() -> Step<Run> {
-        named::bash("cargo fmt --all")
+        named::bash!("cargo fmt --all")
     }
 
     fn run_cargo_fix() -> Step<Run> {
-        named::bash(
+        named::bash!(
             "cargo fix --workspace --release --all-targets --all-features --allow-dirty --allow-staged",
         )
     }
 
     fn run_cargo_machete_fix() -> Step<Run> {
-        named::bash("cargo machete --fix")
+        named::bash!("cargo machete --fix")
     }
 
     fn run_clippy_fix() -> Step<Run> {
-        named::bash(
+        named::bash!(
             "cargo clippy --workspace --release --all-targets --all-features --fix --allow-dirty --allow-staged",
         )
     }
 
     fn run_prettier_fix() -> Step<Run> {
-        named::bash("./script/prettier --write")
+        named::bash!("./script/prettier --write")
     }
 
     fn create_patch() -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             if git diff --quiet; then
                 echo "No changes to commit"
                 echo "has_changes=false" >> "$GITHUB_OUTPUT"
@@ -106,7 +106,7 @@ fn run_autofix(pr_number: &WorkflowInput, run_clippy: &WorkflowInput) -> NamedJo
         .id("create-patch")
     }
 
-    named::job(
+    named::job!(
         Job::default()
             .runs_on(runners::LINUX_DEFAULT)
             .outputs([(
@@ -133,17 +133,17 @@ fn run_autofix(pr_number: &WorkflowInput, run_clippy: &WorkflowInput) -> NamedJo
 
 fn commit_changes(pr_number: &WorkflowInput, autofix_job: &NamedJob) -> NamedJob {
     fn checkout_pr(pr_number: &WorkflowInput, token: &StepOutput) -> Step<Run> {
-        named::bash(r#"gh pr checkout "$PR_NUMBER""#)
+        named::bash!(r#"gh pr checkout "$PR_NUMBER""#)
             .add_env(("PR_NUMBER", pr_number.to_string()))
             .add_env(("GITHUB_TOKEN", token))
     }
 
     fn apply_patch() -> Step<Run> {
-        named::bash("git apply autofix.patch")
+        named::bash!("git apply autofix.patch")
     }
 
     fn commit_and_push(token: &StepOutput) -> Step<Run> {
-        named::bash(indoc::indoc! {r#"
+        named::bash!(indoc::indoc! {r#"
             git commit -am "Autofix"
             git push
         "#})
@@ -168,7 +168,7 @@ fn commit_changes(pr_number: &WorkflowInput, autofix_job: &NamedJob) -> NamedJob
         ])
         .into();
 
-    named::job(
+    named::job!(
         Job::default()
             .runs_on(runners::LINUX_SMALL)
             .needs(vec![autofix_job.name.clone()])

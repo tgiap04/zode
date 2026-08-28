@@ -159,7 +159,7 @@ impl NodeRuntime {
                 Ok(instance) => {
                     log::log!(
                         log_level,
-                        "using Zed managed Node.js at {} since {}",
+                        "using Zode managed Node.js at {} since {}",
                         instance.installation_path.display(),
                         why_using_managed
                     );

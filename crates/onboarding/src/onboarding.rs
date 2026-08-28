@@ -237,10 +237,12 @@ impl Render for Onboarding {
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
-                                                        Label::new("Built on Zed")
-                                                            .color(Color::Muted)
-                                                            .size(LabelSize::Small)
-                                                            .italic(),
+                                                        Label::new(
+                                                            "Your agents, your data, your editor",
+                                                        )
+                                                        .color(Color::Muted)
+                                                        .size(LabelSize::Small)
+                                                        .italic(),
                                                     ),
                                             ),
                                     )
@@ -480,11 +482,6 @@ mod persistence {
 
 #[cfg(test)]
 mod name_tests {
-    /// The one place the crate may still say "Zed": crediting where the fork
-    /// came from. Anything else that names Zed is the app claiming to be an
-    /// editor it is not.
-    const ATTRIBUTION: &str = r#"Label::new("Built on Zed")"#;
-
     /// Reads the source rather than behaviour, because "calls itself by the
     /// right name" has no runtime seam -- and it is exactly the kind of thing
     /// that drifts back in one label at a time.
@@ -504,7 +501,7 @@ mod name_tests {
             let shipping = source.split("#[cfg(test)]").next().unwrap_or(source);
 
             for (number, line) in shipping.lines().enumerate() {
-                if line.trim_start().starts_with("//") || line.contains(ATTRIBUTION) {
+                if line.trim_start().starts_with("//") {
                     continue;
                 }
                 // `zed.dev` links point at documentation that is real and still

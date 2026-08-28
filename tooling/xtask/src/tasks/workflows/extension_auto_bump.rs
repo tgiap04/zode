@@ -19,7 +19,7 @@ pub(crate) fn extension_auto_bump() -> Workflow {
     let detect = detect_changed_extensions();
     let bump = bump_extension_versions(&detect);
 
-    named::workflow()
+    named::workflow!()
         .add_event(
             Event::default().push(
                 Push::default()
@@ -59,7 +59,7 @@ fn detect_changed_extensions() -> NamedJob {
         filter = filter_newly_added,
     );
 
-    let step = named::bash(script).id("detect");
+    let step = named::bash!(script).id("detect");
 
     let output = StepOutput::new(&step, "changed_extensions");
 
@@ -71,7 +71,7 @@ fn detect_changed_extensions() -> NamedJob {
         .add_step(step)
         .outputs([("changed_extensions".to_owned(), output.to_string())]);
 
-    named::job(job)
+    named::job!(job)
 }
 
 fn bump_extension_versions(detect_job: &NamedJob) -> NamedJob<UsesJob> {
@@ -109,5 +109,5 @@ fn bump_extension_versions(detect_job: &NamedJob) -> NamedJob<UsesJob> {
         )
         .with_app_secrets();
 
-    named::job(job)
+    named::job!(job)
 }

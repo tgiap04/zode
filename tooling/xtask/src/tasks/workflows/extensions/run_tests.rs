@@ -8,7 +8,7 @@ use crate::tasks::workflows::{
 
 pub(crate) fn run_tests(args: &GenerateWorkflowArgs) -> Workflow {
     let call_extension_tests = call_extension_tests(args.sha.as_ref());
-    named::workflow()
+    named::workflow!()
         .on(Event::default()
             .pull_request(PullRequest::default().add_branch("**"))
             .push(Push::default().add_branch("main")))
@@ -26,5 +26,5 @@ pub(crate) fn call_extension_tests(target_ref: Option<&GitSha>) -> NamedJob<Uses
             target_ref.map_or("main", AsRef::as_ref),
         );
 
-    named::job(job)
+    named::job!(job)
 }

@@ -260,23 +260,41 @@ impl UsagePanel {
                     .w_full()
                     .gap_1p5()
                     .cursor_pointer()
-                    .child(Icon::new(agent_icon(&source.agent)).size(IconSize::Small))
-                    .child(Label::new(agent_display_name(&source.agent)))
                     .child(
-                        Label::new(Self::source_status(source, now))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                        div()
+                            .flex_none()
+                            .child(Icon::new(agent_icon(&source.agent)).size(IconSize::Small)),
+                    )
+                    // The mark, the name and the chevron keep their size; the
+                    // status is the one thing allowed to give way.
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(Label::new(agent_display_name(&source.agent))),
                     )
                     .child(
-                        div().flex_1().flex().justify_end().child(
-                            Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
+                        // `flex_1` to take what is left and `min_w_0` to be allowed
+                        // to fall below its own text width — `truncate` alone is
+                        // only `overflow_hidden`/`text_ellipsis`, and a flex item
+                        // defaults to refusing to shrink past its content, so
+                        // without `min_w_0` a long status pushes the row straight
+                        // out past PANEL_WIDTH instead of ellipsising inside it.
+                        // Same pairing as `ui::Chip`.
+                        div().flex_1().min_w_0().child(
+                            Label::new(Self::source_status(source, now))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
                         ),
+                    )
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
                     )
                     // Expanding is reading what is already in hand, so it fires no
                     // request -- opening the detail must never be a reason to
@@ -464,6 +482,10 @@ mod tests {
             claude_usage_button: true,
             codex_usage_button: true,
             agent_usage_display: AgentUsageDisplay::Detailed,
+            activity_indicator: true,
+            active_toolchain_button: true,
+            vim_mode_button: true,
+            image_info_button: true,
         }
     }
 

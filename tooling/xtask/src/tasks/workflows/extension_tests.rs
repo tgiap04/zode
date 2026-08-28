@@ -38,7 +38,7 @@ pub(crate) fn extension_tests() -> Workflow {
 
     let working_directory = WorkflowInput::string("working-directory", Some(".".to_owned()));
 
-    named::workflow()
+    named::workflow!()
         .add_event(
             Event::default().workflow_call(
                 WorkflowCall::default()
@@ -64,11 +64,11 @@ pub(crate) fn extension_tests() -> Workflow {
 }
 
 fn install_rust_target() -> Step<Run> {
-    named::bash(format!("rustup target add {EXTENSION_RUST_TARGET}",))
+    named::bash!(format!("rustup target add {EXTENSION_RUST_TARGET}",))
 }
 
 fn get_package_name() -> (Step<Run>, StepOutput) {
-    let step = named::bash(indoc! {r#"
+    let step = named::bash!(indoc! {r#"
         PACKAGE_NAME="$(sed -n 's/^name = "\(.*\)"/\1/p' < Cargo.toml | head -1 | tr -d '[:space:]')"
         echo "package_name=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
     "#})
@@ -79,17 +79,17 @@ fn get_package_name() -> (Step<Run>, StepOutput) {
 }
 
 fn cargo_fmt_package(package_name: &StepOutput) -> Step<Run> {
-    named::bash(r#"cargo fmt -p "$PACKAGE_NAME" -- --check"#)
+    named::bash!(r#"cargo fmt -p "$PACKAGE_NAME" -- --check"#)
         .add_env(("PACKAGE_NAME", package_name.to_string()))
 }
 
 fn run_clippy(package_name: &StepOutput) -> Step<Run> {
-    named::bash(r#"cargo clippy -p "$PACKAGE_NAME" --release --all-features -- --deny warnings"#)
+    named::bash!(r#"cargo clippy -p "$PACKAGE_NAME" --release --all-features -- --deny warnings"#)
         .add_env(("PACKAGE_NAME", package_name.to_string()))
 }
 
 fn run_nextest(package_name: &StepOutput) -> Step<Run> {
-    named::bash(
+    named::bash!(
         r#"cargo nextest run -p "$PACKAGE_NAME" --no-fail-fast --no-tests=warn --target "$(rustc -vV | sed -n 's|host: ||p')""#,
     )
     .add_env(("PACKAGE_NAME", package_name.to_string()))
@@ -128,7 +128,7 @@ fn check_rust() -> NamedJob {
         .add_step(steps::cargo_install_nextest())
         .add_step(run_nextest(&package_name));
 
-    named::job(job)
+    named::job!(job)
 }
 
 pub(crate) fn check_extension() -> NamedJob {
@@ -150,11 +150,11 @@ pub(crate) fn check_extension() -> NamedJob {
         .add_step(check_version_job)
         .add_step(verify_version_did_not_change(version_changed));
 
-    named::job(job)
+    named::job!(job)
 }
 
 pub fn cache_zed_extension_cli() -> (Step<Use>, StepOutput) {
-    let step = named::uses(
+    let step = named::uses!(
         "actions",
         "cache",
         "0057852bfaa89a56745cba8c7296529d2fc39830",
@@ -170,7 +170,7 @@ pub fn cache_zed_extension_cli() -> (Step<Use>, StepOutput) {
 }
 
 pub fn download_zed_extension_cli(cache_hit: StepOutput) -> Step<Run> {
-    named::bash(
+    named::bash!(
     indoc! {
         r#"
         wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZED_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension" -O "$GITHUB_WORKSPACE/zed-extension"
@@ -181,7 +181,7 @@ pub fn download_zed_extension_cli(cache_hit: StepOutput) -> Step<Run> {
 }
 
 pub fn check() -> Step<Run> {
-    named::bash(indoc! {
+    named::bash!(indoc! {
         r#"
         mkdir -p /tmp/ext-scratch
         mkdir -p /tmp/ext-output
@@ -191,7 +191,7 @@ pub fn check() -> Step<Run> {
 }
 
 fn verify_version_did_not_change(version_changed: StepOutput) -> Step<Run> {
-    named::bash(indoc! {r#"
+    named::bash!(indoc! {r#"
         if [[ "$VERSION_CHANGED" == "true" && "$GITHUB_EVENT_NAME" == "pull_request" && "$PR_USER_LOGIN" != "zed-zippy[bot]" ]] ; then
             echo "Version change detected in your change!"
             echo "Version changes happen in separate PRs and will be performed by the zed-zippy bot"

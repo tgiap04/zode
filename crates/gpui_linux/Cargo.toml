@@ -51,6 +51,9 @@ screen-capture = [
 
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+# The screensaver-inhibit route is a session-bus convention, so it is shared by
+# the wayland and x11 backends rather than optional on either.
+zbus.workspace = true
 anyhow.workspace = true
 bytemuck = "1"
 collections.workspace = true

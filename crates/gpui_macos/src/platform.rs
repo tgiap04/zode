@@ -27,9 +27,9 @@ use ctor::ctor;
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
-    KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayWakeLock,
+    ForegroundExecutor, KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowParams,
 };
 use itertools::Itertools;
@@ -909,6 +909,62 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn can_keep_display_awake(&self) -> bool {
+        true
+    }
+
+    fn keep_display_awake(&self, reason: &str) -> Option<DisplayWakeLock> {
+        // `PreventUserIdleDisplaySleep` keeps the panel lit, and a lit panel is
+        // by definition not an idle system -- so this one assertion covers both
+        // halves of what was asked for, and there is no second assertion to
+        // balance against it.
+        let assertion_type = CFString::from_static_string("PreventUserIdleDisplaySleep");
+        let name = CFString::new(reason);
+        let mut id: IOPMAssertionID = 0;
+        let result = unsafe {
+            IOPMAssertionCreateWithName(
+                assertion_type.as_concrete_TypeRef(),
+                K_IOPM_ASSERTION_LEVEL_ON,
+                name.as_concrete_TypeRef(),
+                &mut id,
+            )
+        };
+        if result != K_IO_RETURN_SUCCESS {
+            log::warn!("could not ask macOS to keep the display awake: IOReturn {result:#x}");
+            return None;
+        }
+        Some(DisplayWakeLock::new(move || {
+            let result = unsafe { IOPMAssertionRelease(id) };
+            if result != K_IO_RETURN_SUCCESS {
+                log::warn!("could not release the display-awake assertion: IOReturn {result:#x}");
+            }
+        }))
+    }
+
+    fn on_battery(&self) -> Option<bool> {
+        let sources = unsafe { IOPSCopyPowerSourcesInfo() };
+        if sources.is_null() {
+            return None;
+        }
+        let kind = unsafe { IOPSGetProvidingPowerSourceType(sources) };
+        let kind = if kind.is_null() {
+            None
+        } else {
+            Some(unsafe { CFString::wrap_under_get_rule(kind) }.to_string())
+        };
+        unsafe { CFRelease(sources) };
+        match kind?.as_str() {
+            "Battery Power" => Some(true),
+            // `AC Power` and `UPS Power` are both mains as far as this matters:
+            // the machine is not spending a charge it cannot replace.
+            "AC Power" | "UPS Power" => Some(false),
+            other => {
+                log::warn!("unrecognised macOS power source {other:?}");
+                None
+            }
+        }
+    }
+
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
         Box::new(MacKeyboardLayout::new())
     }
@@ -1385,6 +1441,27 @@ unsafe fn ns_url_to_path(url: id) -> Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(unsafe {
         CStr::from_ptr(path).to_bytes()
     })))
+}
+
+type IOPMAssertionID = u32;
+
+/// `kIOPMAssertionLevelOn` and `kIOReturnSuccess`. Both are macros in the SDK
+/// headers rather than exported symbols, so they cannot be linked -- they have
+/// to be written out here.
+const K_IOPM_ASSERTION_LEVEL_ON: u32 = 255;
+const K_IO_RETURN_SUCCESS: i32 = 0;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPMAssertionCreateWithName(
+        assertion_type: CFStringRef,
+        assertion_level: u32,
+        assertion_name: CFStringRef,
+        assertion_id: *mut IOPMAssertionID,
+    ) -> i32;
+    fn IOPMAssertionRelease(assertion_id: IOPMAssertionID) -> i32;
+    fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
+    fn IOPSGetProvidingPowerSourceType(snapshot: CFTypeRef) -> CFStringRef;
 }
 
 #[link(name = "Carbon", kind = "framework")]

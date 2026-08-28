@@ -12,6 +12,8 @@ workspace = true
 path = "src/sidebar.rs"
 
 [dependencies]
+container_ui.workspace = true
+database_ui.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
 collections.workspace = true
@@ -33,6 +35,10 @@ workspace.workspace = true
 zed_actions.workspace = true
 
 [dev-dependencies]
+# `test-support` so the rail's tests open the container tab over an engine that
+# never leaves the process. Without it, pressing the button runs `docker`, whose
+# exit wakes the GPUI test scheduler from a blocking thread and aborts the run.
+container_ui = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }

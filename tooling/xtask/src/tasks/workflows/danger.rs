@@ -8,7 +8,7 @@ use super::{runners, steps, vars};
 pub fn danger() -> Workflow {
     let danger = danger_job();
 
-    named::workflow()
+    named::workflow!()
         .on(
             // `develop` as well as `main`: feature branches land in `develop` first, so a
             // check that only watches `main` never sees the pull request that introduces
@@ -30,7 +30,7 @@ pub fn danger() -> Workflow {
 
 fn danger_job() -> NamedJob {
     pub fn install_deps() -> Step<Run> {
-        named::bash("pnpm install --dir script/danger")
+        named::bash!("pnpm install --dir script/danger")
     }
 
     // Talks to api.github.com directly with the workflow's own token. Upstream routes
@@ -39,7 +39,7 @@ fn danger_job() -> NamedJob {
     // repository, so here it fails outright. The trade-off is that Danger will not be able
     // to comment on a pull request opened from a fork, where GITHUB_TOKEN is read-only.
     pub fn run() -> Step<Run> {
-        named::bash("pnpm run --dir script/danger danger ci")
+        named::bash!("pnpm run --dir script/danger danger ci")
             .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN))
     }
 

@@ -23,7 +23,7 @@ pub fn run_bundling() -> Workflow {
     // No Nix jobs: they authenticate against upstream's Nix binary cache through a
     // Namespace-only cache action, so they cannot run here. This workflow's remaining
     // purpose is on-demand bundling via the `run-bundling` label.
-    named::workflow()
+    named::workflow!()
         .on(Event::default().pull_request(
             PullRequest::default().types([PullRequestType::Labeled, PullRequestType::Synchronize]),
         ))
@@ -43,9 +43,16 @@ pub fn run_bundling() -> Workflow {
         })
 }
 
-fn bundle_job(deps: &[&NamedJob]) -> Job {
+/// `release_channel`, not `deps.is_empty()`, decides whether the `run-bundling` label
+/// condition belongs on the job. The two used to be the same signal only by coincidence:
+/// every caller that passed a channel also passed a gate. `release` no longer gates its
+/// bundles (they run beside the tests, and `upload_release_assets` is what waits), so
+/// inferring from `deps` would have stamped a label condition that is false on a tag push
+/// onto all six bundles -- a release that succeeds with no assets attached and nothing in
+/// the log saying why.
+fn bundle_job(deps: &[&NamedJob], release_channel: Option<ReleaseChannel>) -> Job {
     dependant_job(deps)
-        .when(deps.len() == 0, |job|
+        .when(release_channel.is_none(), |job|
             job.cond(Expression::new(
                 indoc! {
                     r#"(github.event.action == 'labeled' && github.event.label.name == 'run-bundling') ||
@@ -71,7 +78,7 @@ pub(crate) fn bundle_mac(
     deps: &[&NamedJob],
 ) -> NamedJob {
     pub fn bundle_mac(arch: Arch) -> Step<Run> {
-        named::bash(&format!("./script/bundle-mac {arch}-apple-darwin"))
+        named::bash!(&format!("./script/bundle-mac {arch}-apple-darwin"))
     }
     let platform = Platform::Mac;
     let artifact_name = match arch {
@@ -80,7 +87,7 @@ pub(crate) fn bundle_mac(
     };
     NamedJob {
         name: format!("bundle_mac_{arch}"),
-        job: bundle_job(deps)
+        job: bundle_job(deps, release_channel)
             .runs_on(arch.mac_bundler())
             .envs(bundle_envs(platform))
             .add_step(checkout_for(release_channel))
@@ -121,15 +128,34 @@ pub(crate) fn bundle_linux(
         Arch::X86_64 => assets::LINUX_X86_64,
         Arch::AARCH64 => assets::LINUX_AARCH64,
     };
+    // The runner label is only a Docker host; the userland the binary is linked against
+    // comes from this image, and with it the glibc floor. `ubuntu:22.04` is glibc 2.35,
+    // which is what `script/check-glibc-floor` enforces below. Deliberately the plain tag
+    // rather than a digest: this is a build environment, not a shipped artifact, and a
+    // digest would trade a modest supply-chain gain for a recurring manual bump.
+    fn check_glibc_floor(artifact_name: &str) -> Step<Run> {
+        named::bash!(format!(
+            "./script/check-glibc-floor target/release/{artifact_name}"
+        ))
+    }
+
     NamedJob {
         name: format!("bundle_linux_{arch}"),
-        job: bundle_job(deps)
+        job: bundle_job(deps, release_channel)
             .runs_on(arch.linux_bundler())
+            .container(Container::new("ubuntu:22.04"))
             .envs(bundle_envs(platform))
-            // Unversioned on purpose: upstream pinned clang-18, which exists only on the
-            // 20.04 image its bundler used. On 24.04 the default `clang` already is 18.
+            // Jammy's default `clang` is 14, not 24.04's 18. That is fine: this fork
+            // compiles no C++ (no `webrtc`/`livekit` in `Cargo.lock`, no `.cpp`/`.cc` in
+            // the tree), so the C++20 requirement that forced clang-18 upstream is gone.
+            // Only C `-sys` crates are built, and clang 14 handles those.
             .add_env(Env::new("CC", "clang"))
             .add_env(Env::new("CXX", "clang++"))
+            // Job-level, not exported inside a step: `script/linux` apt-installs from a
+            // different step and `tzdata` will sit waiting for a timezone forever in a
+            // bare container without this.
+            .add_env(Env::new("DEBIAN_FRONTEND", "noninteractive"))
+            .add_step(steps::bootstrap_container())
             .add_step(checkout_for(release_channel))
             .when_some(release_channel, |job, release_channel| {
                 job.add_step(set_release_channel(platform, release_channel))
@@ -137,6 +163,7 @@ pub(crate) fn bundle_linux(
             .add_step(steps::free_disk_space(platform))
             .map(steps::install_linux_dependencies)
             .add_step(steps::script("./script/bundle-linux"))
+            .add_step(check_glibc_floor(artifact_name))
             .add_step(upload_artifact(&format!("target/release/{artifact_name}"))),
     }
 }
@@ -152,8 +179,8 @@ pub(crate) fn bundle_windows(
     // script derives that path itself via `ParseZedWorkspace`.
     pub fn bundle_windows(arch: Arch) -> Step<Run> {
         match arch {
-            Arch::X86_64 => named::pwsh("script/bundle-windows.ps1 -Architecture x86_64"),
-            Arch::AARCH64 => named::pwsh("script/bundle-windows.ps1 -Architecture aarch64"),
+            Arch::X86_64 => named::pwsh!("script/bundle-windows.ps1 -Architecture x86_64"),
+            Arch::AARCH64 => named::pwsh!("script/bundle-windows.ps1 -Architecture aarch64"),
         }
     }
     let artifact_name = match arch {
@@ -162,7 +189,7 @@ pub(crate) fn bundle_windows(
     };
     NamedJob {
         name: format!("bundle_windows_{arch}"),
-        job: bundle_job(deps)
+        job: bundle_job(deps, release_channel)
             .runs_on(runners::WINDOWS_DEFAULT)
             .envs(bundle_envs(platform))
             .add_step(checkout_for(release_channel))
@@ -198,13 +225,13 @@ fn set_release_channel_from_tag(platform: Platform) -> Step<Run> {
 
 fn set_release_channel_to_nightly(platform: Platform) -> Step<Run> {
     match platform {
-        Platform::Linux | Platform::Mac => named::bash(indoc::indoc! {r#"
+        Platform::Linux | Platform::Mac => named::bash!(indoc::indoc! {r#"
             set -eu
             version=$(git rev-parse --short HEAD)
             echo "Publishing version: ${version} on release channel nightly"
             echo "nightly" > crates/zed/RELEASE_CHANNEL
         "#}),
-        Platform::Windows => named::pwsh(indoc::indoc! {r#"
+        Platform::Windows => named::pwsh!(indoc::indoc! {r#"
             $ErrorActionPreference = "Stop"
             $version = git rev-parse --short HEAD
             Write-Host "Publishing version: $version on release channel nightly"

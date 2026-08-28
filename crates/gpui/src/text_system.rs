@@ -1161,9 +1161,17 @@ pub fn font_name_with_fallbacks<'a>(name: &'a str, system: &'a str) -> &'a str {
     // Note: the "Zed Plex" fonts were deprecated as we are not allowed to use "Plex"
     // in a derived font name. They are essentially indistinguishable from IBM Plex/Lilex,
     // and so retained here for backward compatibility.
+    //
+    // `.ZedSans` and "Zed Plex Sans" no longer resolve to the same family. The dotted
+    // name means "whatever sans this build ships with" -- `default.json` has always
+    // said it "may change in the future", which is why the concrete family was never
+    // written there -- and it now ships Inter. "Zed Plex Sans" was kept only because
+    // it was indistinguishable from IBM Plex; Inter is not, so that name keeps
+    // pointing at the font it was named for.
     match name {
         ".SystemUIFont" => system,
-        ".ZedSans" | "Zed Plex Sans" => "IBM Plex Sans",
+        ".ZedSans" => "Inter",
+        "Zed Plex Sans" => "IBM Plex Sans",
         ".ZedMono" | "Zed Plex Mono" => "Lilex",
         _ => name,
     }
@@ -1175,13 +1183,66 @@ pub fn font_name_with_fallbacks_shared<'a>(
     name: &'a SharedString,
     system: &'a SharedString,
 ) -> &'a SharedString {
-    // Note: the "Zed Plex" fonts were deprecated as we are not allowed to use "Plex"
-    // in a derived font name. They are essentially indistinguishable from IBM Plex/Lilex,
-    // and so retained here for backward compatibility.
+    // Keep every arm in step with `font_name_with_fallbacks`, which carries the
+    // rationale for each one. Two copies of one table diverge silently -- nothing
+    // here fails to compile if they disagree -- so `aliases_agree_across_both_forms`
+    // below is what actually holds them together.
     match name.as_str() {
         ".SystemUIFont" => system,
-        ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
+        ".ZedSans" => const { &SharedString::new_static("Inter") },
+        "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod font_alias_tests {
+    use super::{SharedString, font_name_with_fallbacks, font_name_with_fallbacks_shared};
+
+    /// Every virtual name the two functions know about, plus a plain family name
+    /// that must pass straight through untouched.
+    const NAMES: [&str; 7] = [
+        ".SystemUIFont",
+        ".ZedSans",
+        "Zed Plex Sans",
+        ".ZedMono",
+        "Zed Plex Mono",
+        "Inter",
+        "Helvetica",
+    ];
+
+    /// The table is written out twice, once per function, and a divergence is not
+    /// a compile error -- it is a UI that picks a different font depending on
+    /// which call site resolved the name.
+    #[test]
+    fn aliases_agree_across_both_forms() {
+        for name in NAMES {
+            let owned: SharedString = name.to_string().into();
+            let system: SharedString = "System Font".to_string().into();
+            assert_eq!(
+                font_name_with_fallbacks(name, "System Font"),
+                font_name_with_fallbacks_shared(&owned, &system).as_ref(),
+                "{name} resolves differently in the two forms"
+            );
+        }
+    }
+
+    /// `.ZedSans` means "the sans this build ships with" and now ships Inter.
+    /// "Zed Plex Sans" was retained only because it was indistinguishable from
+    /// IBM Plex, so it keeps pointing at the font it is named for -- the two are
+    /// deliberately no longer the same family.
+    #[test]
+    fn zed_sans_ships_inter_while_the_plex_compat_name_stays_plex() {
+        assert_eq!(font_name_with_fallbacks(".ZedSans", "System Font"), "Inter");
+        assert_eq!(
+            font_name_with_fallbacks("Zed Plex Sans", "System Font"),
+            "IBM Plex Sans"
+        );
+        assert_eq!(font_name_with_fallbacks(".ZedMono", "System Font"), "Lilex");
+        assert_eq!(
+            font_name_with_fallbacks(".SystemUIFont", "System Font"),
+            "System Font"
+        );
     }
 }

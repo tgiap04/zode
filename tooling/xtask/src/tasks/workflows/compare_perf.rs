@@ -13,7 +13,7 @@ pub fn compare_perf() -> Workflow {
     let base = WorkflowInput::string("base", None);
     let crate_name = WorkflowInput::string("crate_name", Some("".to_owned()));
     let run_perf = run_perf(&base, &head, &crate_name);
-    named::workflow()
+    named::workflow!()
         .on(Event::default().workflow_dispatch(
             WorkflowDispatch::default()
                 .add_input(head.name, head.input())
@@ -29,7 +29,7 @@ pub fn run_perf(
     crate_name: &WorkflowInput,
 ) -> NamedJob {
     fn cargo_perf_test(ref_name: &WorkflowInput, crate_name: &WorkflowInput) -> Step<Run> {
-        named::bash(
+        named::bash!(
             r#"
             if [ -n "$CRATE_NAME" ]; then
                 cargo perf-test -p "$CRATE_NAME" -- --json="$REF_NAME";
@@ -42,7 +42,7 @@ pub fn run_perf(
     }
 
     fn install_hyperfine() -> Step<Use> {
-        named::uses(
+        named::uses!(
             "taiki-e",
             "install-action",
             "b4f2d5cb8597b15997c8ede873eb6185efc5f0ad", // hyperfine
@@ -50,12 +50,12 @@ pub fn run_perf(
     }
 
     fn compare_runs(head: &WorkflowInput, base: &WorkflowInput) -> Step<Run> {
-        named::bash(r#"cargo perf-compare --save=results.md "$BASE" "$HEAD""#)
+        named::bash!(r#"cargo perf-compare --save=results.md "$BASE" "$HEAD""#)
             .add_env(("BASE", base.to_string()))
             .add_env(("HEAD", head.to_string()))
     }
 
-    named::job(
+    named::job!(
         Job::default()
             .runs_on(runners::LINUX_DEFAULT)
             .add_step(steps::checkout_repo())

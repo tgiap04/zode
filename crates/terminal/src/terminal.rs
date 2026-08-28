@@ -2764,6 +2764,30 @@ mod tests {
         terminal.mouse_up(&mouse_up, cx);
     }
 
+    /// `completion_rx` fires when the child process exits, which is not the same moment
+    /// its bytes have been drained out of the PTY into the emulator grid that
+    /// `get_content` reads. Waiting on the exit alone leaves the two orderings free to
+    /// swap, and under a full-workspace `cargo nextest` run on Linux they do: the grid
+    /// still read empty while the process was already reaped. Poll for the content
+    /// instead of inferring it from the exit.
+    async fn wait_for_terminal_content(
+        terminal: &Entity<Terminal>,
+        expected: &str,
+        cx: &mut TestAppContext,
+    ) -> String {
+        let mut content = String::new();
+        for _ in 0..200 {
+            content = terminal.update(cx, |term, _| term.get_content());
+            if content.contains(expected) {
+                return content;
+            }
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        panic!("timed out waiting for {expected:?} in terminal content, got: {content:?}");
+    }
+
     #[gpui::test]
     async fn test_basic_terminal(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
@@ -2773,10 +2797,8 @@ mod tests {
             completion_rx.recv().await.unwrap(),
             Some(ExitStatus::default())
         );
-        assert_eq!(
-            terminal.update(cx, |term, _| term.get_content()).trim(),
-            "hello"
-        );
+        let content = wait_for_terminal_content(&terminal, "hello", cx).await;
+        assert_eq!(content.trim(), "hello");
 
         // Inject additional output directly into the emulator (display-only path)
         terminal.update(cx, |term, cx| {
