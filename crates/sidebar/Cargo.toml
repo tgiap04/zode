@@ -12,6 +12,7 @@ workspace = true
 path = "src/sidebar.rs"
 
 [dependencies]
+database_ui.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
 collections.workspace = true

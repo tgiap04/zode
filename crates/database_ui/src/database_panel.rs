@@ -12,13 +12,13 @@ use database::registry::DriverRegistry;
 use editor::Editor;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, SharedString, Task,
-    WeakEntity, Window, px,
+    WeakEntity, Window,
 };
 use settings::{Settings as _, SettingsStore};
 use std::sync::Arc;
 use ui::{ContextMenu, prelude::*};
 use workspace::Workspace;
-use workspace::dock::{DockColumn, DockPosition, Panel, PanelEvent};
+use workspace::dock::PanelEvent;
 
 /// What a connection node is doing. `Failed` keeps the driver's own words --
 /// "password authentication failed" is worth far more than "could not connect".
@@ -60,29 +60,7 @@ pub(crate) struct OpenTable {
     pub(crate) columns: Option<Vec<ColumnDef>>,
 }
 
-/// Where this view is standing.
-///
-/// The same view serves three places and only two behaviours, so this names the
-/// behaviours rather than the places. A column is pinned to one edge at a width
-/// somebody dragged, so it stacks and offers the button that takes the window.
-/// A tab and a window of its own are handed whatever width they are given, so
-/// they lay themselves out by measuring it -- and neither has any business
-/// offering to take a window it already has.
-///
-/// Sessions do not travel between them: each host builds its own view, with its
-/// own connections and its own scratch buffer. A single view drawn in two
-/// windows would need its `FocusHandle` in two dispatch trees at once, which is
-/// not a thing a focus handle can be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Host {
-    /// The own column beside the centre.
-    Column,
-    /// An editor tab, or a floating window.
-    Standalone,
-}
-
 pub struct DatabasePanel {
-    pub(crate) host: Host,
     /// The width the view was last drawn at, when it is standing on its own.
     ///
     /// Measured rather than asked for: a tab is as wide as the pane holds and a
@@ -101,16 +79,16 @@ pub struct DatabasePanel {
     pub(crate) open_table: Option<OpenTable>,
     pub(crate) pinned: PinnedConnections,
     /// Which connection a query would run against: whichever was last opened or
-    /// clicked. One editor for the column rather than one per connection --
-    /// people write a query, then decide where to point it.
+    /// clicked. One editor for the view rather than one per connection -- people
+    /// write a query, then decide where to point it.
     pub(crate) active: Option<usize>,
     pub(crate) sql_editor: Entity<Editor>,
     pub(crate) query: QueryState,
     /// The scratch text each connection was last left with, so switching away
     /// and back does not lose a half-written statement.
     pub(crate) scratch: HashMap<String, String>,
-    /// One per connection being opened or expanded, dropped when the panel is,
-    /// so closing the column cancels whatever it had in flight.
+    /// One per connection being opened or expanded, dropped when the view is,
+    /// so closing the tab cancels whatever it had in flight.
     pub(crate) tasks: Vec<Task<()>>,
     /// Counted rather than random, so two queries in the same millisecond
     /// cannot share a request id and have `cancel` stop the wrong one.
@@ -121,27 +99,20 @@ pub struct DatabasePanel {
     pub(crate) context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, gpui::Subscription)>,
     pub(crate) tree_height: Pixels,
     pub(crate) sql_height: Pixels,
-    /// How wide the table list stands in full screen. Only read there: in the
-    /// column the list is as wide as the column, and there is no second region
-    /// beside it to take the space from.
+    /// How wide the table list stands when it stands beside the data. Only read
+    /// there: stacked, the list is as wide as the view and there is no second
+    /// region beside it to take the space from.
     pub(crate) tree_width: Pixels,
     /// Which handle is being dragged and where the pointer was last seen, so a
     /// drag can move a region by the distance travelled rather than by where in
     /// the window the pointer happens to be.
     pub(crate) split_drag: Option<(Split, Pixels)>,
-    /// Whether the column has taken the whole window.
-    ///
-    /// Held here rather than in the workspace, and only ever read from there:
-    /// a panel that wrote workspace state while the workspace was drawing it
-    /// would abort, which this plan has already paid for twice.
-    pub(crate) full_screen: bool,
     _settings_observer: gpui::Subscription,
 }
 
 impl DatabasePanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::for_host(
-            Host::Column,
+        Self::detached(
             workspace.weak_handle(),
             workspace.project().read(cx).languages().clone(),
             window,
@@ -163,11 +134,16 @@ impl DatabasePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::for_host(Host::Standalone, workspace, languages, window, cx)
+        Self::detached(workspace, languages, window, cx)
     }
 
-    fn for_host(
-        host: Host,
+    /// The one place a view is built.
+    ///
+    /// There is one host now: an editor tab, or a window of its own, which lays
+    /// itself out the same way. The column this used to also live in is gone --
+    /// a result grid is the one thing here that cannot be made narrow and stay
+    /// readable, and a column is the one place that cannot be wide.
+    fn detached(
         workspace: WeakEntity<Workspace>,
         languages: Arc<language::LanguageRegistry>,
         window: &mut Window,
@@ -185,7 +161,6 @@ impl DatabasePanel {
         Self::apply_sql_language(&sql_editor, languages, cx);
 
         let mut panel = Self {
-            host,
             measured_width: None,
             focus_handle: cx.focus_handle(),
             workspace,
@@ -204,7 +179,6 @@ impl DatabasePanel {
             sql_height: panel_layout::DEFAULT_SQL_HEIGHT,
             tree_width: panel_layout::DEFAULT_TREE_WIDTH,
             split_drag: None,
-            full_screen: false,
             _settings_observer: settings_observer,
         };
         panel.reload_connections(cx);
@@ -386,79 +360,5 @@ impl EventEmitter<PanelEvent> for DatabasePanel {}
 impl Focusable for DatabasePanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
-    }
-}
-
-impl Panel for DatabasePanel {
-    fn persistent_name() -> &'static str {
-        "Database Panel"
-    }
-
-    fn panel_key() -> &'static str {
-        "DatabasePanel"
-    }
-
-    /// The rail's side, taken from the associated const rather than asked of a
-    /// workspace *handle*. `Workspace::add_panel` calls this from inside its own
-    /// update, so reaching back through the handle here aborts the process --
-    /// the trap `ccd151f` already paid for once. A const borrows nothing, so it
-    /// is safe where the handle was not, and it no longer reads a setting either.
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        Workspace::OWN_COLUMN_POSITION
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    /// Ignored: the column follows the rail. Dragging it across would move it
-    /// away from the button that opens it.
-    fn set_position(
-        &mut self,
-        _position: DockPosition,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
-
-    /// Wider than a tool panel by design -- a result grid is the one thing here
-    /// that cannot be made narrow and stay readable.
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(520.)
-    }
-
-    /// No icon, and therefore no button from either generic renderer.
-    ///
-    /// `rail_panels.rs` only ever looks at the tool dock on the rail's side, so
-    /// it would not draw this column anyway; the status bar (`dock.rs:1272`)
-    /// would, and a second button meaning the same thing as the rail's is worse
-    /// than none. `sidebar::rail_database` draws the one button there is.
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        None
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        None
-    }
-
-    fn toggle_action(&self) -> Box<dyn gpui::Action> {
-        Box::new(zed_actions::database::ToggleDatabase)
-    }
-
-    fn own_column(&self) -> Option<DockColumn> {
-        Some(DockColumn::Database)
-    }
-
-    fn fills_the_window(&self, _window: &Window, _cx: &App) -> bool {
-        self.full_screen
-    }
-
-    /// Closed until asked for: opening it spawns a driver process.
-    fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
-        false
-    }
-
-    fn activation_priority(&self) -> u32 {
-        4
     }
 }

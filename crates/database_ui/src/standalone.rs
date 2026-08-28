@@ -1,17 +1,16 @@
-//! The database away from its column: an editor tab, or a window of its own.
+//! The database as an editor tab, or a window of its own.
 //!
-//! Both hosts hand the view a width nobody chose for it -- a tab is as wide as
-//! the pane holds, a window as wide as it was dragged -- so both lay themselves
-//! out by measuring that width rather than by a flag somebody toggled. That is
-//! the whole difference from the column, and it is why `Host` names two
-//! behaviours rather than three places.
+//! There is no column. It had one, and it was the wrong shape: a result grid is
+//! the one thing here that cannot be made narrow and stay readable, and a column
+//! is the one place that cannot be wide. Both hosts here are given a width nobody
+//! chose -- a tab is as wide as its pane, a window as wide as it was dragged --
+//! so both lay themselves out by measuring it.
 //!
-//! Neither host shares a session with the column. Each builds its own view with
-//! its own connections and its own scratch buffer, which is what the person who
-//! asked for this chose: the alternative needs one `FocusHandle` in two dispatch
-//! trees at once, and a focus handle cannot be in two.
+//! Each view has its own connections and its own scratch buffer. Sharing one
+//! between two hosts needs one `FocusHandle` in two dispatch trees at once, and a
+//! focus handle cannot be in two.
 
-use crate::database_panel::{DatabasePanel, Host};
+use crate::database_panel::DatabasePanel;
 use gpui::{
     App, Bounds, Entity, EventEmitter, Pixels, SharedString, TitlebarOptions, WeakEntity, Window,
     WindowBounds, WindowKind, WindowOptions, px, size,
@@ -78,19 +77,62 @@ fn standalone_view(
     cx.new(|cx| DatabasePanel::standalone(handle, languages, window, cx))
 }
 
-/// Hides the column, so the database is in one place rather than two.
+/// Brings the database tab forward, or opens one.
 ///
-/// Hidden and not closed, matching `ToggleDatabase`: the panel entity stays in
-/// the dock with its tree, its scratch buffer and any open session, so bringing
-/// the column back brings back what was in it.
-fn hide_the_column(workspace: &Workspace, window: &mut Window, cx: &mut App) {
-    let Some(dock) = workspace
-        .dock_for_column(workspace::dock::DockColumn::Database)
-        .cloned()
-    else {
+/// Existing tab first: a second would be a second set of connections and a second
+/// scratch buffer, each unaware of the other.
+pub(crate) fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    // Collected before the mutable borrow: `items_of_type` borrows the workspace
+    // and `activate_item` needs it back.
+    let existing = workspace.items_of_type::<DatabasePanel>(cx).next();
+    if let Some(existing) = existing {
+        workspace.activate_item(&existing, true, true, window, cx);
         return;
+    }
+    open_in_editor_tab(workspace, window, cx);
+}
+
+/// Steps back to the tab that was being read, if the database tab is in front.
+///
+/// Put away, not closed: closing would end every open session and lose a
+/// half-written statement over the second press of a button whose whole job is to
+/// be pressed twice. Same shape as `AgentView::put_away`.
+pub(crate) fn put_away(workspace: &Workspace, window: &mut Window, cx: &mut App) -> bool {
+    let pane = workspace.active_pane().clone();
+
+    // The whole read is taken through one borrow: reaching for the pane again
+    // partway through is how this repo has previously turned a stale read into an
+    // abort.
+    let previous = {
+        let pane = pane.read(cx);
+        let showing_database = pane
+            .active_item()
+            .and_then(|item| item.downcast::<DatabasePanel>())
+            .is_some();
+        if !showing_database {
+            return false;
+        }
+        // The last entry is the tab just activated -- `Pane::update_history`
+        // dedupes then pushes -- so the one before it is where the press goes.
+        pane.activation_history()
+            .iter()
+            .rev()
+            .skip(1)
+            .find_map(|entry| {
+                pane.items()
+                    .position(|item| item.item_id() == entry.entity_id)
+            })
     };
-    dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+
+    // Nothing to step back to: a pane holding only this stays as it is. Closing
+    // instead would end a live session over a button press.
+    if let Some(index) = previous {
+        pane.update(cx, |pane, cx| {
+            pane.activate_item(index, true, true, window, cx);
+        });
+        return true;
+    }
+    false
 }
 
 pub(crate) fn open_in_editor_tab(
@@ -100,17 +142,14 @@ pub(crate) fn open_in_editor_tab(
 ) {
     let handle = cx.weak_entity();
     let view = standalone_view(workspace, handle, window, cx);
-    hide_the_column(workspace, window, cx);
     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
 }
 
 pub(crate) fn open_in_floating_window(
     workspace: &mut Workspace,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    hide_the_column(workspace, window, cx);
-
     let handle: WeakEntity<Workspace> = cx.weak_entity();
     let languages = workspace.project().read(cx).languages().clone();
 
@@ -152,21 +191,10 @@ pub(crate) fn open_in_floating_window(
 }
 
 impl DatabasePanel {
-    pub(crate) fn is_standalone(&self) -> bool {
-        self.host == Host::Standalone
-    }
-
-    /// Whether the table list stands beside the data rather than above it.
-    ///
-    /// In the column, never: it is one column wide and there is nothing to
-    /// stand beside. Standing on its own, it depends on the width measured last
-    /// frame. Full screen keeps its own answer, because that is the column being
-    /// given the window rather than a width being measured.
+    /// Whether the table list stands beside the data rather than above it,
+    /// by the width measured last frame.
     pub(crate) fn side_by_side(&self) -> bool {
-        match self.host {
-            Host::Column => self.full_screen,
-            Host::Standalone => stands_side_by_side(self.measured_width),
-        }
+        stands_side_by_side(self.measured_width)
     }
 
     pub(crate) fn note_measured_width(&mut self, width: Pixels, cx: &mut Context<Self>) {

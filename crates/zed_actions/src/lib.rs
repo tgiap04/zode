@@ -768,17 +768,16 @@ pub mod database {
     actions!(
         database,
         [
-            /// Shows or hides the database column.
+            /// Opens the database tab, or steps back to the tab that was being
+            /// read.
             ToggleDatabase,
             /// Opens the dialog for adding a database connection.
             AddConnection,
-            /// Gives the database column the whole window, or gives it back.
-            ToggleFullScreen,
-            /// Moves the database out of its column and into an editor tab,
-            /// where it lays itself out by the width it is given.
+            /// Opens a second database tab beside the code, where `ToggleDatabase`
+            /// brings the existing one forward.
             OpenInEditorTab,
-            /// Moves the database out of its column and into a window of its
-            /// own that floats above other applications.
+            /// Opens the database in a window of its own that floats above other
+            /// applications.
             OpenInFloatingWindow,
             /// Closes the connection under the cursor, stopping its driver.
             Disconnect,

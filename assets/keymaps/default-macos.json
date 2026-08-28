@@ -911,7 +911,6 @@
       "alt-cmd-right": "database::NextPage",
       "alt-cmd-left": "database::PreviousPage",
       "cmd-shift-c": "database::CopyResultsAsCsv",
-      "cmd-shift-f": "database::ToggleFullScreen",
     },
   },
   {

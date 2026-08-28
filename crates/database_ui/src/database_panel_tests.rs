@@ -4,7 +4,6 @@ use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
 use project::Project;
 use settings::{Settings as _, SettingsStore};
 use workspace::MultiWorkspace;
-use workspace::dock::{DockColumn, DockPosition};
 
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -34,143 +33,39 @@ async fn workspace_with_panel(
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
+    // A tab, not a dock panel: the database has no column any more.
     let panel = workspace.update_in(cx, |workspace, window, cx| {
-        let panel = cx.new(|cx| DatabasePanel::new(workspace, window, cx));
-        workspace.add_panel(panel.clone(), window, cx);
+        let handle = cx.weak_entity();
+        let languages = workspace.project().read(cx).languages().clone();
+        let panel = cx.new(|cx| DatabasePanel::standalone(handle, languages, window, cx));
+        workspace.add_item_to_active_pane(Box::new(panel.clone()), None, true, window, cx);
         panel
     });
 
     (workspace, panel, cx)
 }
 
-/// The panel names a `DockPosition` like any left-hand panel, so only
-/// `own_column()` keeps it out of the tool dock -- where it would share height
-/// with the project and git panels.
+/// The database is a pane item now, so it lands in a tab and nowhere else.
+///
+/// It used to be a dock panel with an own column; that column is gone, because a
+/// result grid is the one thing here that cannot be made narrow and stay
+/// readable, and a column is the one place that cannot be wide.
 #[gpui::test]
-async fn the_panel_lands_in_the_database_column(cx: &mut TestAppContext) {
-    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
+async fn the_panel_lands_in_a_tab(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
 
     workspace.read_with(cx, |workspace, cx| {
-        assert!(
-            workspace
-                .dock_for_column(DockColumn::Database)
-                .expect("the database column exists")
-                .read(cx)
-                .panel::<DatabasePanel>()
-                .is_some(),
-            "the panel must be placed in the database column"
-        );
-        assert!(
-            workspace
-                .left_dock()
-                .read(cx)
-                .panel::<DatabasePanel>()
-                .is_none()
-                && workspace
-                    .right_dock()
-                    .read(cx)
-                    .panel::<DatabasePanel>()
-                    .is_none(),
-            "and never in the tool dock its position names"
-        );
-    });
-}
-
-/// Both generic button renderers skip a panel whose icon is `None`. The rail
-/// draws this column's button by hand; a second one in the status bar meaning
-/// the same thing is worse than none.
-#[gpui::test]
-async fn the_panel_contributes_no_generic_button(cx: &mut TestAppContext) {
-    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
-
-    panel.update_in(cx, |panel, window, cx| {
-        use workspace::dock::Panel as _;
-        assert!(
-            panel.icon(window, cx).is_none(),
-            "an icon here would grow a status-bar button beside the rail's own"
-        );
-    });
-}
-
-/// A real draw with the column up, so `render_centre_with_own_columns` and
-/// `measure_own_column` run over this panel rather than only over a `TestPanel`.
-/// The rail's own button is drawn and tested in `sidebar`, which is where it
-/// lives and where the re-entrancy trap is.
-#[gpui::test]
-async fn the_column_draws_with_the_panel_in_it(cx: &mut TestAppContext) {
-    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
-
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-}
-
-/// The column stands beside the rail, so the button and the column it opens can
-/// never end up at opposite edges of the window. Both stand on the left, and
-/// `Workspace::OWN_COLUMN_POSITION` is the single place that says so.
-#[gpui::test]
-async fn the_column_stands_left_beside_the_rail(cx: &mut TestAppContext) {
-    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
-    cx.run_until_parked();
-
-    workspace.read_with(cx, |workspace, cx| {
-        let column = workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists");
-
         assert_eq!(
-            column.read(cx).position(),
-            DockPosition::Left,
-            "the column stands on the rail's edge"
-        );
-        assert_ne!(
-            column.read(cx).position(),
-            DockPosition::Right,
-            "and never opposite it -- the button would be a window away from what it opens"
-        );
-        assert!(
-            column.read(cx).panel::<DatabasePanel>().is_some(),
-            "and the panel must not be hauled into a tool dock on the way"
-        );
-    });
-}
-
-/// An empty column is a legitimate state here -- unlike the agent panel, which
-/// closes itself when it holds nothing. Someone who has not added a connection
-/// yet still needs somewhere to be told how.
-#[gpui::test]
-async fn an_empty_column_stays_open(cx: &mut TestAppContext) {
-    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
-    cx.run_until_parked();
-
-    workspace.read_with(cx, |workspace, cx| {
-        assert!(
             workspace
-                .dock_for_column(DockColumn::Database)
-                .expect("the database column exists")
-                .read(cx)
-                .is_open(),
-            "a column holding no connections must not close itself"
+                .items_of_type::<DatabasePanel>(cx)
+                .map(|view| view.entity_id())
+                .collect::<Vec<_>>(),
+            vec![panel.entity_id()],
+            "exactly one, and it is a tab"
+        );
+        assert!(
+            workspace.active_item(cx).is_some(),
+            "and it is what the pane is showing"
         );
     });
 }
@@ -269,18 +164,8 @@ async fn configured_connections_stay_closed_until_clicked(cx: &mut TestAppContex
 /// vanish the moment the tree scrolled.
 #[gpui::test]
 async fn right_clicking_a_connection_opens_a_menu_the_panel_owns(cx: &mut TestAppContext) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     set_connections(cx, &[("a", "/tmp/a.sqlite")]);
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
 
     panel.update_in(cx, |panel, window, cx| {
         panel.deploy_connection_menu(0, gpui::point(gpui::px(10.), gpui::px(10.)), window, cx);
@@ -462,66 +347,6 @@ async fn the_table_list_edge_is_dragged_sideways(cx: &mut TestAppContext) {
     });
 }
 
-/// Measured rather than reasoned about: this ordering lives in an element tree
-/// and nothing else in the crate would notice it collapsing back into the
-/// column's own stack.
-///
-/// Both regions on the right are asserted to be drawn with no connection open,
-/// which is the difference from the column: there they are hidden until there is
-/// something to run against, here they are the layout that was asked for.
-#[gpui::test]
-async fn full_screen_puts_the_table_list_beside_the_data_with_the_query_below_it(
-    cx: &mut TestAppContext,
-) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
-    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
-    cx.run_until_parked();
-
-    panel.update_in(cx, |panel, window, cx| {
-        panel.toggle_full_screen(window, cx);
-    });
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-
-    let tree = cx
-        .debug_bounds("database-tree-column")
-        .expect("the table list is drawn in full screen");
-    let data = cx
-        .debug_bounds("database-data-view")
-        .expect("the data view is drawn in full screen, with or without a connection");
-    let query = cx
-        .debug_bounds("database-query-input")
-        .expect("the query input is drawn in full screen, with or without a connection");
-
-    assert!(
-        tree.right() <= data.origin.x && tree.right() <= query.origin.x,
-        "the table list must stand to the left of both, got list {tree:?} data {data:?} query {query:?}"
-    );
-    assert!(
-        data.bottom() <= query.origin.y,
-        "the data must sit above the statement, got data {data:?} query {query:?}"
-    );
-    assert!(
-        data.size.height > query.size.height,
-        "the rows are what the window was taken for, got data {data:?} query {query:?}"
-    );
-    assert!(
-        cx.debug_bounds("database-no-table-placeholder").is_some(),
-        "with no table chosen the data view must say so rather than stand empty"
-    );
-}
-
 /// A modal in a real window, for the add-connection tests.
 ///
 /// Built through the workspace like the real one is: it takes the project's
@@ -569,7 +394,7 @@ async fn dispatching_add_connection_opens_the_dialog_rather_than_aborting(cx: &m
 
     workspace.update_in(cx, |workspace, window, cx| {
         let panel = cx.new(|cx| DatabasePanel::new(workspace, window, cx));
-        workspace.add_panel(panel, window, cx);
+        workspace.add_item_to_active_pane(Box::new(panel), None, true, window, cx);
     });
     cx.run_until_parked();
 
@@ -593,70 +418,6 @@ async fn dispatching_add_connection_opens_the_dialog_rather_than_aborting(cx: &m
     cx.update(|window, cx| {
         window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx);
     });
-    cx.run_until_parked();
-}
-
-/// The workspace and `MultiWorkspace` both read this flag to decide what to
-/// stop drawing, so it has to be the panel's own state and nothing else.
-#[gpui::test]
-async fn full_screen_takes_the_whole_window_and_gives_it_back(cx: &mut TestAppContext) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(
-                !workspace.a_column_fills_the_window(window, cx),
-                "nothing takes the window until asked"
-            );
-        });
-    });
-
-    panel.update_in(cx, |panel, window, cx| {
-        panel.toggle_full_screen(window, cx);
-    });
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        workspace.read_with(cx, |workspace, cx| {
-            assert_eq!(
-                workspace.window_filling_column(window, cx),
-                Some(DockColumn::Database),
-                "the workspace must see the column asking for the window"
-            );
-        });
-    });
-
-    // Drawn while it holds the window: the branch that drops the centre and the
-    // docks only runs here, and asserting on the flag alone would never reach
-    // it.
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-
-    panel.update_in(cx, |panel, window, cx| {
-        panel.toggle_full_screen(window, cx);
-    });
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        workspace.read_with(cx, |workspace, cx| {
-            assert!(
-                workspace.window_filling_column(window, cx).is_none(),
-                "closing it must give the window back"
-            );
-        });
-    });
-    cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
 
@@ -706,124 +467,6 @@ async fn a_connection_that_was_never_opened_reports_itself_closed(cx: &mut TestA
     });
 }
 
-/// The rail button is a toggle, and its lit state says the column is up. A lit
-/// toggle that does nothing when clicked is the complaint this pins.
-///
-/// Hidden rather than closed: the panel entity stays, so the tree, the scratch
-/// buffer and any open session survive being put away.
-#[gpui::test]
-async fn the_toggle_action_hides_the_column_on_a_second_use(cx: &mut TestAppContext) {
-    init_test(cx);
-    cx.update(crate::init);
-
-    let fs = FakeFs::new(cx.executor());
-    let project = Project::test(fs, [], cx).await;
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-
-    let panel = workspace.update_in(cx, |workspace, window, cx| {
-        let panel = cx.new(|cx| DatabasePanel::new(workspace, window, cx));
-        workspace.add_panel(panel.clone(), window, cx);
-        panel
-    });
-    cx.run_until_parked();
-
-    let column_open = |cx: &mut gpui::VisualTestContext| {
-        workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .dock_for_column(DockColumn::Database)
-                .expect("the database column exists")
-                .read(cx)
-                .is_open()
-        })
-    };
-
-    cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
-    });
-    cx.run_until_parked();
-    assert!(column_open(cx), "the first use must open the column");
-
-    cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
-    });
-    cx.run_until_parked();
-    assert!(!column_open(cx), "the second use must put it away");
-
-    workspace.read_with(cx, |workspace, cx| {
-        assert!(
-            workspace
-                .dock_for_column(DockColumn::Database)
-                .expect("the database column exists")
-                .read(cx)
-                .panel::<DatabasePanel>()
-                .is_some(),
-            "hidden, not closed -- the panel and everything it holds must survive"
-        );
-    });
-    drop(panel);
-
-    cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
-    });
-    cx.run_until_parked();
-    assert!(column_open(cx), "and a third use must bring it back");
-}
-
-/// The tool docks are pulled back in when the window narrows; the own columns
-/// were not, so a column sized for a wide window kept that width when the
-/// sidebar opened beside it and pushed the editor out of view.
-#[gpui::test]
-async fn a_column_is_pulled_back_in_when_the_space_beside_it_shrinks(cx: &mut TestAppContext) {
-    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
-    cx.simulate_resize(gpui::size(gpui::px(1400.), gpui::px(900.)));
-    cx.run_until_parked();
-
-    let column_width = |cx: &mut gpui::VisualTestContext| {
-        workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .dock_for_column(DockColumn::Database)
-                .expect("the database column exists")
-                .read(cx)
-                .active_panel_size()
-                .and_then(|state| state.size)
-                .unwrap_or_default()
-        })
-    };
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.resize_active_panel(Some(gpui::px(1200.)), None, window, cx);
-            });
-    });
-    cx.run_until_parked();
-    assert!(column_width(cx) > gpui::px(600.), "the column starts wide");
-
-    // The window narrows -- which is also what happens when the sidebar's panel
-    // opens beside the workspace and takes part of the row.
-    cx.simulate_resize(gpui::size(gpui::px(500.), gpui::px(900.)));
-    cx.run_until_parked();
-
-    assert!(
-        column_width(cx) < gpui::px(500.),
-        "a column wider than the space it stands in leaves nothing for the editor"
-    );
-}
-
 /// The row's power button does two jobs and must never offer the wrong one:
 /// closing what is already closed, or opening what is already open.
 #[gpui::test]
@@ -858,109 +501,6 @@ async fn a_closed_connection_offers_to_open_again(cx: &mut TestAppContext) {
     });
 }
 
-/// The column wears one surface card, not two.
-///
-/// `Dock::render` insets every dock by `SURFACE_MARGIN` and draws the rounded
-/// border and background inside that -- own columns included. The panel drew a
-/// second identical card within it, so the column's edge carried two borders
-/// four pixels apart.
-///
-/// Measured off the tree, which is the panel's own first child and carries no
-/// inset of its own: one card puts its left edge `SURFACE_MARGIN + 1px` inside
-/// the dock, two put it twice that. Asserted as an exact figure rather than a
-/// threshold -- "less than two cards" would also pass for a card and a half.
-#[gpui::test]
-async fn the_database_column_draws_a_single_surface_card(cx: &mut TestAppContext) {
-    let (workspace, _panel, cx) = workspace_with_panel(cx).await;
-    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
-    cx.run_until_parked();
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-
-    let dock = cx
-        .debug_bounds("dock-panel")
-        .expect("the database column must be drawn");
-    let tree = cx
-        .debug_bounds("database-tree-column")
-        .expect("the table list must be drawn");
-
-    let card = workspace::pane_group::SURFACE_MARGIN + gpui::px(1.);
-    assert_eq!(
-        tree.left() - dock.left(),
-        card,
-        "the column must be inset by one card, got {:?} against one card of {:?}",
-        tree.left() - dock.left(),
-        card
-    );
-}
-
-/// The button that moves the database into an editor tab.
-///
-/// Dispatched as an action rather than by calling the handler, so the wiring
-/// between the button and the work is what is under test. A button that dispatches
-/// an action nobody registered does nothing at all, silently, and this crate has
-/// shipped exactly that before.
-///
-/// Asserts both halves of the decision that was taken: a tab appears, and the
-/// column goes away -- the database lives in one place at a time.
-#[gpui::test]
-async fn opening_in_an_editor_tab_takes_it_out_of_the_column(cx: &mut TestAppContext) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
-    set_connections(cx, &[("local", "/tmp/a.sqlite")]);
-
-    let dock = workspace.update_in(cx, |workspace, window, cx| {
-        let dock = workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .clone();
-        dock.update(cx, |dock, cx| {
-            dock.show_panel(0, window, cx);
-            dock.set_open(true, window, cx);
-        });
-        dock
-    });
-    cx.run_until_parked();
-
-    assert!(
-        dock.read_with(cx, |dock, _| dock.is_open()),
-        "the column must be up before it can be moved out of"
-    );
-
-    panel.update_in(cx, |panel, window, cx| {
-        window.focus(&panel.focus_handle.clone(), cx);
-    });
-    cx.run_until_parked();
-    cx.dispatch_action(zed_actions::database::OpenInEditorTab);
-    cx.run_until_parked();
-
-    let tabs = workspace.read_with(cx, |workspace, cx| {
-        workspace
-            .active_pane()
-            .read(cx)
-            .items()
-            .map(|item| item.tab_content_text(0, cx).to_string())
-            .collect::<Vec<_>>()
-    });
-    assert!(
-        tabs.contains(&"Database".to_string()),
-        "the action must put a database tab in the active pane, found {tabs:?}"
-    );
-    assert!(
-        !dock.read_with(cx, |dock, _| dock.is_open()),
-        "and must hide the column, so the database is not in two places at once"
-    );
-}
-
 /// A view standing on its own lays the table list beside the data once it is
 /// wide enough, without anybody toggling full screen.
 ///
@@ -976,18 +516,9 @@ async fn opening_in_an_editor_tab_takes_it_out_of_the_column(cx: &mut TestAppCon
 /// regions are ordered across rather than down; it cannot fail on its own.
 #[gpui::test]
 async fn a_wide_editor_tab_stands_the_table_list_beside_the_data(cx: &mut TestAppContext) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     set_connections(cx, &[("local", "/tmp/a.sqlite")]);
 
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
     cx.run_until_parked();
 
     panel.update_in(cx, |panel, window, cx| {
@@ -1030,20 +561,9 @@ async fn a_wide_editor_tab_stands_the_table_list_beside_the_data(cx: &mut TestAp
 /// test here can see. Those need an eye on a real build.
 #[gpui::test]
 async fn opening_in_a_floating_window_adds_a_window_without_aborting(cx: &mut TestAppContext) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     set_connections(cx, &[("local", "/tmp/a.sqlite")]);
 
-    let dock = workspace.update_in(cx, |workspace, window, cx| {
-        let dock = workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .clone();
-        dock.update(cx, |dock, cx| {
-            dock.show_panel(0, window, cx);
-            dock.set_open(true, window, cx);
-        });
-        dock
-    });
     cx.run_until_parked();
 
     let before = cx.update(|_window, cx| cx.windows().len());
@@ -1061,10 +581,6 @@ async fn opening_in_a_floating_window_adds_a_window_without_aborting(cx: &mut Te
         before + 1,
         "the action must open exactly one window, went from {before} to {after}"
     );
-    assert!(
-        !dock.read_with(cx, |dock, _| dock.is_open()),
-        "and must hide the column it came out of"
-    );
 }
 
 /// A standalone view must lay its *regions* out sideways too, not just pick the
@@ -1081,18 +597,9 @@ async fn opening_in_a_floating_window_adds_a_window_without_aborting(cx: &mut Te
 /// placeholder is the roomy one rather than the column's single grey line.
 #[gpui::test]
 async fn a_standalone_view_lays_its_regions_out_sideways(cx: &mut TestAppContext) {
-    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     set_connections(cx, &[("local", "/tmp/a.sqlite")]);
 
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace
-            .dock_for_column(DockColumn::Database)
-            .expect("the database column exists")
-            .update(cx, |dock, cx| {
-                dock.show_panel(0, window, cx);
-                dock.set_open(true, window, cx);
-            });
-    });
     cx.run_until_parked();
 
     panel.update_in(cx, |panel, window, cx| {
@@ -1118,5 +625,88 @@ async fn a_standalone_view_lays_its_regions_out_sideways(cx: &mut TestAppContext
         cx.debug_bounds("database-no-table-placeholder").is_some(),
         "a view laid out sideways must draw the roomy waiting-room placeholder, \
          not the column's one-line note"
+    );
+}
+
+/// The rail button opens the tab, and a second press steps back.
+///
+/// Put away rather than closed: closing would end every open session and lose a
+/// half-written statement over the second press of a button whose whole job is to
+/// be pressed twice.
+#[gpui::test]
+async fn the_toggle_action_opens_the_tab_and_puts_it_away(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(crate::init);
+
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    assert_eq!(
+        workspace.read_with(cx, |workspace, cx| workspace
+            .items_of_type::<DatabasePanel>(cx)
+            .count()),
+        0,
+        "nothing is open before the button is pressed"
+    );
+
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        workspace.read_with(cx, |workspace, cx| workspace
+            .items_of_type::<DatabasePanel>(cx)
+            .count()),
+        1,
+        "the action the rail button dispatches must open the tab; if this fails \
+         the button is wired to something nothing handles"
+    );
+
+    // Pressed again with nothing else in the pane: put away, never closed.
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        workspace.read_with(cx, |workspace, cx| workspace
+            .items_of_type::<DatabasePanel>(cx)
+            .count()),
+        1,
+        "the tab must still be there, with its sessions -- put away, not closed"
+    );
+}
+
+/// Pressing again must bring the existing tab forward, not open a second one.
+///
+/// Two would be two sets of connections and two scratch buffers, each unaware of
+/// the other.
+#[gpui::test]
+async fn the_toggle_action_never_opens_a_second_tab(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(crate::init);
+
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    for _ in 0..3 {
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+        });
+        cx.run_until_parked();
+    }
+
+    assert_eq!(
+        workspace.read_with(cx, |workspace, cx| workspace
+            .items_of_type::<DatabasePanel>(cx)
+            .count()),
+        1,
+        "however many times it is pressed, there is one database"
     );
 }

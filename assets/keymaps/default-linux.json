@@ -836,7 +836,6 @@
       "alt-ctrl-right": "database::NextPage",
       "alt-ctrl-left": "database::PreviousPage",
       "ctrl-shift-c": "database::CopyResultsAsCsv",
-      "ctrl-shift-f": "database::ToggleFullScreen",
     },
   },
   {
