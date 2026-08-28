@@ -1,9 +1,27 @@
 //! Tests for the crate's own seams.
 //!
 //! Split between two kinds: those that hold the fake to the trait, and those
-//! that put the real Docker on the machine through the same suite. The second
-//! kind is why the suite cannot rot -- Docker is on every machine this is worked
-//! on and in CI, so it always runs.
+//! that put the machine's real engine through the same suite.
+//!
+//! # Engine tests
+//!
+//! The second kind is `#[ignore]`d, and this is the correction of a claim that
+//! used to stand here -- that Docker is on every machine and in CI, so they
+//! always run. Both halves were wrong. A runner may have the CLI and no daemon,
+//! and in that state `docker` does not fail, it *waits*: three of these hit
+//! nextest's 60-second timeout on Windows CI while passing on every machine
+//! that happened to have a daemon up. A test whose result depends on what is
+//! installed and running is a report about the machine, not about this crate.
+//!
+//! Run them deliberately, on a machine with an engine:
+//!
+//! ```text
+//! cargo nextest run -p container --run-ignored all
+//! ```
+//!
+//! Everything they were protecting that can be checked without an engine --
+//! which command is built, which flags are absent, how output parses -- is
+//! covered by the fake and by the parsing tests, and those always run.
 
 use crate::backend::{BackendKind, ContainerBackend, ContainerError};
 use crate::backend_test_suite::shared_suite;
@@ -303,6 +321,7 @@ mod real_engine_classification {
     /// The count the backend reports must be the count the CLI reports. Skipped
     /// rather than failed when docker is not usable here.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn the_backend_counts_what_the_cli_counts() {
         // Through `util::command` rather than `std::process`: the repo disallows
         // the blocking std spawn outright (see clippy.toml), and the platform
@@ -494,6 +513,7 @@ mod kubernetes {
     /// kubeconfig is therefore read *before* the `get`, and this is that
     /// ordering, checked against the real empty kubeconfig on this machine.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn no_context_is_not_reported_as_an_unreachable_cluster() {
         let backend = KubernetesBackend::new();
         match block_on(backend.list(ResourceKind::Pod)) {
@@ -523,6 +543,7 @@ mod kubernetes {
 
     /// A scope skips the kubeconfig check, because the caller has already chosen.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn a_scope_is_passed_to_kubectl_rather_than_rediscovered() {
         let backend = KubernetesBackend::with_scope(Scope {
             context: "prod".into(),
@@ -700,6 +721,7 @@ mod docker_resources {
     /// Every declared kind must actually answer against real Docker. A kind in
     /// `supported_kinds` that errors is a group the tree draws and cannot fill.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn real_docker_answers_for_every_kind_it_declares() {
         let backend = DockerBackend::docker();
         let mut answered = 0;
@@ -1222,6 +1244,7 @@ mod destructive {
     /// Removing a container must not force. "Remove" was not "kill", and a
     /// running container refusing is the engine telling the truth.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn removing_a_running_container_is_not_forced() {
         let backend = DockerBackend::docker();
         let plan = DestructivePlan::remove(
@@ -1257,6 +1280,7 @@ mod destructive {
     /// Docker's prune list is gathered from real commands, and it must never
     /// include volumes unless volumes were asked for.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn dockers_prune_list_only_includes_volumes_when_asked() {
         let backend = DockerBackend::docker();
         let reclaimable =
