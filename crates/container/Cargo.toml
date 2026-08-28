@@ -1,0 +1,32 @@
+[package]
+name = "container"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/container.rs"
+
+[features]
+default = []
+# A backend that never leaves the process, plus the suite every real backend is
+# held to. Split out so `container_ui` can take the fake as a dev-dependency
+# without shipping it.
+test-support = []
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+util.workspace = true
+
+[dev-dependencies]
+container = { path = ".", features = ["test-support"] }
+smol.workspace = true

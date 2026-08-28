@@ -2243,6 +2243,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "container"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "container",
+ "futures 0.3.32",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "smol",
+ "util",
+]
+
+[[package]]
+name = "container_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "container",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "project",
+ "settings",
+ "task",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "context_server"
 version = "0.1.0"
 dependencies = [
@@ -13367,6 +13405,8 @@ dependencies = [
  "agent_ui",
  "anyhow",
  "collections",
+ "container_ui",
+ "database_ui",
  "editor",
  "fs",
  "gpui",
@@ -19280,6 +19320,7 @@ dependencies = [
  "command_palette",
  "component",
  "component_preview",
+ "container_ui",
  "csv_preview",
  "dap_adapters",
  "database_ui",
