@@ -339,39 +339,6 @@ impl StatusBar {
         None
     }
 
-    /// Inserts at a flat left-then-right index, unrelated to rank order.
-    /// This always allocates the newest (largest) rank but can insert
-    /// anywhere in the vector, so it can leave that side's slots out of
-    /// rank order. Harmless today since nothing calls this alongside
-    /// `insert_item_at_rank`/`remove_item_by_rank`, but new callers should
-    /// prefer the rank-based API.
-    pub fn insert_item_after<T>(
-        &mut self,
-        position: usize,
-        item: Entity<T>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) where
-        T: 'static + StatusItemView,
-    {
-        let active_pane_item = self.active_pane.read(cx).active_item();
-        item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
-
-        let rank = self.allocate_rank();
-        let slot = Slot {
-            rank,
-            item: Box::new(item),
-        };
-
-        if position < self.left_items.len() {
-            self.left_items.insert(position + 1, slot)
-        } else {
-            self.right_items
-                .insert(position + 1 - self.left_items.len(), slot)
-        }
-        cx.notify()
-    }
-
     pub fn remove_item_at(&mut self, position: usize, cx: &mut Context<Self>) {
         if position < self.left_items.len() {
             self.left_items.remove(position);
