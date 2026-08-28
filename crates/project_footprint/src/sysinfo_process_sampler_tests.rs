@@ -1,20 +1,40 @@
 //! Real OS reads, so these are plain `#[test]` functions with no GPUI context --
 //! the deterministic scheduler treats a genuine syscall as non-determinism.
-//! Every PID used here already exists (this test process, and PID 1), so no
-//! process is ever spawned: a real `Terminal` has caused SIGABRT under that
-//! scheduler before, and there is no reason to invite it here.
+//! Every PID used here already exists (this test process and the one that
+//! launched it), so no process is ever spawned: a real `Terminal` has caused
+//! SIGABRT under that scheduler before, and there is no reason to invite it
+//! here.
 
 use std::{thread::sleep, time::Duration};
 
 use super::{Pid, ProcessSampler, sysinfo_process_sampler::SysinfoProcessSampler};
 
-/// PID 1 (`launchd` / `init`) is always alive and is an ancestor of essentially
-/// every user process, which makes it a convenient "wide" root for the eviction
-/// test below.
-const INIT_PID: Pid = 1;
-
 fn self_pid() -> Pid {
     std::process::id()
+}
+
+/// A root with more than one descendant, on any platform.
+///
+/// The process that launched this one: whatever runs the tests is alive for as
+/// long as they are, and its descendants include at least itself and this
+/// process. That is all the eviction test needs -- a "wide" set it can then
+/// shrink.
+///
+/// This used to be PID 1, which is `init` on Unix and **nothing at all on
+/// Windows**: the widest possible root there found one process, and the test
+/// failed on Windows alone while passing everywhere it was written and run.
+fn launcher_pid() -> Pid {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(sysinfo::Pid::from_u32(self_pid()))
+        .and_then(|process| process.parent())
+        .map(|parent| parent.as_u32())
+        .expect("a test binary is launched by something, and that something is still running")
 }
 
 #[test]
@@ -67,12 +87,12 @@ fn cpu_is_none_until_a_baseline_exists() {
 fn shrinking_the_discovered_set_evicts_the_retained_map() {
     let mut sampler = SysinfoProcessSampler::new();
 
-    // Rooting at PID 1 claims nearly every process on the machine.
-    let wide = sampler.descendants(&[INIT_PID]);
+    // The launcher owns at least itself and this process.
+    let wide = sampler.descendants(&[launcher_pid()]);
     let wide_tracked = sampler.tracked_len();
     assert!(
         wide_tracked > 1,
-        "expected PID 1 to have descendants; got {} pairs",
+        "expected the launching process to have descendants; got {} pairs",
         wide.len()
     );
 
