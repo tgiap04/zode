@@ -264,20 +264,31 @@ async fn post_json(
         return Ok(response_body);
     }
 
-    // The error slug, never the whole body: an error body from an
-    // authenticated endpoint is exactly the sort of thing that echoes a
-    // credential back into a log.
-    let code = serde_json::from_str::<ErrorResponse>(&response_body)
-        .map(|parsed| parsed.error)
-        .unwrap_or_else(|_| format!("http_{}", status.as_u16()));
-
     if status.is_server_error() {
         return Err(DeviceFlowError::Unreachable(format!(
             "the server answered {}",
             status.as_u16()
         )));
     }
-    Err(DeviceFlowError::Rejected(code))
+
+    // The error slug, never the whole body: an error body from an
+    // authenticated endpoint is exactly the sort of thing that echoes a
+    // credential back into a log.
+    //
+    // A body that is NOT that JSON means we never reached the account service
+    // at all — most often a host serving a single-page app for every path, so
+    // `/api/...` returns index.html and a POST to it answers 405. Reporting
+    // that as `http_405` reads as "the API refused us" and sends whoever is
+    // debugging into the request code, when the fault is that nothing is
+    // routing `/api` to the backend. So it says which URL, and what to check.
+    match serde_json::from_str::<ErrorResponse>(&response_body) {
+        Ok(parsed) => Err(DeviceFlowError::Rejected(parsed.error)),
+        Err(_) => Err(DeviceFlowError::Rejected(format!(
+            "{url} answered {} without a JSON error, so it is not the account \
+             service — check that /api is routed to the backend",
+            status.as_u16()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +519,35 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, DeviceFlowError::Rejected(_)));
+        cx.background_executor.run_until_parked();
+    }
+
+    /// The exact production failure this message was rewritten for: a host that
+    /// serves its single-page app for every path answers a POST to
+    /// `/api/auth/device/code` with 405 and an HTML body. The old message said
+    /// `http_405`, which reads as "the API refused us" and cost a real
+    /// debugging session before anyone looked at the nginx config.
+    #[gpui::test]
+    async fn a_non_json_4xx_says_the_url_is_not_the_account_service(cx: &mut TestAppContext) {
+        let (client, _) = scripted(vec![(405, "<!doctype html><html>...".into())]);
+
+        let error = request_authorization(&client, "https://zodekit.site/api")
+            .await
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("not the account service"),
+            "expected a message naming the misconfiguration, got: {message}"
+        );
+        assert!(
+            message.contains("/api"),
+            "the message must name the URL: {message}"
+        );
+        assert!(
+            !message.contains("http_405"),
+            "the synthetic slug is what sent the last reader the wrong way: {message}"
+        );
         cx.background_executor.run_until_parked();
     }
 
