@@ -19467,6 +19467,7 @@ dependencies = [
  "zed_env_vars",
  "zlog",
  "zlog_settings",
+ "zode_account",
  "ztracing",
 ]
 
@@ -19500,6 +19501,23 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "zode_account"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "log",
+ "serde",
+ "serde_json",
+ "util",
+ "zed_credentials_provider",
+ "zed_env_vars",
 ]
 
 [[package]]

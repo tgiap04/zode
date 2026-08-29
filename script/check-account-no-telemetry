@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Invariant 4: the account never becomes a telemetry channel.
+#
+# Zode's whole pitch is zero telemetry and no login wall. Adding sign-in is
+# exactly the change that quietly reopens that door — an identified user is the
+# one thing telemetry was ever missing, and the temptation compounds as the
+# account crate grows.
+#
+# Asserted against the dependency graph rather than by grepping for calls,
+# because a graph cannot be satisfied by a comment and does not rot when
+# somebody refactors. If `telemetry` is not reachable from these crates, no
+# amount of code inside them can send an event.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Crates that must never be able to reach telemetry, and the forbidden crates.
+ACCOUNT_CRATES=(zode_account zode_account_ui)
+FORBIDDEN=(telemetry telemetry_events)
+
+status=0
+
+workspace_has() {
+  cargo metadata --no-deps --format-version 1 | grep -q "\"name\":\"$1\""
+}
+
+# `cargo tree --invert X --package C` prints the paths from C to X. Three
+# answers matter, and they must not be conflated:
+#
+#   non-empty stdout            -> a path exists. Fail.
+#   "did not match any packages" -> X is not in C's graph at all. Pass.
+#   anything else                -> the check did not run. Fail loudly, because
+#                                   a gate that passes when it breaks is worse
+#                                   than no gate.
+check_unreachable() {
+  local crate="$1" forbidden="$2" stdout stderr exit_code
+  stderr=$(mktemp)
+  set +e
+  stdout=$(cargo tree --quiet --package "${crate}" --invert "${forbidden}" 2>"${stderr}")
+  exit_code=$?
+  set -e
+
+  if [[ ${exit_code} -eq 0 && -n "${stdout}" ]]; then
+    echo "FAIL  ${crate} can reach ${forbidden}:"
+    echo "${stdout}"
+    rm -f "${stderr}"
+    return 1
+  fi
+
+  if grep -q "did not match any packages" "${stderr}"; then
+    echo "ok    ${crate} cannot reach ${forbidden}"
+    rm -f "${stderr}"
+    return 0
+  fi
+
+  if [[ ${exit_code} -eq 0 && -z "${stdout}" ]]; then
+    echo "ok    ${crate} cannot reach ${forbidden}"
+    rm -f "${stderr}"
+    return 0
+  fi
+
+  echo "ERROR the check could not run for ${crate} vs ${forbidden}:"
+  cat "${stderr}"
+  rm -f "${stderr}"
+  return 1
+}
+
+for crate in "${ACCOUNT_CRATES[@]}"; do
+  if ! workspace_has "${crate}"; then
+    # Not yet built (phase 04 lands `zode_account_ui`). Skip rather than fail:
+    # this guards what exists, it does not block what does not.
+    echo "skip  ${crate} — not in the workspace yet"
+    continue
+  fi
+
+  for forbidden in "${FORBIDDEN[@]}"; do
+    check_unreachable "${crate}" "${forbidden}" || status=1
+  done
+done
+
+if [[ ${status} -ne 0 ]]; then
+  echo
+  echo "The account crates must not be able to reach telemetry."
+  echo "See crates/zode_account/src/zode_account.rs for why."
+fi
+
+exit ${status}

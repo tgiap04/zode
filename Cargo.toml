@@ -194,6 +194,7 @@ members = [
     "crates/zed",
     "crates/zed_actions",
     "crates/zed_credentials_provider",
+    "crates/zode_account",
     "crates/zed_env_vars",
     "crates/zlog",
     "crates/zlog_settings",
@@ -419,6 +420,7 @@ worktree = { path = "crates/worktree" }
 zode = { path = "crates/zed" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
+zode_account = { path = "crates/zode_account" }
 zed_env_vars = { path = "crates/zed_env_vars" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
