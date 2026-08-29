@@ -24,3 +24,7 @@ zode_account.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme.workspace = true
+theme_settings.workspace = true
+zode_account = { workspace = true, features = ["test-support"] }

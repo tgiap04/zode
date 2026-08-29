@@ -19529,6 +19529,9 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "menu",
+ "settings",
+ "theme",
+ "theme_settings",
  "ui",
  "workspace",
  "zed_actions",
