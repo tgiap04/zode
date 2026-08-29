@@ -13,6 +13,7 @@ mod project_item;
 mod project_list;
 mod project_menu;
 mod rail;
+mod rail_account;
 mod rail_agents;
 mod rail_container;
 mod rail_database;

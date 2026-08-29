@@ -115,6 +115,22 @@ impl Account {
         cx.set_global(GlobalAccount(account));
     }
 
+    /// Builds an account parked in a given state, with no client behind it.
+    ///
+    /// For rendering tests: the rail has five states to draw and no business
+    /// standing up an HTTP client to draw them.
+    #[cfg(feature = "test-support")]
+    pub fn for_test(status: AccountStatus) -> Self {
+        Self {
+            status,
+            http_client: Arc::new(http_client::BlockedHttpClient::new()),
+            credentials: Arc::new(NoCredentials),
+            api_url: "http://test.invalid/api".into(),
+            tokens: None,
+            sign_in_task: None,
+        }
+    }
+
     pub fn status(&self) -> &AccountStatus {
         &self.status
     }
@@ -372,4 +388,41 @@ async fn fetch_identity(
         name: parsed.name.map(Into::into),
         avatar_url: parsed.avatar_url.map(Into::into),
     })
+}
+
+/// A keychain that holds nothing, for tests that only need the account to
+/// exist. `BlockedHttpClient` beside it makes the pair loud rather than quiet:
+/// a rendering test that somehow issues a request fails instead of passing.
+#[cfg(feature = "test-support")]
+struct NoCredentials;
+
+#[cfg(feature = "test-support")]
+impl CredentialsProvider for NoCredentials {
+    fn read_credentials<'a>(
+        &'a self,
+        _url: &'a str,
+        _cx: &'a gpui::AsyncApp,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<(String, Vec<u8>)>>> + 'a>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn write_credentials<'a>(
+        &'a self,
+        _url: &'a str,
+        _username: &'a str,
+        _password: &'a [u8],
+        _cx: &'a gpui::AsyncApp,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete_credentials<'a>(
+        &'a self,
+        _url: &'a str,
+        _cx: &'a gpui::AsyncApp,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }

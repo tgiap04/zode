@@ -13448,6 +13448,8 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+ "zode_account",
+ "zode_account_ui",
 ]
 
 [[package]]
@@ -19468,6 +19470,7 @@ dependencies = [
  "zlog",
  "zlog_settings",
  "zode_account",
+ "zode_account_ui",
  "ztracing",
 ]
 
@@ -19518,6 +19521,18 @@ dependencies = [
  "util",
  "zed_credentials_provider",
  "zed_env_vars",
+]
+
+[[package]]
+name = "zode_account_ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "menu",
+ "ui",
+ "workspace",
+ "zed_actions",
+ "zode_account",
 ]
 
 [[package]]

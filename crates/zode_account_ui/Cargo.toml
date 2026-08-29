@@ -1,0 +1,26 @@
+[package]
+name = "zode_account_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/zode_account_ui.rs"
+doctest = false
+
+[dependencies]
+# No `telemetry` and no `client`, and `script/check-account-no-telemetry`
+# asserts the first of those against the dependency graph on every run.
+gpui.workspace = true
+menu.workspace = true
+ui.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
+zode_account.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

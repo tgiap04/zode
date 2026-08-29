@@ -187,6 +187,23 @@ pub mod editor {
     );
 }
 
+pub mod account {
+    use gpui::actions;
+
+    actions!(
+        account,
+        [
+            /// Signs in to a Zode account. Signing in is always optional —
+            /// the editor is fully usable without one.
+            SignIn,
+            /// Signs out and forgets the saved session.
+            SignOut,
+            /// Opens the account page on the web.
+            OpenAccountOnWeb
+        ]
+    );
+}
+
 pub mod dev {
     use gpui::actions;
 

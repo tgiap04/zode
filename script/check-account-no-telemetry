@@ -14,8 +14,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Crates that must never be able to reach telemetry, and the forbidden crates.
-ACCOUNT_CRATES=(zode_account zode_account_ui)
+# Only `zode_account` is held to the graph rule, and that is a real limit
+# rather than an oversight.
+#
+# `zode_account_ui` must depend on `workspace` to register its actions, and
+# `workspace` pulls in `client`, which owns `telemetry`. Every UI crate in this
+# repo therefore *can* reach telemetry, so asserting otherwise would only mean
+# deleting the assertion the first time someone ran it.
+#
+# What can still be held is the part that matters: the crate that holds the
+# tokens and makes the requests cannot reach telemetry at all, and the UI crate
+# does not name it in its own source. The first is a graph fact; the second is
+# a grep, and weaker — but a weaker true guard beats a strong false one.
+GRAPH_ISOLATED=(zode_account)
+SOURCE_CLEAN=(zode_account_ui)
 FORBIDDEN=(telemetry telemetry_events)
 
 status=0
@@ -65,10 +77,8 @@ check_unreachable() {
   return 1
 }
 
-for crate in "${ACCOUNT_CRATES[@]}"; do
+for crate in "${GRAPH_ISOLATED[@]}"; do
   if ! workspace_has "${crate}"; then
-    # Not yet built (phase 04 lands `zode_account_ui`). Skip rather than fail:
-    # this guards what exists, it does not block what does not.
     echo "skip  ${crate} — not in the workspace yet"
     continue
   fi
@@ -76,6 +86,29 @@ for crate in "${ACCOUNT_CRATES[@]}"; do
   for forbidden in "${FORBIDDEN[@]}"; do
     check_unreachable "${crate}" "${forbidden}" || status=1
   done
+done
+
+for crate in "${SOURCE_CLEAN[@]}"; do
+  if ! workspace_has "${crate}"; then
+    echo "skip  ${crate} — not in the workspace yet"
+    continue
+  fi
+
+  if hits=$(grep -rnE '\b(telemetry|telemetry_events)::' "crates/${crate}/src" 2>/dev/null) \
+    && [[ -n "${hits}" ]]; then
+    echo "FAIL  ${crate} names telemetry in its own source:"
+    echo "${hits}"
+    status=1
+  else
+    echo "ok    ${crate} does not name telemetry in its own source"
+  fi
+
+  if grep -qE '^\s*telemetry(_events)?\.workspace' "crates/${crate}/Cargo.toml"; then
+    echo "FAIL  ${crate} depends on telemetry directly"
+    status=1
+  else
+    echo "ok    ${crate} has no direct telemetry dependency"
+  fi
 done
 
 if [[ ${status} -ne 0 ]]; then

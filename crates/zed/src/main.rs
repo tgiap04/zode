@@ -529,6 +529,7 @@ fn main() {
         // session, the account service — a machine that has never signed in
         // issues no request from here. See `zode_account`'s crate docs.
         zode_account::init(cx);
+        zode_account_ui::init(cx);
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
         debugger_tools::init(cx);
