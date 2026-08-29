@@ -40,7 +40,14 @@ pub use tokens::StoredTokens;
 /// as `ZED_DEVELOPMENT_USE_KEYCHAIN` in `zed_credentials_provider`.
 static ZODE_API_URL: LazyLock<EnvVar> = env_var!("ZODE_API_URL");
 
-const DEFAULT_API_URL: &str = "https://zodekit.site/api";
+/// The API's own host, not the marketing site.
+///
+/// The browser app is served from `zodekit.site` and the API from
+/// `api.zodekit.site`; a page can reach the second through CORS, but the IDE
+/// is not a browser and has no reason to depend on whatever the site host
+/// proxies. Going straight at the API is both simpler and one fewer thing that
+/// can be misconfigured out from under a released binary.
+const DEFAULT_API_URL: &str = "https://api.zodekit.site/api";
 
 pub fn api_url() -> String {
     ZODE_API_URL
