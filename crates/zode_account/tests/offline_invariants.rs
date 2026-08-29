@@ -96,7 +96,8 @@ async fn a_machine_that_has_never_signed_in_issues_no_request(cx: &mut TestAppCo
 
     let account = cx.update(|cx| {
         cx.new(|cx| {
-            let mut account = Account::new(http_client, credentials, "https://zode.dev/api".into());
+            let mut account =
+                Account::new(http_client, credentials, "https://zodekit.site/api".into());
             account.restore(cx).detach();
             account
         })
@@ -126,7 +127,8 @@ async fn an_idle_signed_out_account_never_wakes_up(cx: &mut TestAppContext) {
 
     let _account = cx.update(|cx| {
         cx.new(|cx| {
-            let mut account = Account::new(http_client, credentials, "https://zode.dev/api".into());
+            let mut account =
+                Account::new(http_client, credentials, "https://zodekit.site/api".into());
             account.restore(cx).detach();
             account
         })
@@ -157,8 +159,8 @@ async fn cancelling_a_sign_in_stops_the_polling(cx: &mut TestAppContext) {
                 serde_json::json!({
                     "device_code": "dc",
                     "user_code": "A1B2-C3D4",
-                    "verification_uri": "https://zode.dev/activate",
-                    "verification_uri_complete": "https://zode.dev/activate?code=A1B2-C3D4",
+                    "verification_uri": "https://zodekit.site/activate",
+                    "verification_uri_complete": "https://zodekit.site/activate?code=A1B2-C3D4",
                     "expires_in": 600,
                     "interval": 5
                 })
@@ -183,7 +185,7 @@ async fn cancelling_a_sign_in_stops_the_polling(cx: &mut TestAppContext) {
             Account::new(
                 http_client,
                 StubCredentials::empty(),
-                "https://zode.dev/api".into(),
+                "https://zodekit.site/api".into(),
             )
         })
     });
@@ -238,7 +240,7 @@ async fn a_hung_account_service_does_not_block_the_rest_of_the_app(cx: &mut Test
             Account::new(
                 http_client,
                 StubCredentials::empty(),
-                "https://zode.dev/api".into(),
+                "https://zodekit.site/api".into(),
             )
         })
     });

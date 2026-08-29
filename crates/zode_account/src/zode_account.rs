@@ -40,7 +40,7 @@ pub use tokens::StoredTokens;
 /// as `ZED_DEVELOPMENT_USE_KEYCHAIN` in `zed_credentials_provider`.
 static ZODE_API_URL: LazyLock<EnvVar> = env_var!("ZODE_API_URL");
 
-const DEFAULT_API_URL: &str = "https://zode.dev/api";
+const DEFAULT_API_URL: &str = "https://zodekit.site/api";
 
 pub fn api_url() -> String {
     ZODE_API_URL

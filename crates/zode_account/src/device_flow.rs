@@ -322,8 +322,8 @@ mod tests {
         PendingAuthorization {
             device_code: "device".into(),
             user_code: "A1B2-C3D4".into(),
-            verification_uri: "https://zode.dev/activate".into(),
-            verification_uri_complete: "https://zode.dev/activate?code=A1B2-C3D4".into(),
+            verification_uri: "https://zodekit.site/activate".into(),
+            verification_uri_complete: "https://zodekit.site/activate?code=A1B2-C3D4".into(),
             expires_in: Duration::from_secs(expires_secs),
             interval: Duration::from_secs(interval_secs),
         }
@@ -348,15 +348,15 @@ mod tests {
         let body = serde_json::json!({
             "device_code": "dc",
             "user_code": "A1B2-C3D4",
-            "verification_uri": "https://zode.dev/activate",
-            "verification_uri_complete": "https://zode.dev/activate?code=A1B2-C3D4",
+            "verification_uri": "https://zodekit.site/activate",
+            "verification_uri_complete": "https://zodekit.site/activate?code=A1B2-C3D4",
             "expires_in": 600,
             "interval": 5
         })
         .to_string();
         let (client, _) = scripted(vec![(201, body)]);
 
-        let result = request_authorization(&client, "https://zode.dev/api")
+        let result = request_authorization(&client, "https://zodekit.site/api")
             .await
             .unwrap();
 
@@ -376,7 +376,7 @@ mod tests {
 
         let tokens = poll_until_authorized(
             &client,
-            "https://zode.dev/api",
+            "https://zodekit.site/api",
             &pending(5, 600),
             &cx.background_executor,
         )
@@ -393,7 +393,7 @@ mod tests {
 
         let error = poll_until_authorized(
             &client,
-            "https://zode.dev/api",
+            "https://zodekit.site/api",
             &pending(5, 600),
             &cx.background_executor,
         )
@@ -411,7 +411,7 @@ mod tests {
 
         let error = poll_until_authorized(
             &client,
-            "https://zode.dev/api",
+            "https://zodekit.site/api",
             &pending(5, 600),
             &cx.background_executor,
         )
@@ -431,7 +431,7 @@ mod tests {
 
         let tokens = poll_until_authorized(
             &client,
-            "https://zode.dev/api",
+            "https://zodekit.site/api",
             &pending(5, 600),
             &cx.background_executor,
         )
@@ -456,7 +456,7 @@ mod tests {
 
         let tokens = poll_until_authorized(
             &client,
-            "https://zode.dev/api",
+            "https://zodekit.site/api",
             &pending(5, 600),
             &cx.background_executor,
         )
@@ -474,7 +474,7 @@ mod tests {
 
         let error = poll_until_authorized(
             &client,
-            "https://zode.dev/api",
+            "https://zodekit.site/api",
             &pending(5, 5),
             &cx.background_executor,
         )
@@ -488,7 +488,7 @@ mod tests {
     async fn refresh_returns_a_fresh_pair(cx: &mut TestAppContext) {
         let (client, _) = scripted(vec![(201, token_body())]);
 
-        let tokens = refresh(&client, "https://zode.dev/api", "old-refresh")
+        let tokens = refresh(&client, "https://zodekit.site/api", "old-refresh")
             .await
             .unwrap();
 
@@ -503,7 +503,7 @@ mod tests {
         // marked offline, so it must not blur.
         let (client, _) = scripted(vec![(401, error_body("invalid_grant"))]);
 
-        let error = refresh(&client, "https://zode.dev/api", "spent")
+        let error = refresh(&client, "https://zodekit.site/api", "spent")
             .await
             .unwrap_err();
 
@@ -515,7 +515,7 @@ mod tests {
     async fn a_server_error_on_refresh_is_unreachable_not_rejected(cx: &mut TestAppContext) {
         let (client, _) = scripted(vec![(503, String::new())]);
 
-        let error = refresh(&client, "https://zode.dev/api", "fine")
+        let error = refresh(&client, "https://zodekit.site/api", "fine")
             .await
             .unwrap_err();
 

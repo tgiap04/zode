@@ -148,8 +148,8 @@ mod tests {
         draw_rail_with(
             Some(AccountStatus::WaitingForApproval {
                 user_code: "A1B2-C3D4".into(),
-                verification_uri: "https://zode.dev/activate".into(),
-                verification_uri_complete: "https://zode.dev/activate?code=A1B2-C3D4".into(),
+                verification_uri: "https://zodekit.site/activate".into(),
+                verification_uri_complete: "https://zodekit.site/activate?code=A1B2-C3D4".into(),
             }),
             cx,
         )
