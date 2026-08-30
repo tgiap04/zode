@@ -259,6 +259,10 @@ impl Sidebar {
                         window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
                     }),
             )
+            // Last, below the settings gear: every activity bar that has an
+            // account puts it at the bottom, and a user looking for it looks
+            // there first.
+            .child(self.render_rail_account(cx))
             .into_any_element()
     }
 }

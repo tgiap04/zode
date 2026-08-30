@@ -267,6 +267,21 @@ pub fn keymap_backup_file() -> &'static PathBuf {
     KEYMAP_FILE.get_or_init(|| config_dir().join("keymap_backup.json"))
 }
 
+/// Returns the path to the `sync_state.json` file.
+///
+/// Records, per synced artifact, the revision last seen on the server and a
+/// hash of the local file at that moment. Without it there is no way to tell
+/// "this file is exactly what was pulled" from "this file has been edited
+/// since", and every push would have to either interrogate the user or
+/// silently overwrite.
+///
+/// Holds hashes and revisions only — never file contents — so it is not
+/// encrypted and carries nothing worth reading.
+pub fn sync_state_file() -> &'static PathBuf {
+    static SYNC_STATE_FILE: OnceLock<PathBuf> = OnceLock::new();
+    SYNC_STATE_FILE.get_or_init(|| config_dir().join("sync_state.json"))
+}
+
 /// Returns the path to the `tasks.json` file.
 pub fn tasks_file() -> &'static PathBuf {
     static TASKS_FILE: OnceLock<PathBuf> = OnceLock::new();

@@ -4962,6 +4962,7 @@ mod tests {
             // handler left. `collab::{SwitchBranch,ToggleProjectMenu}` are live
             // title-bar features sitting in a misleading namespace.
             let expected_namespaces = vec![
+                "account",
                 "action",
                 "activity_indicator",
                 "agent",

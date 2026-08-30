@@ -187,6 +187,31 @@ pub mod editor {
     );
 }
 
+pub mod account {
+    use gpui::actions;
+
+    actions!(
+        account,
+        [
+            /// Signs in to a Zode account. Signing in is always optional —
+            /// the editor is fully usable without one.
+            SignIn,
+            /// Signs out and forgets the saved session.
+            SignOut,
+            /// Opens the account page on the web.
+            OpenAccountOnWeb,
+            /// Opens the push/pull window for synced settings.
+            SyncSettings,
+            /// Shows the recovery key this machine holds, for writing down again.
+            ShowRecoveryKey,
+            /// Takes a recovery key from another machine.
+            EnterRecoveryKey,
+            /// Replaces the recovery key and re-encrypts everything stored.
+            RotateRecoveryKey
+        ]
+    );
+}
+
 pub mod dev {
     use gpui::actions;
 

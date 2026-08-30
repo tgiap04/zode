@@ -444,6 +444,7 @@ fn check_style() -> NamedJob {
             .add_step(steps::cargo_fmt())
             .add_step(steps::script("./script/check-todos"))
             .add_step(steps::script("./script/check-keymaps"))
+            .add_step(steps::script("./script/check-account-no-telemetry"))
             .add_step(check_for_typos())
             .add_step(fetch_ts_query_ls())
             .add_step(run_ts_query_ls()),

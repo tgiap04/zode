@@ -33,8 +33,11 @@ ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
+zode_account.workspace = true
+zode_account_ui.workspace = true
 
 [dev-dependencies]
+zode_account = { workspace = true, features = ["test-support"] }
 # `test-support` so the rail's tests open the container tab over an engine that
 # never leaves the process. Without it, pressing the button runs `docker`, whose
 # exit wakes the GPUI test scheduler from a blocking thread and aborts the run.

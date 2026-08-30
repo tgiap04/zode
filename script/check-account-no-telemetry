@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Invariant 4: the account never becomes a telemetry channel.
+#
+# Zode's whole pitch is zero telemetry and no login wall. Adding sign-in is
+# exactly the change that quietly reopens that door — an identified user is the
+# one thing telemetry was ever missing, and the temptation compounds as the
+# account crate grows.
+#
+# Asserted against the dependency graph rather than by grepping for calls,
+# because a graph cannot be satisfied by a comment and does not rot when
+# somebody refactors. If `telemetry` is not reachable from these crates, no
+# amount of code inside them can send an event.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# Only `zode_account` is held to the graph rule, and that is a real limit
+# rather than an oversight.
+#
+# `zode_account_ui` must depend on `workspace` to register its actions, and
+# `workspace` pulls in `client`, which owns `telemetry`. Every UI crate in this
+# repo therefore *can* reach telemetry, so asserting otherwise would only mean
+# deleting the assertion the first time someone ran it.
+#
+# `zode_sync` joins `zode_account` under the graph rule for the same reason it
+# was written as a separate crate: it holds the encryption key, and a crate
+# that can reach telemetry is a crate that could one day be asked to report on
+# what it just decrypted.
+#
+# What can still be held is the part that matters: the crates that hold the
+# tokens and the key cannot reach telemetry at all, and the UI crate does not
+# name it in its own source. The first is a graph fact; the second is
+# a grep, and weaker — but a weaker true guard beats a strong false one.
+GRAPH_ISOLATED=(zode_account zode_sync)
+SOURCE_CLEAN=(zode_account_ui)
+FORBIDDEN=(telemetry telemetry_events)
+
+# Decision D7: sync runs on the machine with the UI, and only there.
+# `remote_server` executes on a different machine, so letting these crates
+# reach it would give the encryption key a route off the user's own hardware --
+# the one thing the whole design exists to prevent. Asserted the same way, and
+# for the same reason, as the telemetry rule above.
+LOCAL_ONLY=(zode_account zode_sync)
+FORBIDDEN_REMOTE=(remote remote_server remote_connection)
+
+status=0
+
+workspace_has() {
+  cargo metadata --no-deps --format-version 1 | grep -q "\"name\":\"$1\""
+}
+
+# `cargo tree --invert X --package C` prints the paths from C to X. Three
+# answers matter, and they must not be conflated:
+#
+#   non-empty stdout            -> a path exists. Fail.
+#   "did not match any packages" -> X is not in C's graph at all. Pass.
+#   anything else                -> the check did not run. Fail loudly, because
+#                                   a gate that passes when it breaks is worse
+#                                   than no gate.
+check_unreachable() {
+  local crate="$1" forbidden="$2" stdout stderr exit_code
+  stderr=$(mktemp)
+  set +e
+  stdout=$(cargo tree --quiet --package "${crate}" --invert "${forbidden}" 2>"${stderr}")
+  exit_code=$?
+  set -e
+
+  if [[ ${exit_code} -eq 0 && -n "${stdout}" ]]; then
+    echo "FAIL  ${crate} can reach ${forbidden}:"
+    echo "${stdout}"
+    rm -f "${stderr}"
+    return 1
+  fi
+
+  if grep -q "did not match any packages" "${stderr}"; then
+    echo "ok    ${crate} cannot reach ${forbidden}"
+    rm -f "${stderr}"
+    return 0
+  fi
+
+  if [[ ${exit_code} -eq 0 && -z "${stdout}" ]]; then
+    echo "ok    ${crate} cannot reach ${forbidden}"
+    rm -f "${stderr}"
+    return 0
+  fi
+
+  echo "ERROR the check could not run for ${crate} vs ${forbidden}:"
+  cat "${stderr}"
+  rm -f "${stderr}"
+  return 1
+}
+
+for crate in "${GRAPH_ISOLATED[@]}"; do
+  if ! workspace_has "${crate}"; then
+    echo "skip  ${crate} — not in the workspace yet"
+    continue
+  fi
+
+  for forbidden in "${FORBIDDEN[@]}"; do
+    check_unreachable "${crate}" "${forbidden}" || status=1
+  done
+done
+
+for crate in "${LOCAL_ONLY[@]}"; do
+  if ! workspace_has "${crate}"; then
+    echo "skip  ${crate} -- not in the workspace yet"
+    continue
+  fi
+
+  for forbidden in "${FORBIDDEN_REMOTE[@]}"; do
+    check_unreachable "${crate}" "${forbidden}" || status=1
+  done
+done
+
+for crate in "${SOURCE_CLEAN[@]}"; do
+  if ! workspace_has "${crate}"; then
+    echo "skip  ${crate} — not in the workspace yet"
+    continue
+  fi
+
+  if hits=$(grep -rnE '\b(telemetry|telemetry_events)::' "crates/${crate}/src" 2>/dev/null) \
+    && [[ -n "${hits}" ]]; then
+    echo "FAIL  ${crate} names telemetry in its own source:"
+    echo "${hits}"
+    status=1
+  else
+    echo "ok    ${crate} does not name telemetry in its own source"
+  fi
+
+  if grep -qE '^\s*telemetry(_events)?\.workspace' "crates/${crate}/Cargo.toml"; then
+    echo "FAIL  ${crate} depends on telemetry directly"
+    status=1
+  else
+    echo "ok    ${crate} has no direct telemetry dependency"
+  fi
+done
+
+if [[ ${status} -ne 0 ]]; then
+  echo
+  echo "The account crates must not reach telemetry, and must not reach the"
+  echo "remote-server crates (decision D7 -- sync is local-only)."
+  echo "See crates/zode_account/src/zode_account.rs and crates/zode_sync/src/zode_sync.rs."
+fi
+
+exit ${status}
