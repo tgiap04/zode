@@ -199,7 +199,15 @@ pub mod account {
             /// Signs out and forgets the saved session.
             SignOut,
             /// Opens the account page on the web.
-            OpenAccountOnWeb
+            OpenAccountOnWeb,
+            /// Opens the push/pull window for synced settings.
+            SyncSettings,
+            /// Shows the recovery key this machine holds, for writing down again.
+            ShowRecoveryKey,
+            /// Takes a recovery key from another machine.
+            EnterRecoveryKey,
+            /// Replaces the recovery key and re-encrypts everything stored.
+            RotateRecoveryKey
         ]
     );
 }

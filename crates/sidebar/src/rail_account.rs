@@ -68,6 +68,23 @@ impl Sidebar {
                     .menu(move |window, cx| {
                         Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
                             menu.action(
+                                "Sync Settings\u{2026}",
+                                Box::new(zed_actions::account::SyncSettings),
+                            )
+                            .action(
+                                "Show Recovery Key",
+                                Box::new(zed_actions::account::ShowRecoveryKey),
+                            )
+                            .action(
+                                "Enter Recovery Key\u{2026}",
+                                Box::new(zed_actions::account::EnterRecoveryKey),
+                            )
+                            .action(
+                                "Rotate Recovery Key\u{2026}",
+                                Box::new(zed_actions::account::RotateRecoveryKey),
+                            )
+                            .separator()
+                            .action(
                                 "Account on the Web",
                                 Box::new(zed_actions::account::OpenAccountOnWeb),
                             )
