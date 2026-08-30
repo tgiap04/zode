@@ -97,6 +97,11 @@ impl Driver for MongoDriver {
                     cancellation: false,
                     identifier_quote: values::IDENTIFIER_QUOTE,
                     connection_form: Some(connection_form()),
+                    // Clicking a collection has to produce something this
+                    // engine can read, and `SELECT * FROM ...` is not it. The
+                    // quoting the protocol applies is the JSON string quote
+                    // here, which is exactly what a command document wants.
+                    read_table_template: Some(r#"{"find": {table}, "$db": {schema}}"#.into()),
                 },
             })
         })
@@ -216,14 +221,19 @@ impl Driver for MongoDriver {
 fn run_page(live: &Live, params: &QueryParams) -> Result<ResultSet, ResponseError> {
     let started = Instant::now();
     let command = query::parse(&params.sql)?;
+    // The database the statement names, or the one the connection opened on.
+    // The tree lists every database on the server while a connection opens on
+    // one, so without honouring `$db` a click on a collection in any other
+    // database read the default instead -- and answered about a different
+    // collection without ever saying so.
+    let database = command
+        .database
+        .as_deref()
+        .unwrap_or(&live.default_database);
     let collection = live
         .client
-        // The database the statement runs against is the one the connection
-        // opened on. A command document naming its own database would be a
-        // second way to say where a query goes, and the tree's selection would
-        // then disagree with the buffer.
-        .database(&live.default_database)
-        .collection::<Document>(command.collection());
+        .database(database)
+        .collection::<Document>(&command.collection);
 
     // One past the page. `limit` is `u32` and this is `i64`, so no clamp is
     // needed for it -- but the sum is taken in `i64` all the same, because the
@@ -231,12 +241,11 @@ fn run_page(live: &Live, params: &QueryParams) -> Result<ResultSet, ResponseErro
     let wanted = params.limit as i64;
     let skip = params.offset.min(i64::MAX as u64);
 
-    let documents: Vec<Document> = match &command {
-        query::Command::Find {
+    let documents: Vec<Document> = match &command.operation {
+        query::Operation::Find {
             filter,
             sort,
             projection,
-            ..
         } => {
             let mut find = collection
                 .find(filter.clone())
@@ -253,7 +262,7 @@ fn run_page(live: &Live, params: &QueryParams) -> Result<ResultSet, ResponseErro
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(values::error)?
         }
-        query::Command::Aggregate { pipeline, .. } => {
+        query::Operation::Aggregate { pipeline } => {
             let mut stages = pipeline.clone();
             stages.push(mongodb::bson::doc! { "$skip": skip as i64 });
             stages.push(mongodb::bson::doc! { "$limit": wanted.saturating_add(1) });

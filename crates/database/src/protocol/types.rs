@@ -132,6 +132,20 @@ pub struct Capabilities {
     /// version -- see `PROTOCOL.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_form: Option<ConnectionForm>,
+    /// The statement that reads a whole table, with `{schema}` and `{table}`
+    /// standing for the names already quoted by
+    /// [`quote_identifier`](Self::quote_identifier).
+    ///
+    /// Absent means `SELECT * FROM {schema}.{table}`, which is what every SQL
+    /// engine here wants and what clicking a table used to produce
+    /// unconditionally. That was the last place Zode still assumed an engine
+    /// speaks SQL: a document store was handed a `SELECT` it could only refuse,
+    /// so every click on a collection was a failed query.
+    ///
+    /// An optional field with a cautious default, so it costs no protocol
+    /// version -- see `PROTOCOL.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_table_template: Option<String>,
 }
 
 /// How to ask for a connection to one engine.
@@ -308,6 +322,67 @@ impl Capabilities {
             "{quote}{}{quote}",
             identifier.replace(quote, &quote.repeat(2))
         )
+    }
+}
+
+impl Capabilities {
+    /// The statement that reads a whole table, with both names quoted this
+    /// engine's way.
+    ///
+    /// Built here rather than at the panel so that adding an engine whose
+    /// "read everything" is not a `SELECT` stays a driver-side change -- the
+    /// same bargain [`quote_identifier`](Self::quote_identifier) already makes
+    /// for the quote character.
+    pub fn read_table_statement(&self, schema: &str, table: &str) -> String {
+        let schema = self.quote_identifier(schema);
+        let table = self.quote_identifier(table);
+        match &self.read_table_template {
+            Some(template) => template
+                .replace("{schema}", &schema)
+                .replace("{table}", &table),
+            None => format!("SELECT * FROM {schema}.{table}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_table_tests {
+    use super::*;
+
+    /// What every SQL engine here gets, and what the panel used to build for
+    /// all of them regardless of what the driver could read.
+    #[test]
+    fn a_driver_that_says_nothing_gets_a_select() {
+        let capabilities = Capabilities::default();
+        assert_eq!(
+            capabilities.read_table_statement("public", "users"),
+            r#"SELECT * FROM "public"."users""#
+        );
+    }
+
+    /// The defect this closes: a document store was handed a `SELECT` it could
+    /// only refuse, so every click on a collection failed.
+    #[test]
+    fn a_driver_that_reads_no_sql_gets_its_own_statement() {
+        let capabilities = Capabilities {
+            read_table_template: Some(r#"{"find": {table}, "$db": {schema}}"#.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            capabilities.read_table_statement("app", "users"),
+            r#"{"find": "users", "$db": "app"}"#
+        );
+    }
+
+    /// A name from the tree becomes a statement here, and a table really can be
+    /// called `"; drop table users; --`.
+    #[test]
+    fn a_name_that_would_escape_its_quotes_is_still_quoted() {
+        let capabilities = Capabilities::default();
+        assert_eq!(
+            capabilities.read_table_statement("public", r#"a"b"#),
+            r#"SELECT * FROM "public"."a""b""#
+        );
     }
 }
 

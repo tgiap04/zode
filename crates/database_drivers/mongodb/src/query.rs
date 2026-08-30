@@ -26,25 +26,31 @@ use mongodb::bson::{Bson, Document};
 const WRITING_STAGES: [&str; 2] = ["$out", "$merge"];
 
 #[derive(Debug, PartialEq)]
-pub enum Command {
+pub struct Command {
+    pub collection: String,
+    /// Which database to run against, from the command document's `$db`.
+    ///
+    /// `None` means the one the connection opened on. It matters because the
+    /// tree lists every database on the server while a connection opens on one:
+    /// without this, clicking a collection in any *other* database ran the
+    /// statement against the default and answered about the wrong collection --
+    /// or, worse, about a collection of the same name that happens to exist
+    /// there. `$db` is MongoDB's own spelling for this, carried in the command
+    /// document rather than in a new protocol field.
+    pub database: Option<String>,
+    pub operation: Operation,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Operation {
     Find {
-        collection: String,
         filter: Document,
         sort: Option<Document>,
         projection: Option<Document>,
     },
     Aggregate {
-        collection: String,
         pipeline: Vec<Document>,
     },
-}
-
-impl Command {
-    pub fn collection(&self) -> &str {
-        match self {
-            Command::Find { collection, .. } | Command::Aggregate { collection, .. } => collection,
-        }
-    }
 }
 
 fn refused(message: impl Into<String>) -> ResponseError {
@@ -80,16 +86,25 @@ pub fn parse(statement: &str) -> Result<Command, ResponseError> {
     let command: Document = mongodb::bson::to_document(&value)
         .map_err(|error| refused("that statement is not a command document").with_detail(error.to_string()))?;
 
-    if let Some(collection) = command.get_str("find").ok() {
-        return Ok(Command::Find {
+    let database = match command.get("$db") {
+        None | Some(Bson::Null) => None,
+        Some(Bson::String(name)) => Some(name.clone()),
+        Some(_) => return Err(refused("`$db` has to be a database name")),
+    };
+
+    if let Ok(collection) = command.get_str("find") {
+        return Ok(Command {
             collection: collection.to_string(),
-            filter: sub_document(&command, "filter")?.unwrap_or_default(),
-            sort: sub_document(&command, "sort")?,
-            projection: sub_document(&command, "projection")?,
+            database,
+            operation: Operation::Find {
+                filter: sub_document(&command, "filter")?.unwrap_or_default(),
+                sort: sub_document(&command, "sort")?,
+                projection: sub_document(&command, "projection")?,
+            },
         });
     }
 
-    if let Some(collection) = command.get_str("aggregate").ok() {
+    if let Ok(collection) = command.get_str("aggregate") {
         let pipeline = match command.get("pipeline") {
             Some(Bson::Array(stages)) => stages
                 .iter()
@@ -108,9 +123,10 @@ pub fn parse(statement: &str) -> Result<Command, ResponseError> {
             )));
         }
 
-        return Ok(Command::Aggregate {
+        return Ok(Command {
             collection: collection.to_string(),
-            pipeline,
+            database,
+            operation: Operation::Aggregate { pipeline },
         });
     }
 
@@ -140,15 +156,18 @@ mod tests {
             .expect("a well-formed find");
         assert_eq!(
             command,
-            Command::Find {
+            Command {
                 collection: "users".into(),
-                filter: doc! { "active": true },
-                // `1i64`, not `1`: a statement arrives as JSON, whose
-                // integers become BSON 64-bit ones. MongoDB reads either as a
-                // sort direction, so this is the test matching the wire rather
-                // than the wire needing to change.
-                sort: Some(doc! { "name": 1i64 }),
-                projection: None,
+                database: None,
+                operation: Operation::Find {
+                    filter: doc! { "active": true },
+                    // `1i64`, not `1`: a statement arrives as JSON, whose
+                    // integers become BSON 64-bit ones. MongoDB reads either as
+                    // a sort direction, so this is the test matching the wire
+                    // rather than the wire needing to change.
+                    sort: Some(doc! { "name": 1i64 }),
+                    projection: None,
+                },
             }
         );
     }
@@ -158,11 +177,14 @@ mod tests {
         let command = parse(r#"{"find": "users"}"#).expect("a bare find is a whole-collection read");
         assert_eq!(
             command,
-            Command::Find {
+            Command {
                 collection: "users".into(),
-                filter: Document::new(),
-                sort: None,
-                projection: None,
+                database: None,
+                operation: Operation::Find {
+                    filter: Document::new(),
+                    sort: None,
+                    projection: None,
+                },
             }
         );
     }
@@ -208,9 +230,12 @@ mod tests {
             .expect("a reading pipeline");
         assert_eq!(
             command,
-            Command::Aggregate {
+            Command {
                 collection: "orders".into(),
-                pipeline: vec![doc! { "$match": { "paid": true } }],
+                database: None,
+                operation: Operation::Aggregate {
+                    pipeline: vec![doc! { "$match": { "paid": true } }],
+                },
             }
         );
     }
@@ -222,6 +247,17 @@ mod tests {
         let error = parse("SELECT * FROM users").expect_err("SQL is not a MongoDB statement");
         assert_eq!(error.code, ErrorCode::Syntax);
         assert!(error.message.contains("{\"find\""), "{}", error.message);
+    }
+
+    /// The tree lists every database on the server while a connection opens on
+    /// one, so a statement built from a click on another database has to say
+    /// which -- or it reads the wrong collection and looks like it worked.
+    #[test]
+    fn a_statement_may_name_the_database_it_runs_against() {
+        let command =
+            parse(r#"{"find": "users", "$db": "other_app"}"#).expect("a well-formed find");
+        assert_eq!(command.database.as_deref(), Some("other_app"));
+        assert_eq!(command.collection, "users");
     }
 
     #[test]

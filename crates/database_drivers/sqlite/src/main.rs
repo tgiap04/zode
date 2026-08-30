@@ -80,6 +80,9 @@ impl Driver for SqliteDriver {
                     cancellation: true,
                     identifier_quote: None,
                     connection_form: Some(connection_form()),
+                    // Absent: `SELECT * FROM {schema}.{table}` is exactly what
+                    // this engine wants, and the default says so.
+                    read_table_template: None,
                 },
             })
         })
