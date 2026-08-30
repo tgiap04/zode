@@ -153,6 +153,7 @@
 
 # Account & Privacy
 
+- [Your Zode Account](./account.md)
 - [Roles](./roles.md)
 - [Worktree Trust](./worktree-trust.md)
 - [Telemetry](./telemetry.md)
