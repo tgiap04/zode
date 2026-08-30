@@ -19520,7 +19520,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo 0.37.2",
- "util",
  "zed_credentials_provider",
  "zed_env_vars",
 ]

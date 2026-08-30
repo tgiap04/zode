@@ -37,7 +37,6 @@ serde_json.workspace = true
 # which laptop is which. Chosen over shelling out to `hostname` because the
 # repo forbids `std::process::Command` on the poll path.
 sysinfo.workspace = true
-util.workspace = true
 zed_credentials_provider.workspace = true
 zed_env_vars.workspace = true
 
