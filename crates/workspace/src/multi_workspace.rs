@@ -2300,6 +2300,28 @@ impl MultiWorkspace {
         self.wake_project(&workspace, cx);
         self.schedule_hibernate(&old_active_workspace, cx);
 
+        // Retention is about the project that just lost focus, and this is the
+        // last moment anything can act on it: `active_workspace` is the only
+        // strong handle a window's own project ever has -- `retained_workspaces`
+        // starts empty and nothing on the open path puts it there -- and the
+        // line below overwrites it. Without this the first project was dropped
+        // the instant a second one activated, so clicking it on the rail found
+        // no workspace (`workspace_for_paths` scans `workspaces()`) and reopened
+        // it from disk: worktree scan, language servers and tabs all built
+        // again, which reads as the project restarting rather than switching
+        // back to it. That is also precisely what `retain_background_projects`
+        // promises not to happen, and it defaults to `true`.
+        //
+        // A pathless workspace is left out: an empty window is nothing to
+        // switch back to, the rail does not draw it, and keeping it alive would
+        // hold a project no surface can reach.
+        if should_retain && !old_active_was_retained {
+            let old_key = old_active_workspace.read(cx).project_group_key(cx);
+            if !old_key.path_list().paths().is_empty() {
+                self.retain_workspace(old_active_workspace.clone(), old_key, cx);
+            }
+        }
+
         self.active_workspace = workspace;
 
         let active_key = self.active_workspace.read(cx).project_group_key(cx);
