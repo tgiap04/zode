@@ -81,11 +81,10 @@ fn open_account_on_web(
     _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    // Derived from the same base the account service uses, so pointing the
-    // editor at a local backend points this at the same place.
-    let base = zode_account::api_url();
-    let origin = base.strip_suffix("/api").unwrap_or(&base);
-    cx.open_url(&format!("{origin}{ACCOUNT_WEB_PATH}"));
+    // `web_url`, not `api_url`. Stripping `/api` off the API base was right
+    // only while the API answered on the site's own host; once it moved to
+    // `api.zodekit.site` this opened a link to a host that serves no pages.
+    cx.open_url(&format!("{}{ACCOUNT_WEB_PATH}", zode_account::web_url()));
 }
 
 /// Opens the push/pull window, asking for a recovery key first when this
