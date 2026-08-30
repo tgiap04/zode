@@ -24,11 +24,11 @@ restart.
 
 **Account → Sync Settings…** in the rail menu. Three things can travel:
 
-| | What moves |
-|---|---|
-| Settings | your whole `settings.json`, comments and formatting included |
-| Key bindings | your whole `keymap.json` |
-| Extensions | the list of installed extension IDs — never the extensions themselves |
+|              | What moves                                                            |
+| ------------ | --------------------------------------------------------------------- |
+| Settings     | your whole `settings.json`, comments and formatting included          |
+| Key bindings | your whole `keymap.json`                                              |
+| Extensions   | the list of installed extension IDs — never the extensions themselves |
 
 Nothing syncs automatically. There is no background reconciliation and no sync
 at startup; every transfer is one button press, and you are shown exactly what
