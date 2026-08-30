@@ -87,7 +87,21 @@ impl Driver for PostgresDriver {
                 config.password(secret);
             }
 
-            let mut client = config.connect(tls::connector()).map_err(values::error)?;
+            // Named here rather than left to the engine's own words: a
+            // `tokio_postgres` connect failure knows nothing about which server
+            // it meant, so a person with several connections configured was told
+            // one had failed and not which one.
+            let address = values::server_address(&config);
+            let mut client = config.connect(tls::connector()).map_err(|error| {
+                let mut error = values::error(error);
+                // Only when reaching the server is what failed. Credentials
+                // being refused is a different sentence, and the engine's own is
+                // the better one.
+                if error.code == ErrorCode::Connection {
+                    error.message = format!("could not reach {address}");
+                }
+                error
+            })?;
             let schema = introspect::current_schema(&mut client)?;
 
             let live = Arc::new(Live {

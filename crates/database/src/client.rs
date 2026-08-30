@@ -35,7 +35,14 @@ impl DriverError {
 impl std::fmt::Display for DriverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.message)?;
-        if let Some(detail) = &self.0.detail {
+        // A detail that only repeats the message is not a second fact, and
+        // printing it made a connection failure read as
+        // `error connecting to server (error connecting to server)` -- which
+        // looks like the driver stuttering rather than like an error saying
+        // everything it knows. Drivers fall back to the engine's own words for
+        // `message` whenever there is no shorter line to give, so the two being
+        // equal is ordinary rather than a driver bug to fix at each call site.
+        if let Some(detail) = self.0.detail.as_deref().filter(|detail| *detail != self.0.message) {
             write!(f, " ({detail})")?;
         }
         Ok(())
@@ -172,5 +179,37 @@ impl DriverClient {
             PROTOCOL_VERSION,
         );
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{ErrorCode, ResponseError};
+
+    /// What a connection failure actually looked like: the driver has no
+    /// shorter line to offer than the engine's own words, so `message` and
+    /// `detail` are the same sentence -- and printing both read as the driver
+    /// stuttering rather than as an error saying everything it knows.
+    #[test]
+    fn a_detail_that_only_repeats_the_message_is_not_printed_twice() {
+        let error = DriverError(
+            ResponseError::new(ErrorCode::Connection, "error connecting to server")
+                .with_detail("error connecting to server"),
+        );
+        assert_eq!(error.to_string(), "error connecting to server");
+    }
+
+    #[test]
+    fn a_detail_that_adds_something_is_still_printed() {
+        let error = DriverError(
+            ResponseError::new(ErrorCode::Connection, "could not reach db.example:5432")
+                .with_detail("error connecting to server: Network is unreachable (os error 51)"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "could not reach db.example:5432 \
+             (error connecting to server: Network is unreachable (os error 51))"
+        );
     }
 }
