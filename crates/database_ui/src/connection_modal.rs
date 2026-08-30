@@ -358,9 +358,27 @@ impl ConnectionModal {
                 .unwrap_or_default()
         });
 
+        // A URL pasted into the import path arrived under a stand-in engine
+        // carrying no driver at all (see `imported_entry`), and it was saved
+        // that way: a connection naming no driver, which nothing can ever open,
+        // and which made `Test Connection` return without a word. The scheme is
+        // the only thing that says what a URL is for, so it is read here.
+        let driver = if engine.driver.is_empty() {
+            driver_registry::driver_for_url(&url)
+                .ok_or_else(|| {
+                    SharedString::from(
+                        "That URL's scheme names no engine this build knows. \
+                         Pick the engine from the list instead.",
+                    )
+                })?
+                .to_string()
+        } else {
+            engine.driver.to_string()
+        };
+
         Ok(Filled {
             name,
-            driver: engine.driver.to_string(),
+            driver,
             url,
             secret: values
                 .iter()
@@ -383,10 +401,17 @@ impl ConnectionModal {
                 return;
             }
         };
-        let Some(engine) = self.engine().cloned() else {
-            return;
-        };
-        let Some(descriptor) = self.descriptor_for(&engine, cx) else {
+        // Looked up by the driver the form resolved rather than by the engine
+        // on screen: the import path's engine is a stand-in with no driver, so
+        // this lookup failed for it -- and failed by returning, which is a
+        // button that does nothing at all when pressed.
+        let Some(descriptor) = driver_registry::global(cx)
+            .read(cx)
+            .get(&filled.driver)
+            .cloned()
+        else {
+            self.error = Some(format!("No driver called `{}` is registered.", filled.driver).into());
+            cx.notify();
             return;
         };
 

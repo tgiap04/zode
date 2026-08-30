@@ -315,6 +315,14 @@ fn run_page(live: &Live, params: &QueryParams) -> Result<ResultSet, ResponseErro
 /// A replica set is written as several hosts in one field rather than as
 /// several fields: how many there are is the user's business and not a shape a
 /// form can fix in advance.
+///
+/// `authSource` earns a field of its own because leaving it out is the single
+/// most common way a MongoDB connection fails while the same credentials work
+/// everywhere else. MongoDB authenticates against the database named in the
+/// URI unless told otherwise, and most deployments create their users in
+/// `admin` -- so a form without this asks for a user and a password and then
+/// looks for them in the wrong place, and the server answers only
+/// "Authentication failed".
 fn connection_form() -> ConnectionForm {
     ConnectionForm {
         fields: vec![
@@ -347,8 +355,21 @@ fn connection_form() -> ConnectionForm {
                 secret: true,
                 ..Default::default()
             },
+            ConnectionField {
+                key: "auth_source".into(),
+                label: "Auth database".into(),
+                group: Some("Authentication".into()),
+                // `admin` because that is where a deployment with
+                // authentication turned on almost always keeps its users.
+                // Anyone whose user lives in the database itself types that
+                // name here -- which is a thing the form could not say at all
+                // before.
+                default: Some("admin".into()),
+                url_encoded: true,
+                ..Default::default()
+            },
         ],
-        url_template: "mongodb://{user}@{host}/{database}".into(),
+        url_template: "mongodb://{user}@{host}/{database}?authSource={auth_source}".into(),
     }
 }
 

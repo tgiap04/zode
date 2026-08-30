@@ -104,14 +104,16 @@ pub struct ResponseError {
 /// through `to_string()`, the one fact worth having never reached the user, who
 /// saw a connection fail for no stated reason.
 ///
-/// A link whose text the line already ends with is skipped, because a wrapper
-/// that merely restates its cause is common and reads as a stutter.
+/// A link the line already carries is skipped, wherever it already sits. A
+/// wrapper that restates its cause is common, and an engine whose own `Display`
+/// prints its source in full (MongoDB does) would otherwise have that source
+/// appended to it a second time.
 pub fn error_chain(error: &dyn std::error::Error) -> String {
     let mut chain = error.to_string();
     let mut cause = error.source();
     while let Some(error) = cause {
         let text = error.to_string();
-        if !text.is_empty() && !chain.ends_with(&text) {
+        if !text.is_empty() && !chain.contains(&text) {
             chain.push_str(": ");
             chain.push_str(&text);
         }
@@ -272,5 +274,20 @@ mod tests {
             Some(Box::new(Layer("could not reach db.example:5432", None))),
         );
         assert_eq!(error_chain(&error), "could not reach db.example:5432");
+    }
+
+    /// An engine whose own `Display` already prints its source -- MongoDB does,
+    /// in full -- would otherwise have that source appended a second time, and
+    /// the reader gets the same failure three times over in one line.
+    #[test]
+    fn a_cause_the_outer_message_already_quotes_is_not_appended_again() {
+        let error = Layer(
+            "SCRAM failure: Authentication failed., source: Authentication failed.",
+            Some(Box::new(Layer("Authentication failed.", None))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "SCRAM failure: Authentication failed., source: Authentication failed."
+        );
     }
 }

@@ -91,9 +91,11 @@ pub fn type_name(value: &Bson) -> &'static str {
 
 /// MongoDB's errors, sorted into the few kinds the UI reacts to differently.
 pub fn error(error: mongodb::error::Error) -> ResponseError {
-    // The whole chain, not `to_string()`: a MongoDB connection failure wraps
-    // the DNS or socket error that explains it, and reporting only the outer
-    // sentence is how a failed connection reaches someone saying nothing.
+    // `error_chain` rather than `to_string()` for the reason every driver here
+    // uses it -- though this engine needs it least: its own `Display` already
+    // spells out the topology and the command failure underneath, so the chain
+    // usually adds nothing, and `error_chain` drops a link the line already
+    // carries rather than saying it twice.
     let detail = database::protocol::error_chain(&error);
     let code = match error.kind.as_ref() {
         mongodb::error::ErrorKind::Authentication { .. } => ErrorCode::Authentication,
@@ -113,6 +115,16 @@ pub fn error(error: mongodb::error::Error) -> ResponseError {
 
     let message = match code {
         ErrorCode::Cancelled => "the query was cancelled".to_string(),
+        // Said in a sentence rather than by handing over the engine's own dump,
+        // and it names `authSource` on purpose: MongoDB authenticates against
+        // the database in the URI unless told otherwise, so the same user and
+        // password that work in another client fail here for a reason the
+        // server's own answer -- "Authentication failed." -- never mentions.
+        ErrorCode::Authentication => {
+            "the server refused these credentials -- check the user, the password, \
+             and the auth database they were created in"
+                .to_string()
+        }
         _ => detail.clone(),
     };
     ResponseError::new(code, message).with_detail(detail)
