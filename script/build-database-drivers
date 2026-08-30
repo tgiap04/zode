@@ -17,4 +17,5 @@ cd "$(dirname "$0")/.."
 cargo build "$@" \
     --package zode-db-sqlite \
     --package zode-db-postgres \
-    --package zode-db-mysql
+    --package zode-db-mysql \
+    --package zode-db-mongodb

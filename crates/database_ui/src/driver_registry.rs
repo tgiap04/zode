@@ -15,6 +15,7 @@ const BUILT_IN: &[(&str, &str, &str)] = &[
     ("sqlite", "SQLite", "zode-db-sqlite"),
     ("postgres", "PostgreSQL", "zode-db-postgres"),
     ("mysql", "MySQL", "zode-db-mysql"),
+    ("mongodb", "MongoDB", "zode-db-mongodb"),
 ];
 
 /// Where a driver binary lives.
@@ -149,6 +150,12 @@ const CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "A whole database in a single file",
         "Relational",
     ),
+    (
+        "mongodb",
+        "MongoDB",
+        "Document store, queried with JSON commands",
+        "Document",
+    ),
 ];
 
 /// Every engine, with the driver each one needs and whether it is here.
@@ -182,7 +189,10 @@ pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
             driver: driver.id.to_string().into(),
             name: driver.name.clone().into(),
             description: SharedString::new_static("Provided by an extension"),
-            group: SharedString::new_static("Relational"),
+            // Not "Relational": that was the only shape shipped when this line
+            // was written, and an extension's engine is precisely the one whose
+            // shape nobody here knows.
+            group: SharedString::new_static("Other"),
             installed: true,
         });
     }
