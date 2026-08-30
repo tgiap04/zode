@@ -196,6 +196,7 @@ members = [
     "crates/zed_credentials_provider",
     "crates/zode_account",
     "crates/zode_account_ui",
+    "crates/zode_sync",
     "crates/zed_env_vars",
     "crates/zlog",
     "crates/zlog_settings",
@@ -423,6 +424,7 @@ zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
 zode_account = { path = "crates/zode_account" }
 zode_account_ui = { path = "crates/zode_account_ui" }
+zode_sync = { path = "crates/zode_sync" }
 zed_env_vars = { path = "crates/zed_env_vars" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
@@ -632,6 +634,10 @@ pollster = "0.4.0"
 pulldown-cmark = { version = "0.13.0", default-features = false }
 quote = "1.0.9"
 rand = "0.9"
+# Already compiled into every build as a transitive dependency of rustls, but a
+# crate that calls into it must say so. `zode_sync` uses AES-256-GCM and
+# SystemRandom from here rather than adding a second crypto stack.
+ring = "0.17"
 rayon = "1.8"
 regex = "1.5"
 # WARNING: If you change this, you must also publish a new version of zed-reqwest to crates.io

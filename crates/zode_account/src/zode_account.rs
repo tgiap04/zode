@@ -24,10 +24,10 @@ mod tokens;
 
 use std::sync::LazyLock;
 
-use gpui::{App, AppContext as _};
+use gpui::{App, AppContext as _, Entity};
 use zed_env_vars::{EnvVar, env_var};
 
-pub use account::{Account, AccountStatus, AccountStatusChanged, AccountUser};
+pub use account::{Account, AccountStatus, AccountStatusChanged, AccountUser, ApiCredential};
 pub use device_flow::DeviceFlowError;
 pub use tokens::StoredTokens;
 
@@ -39,6 +39,7 @@ pub use tokens::StoredTokens;
 /// `settings_content` schema for something no user should ever set. Same shape
 /// as `ZED_DEVELOPMENT_USE_KEYCHAIN` in `zed_credentials_provider`.
 static ZODE_API_URL: LazyLock<EnvVar> = env_var!("ZODE_API_URL");
+
 
 /// The API's own host, not the marketing site.
 ///
@@ -61,7 +62,10 @@ pub fn api_url() -> String {
 ///
 /// `restore` reads the keychain before it touches the network, so a machine
 /// that has never signed in issues no request from this call.
-pub fn init(cx: &mut App) {
+///
+/// Returns the entity so `zode_sync::init` can be handed the same one rather
+/// than reaching for the global and having to cope with it being absent.
+pub fn init(cx: &mut App) -> Entity<Account> {
     let http_client = cx.http_client();
     let credentials = zed_credentials_provider::global(cx);
 
@@ -71,5 +75,6 @@ pub fn init(cx: &mut App) {
         account
     });
 
-    Account::set_global(account, cx);
+    Account::set_global(account.clone(), cx);
+    account
 }

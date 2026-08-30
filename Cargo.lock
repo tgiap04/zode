@@ -19471,6 +19471,7 @@ dependencies = [
  "zlog_settings",
  "zode_account",
  "zode_account_ui",
+ "zode_sync",
  "ztracing",
 ]
 
@@ -19518,6 +19519,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sysinfo 0.37.2",
  "util",
  "zed_credentials_provider",
  "zed_env_vars",
@@ -19527,6 +19529,8 @@ dependencies = [
 name = "zode_account_ui"
 version = "0.1.0"
 dependencies = [
+ "editor",
+ "extension_host",
  "gpui",
  "menu",
  "settings",
@@ -19536,6 +19540,29 @@ dependencies = [
  "workspace",
  "zed_actions",
  "zode_account",
+ "zode_sync",
+]
+
+[[package]]
+name = "zode_sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "credentials_provider",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "imara-diff",
+ "log",
+ "paths",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+ "zode_account",
+ "zode_sync",
 ]
 
 [[package]]

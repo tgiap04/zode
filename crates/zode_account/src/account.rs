@@ -53,6 +53,28 @@ impl AccountStatus {
 /// one entity instead of polling it.
 pub struct AccountStatusChanged;
 
+/// A live credential for calling the API as the signed-in user.
+///
+/// `user_id` travels with the token because the sync layer binds it into the
+/// AAD of every envelope it writes — without it the server could serve one
+/// user's blob into another user's slot and the tag would still verify.
+#[derive(Clone, Debug)]
+pub struct ApiCredential {
+    pub access_token: String,
+    pub user_id: SharedString,
+}
+
+impl std::fmt::Display for ApiCredential {
+    /// Shape, never the token — same reasoning as `StoredTokens`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ApiCredential {{ user: {}, access: <redacted> }}",
+            self.user_id
+        )
+    }
+}
+
 struct GlobalAccount(Entity<Account>);
 impl Global for GlobalAccount {}
 
@@ -131,8 +153,116 @@ impl Account {
         }
     }
 
+    /// The same, but wired to a real client and keychain.
+    ///
+    /// For tests that COUNT requests rather than draw pictures. `for_test`
+    /// blocks the network outright, which makes "no request was sent" true by
+    /// construction and therefore worth nothing as an assertion.
+    #[cfg(feature = "test-support")]
+    pub fn for_test_with(
+        status: AccountStatus,
+        http_client: Arc<dyn HttpClient>,
+        credentials: Arc<dyn CredentialsProvider>,
+    ) -> Self {
+        Self {
+            status,
+            http_client,
+            credentials,
+            api_url: "http://test.invalid/api".into(),
+            tokens: None,
+            sign_in_task: None,
+        }
+    }
+
     pub fn status(&self) -> &AccountStatus {
         &self.status
+    }
+
+    /// Gives the account a credential that is valid but meaningless.
+    ///
+    /// Lets a test reach the code paths that require one without standing up a
+    /// whole device grant. The expiry is far enough out that `needs_refresh`
+    /// answers false, so no refresh request is made either.
+    #[cfg(feature = "test-support")]
+    pub fn set_tokens_for_test(&mut self) {
+        self.tokens = Some(StoredTokens {
+            access_token: "test-access".into(),
+            refresh_token: "test-refresh".into(),
+            expires_at: SystemTime::now() + std::time::Duration::from_secs(3600),
+        });
+    }
+
+    /// The HTTP client this account was built with.
+    ///
+    /// Exposed so `zode_sync` talks to the same client rather than
+    /// constructing a second one — one client means one proxy configuration
+    /// and one place a test can substitute a fake.
+    pub fn http_client(&self) -> Arc<dyn HttpClient> {
+        self.http_client.clone()
+    }
+
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
+    /// The keychain the account is stored in, so the sync key can live beside
+    /// it under its own entry.
+    pub fn credentials_provider(&self) -> Arc<dyn CredentialsProvider> {
+        self.credentials.clone()
+    }
+
+    /// Hands out a usable access token, refreshing it first if it is close to
+    /// expiring.
+    ///
+    /// `None` means "cannot act as this user right now" and covers three
+    /// different situations on purpose: signed out, credential rejected (the
+    /// account is signed out as a side effect), and service unreachable. The
+    /// caller's answer is the same in all three — do not proceed — while the
+    /// user-facing message is the caller's to choose from `status`.
+    ///
+    /// This performs network I/O ONLY when a token is already held, so it
+    /// cannot break the signed-out invariant: no tokens, no request, early
+    /// return.
+    pub fn api_credential(&mut self, cx: &mut gpui::Context<Self>) -> Task<Option<ApiCredential>> {
+        let Some(tokens) = self.tokens.clone() else {
+            return Task::ready(None);
+        };
+        let Some(user_id) = self.status.user().map(|user| user.id.clone()) else {
+            return Task::ready(None);
+        };
+
+        let http_client = self.http_client.clone();
+        let credentials = self.credentials.clone();
+        let api_url = self.api_url.clone();
+
+        cx.spawn(async move |this, cx| {
+            let had = tokens.access_token.clone();
+            match Self::ensure_fresh(&http_client, &api_url, tokens, SystemTime::now()).await {
+                Ok(fresh) => {
+                    if fresh.access_token != had {
+                        // Persist immediately. A refresh that only lives in
+                        // memory means the rotated refresh token is lost on
+                        // restart, and the old one is already spent — which
+                        // the server reads as reuse and revokes the family.
+                        if let Err(error) = storage::write(&credentials, &user_id, &fresh, cx).await
+                        {
+                            log::warn!("refreshed the session but could not save it: {error}");
+                        }
+                    }
+                    let access_token = fresh.access_token.clone();
+                    _ = this.update(cx, |this, _| this.tokens = Some(fresh));
+                    Some(ApiCredential {
+                        access_token,
+                        user_id,
+                    })
+                }
+                Err(RefreshOutcome::Rejected) => {
+                    _ = this.update(cx, |this, cx| this.forget_locally(cx));
+                    None
+                }
+                Err(RefreshOutcome::Unreachable) => None,
+            }
+        })
     }
 
     /// Restores a session saved by a previous run.

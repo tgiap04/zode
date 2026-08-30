@@ -22,13 +22,26 @@ cd "$(dirname "$0")/.."
 # repo therefore *can* reach telemetry, so asserting otherwise would only mean
 # deleting the assertion the first time someone ran it.
 #
-# What can still be held is the part that matters: the crate that holds the
-# tokens and makes the requests cannot reach telemetry at all, and the UI crate
-# does not name it in its own source. The first is a graph fact; the second is
+# `zode_sync` joins `zode_account` under the graph rule for the same reason it
+# was written as a separate crate: it holds the encryption key, and a crate
+# that can reach telemetry is a crate that could one day be asked to report on
+# what it just decrypted.
+#
+# What can still be held is the part that matters: the crates that hold the
+# tokens and the key cannot reach telemetry at all, and the UI crate does not
+# name it in its own source. The first is a graph fact; the second is
 # a grep, and weaker — but a weaker true guard beats a strong false one.
-GRAPH_ISOLATED=(zode_account)
+GRAPH_ISOLATED=(zode_account zode_sync)
 SOURCE_CLEAN=(zode_account_ui)
 FORBIDDEN=(telemetry telemetry_events)
+
+# Decision D7: sync runs on the machine with the UI, and only there.
+# `remote_server` executes on a different machine, so letting these crates
+# reach it would give the encryption key a route off the user's own hardware --
+# the one thing the whole design exists to prevent. Asserted the same way, and
+# for the same reason, as the telemetry rule above.
+LOCAL_ONLY=(zode_account zode_sync)
+FORBIDDEN_REMOTE=(remote remote_server remote_connection)
 
 status=0
 
@@ -88,6 +101,17 @@ for crate in "${GRAPH_ISOLATED[@]}"; do
   done
 done
 
+for crate in "${LOCAL_ONLY[@]}"; do
+  if ! workspace_has "${crate}"; then
+    echo "skip  ${crate} -- not in the workspace yet"
+    continue
+  fi
+
+  for forbidden in "${FORBIDDEN_REMOTE[@]}"; do
+    check_unreachable "${crate}" "${forbidden}" || status=1
+  done
+done
+
 for crate in "${SOURCE_CLEAN[@]}"; do
   if ! workspace_has "${crate}"; then
     echo "skip  ${crate} — not in the workspace yet"
@@ -113,8 +137,9 @@ done
 
 if [[ ${status} -ne 0 ]]; then
   echo
-  echo "The account crates must not be able to reach telemetry."
-  echo "See crates/zode_account/src/zode_account.rs for why."
+  echo "The account crates must not reach telemetry, and must not reach the"
+  echo "remote-server crates (decision D7 -- sync is local-only)."
+  echo "See crates/zode_account/src/zode_account.rs and crates/zode_sync/src/zode_sync.rs."
 fi
 
 exit ${status}
