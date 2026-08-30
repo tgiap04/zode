@@ -33,6 +33,10 @@ http_client.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Only for the machine's own name, sent so the account's device list can say
+# which laptop is which. Chosen over shelling out to `hostname` because the
+# repo forbids `std::process::Command` on the poll path.
+sysinfo.workspace = true
 util.workspace = true
 zed_credentials_provider.workspace = true
 zed_env_vars.workspace = true

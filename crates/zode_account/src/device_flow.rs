@@ -188,12 +188,57 @@ pub async fn revoke(http_client: &Arc<dyn HttpClient>, api_url: &str, refresh_to
     }
 }
 
+/// How this machine names itself in the account's device list.
+///
+/// Read from the OS rather than asked for: the sign-in flow is already the
+/// longest path in the feature, and the machine knows what it is called. The
+/// user can rename it afterwards on the web, where the cost of a text field is
+/// nothing.
+///
+/// `sysinfo` rather than shelling out to `hostname`: the repo forbids
+/// `std::process::Command` on the grounds that it blocks the calling thread
+/// for an unknown duration, and this runs on the poll path where a stall would
+/// be felt directly.
+///
+/// Capped to match the server's own limit, so an unusually long hostname is
+/// trimmed here rather than rejected there.
+fn device_name() -> Option<String> {
+    const MAX_NAME: usize = 64;
+    let name = sysinfo::System::host_name()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.chars().take(MAX_NAME).collect())
+}
+
+fn platform() -> &'static str {
+    // The server accepts exactly these three; anything else would be rejected
+    // and cost the user their sign-in over a cosmetic field.
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
+
 async fn poll_once(
     http_client: &Arc<dyn HttpClient>,
     api_url: &str,
     device_code: &str,
 ) -> PollOutcome {
-    let request_body = serde_json::json!({ "device_code": device_code }).to_string();
+    // Sent on every poll rather than only the last one: the client cannot know
+    // which poll will be the one that succeeds, and the server ignores the
+    // fields until it issues a session.
+    let mut body = serde_json::json!({
+        "device_code": device_code,
+        "platform": platform(),
+    });
+    if let Some(name) = device_name() {
+        body["device_name"] = name.into();
+    }
+    let request_body = body.to_string();
 
     match post_json(
         http_client,
@@ -300,6 +345,50 @@ mod tests {
 
     /// Answers each request with the next canned response, so a test can lay
     /// out an entire polling conversation as a list.
+    /// Captures the body of every request, so a test can assert what was sent
+    /// rather than only what came back.
+    fn recording(status: u16, body: String) -> (Arc<dyn HttpClient>, Arc<Mutex<Vec<String>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let recorder = sent.clone();
+
+        let client = FakeHttpClient::create(move |request| {
+            let recorder = recorder.clone();
+            let body = body.clone();
+            async move {
+                use futures::AsyncReadExt as _;
+                let mut raw = String::new();
+                let mut request_body = request.into_body();
+                let _ = request_body.read_to_string(&mut raw).await;
+                recorder.lock().unwrap().push(raw);
+                Ok(Response::builder()
+                    .status(status)
+                    .body(body.into())
+                    .unwrap())
+            }
+        });
+
+        (client as Arc<dyn HttpClient>, sent)
+    }
+
+    /// The device list is only useful if the machine says what it is, and the
+    /// server accepts exactly three platform values — a fourth would cost the
+    /// user their sign-in over a cosmetic field.
+    #[gpui::test]
+    async fn the_poll_tells_the_server_what_machine_this_is() {
+        let (client, sent) = recording(400, r#"{"error":"authorization_pending"}"#.to_string());
+
+        let _ = poll_once(&client, "https://zodekit.site/api", "dc").await;
+
+        let bodies = sent.lock().unwrap().clone();
+        let parsed: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(parsed["device_code"], "dc");
+        assert!(
+            ["macos", "linux", "windows"].contains(&parsed["platform"].as_str().unwrap()),
+            "platform must be one the server accepts, got {:?}",
+            parsed["platform"],
+        );
+    }
+
     fn scripted(steps: Vec<(u16, String)>) -> (Arc<dyn HttpClient>, Arc<Mutex<usize>>) {
         let calls = Arc::new(Mutex::new(0));
         let counter = calls.clone();
