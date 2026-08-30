@@ -357,6 +357,12 @@ impl ConnectionModal {
                 .map(|(_, value)| value.clone())
                 .unwrap_or_default()
         });
+        // A URL that arrived already built may carry a password in its
+        // userinfo, and the import path is exactly that: one plain field, no
+        // `secret` on it, so `build_url` had nothing to blank and the password
+        // went into the settings file in the clear. Taken out here rather than
+        // at the import path alone, so no future form can reintroduce it.
+        let (url, url_password) = database::protocol::split_password(&url);
 
         // A URL pasted into the import path arrived under a stand-in engine
         // carrying no driver at all (see `imported_entry`), and it was saved
@@ -380,10 +386,14 @@ impl ConnectionModal {
             name,
             driver,
             url,
+            // A field marked secret wins: it is what the person typed into
+            // this form, while the one in the URL may be left over from
+            // whatever they pasted.
             secret: values
                 .iter()
                 .find(|(field, value)| field.secret && !value.is_empty())
-                .map(|(_, value)| value.clone()),
+                .map(|(_, value)| value.clone())
+                .or(url_password),
         })
     }
 
