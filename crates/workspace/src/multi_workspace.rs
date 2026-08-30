@@ -812,10 +812,16 @@ impl MultiWorkspace {
             return;
         }
 
-        // The Project already emitted WorktreePathsChanged which the
-        // sidebar handles for thread migration.
         self.rekey_project_group(old_key, &new_key, cx);
         self.serialize(cx);
+        // Announced for the same reason `restore_project_groups` is: the rail
+        // is drawn from a list the sidebar rebuilds only on a
+        // `MultiWorkspaceEvent`, so a re-key that merely notified left it
+        // labelling the project by the paths it no longer has. The comment
+        // that used to stand here pointed at a `WorktreePathsChanged`
+        // subscription the sidebar carried for thread migration -- threads,
+        // and that subscription, are gone.
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
         cx.notify();
     }
 
@@ -984,10 +990,20 @@ impl MultiWorkspace {
         workspace.read(cx).project_group_key(cx)
     }
 
+    /// Replays a previous session's rail into this window.
+    ///
+    /// Announced, not just written. The sidebar rebuilds the list it draws
+    /// from only when a `MultiWorkspaceEvent` arrives (`update_entries`), and
+    /// its first build runs while the window is still being constructed --
+    /// before this async restore lands. Mutating the list silently therefore
+    /// left the rail painting the one project `derived_project_groups`
+    /// synthesizes for the active workspace, so a window reopened with two
+    /// projects came back showing only the first, while the record on disk
+    /// still held both.
     pub fn restore_project_groups(
         &mut self,
         groups: Vec<SerializedProjectGroupState>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let mut restored: Vec<ProjectGroupState> = Vec::new();
         for SerializedProjectGroupState {
@@ -1017,6 +1033,8 @@ impl MultiWorkspace {
             }
         }
         self.project_groups = restored;
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+        cx.notify();
     }
 
     /// Asks before taking a project off this window.
