@@ -848,6 +848,13 @@ pub mod floating_pane {
         [
             /// Opens the floating window over the editor, or puts it away.
             ToggleFloatingPane,
+            /// Closes the floating window, ending its terminals and threads.
+            ///
+            /// Told apart from `ToggleFloatingPane` by what survives it, which
+            /// is the whole difference between the two buttons on its title
+            /// bar: minimising hides the window and leaves everything running,
+            /// this ends it. Asks first whenever there is anything to lose.
+            CloseFloatingPane,
             /// Opens a terminal as a tab in the floating window.
             NewTerminal,
             /// Opens an unsaved markdown note as a tab in the floating window.

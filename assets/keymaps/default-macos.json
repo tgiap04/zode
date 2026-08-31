@@ -544,6 +544,8 @@
       "cmd-r": "workspace::ToggleRightDock",
       "cmd-j": "workspace::ToggleBottomDock",
       "cmd-alt-j": "multi_workspace::ToggleWorkspaceSidebar",
+      "alt-`": "floating_pane::ToggleFloatingPane",
+      "alt-~": "floating_pane::CloseFloatingPane",
       "cmd-alt-;": "multi_workspace::FocusWorkspaceSidebar",
       "alt-cmd-y": "workspace::ToggleAllDocks",
       // For 0px parameter, uses UI font size value.
@@ -1293,7 +1295,7 @@
       "cmd--": "image_viewer::ZoomOut",
       "cmd-0": "image_viewer::ResetZoom",
       "cmd-1": "image_viewer::ZoomToActualSize",
-      "cmd-shift-0": "image_viewer::FitToView",
+      "cmd-)": "image_viewer::FitToView",
     },
   },
   {

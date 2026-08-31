@@ -289,7 +289,11 @@ impl FloatingPane {
                         IconButton::new("floating-pane-close", IconName::Close)
                             .icon_size(IconSize::Small)
                             .tooltip(|_window, cx| {
-                                Tooltip::simple("Close \u{2014} ends its terminals and threads", cx)
+                                Tooltip::for_action(
+                                    "Close \u{2014} ends its terminals and threads",
+                                    &zed_actions::floating_pane::CloseFloatingPane,
+                                    cx,
+                                )
                             })
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.confirm_shut_down(window, cx)
@@ -440,7 +444,7 @@ impl FloatingPane {
     /// Asked because it is not undoable: a shell with a half-finished command
     /// and an agent mid-answer both die, and the button that does it sits one
     /// pixel from the one that does not.
-    fn confirm_shut_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_shut_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Nothing running is nothing to lose, and a dialog over an empty window
         // is a dialog that teaches people to dismiss dialogs.
         if self.is_empty(cx) {

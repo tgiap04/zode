@@ -4677,6 +4677,101 @@ mod tests {
         });
     }
 
+    /// Both of the floating window's verbs must be reachable from the keyboard
+    /// on every platform we ship a keymap for.
+    ///
+    /// Its launcher sits in the bottom corner and builds its tooltip with
+    /// `Tooltip::for_action`, which prints a keystroke only when one is bound.
+    /// None was, so the tooltip showed nothing and the only way in was the
+    /// mouse -- even though the toggle had been an action from the start
+    /// precisely so a binding could reach it. This pins the binding rather
+    /// than the tooltip: the tooltip needs no maintenance once a binding
+    /// exists, and the binding is the half a keymap edit can quietly drop.
+    #[gpui::test]
+    fn test_the_floating_window_is_reachable_from_the_keyboard(cx: &mut TestAppContext) {
+        let _app_state = init_keymap_test(cx);
+
+        cx.update(|cx| {
+            let wanted = [
+                zed_actions::floating_pane::ToggleFloatingPane.name(),
+                zed_actions::floating_pane::CloseFloatingPane.name(),
+            ];
+            for path in [
+                "keymaps/default-macos.json",
+                "keymaps/default-linux.json",
+                "keymaps/default-windows.json",
+            ] {
+                let bindings = KeymapFile::load_asset(path, None, cx)
+                    .unwrap_or_else(|error| panic!("bundled keymap {path}: {error}"));
+                for action in wanted {
+                    assert!(
+                        bindings
+                            .iter()
+                            .any(|binding| binding.action().name() == action),
+                        "{path} binds no key to {action}, so on that platform the \
+                         floating window is mouse-only and its button's tooltip \
+                         has no keystroke to show"
+                    );
+                }
+            }
+        });
+    }
+
+    /// On macOS and Linux, `shift-` on anything but a letter is a binding that
+    /// can never fire.
+    ///
+    /// Both platforms normalise the *event* and leave the *binding* alone. The
+    /// macOS event path clears `shift` and swaps in the shifted character for
+    /// any key that is not plain ASCII lowercase (`gpui_macos/src/events.rs`,
+    /// the `else if shift` arm); Linux does the same and says why in its own
+    /// comment -- "we only include the shift for upper-case letters by
+    /// convention, so don't include for numbers and symbols"
+    /// (`gpui_linux/src/linux/platform.rs`). The binding side is
+    /// `KeybindingKeystroke::from_keystroke`, which changes nothing. So
+    /// ``alt-shift-` `` parses, loads, and passes every other test here -- and
+    /// is dead, because the event it waits for arrives as `alt-~`. That is
+    /// exactly how this window's close shortcut shipped broken once already.
+    ///
+    /// Windows is exempt: it normalises the binding too
+    /// (`gpui_windows/src/keyboard.rs`), which is why its keymap can write
+    /// ``ctrl-shift-` `` and have it work.
+    ///
+    /// This first ran against three bindings that were already here --
+    /// `cmd-shift-0` and `ctrl-shift-0` for `image_viewer::FitToView`, and
+    /// `ctrl-shift-5` for `pane::SplitRight` -- all dead the same way, and all
+    /// now written as the character shift produces. The keymaps are QWERTY by
+    /// convention and `use_key_equivalents` translates them for other layouts,
+    /// which is what makes `cmd-)` the right spelling rather than a US-only
+    /// guess -- and it is the spelling the image-viewer block was already using
+    /// two lines above the broken one, in `cmd-+` beside `cmd-=`.
+    #[gpui::test]
+    fn test_no_shifted_symbol_binding_is_dead_on_arrival(cx: &mut TestAppContext) {
+        let _app_state = init_keymap_test(cx);
+
+        cx.update(|cx| {
+            for path in ["keymaps/default-macos.json", "keymaps/default-linux.json"] {
+                let bindings = KeymapFile::load_asset(path, None, cx)
+                    .unwrap_or_else(|error| panic!("bundled keymap {path}: {error}"));
+                for binding in &bindings {
+                    for keystroke in binding.keystrokes() {
+                        let key = keystroke.key();
+                        let symbol = key.chars().count() == 1
+                            && !key.chars().all(|c: char| c.is_ascii_alphabetic());
+                        assert!(
+                            !(keystroke.modifiers().shift && symbol),
+                            "{path} binds `{}` to {}, but this platform reports that \
+                             keystroke with shift already folded into the character -- \
+                             write the shifted character instead, the way `ctrl-alt-_` \
+                             and `ctrl-alt-+` already do",
+                            keystroke,
+                            binding.action().name(),
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     #[gpui::test]
     async fn test_base_keymap(cx: &mut gpui::TestAppContext) {
         let executor = cx.executor();

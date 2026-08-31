@@ -493,6 +493,8 @@
       "ctrl-b": "workspace::ToggleLeftDock",
       "ctrl-j": "workspace::ToggleBottomDock",
       "ctrl-alt-j": "multi_workspace::ToggleWorkspaceSidebar",
+      "alt-`": "floating_pane::ToggleFloatingPane",
+      "alt-~": "floating_pane::CloseFloatingPane",
       "ctrl-alt-;": "multi_workspace::FocusWorkspaceSidebar",
       "ctrl-alt-y": "workspace::ToggleAllDocks",
       "ctrl-alt-0": "workspace::ResetActiveDockSize",
@@ -1017,7 +1019,7 @@
       "ctrl-shift-r": "terminal::RerunTask",
       "ctrl-alt-r": "terminal::RerunTask",
       "alt-t": "terminal::RerunTask",
-      "ctrl-shift-5": "pane::SplitRight"
+      "ctrl-%": "pane::SplitRight"
     },
   },
   {
@@ -1268,7 +1270,7 @@
       "ctrl--": "image_viewer::ZoomOut",
       "ctrl-0": "image_viewer::ResetZoom",
       "ctrl-1": "image_viewer::ZoomToActualSize",
-      "ctrl-shift-0": "image_viewer::FitToView",
+      "ctrl-)": "image_viewer::FitToView",
     },
   },
   {
