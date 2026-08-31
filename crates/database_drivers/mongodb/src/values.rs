@@ -47,14 +47,9 @@ pub fn cell(value: &Bson) -> Cell {
         // An ObjectId is the identity of the document, and it is what someone
         // copies out to go and find it again -- so it crosses as its own hex
         // text rather than as the `{"$oid": ...}` wrapper.
-        Bson::ObjectId(id) => Cell::Text {
-            value: id.to_hex(),
-        },
+        Bson::ObjectId(id) => Cell::Text { value: id.to_hex() },
         Bson::Document(_) | Bson::Array(_) => Cell::Json {
-            value: value
-                .clone()
-                .into_relaxed_extjson()
-                .to_string(),
+            value: value.clone().into_relaxed_extjson().to_string(),
         },
         // Everything left is rare and has no shorter honest rendering than the
         // engine's own extended JSON: regexes, code, min/max keys.

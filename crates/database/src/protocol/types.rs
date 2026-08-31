@@ -444,9 +444,8 @@ mod connection_form_tests {
     /// nothing, because nothing was marked as a secret to put there.
     #[test]
     fn a_pasted_url_gives_up_its_password() {
-        let (url, password) = split_password(
-            "mongodb://tgiap:s3cret@db.example:27017/app?authSource=admin",
-        );
+        let (url, password) =
+            split_password("mongodb://tgiap:s3cret@db.example:27017/app?authSource=admin");
         assert_eq!(url, "mongodb://tgiap@db.example:27017/app?authSource=admin");
         assert_eq!(password.as_deref(), Some("s3cret"));
         assert!(!url.contains("s3cret"), "{url}");

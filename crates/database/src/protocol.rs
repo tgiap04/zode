@@ -245,7 +245,9 @@ mod tests {
 
     impl std::error::Error for Layer {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.1.as_deref().map(|layer| layer as &dyn std::error::Error)
+            self.1
+                .as_deref()
+                .map(|layer| layer as &dyn std::error::Error)
         }
     }
 
@@ -257,7 +259,10 @@ mod tests {
             "error connecting to server",
             Some(Box::new(Layer(
                 "tcp connect error",
-                Some(Box::new(Layer("Network is unreachable (os error 51)", None))),
+                Some(Box::new(Layer(
+                    "Network is unreachable (os error 51)",
+                    None,
+                ))),
             ))),
         );
         assert_eq!(

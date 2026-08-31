@@ -58,7 +58,11 @@ pub const SAMPLE_SIZE: i64 = 50;
 /// has none, so this is an inference and is labelled as one: `nullable` is true
 /// for every field that did not appear in every sampled document, which is the
 /// honest reading of "this field is sometimes absent".
-pub fn fields(client: &Client, database: &str, collection: &str) -> Result<Vec<ColumnDef>, ResponseError> {
+pub fn fields(
+    client: &Client,
+    database: &str,
+    collection: &str,
+) -> Result<Vec<ColumnDef>, ResponseError> {
     let sample: Vec<Document> = client
         .database(database)
         .collection::<Document>(collection)

@@ -420,7 +420,8 @@ impl ConnectionModal {
             .get(&filled.driver)
             .cloned()
         else {
-            self.error = Some(format!("No driver called `{}` is registered.", filled.driver).into());
+            self.error =
+                Some(format!("No driver called `{}` is registered.", filled.driver).into());
             cx.notify();
             return;
         };

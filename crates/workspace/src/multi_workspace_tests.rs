@@ -2487,8 +2487,10 @@ async fn a_restored_group_still_carries_the_windows_own_workspace(cx: &mut TestA
 async fn test_outgoing_workspace_is_retained_when_retention_is_on(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
-    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" })).await;
-    fs.insert_tree(path!("/root_b"), json!({ "b.txt": "" })).await;
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/root_b"), json!({ "b.txt": "" }))
+        .await;
     let project_a = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
     let project_b = Project::test(fs, [path!("/root_b").as_ref()], cx).await;
 
@@ -2527,8 +2529,10 @@ async fn test_outgoing_workspace_is_retained_when_retention_is_on(cx: &mut TestA
 async fn test_outgoing_workspace_is_dropped_when_retention_is_off(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
-    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" })).await;
-    fs.insert_tree(path!("/root_b"), json!({ "b.txt": "" })).await;
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/root_b"), json!({ "b.txt": "" }))
+        .await;
     let project_a = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
     let project_b = Project::test(fs, [path!("/root_b").as_ref()], cx).await;
 

@@ -42,7 +42,12 @@ impl std::fmt::Display for DriverError {
         // everything it knows. Drivers fall back to the engine's own words for
         // `message` whenever there is no shorter line to give, so the two being
         // equal is ordinary rather than a driver bug to fix at each call site.
-        if let Some(detail) = self.0.detail.as_deref().filter(|detail| *detail != self.0.message) {
+        if let Some(detail) = self
+            .0
+            .detail
+            .as_deref()
+            .filter(|detail| *detail != self.0.message)
+        {
             write!(f, " ({detail})")?;
         }
         Ok(())

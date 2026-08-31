@@ -1546,11 +1546,7 @@ mod tests {
 
         agent_view.update_in(cx, |view, window, cx| {
             // Exit code 1: the raw wait status puts the code in the high byte.
-            view.watch_for_exit(
-                Task::ready(Some(ExitStatus::from_raw(1 << 8))),
-                window,
-                cx,
-            );
+            view.watch_for_exit(Task::ready(Some(ExitStatus::from_raw(1 << 8))), window, cx);
         });
         cx.run_until_parked();
 

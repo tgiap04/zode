@@ -415,9 +415,15 @@ mod url_scheme_tests {
             driver_for_url("mongodb://user@host:27017/app?authSource=admin"),
             Some("mongodb")
         );
-        assert_eq!(driver_for_url("mongodb+srv://user@cluster/app"), Some("mongodb"));
+        assert_eq!(
+            driver_for_url("mongodb+srv://user@cluster/app"),
+            Some("mongodb")
+        );
         assert_eq!(driver_for_url("postgres://user@host/app"), Some("postgres"));
-        assert_eq!(driver_for_url("postgresql://user@host/app"), Some("postgres"));
+        assert_eq!(
+            driver_for_url("postgresql://user@host/app"),
+            Some("postgres")
+        );
         assert_eq!(driver_for_url("mysql://user@host/app"), Some("mysql"));
     }
 

@@ -83,8 +83,9 @@ pub fn parse(statement: &str) -> Result<Command, ResponseError> {
         )
         .with_detail(database::protocol::error_chain(&error))
     })?;
-    let command: Document = mongodb::bson::to_document(&value)
-        .map_err(|error| refused("that statement is not a command document").with_detail(error.to_string()))?;
+    let command: Document = mongodb::bson::to_document(&value).map_err(|error| {
+        refused("that statement is not a command document").with_detail(error.to_string())
+    })?;
 
     let database = match command.get("$db") {
         None | Some(Bson::Null) => None,
@@ -152,8 +153,9 @@ mod tests {
 
     #[test]
     fn a_find_carries_its_filter_and_sort() {
-        let command = parse(r#"{"find": "users", "filter": {"active": true}, "sort": {"name": 1}}"#)
-            .expect("a well-formed find");
+        let command =
+            parse(r#"{"find": "users", "filter": {"active": true}, "sort": {"name": 1}}"#)
+                .expect("a well-formed find");
         assert_eq!(
             command,
             Command {
@@ -174,7 +176,8 @@ mod tests {
 
     #[test]
     fn a_find_without_a_filter_reads_everything() {
-        let command = parse(r#"{"find": "users"}"#).expect("a bare find is a whole-collection read");
+        let command =
+            parse(r#"{"find": "users"}"#).expect("a bare find is a whole-collection read");
         assert_eq!(
             command,
             Command {
