@@ -456,6 +456,31 @@ mod geometry {
             assert!(bounds.origin.y >= px(0.));
         });
     }
+
+    /// A resized editor window still reaches the layer's measurement.
+    ///
+    /// The measurement is skipped on the frames that report the size already
+    /// held, which is nearly all of them. This pins the frames that do not: a
+    /// guard that also swallowed a real change would leave the window laying
+    /// itself out inside a container that no longer exists, and the only symptom
+    /// would be a window stranded off the edge of a shrunken editor.
+    #[gpui::test]
+    async fn a_resized_container_still_reaches_the_window(cx: &mut TestAppContext) {
+        let (window, cx) = a_painted_window(cx).await;
+        let settled = window
+            .read_with(cx, |window, _| window.last_container)
+            .expect("the first frame measures the layer");
+
+        let resized = size(settled.width - px(240.), settled.height - px(160.));
+        cx.simulate_resize(resized);
+        cx.run_until_parked();
+
+        assert_eq!(
+            window.read_with(cx, |window, _| window.last_container),
+            Some(resized),
+            "a container that actually changed must still be recorded"
+        );
+    }
 }
 
 mod opening {

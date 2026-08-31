@@ -31,6 +31,7 @@ members = [
     "crates/dap",
     "crates/dap_adapters",
     "crates/database",
+    "crates/database_drivers/mongodb",
     "crates/database_drivers/mysql",
     "crates/database_drivers/postgres",
     "crates/database_drivers/sqlite",
@@ -555,6 +556,12 @@ libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 # them. The sync client is deliberate: the driver's serve loop is threads, and
 # `Client::cancel_token()` is what makes `cancel` reach a running query.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls"] }
+# `sync` for the blocking API every other driver here is written against, and
+# `rustls-tls-aws-lc` rather than the default `rustls-tls` (which asks for
+# `ring`): cargo unifies rustls features across one build, and the PostgreSQL
+# driver already names `aws-lc-rs` outright to stop rustls inferring a provider
+# from two enabled backends and panicking at the first handshake.
+mongodb = { version = "3.8", default-features = false, features = ["sync", "rustls-tls-aws-lc", "dns-resolver", "compat-3-0-0"] }
 postgres = "0.19"
 tokio-postgres-rustls = "0.14"
 

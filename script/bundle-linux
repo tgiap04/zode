@@ -73,13 +73,13 @@ if [[ "$(uname -m)" == "aarch64" ]]; then
 else
     export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
 fi
-database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql)
+database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql zode-db-mongodb)
 
 # The database drivers are sidecars the app starts by name from beside its own
 # executable, so they are built and copied like `cli` -- nothing depends on them
 # at link time, and without these they would not be in the package at all.
 cargo build --release --target "${target_triple}" --package zode --package cli \
-    --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql
+    --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb
 
 # Upload debug info to sentry.io
 if ! command -v sentry-cli >/dev/null 2>&1; then

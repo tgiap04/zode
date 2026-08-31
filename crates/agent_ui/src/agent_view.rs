@@ -7,11 +7,13 @@ use gpui::{
 };
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
+use terminal::Terminal;
 use terminal_view::TerminalView;
 use ui::prelude::*;
 use workspace::{Pane, Workspace};
 use zed_actions::agent::AgentViewMode;
 
+use std::process::ExitStatus;
 use util::ResultExt as _;
 
 /// The rail draws hard-coded buttons for the built-in agents, and the tab has to
@@ -46,6 +48,16 @@ pub struct AgentView {
     focus_handle: FocusHandle,
     self_handle: WeakEntity<Self>,
     _startup: Option<Task<()>>,
+    /// Watching the agent's CLI for the moment it ends, so the tab can hand back
+    /// a shell.
+    ///
+    /// A field rather than detached: a tab closed while the agent is still
+    /// running has to stop watching, or it builds a shell for a view that is
+    /// already gone. Reused afterwards for the build itself, which the completed
+    /// watch no longer needs.
+    _exit_watch: Option<Task<()>>,
+    /// Carries the shell's own `CloseItem` outward. See [`AgentView::hand_back_a_shell`].
+    _shell_close: Option<Subscription>,
 }
 
 enum State {
@@ -67,10 +79,18 @@ enum State {
     /// feature exists to prevent.
     SessionGone,
     Failed(SharedString),
+    /// The agent's CLI ended and the tab handed back a shell in its folder.
+    ///
+    /// Still this agent's tab: the name, the icon and the session id are all
+    /// untouched, so the existing restart puts the agent back on the same
+    /// conversation. The only thing that changed is what the pty holds.
+    Shell(Entity<TerminalView>),
 }
 
 pub enum AgentViewEvent {
     UpdateTab,
+    /// The shell this tab handed back has exited, so the tab goes with it.
+    Close,
 }
 
 impl AgentView {
@@ -365,6 +385,8 @@ impl AgentView {
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
             _startup: None,
+            _exit_watch: None,
+            _shell_close: None,
         };
         view.start(window, cx);
         view
@@ -449,6 +471,8 @@ impl AgentView {
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
             _startup: None,
+            _exit_watch: None,
+            _shell_close: None,
         }
     }
 
@@ -467,9 +491,15 @@ impl AgentView {
     pub fn terminal(&self) -> Option<&Entity<TerminalView>> {
         match &self.state {
             State::Terminal(view) => Some(view),
-            State::Starting | State::MissingBinary(_) | State::SessionGone | State::Failed(_) => {
-                None
-            }
+            // Deliberately not the shell. This answers "what is the agent
+            // running in", and a shell handed back after the agent ended is not
+            // that -- `keep_awake` reading its absent task status as "working"
+            // would hold the display awake for a bare prompt.
+            State::Shell(_)
+            | State::Starting
+            | State::MissingBinary(_)
+            | State::SessionGone
+            | State::Failed(_) => None,
         }
     }
 
@@ -585,6 +615,11 @@ impl AgentView {
     /// starting an agent — which is the only way to assert the release, since
     /// `start` would spawn a real one.
     fn end_previous_mode(&mut self, cx: &mut Context<Self>) {
+        // Dropped with the mode it was watching. A watch left running would be
+        // waiting on a terminal nobody can see any more, and `start` is about to
+        // install the one that replaces it.
+        self._exit_watch = None;
+        self._shell_close = None;
         let previous = std::mem::replace(&mut self.state, State::Starting);
         Self::warn_if_retained(&previous, cx);
         drop(previous);
@@ -624,6 +659,7 @@ impl AgentView {
 
         match previous {
             State::Terminal(view) => watch("terminal", view, cx),
+            State::Shell(view) => watch("shell", view, cx),
             State::Starting | State::MissingBinary(_) | State::SessionGone | State::Failed(_) => {}
         }
     }
@@ -639,6 +675,94 @@ impl AgentView {
                 crate::missing_binary::open_install_terminal(workspace, command, window, cx);
             })
             .log_err();
+    }
+
+    /// Waits for the agent's CLI to end, and hands the tab back to a shell when
+    /// the way it ended says the person meant to leave it.
+    ///
+    /// One task from the wait through to the new terminal, deliberately. Storing
+    /// the second half in this same field would mean dropping the handle of the
+    /// task that is running at that moment, and a reader should not have to work
+    /// out whether that is survivable.
+    fn watch_for_exit(
+        &mut self,
+        completed: Task<Option<ExitStatus>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._exit_watch = Some(cx.spawn_in(window, async move |this, cx| {
+            if !ends_at_a_prompt(completed.await) {
+                return;
+            }
+
+            let Ok(building) = this.update(cx, |this, cx| this.build_a_shell(cx)) else {
+                return;
+            };
+            let terminal = match building.await {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    log::error!("could not open a shell after the agent ended: {error}");
+                    return;
+                }
+            };
+
+            this.update_in(cx, |this, window, cx| {
+                // Asked before the swap, because after it the handle belongs to
+                // the shell and the answer is always no. If the pty that just
+                // died held the keyboard, the shell replacing it has to take it:
+                // otherwise a prompt appears, the person types at it, and the
+                // keystrokes go to a view on its way out.
+                let had_focus = this.focus_handle(cx).contains_focused(window, cx);
+                let view = cx.new(|cx| {
+                    TerminalView::new(
+                        terminal,
+                        this.workspace.clone(),
+                        None,
+                        this.project.downgrade(),
+                        window,
+                        cx,
+                    )
+                });
+                // Typing `exit` here has to close the tab, the way it closes a
+                // terminal tab. `TerminalView` raises `CloseItem` for its own
+                // shell, but this tab is the item -- so the event has to be
+                // carried the rest of the way out.
+                this._shell_close = Some(cx.subscribe(
+                    &view,
+                    |_this, _view, event: &workspace::item::ItemEvent, cx| {
+                        if matches!(event, workspace::item::ItemEvent::CloseItem) {
+                            cx.emit(AgentViewEvent::Close);
+                        }
+                    },
+                ));
+                this.state = State::Shell(view);
+                if had_focus {
+                    let handle = this.focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Starts an ordinary shell in the folder the agent was working in.
+    ///
+    /// A new pty rather than the agent's: the agent's is dead, and a dead one
+    /// cannot be reopened. That is the whole reason a failed agent keeps its
+    /// terminal instead -- its output is on a surface this would replace.
+    ///
+    /// The directory is read off the dying terminal rather than recomputed from
+    /// the project: a resumed session runs where it ran before, which is not
+    /// necessarily where this window happens to be pointed.
+    fn build_a_shell(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<Entity<Terminal>>> {
+        let working_directory = match &self.state {
+            State::Terminal(view) => view.read(cx).terminal().read(cx).working_directory(),
+            _ => None,
+        };
+        self.project.update(cx, |project, cx| {
+            project.create_terminal_shell(working_directory, cx)
+        })
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -717,6 +841,10 @@ impl AgentView {
             this.update_in(cx, |this, window, cx| {
                 match terminal {
                     Ok(terminal) => {
+                        // Taken before the handle is given away, and from the
+                        // `Terminal` rather than the view: this is the only
+                        // place both are in hand.
+                        let completed = terminal.read(cx).wait_for_completed_task(cx);
                         let view = cx.new(|cx| {
                             TerminalView::new(
                                 terminal,
@@ -728,6 +856,7 @@ impl AgentView {
                             )
                         });
                         this.state = State::Terminal(view);
+                        this.watch_for_exit(completed, window, cx);
                     }
                     Err(error) => this.state = State::Failed(SharedString::from(error.to_string())),
                 }
@@ -736,6 +865,38 @@ impl AgentView {
             .ok();
         }));
     }
+}
+
+/// Whether an agent that ended this way should leave a shell behind.
+///
+/// The three yes-cases are all "the person ended it": killed by a signal, which
+/// is what a bare Ctrl+C is; a clean zero, which is what a CLI that catches the
+/// interrupt and tidies up reports; and 130, the conventional 128 + SIGINT for
+/// one that reports being interrupted rather than merely exiting.
+///
+/// Only the first was observed -- a child killed by SIGINT yields raw wait
+/// status 2, `WIFSIGNALED`, so `code()` is `None`. Which of the other two a
+/// given agent's CLI picks cannot be found out without driving its interface by
+/// hand, so both are covered rather than guessed between; the cost of guessing
+/// wrong is exactly the fault this exists to fix.
+///
+/// Anything else is a failure, and its terminal is left alone. A shell built
+/// over it would take a stack trace off the screen at the moment it is worth
+/// most.
+///
+/// `None` is no status at all -- the channel closed without one, which happens
+/// when the terminal is dropped rather than when it ends. Nothing to hand back.
+fn ends_at_a_prompt(status: Option<ExitStatus>) -> bool {
+    status.is_some_and(|status| user_ended_it(status.code()))
+}
+
+/// The rule itself, on the exit code alone.
+///
+/// Split out because `ExitStatus` has no portable constructor, and a rule this
+/// load-bearing should be provable on every platform it runs on rather than only
+/// on the one whose raw wait status a test can forge.
+fn user_ended_it(code: Option<i32>) -> bool {
+    matches!(code, None | Some(0) | Some(130))
 }
 
 fn display_name(agent: &AgentId) -> SharedString {
@@ -997,7 +1158,7 @@ fn agent_task(
 impl Focusable for AgentView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match &self.state {
-            State::Terminal(terminal) => terminal.focus_handle(cx),
+            State::Terminal(terminal) | State::Shell(terminal) => terminal.focus_handle(cx),
             _ => self.focus_handle.clone(),
         }
     }
@@ -1006,8 +1167,11 @@ impl Focusable for AgentView {
 impl workspace::item::Item for AgentView {
     type Event = AgentViewEvent;
 
-    fn to_item_events(_event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
-        f(workspace::item::ItemEvent::UpdateTab);
+    fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
+        match event {
+            AgentViewEvent::UpdateTab => f(workspace::item::ItemEvent::UpdateTab),
+            AgentViewEvent::Close => f(workspace::item::ItemEvent::CloseItem),
+        }
     }
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
@@ -1206,7 +1370,9 @@ impl Render for AgentView {
         // Built before the theme is borrowed: this needs `cx` mutably, and that
         // borrow lives to the end of the element tree below.
         let body = match &self.state {
-            State::Terminal(terminal) => terminal.clone().into_any_element(),
+            State::Terminal(terminal) | State::Shell(terminal) => {
+                terminal.clone().into_any_element()
+            }
             State::Starting => centered_message(
                 IconName::ArrowCircle,
                 format!("Starting {}…", self.display_name).into(),
@@ -1333,6 +1499,207 @@ mod tests {
     use terminal::terminal_settings::{AlternateScroll, CursorShape};
     use util::{path, paths::PathStyle, rel_path::rel_path};
     use workspace::MultiWorkspace;
+
+    /// The rule that decides whether a tab gets a prompt back.
+    ///
+    /// Pinned exhaustively because every branch is a different reported defect:
+    /// lose the signal case and Ctrl+C leaves a dead window again; lose the
+    /// failure case and a stack trace is wiped by a shell the moment it appears.
+    #[test]
+    fn only_an_ending_the_person_chose_leaves_a_prompt() {
+        // A bare Ctrl+C. Measured: a child killed by SIGINT yields raw wait
+        // status 2, `WIFSIGNALED`, so no code survives to `code()`.
+        assert!(user_ended_it(None), "a signal is the plain Ctrl+C case");
+        assert!(user_ended_it(Some(0)), "a CLI that caught the interrupt");
+        assert!(user_ended_it(Some(130)), "128 + SIGINT, reported as a code");
+
+        assert!(!user_ended_it(Some(1)), "a failure keeps its terminal");
+        assert!(!user_ended_it(Some(2)));
+        assert!(!user_ended_it(Some(127)), "command not found");
+        assert!(
+            !user_ended_it(Some(129)),
+            "128 + SIGHUP is not an interrupt, and 130 must not be read as a range"
+        );
+    }
+
+    /// No status at all is not an ending, and must not build a shell.
+    ///
+    /// This is what a dropped terminal produces -- the channel closes without a
+    /// value. Treating it as an exit would put a shell in a tab that is on its
+    /// way out.
+    #[test]
+    fn a_terminal_that_never_reported_leaves_nothing_behind() {
+        assert!(!ends_at_a_prompt(None));
+    }
+
+    /// An agent that failed keeps its terminal, so its error stays readable.
+    ///
+    /// The whole reason the tab does not simply always hand back a shell: the
+    /// new pty cannot inherit the dead one's screen, so building one over a
+    /// stack trace destroys it at the moment it is worth most.
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn a_failed_agent_keeps_its_terminal(cx: &mut TestAppContext) {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
+
+        agent_view.update_in(cx, |view, window, cx| {
+            // Exit code 1: the raw wait status puts the code in the high byte.
+            view.watch_for_exit(Task::ready(Some(ExitStatus::from_raw(1 << 8))), window, cx);
+        });
+        cx.run_until_parked();
+
+        agent_view.read_with(cx, |view, _| {
+            assert!(
+                matches!(view.state, State::Terminal(_)),
+                "a failed agent must keep the terminal holding its error"
+            );
+        });
+    }
+
+    /// A Ctrl+C leaves a working prompt where the agent was.
+    ///
+    /// The defect this closes: the tab used to stop at a dead terminal with no
+    /// prompt and no way to keep working in that folder.
+    ///
+    /// This one builds a real shell, which is the only way to prove the hand-off
+    /// produces something usable rather than merely changing a field. The pty it
+    /// starts dies with the view, by the ownership chain
+    /// `leaving_a_mode_releases_it` asserts.
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn an_interrupted_agent_hands_back_a_shell(cx: &mut TestAppContext) {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
+
+        agent_view.update_in(cx, |view, window, cx| {
+            // Raw wait status 2: killed by SIGINT, which is what Ctrl+C sends.
+            view.watch_for_exit(Task::ready(Some(ExitStatus::from_raw(2))), window, cx);
+        });
+        cx.run_until_parked();
+
+        agent_view.read_with(cx, |view, _| {
+            assert!(
+                matches!(view.state, State::Shell(_)),
+                "Ctrl+C must leave a prompt behind, not a dead terminal"
+            );
+        });
+    }
+
+    /// The shell takes the keyboard the dying terminal was holding.
+    ///
+    /// Without this the feature looks like it works and is not usable: the
+    /// prompt appears, and every keystroke goes to the view being dropped. The
+    /// focus has to be handed over with the pty.
+    #[gpui::test]
+    #[cfg(unix)]
+    async fn the_shell_inherits_the_keyboard(cx: &mut TestAppContext) {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
+
+        agent_view.update_in(cx, |view, window, cx| {
+            let handle = view.focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+
+        agent_view.update_in(cx, |view, window, cx| {
+            view.watch_for_exit(Task::ready(Some(ExitStatus::from_raw(2))), window, cx);
+        });
+        cx.run_until_parked();
+
+        agent_view.update_in(cx, |view, window, cx| {
+            assert!(
+                matches!(view.state, State::Shell(_)),
+                "the shell must have replaced the terminal for this to mean anything"
+            );
+            assert!(
+                view.focus_handle(cx).contains_focused(window, cx),
+                "the prompt is unusable if the keyboard stayed with the dead terminal"
+            );
+        });
+    }
+
+    /// An agent tab showing a terminal, with no agent process behind it.
+    ///
+    /// Display-only: what these tests drive is the exit path, and a real CLI
+    /// would be a process the test then has to be trusted to clean up.
+    ///
+    /// The tab is the window's root rather than an entity beside it. A view that
+    /// is never rendered is not in the dispatch tree, so focus placed on it does
+    /// not survive the next frame -- which is the whole subject of one of these
+    /// tests.
+    ///
+    /// Gated with the tests it serves. All three build an `ExitStatus` from a raw
+    /// wait status, which only Unix has; without the gate this is dead code on
+    /// Windows, and `script/clippy` runs with `--deny warnings`.
+    #[cfg(unix)]
+    async fn an_agent_showing_a_terminal(
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentView>, &mut gpui::VisualTestContext) {
+        init_test(cx);
+        cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/test"), json!({})).await;
+        let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+
+        let (multi_workspace, host_cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(host_cx, |multi, _| multi.workspace().clone());
+
+        // Built empty and filled below: the terminal needs a window, and this is
+        // the call that makes one.
+        let (agent_view, cx) = cx.add_window_view(|_window, cx| AgentView {
+            intent: SessionIntent::Untracked,
+            agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+            display_name: "Claude Code".into(),
+            custom_name: None,
+            rename_editor: None,
+            _rename_subscription: None,
+            mode: AgentViewMode::Terminal,
+            state: State::Starting,
+            project: project.clone(),
+            workspace: workspace.downgrade(),
+            focus_handle: cx.focus_handle(),
+            self_handle: cx.entity().downgrade(),
+            _startup: None,
+            _exit_watch: None,
+            _shell_close: None,
+        });
+
+        let terminal_view = cx.new_window_entity(|window, cx| {
+            let terminal = cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    CursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    PathStyle::local(),
+                )
+                .expect("a display-only terminal needs nothing from the system")
+                .subscribe(cx)
+            });
+            TerminalView::new(
+                terminal,
+                workspace.downgrade(),
+                None,
+                project.downgrade(),
+                window,
+                cx,
+            )
+        });
+        agent_view.update(cx, |view, cx| {
+            view.state = State::Terminal(terminal_view);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        (agent_view, cx)
+    }
 
     /// The resume command reaches the pty, and an ordinary open still does not.
     ///
@@ -1710,6 +2077,8 @@ mod tests {
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
             _startup: None,
+            _exit_watch: None,
+            _shell_close: None,
         });
 
         let left_behind = terminal_view.downgrade();

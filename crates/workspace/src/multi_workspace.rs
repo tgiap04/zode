@@ -812,10 +812,16 @@ impl MultiWorkspace {
             return;
         }
 
-        // The Project already emitted WorktreePathsChanged which the
-        // sidebar handles for thread migration.
         self.rekey_project_group(old_key, &new_key, cx);
         self.serialize(cx);
+        // Announced for the same reason `restore_project_groups` is: the rail
+        // is drawn from a list the sidebar rebuilds only on a
+        // `MultiWorkspaceEvent`, so a re-key that merely notified left it
+        // labelling the project by the paths it no longer has. The comment
+        // that used to stand here pointed at a `WorktreePathsChanged`
+        // subscription the sidebar carried for thread migration -- threads,
+        // and that subscription, are gone.
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
         cx.notify();
     }
 
@@ -984,10 +990,20 @@ impl MultiWorkspace {
         workspace.read(cx).project_group_key(cx)
     }
 
+    /// Replays a previous session's rail into this window.
+    ///
+    /// Announced, not just written. The sidebar rebuilds the list it draws
+    /// from only when a `MultiWorkspaceEvent` arrives (`update_entries`), and
+    /// its first build runs while the window is still being constructed --
+    /// before this async restore lands. Mutating the list silently therefore
+    /// left the rail painting the one project `derived_project_groups`
+    /// synthesizes for the active workspace, so a window reopened with two
+    /// projects came back showing only the first, while the record on disk
+    /// still held both.
     pub fn restore_project_groups(
         &mut self,
         groups: Vec<SerializedProjectGroupState>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let mut restored: Vec<ProjectGroupState> = Vec::new();
         for SerializedProjectGroupState {
@@ -1017,6 +1033,8 @@ impl MultiWorkspace {
             }
         }
         self.project_groups = restored;
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+        cx.notify();
     }
 
     /// Asks before taking a project off this window.
@@ -2281,6 +2299,28 @@ impl MultiWorkspace {
         // actually cancel it instead of racing it.
         self.wake_project(&workspace, cx);
         self.schedule_hibernate(&old_active_workspace, cx);
+
+        // Retention is about the project that just lost focus, and this is the
+        // last moment anything can act on it: `active_workspace` is the only
+        // strong handle a window's own project ever has -- `retained_workspaces`
+        // starts empty and nothing on the open path puts it there -- and the
+        // line below overwrites it. Without this the first project was dropped
+        // the instant a second one activated, so clicking it on the rail found
+        // no workspace (`workspace_for_paths` scans `workspaces()`) and reopened
+        // it from disk: worktree scan, language servers and tabs all built
+        // again, which reads as the project restarting rather than switching
+        // back to it. That is also precisely what `retain_background_projects`
+        // promises not to happen, and it defaults to `true`.
+        //
+        // A pathless workspace is left out: an empty window is nothing to
+        // switch back to, the rail does not draw it, and keeping it alive would
+        // hold a project no surface can reach.
+        if should_retain && !old_active_was_retained {
+            let old_key = old_active_workspace.read(cx).project_group_key(cx);
+            if !old_key.path_list().paths().is_empty() {
+                self.retain_workspace(old_active_workspace.clone(), old_key, cx);
+            }
+        }
 
         self.active_workspace = workspace;
 

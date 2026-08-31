@@ -132,6 +132,20 @@ pub struct Capabilities {
     /// version -- see `PROTOCOL.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_form: Option<ConnectionForm>,
+    /// The statement that reads a whole table, with `{schema}` and `{table}`
+    /// standing for the names already quoted by
+    /// [`quote_identifier`](Self::quote_identifier).
+    ///
+    /// Absent means `SELECT * FROM {schema}.{table}`, which is what every SQL
+    /// engine here wants and what clicking a table used to produce
+    /// unconditionally. That was the last place Zode still assumed an engine
+    /// speaks SQL: a document store was handed a `SELECT` it could only refuse,
+    /// so every click on a collection was a failed query.
+    ///
+    /// An optional field with a cautious default, so it costs no protocol
+    /// version -- see `PROTOCOL.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_table_template: Option<String>,
 }
 
 /// How to ask for a connection to one engine.
@@ -209,6 +223,74 @@ impl ConnectionForm {
     }
 }
 
+/// Takes the password out of a URL, returning the URL without it and the
+/// password on its own.
+///
+/// The mirror of [`ConnectionForm::build_url`], and it exists for the same
+/// reason: a URL is written into a settings file people share, sync and back
+/// up, and a password does not belong there. `build_url` keeps a secret out of
+/// a URL it *builds*; this takes one out of a URL that arrived already built --
+/// which is what a URL pasted into the import field is, and there the password
+/// was travelling straight into settings in the clear.
+///
+/// The password is percent-decoded on the way out, because the driver is handed
+/// it as a plain string rather than parsing it out of a URL itself.
+///
+/// A string with no `://` is left alone: that is a file path, and SQLite's
+/// connection string has no userinfo to find.
+pub fn split_password(url: &str) -> (String, Option<String>) {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return (url.to_string(), None);
+    };
+    // The authority runs to the first `/`, `?` or `#`. A password may contain
+    // any of them once encoded, so the search has to stop at the authority
+    // rather than at the first one anywhere in the URL.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    // The *last* `@`: an unencoded `@` inside a password is what makes a URL
+    // ambiguous, and the one that separates userinfo from host is the last one.
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return (url.to_string(), None);
+    };
+    let Some((user, password)) = userinfo.split_once(':') else {
+        return (url.to_string(), None);
+    };
+    if password.is_empty() {
+        return (url.to_string(), None);
+    }
+    (
+        format!("{scheme}://{user}@{host}{tail}"),
+        Some(percent_decode(password)),
+    )
+}
+
+/// Undoes [`percent_encode`] for the one value that leaves a URL again.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escape = bytes[index] == b'%'
+            && index + 3 <= bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit();
+        if escape {
+            let hex = [bytes[index + 1], bytes[index + 2]];
+            // Both digits were just checked, so this cannot fail -- but it is
+            // read rather than unwrapped, because a panic here would be one
+            // inside a password.
+            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&hex).unwrap_or("zz"), 16) {
+                decoded.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 /// Percent-encodes everything outside the unreserved set.
 ///
 /// Deliberately strict rather than clever: this runs on a user name or a
@@ -240,6 +322,67 @@ impl Capabilities {
             "{quote}{}{quote}",
             identifier.replace(quote, &quote.repeat(2))
         )
+    }
+}
+
+impl Capabilities {
+    /// The statement that reads a whole table, with both names quoted this
+    /// engine's way.
+    ///
+    /// Built here rather than at the panel so that adding an engine whose
+    /// "read everything" is not a `SELECT` stays a driver-side change -- the
+    /// same bargain [`quote_identifier`](Self::quote_identifier) already makes
+    /// for the quote character.
+    pub fn read_table_statement(&self, schema: &str, table: &str) -> String {
+        let schema = self.quote_identifier(schema);
+        let table = self.quote_identifier(table);
+        match &self.read_table_template {
+            Some(template) => template
+                .replace("{schema}", &schema)
+                .replace("{table}", &table),
+            None => format!("SELECT * FROM {schema}.{table}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_table_tests {
+    use super::*;
+
+    /// What every SQL engine here gets, and what the panel used to build for
+    /// all of them regardless of what the driver could read.
+    #[test]
+    fn a_driver_that_says_nothing_gets_a_select() {
+        let capabilities = Capabilities::default();
+        assert_eq!(
+            capabilities.read_table_statement("public", "users"),
+            r#"SELECT * FROM "public"."users""#
+        );
+    }
+
+    /// The defect this closes: a document store was handed a `SELECT` it could
+    /// only refuse, so every click on a collection failed.
+    #[test]
+    fn a_driver_that_reads_no_sql_gets_its_own_statement() {
+        let capabilities = Capabilities {
+            read_table_template: Some(r#"{"find": {table}, "$db": {schema}}"#.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            capabilities.read_table_statement("app", "users"),
+            r#"{"find": "users", "$db": "app"}"#
+        );
+    }
+
+    /// A name from the tree becomes a statement here, and a table really can be
+    /// called `"; drop table users; --`.
+    #[test]
+    fn a_name_that_would_escape_its_quotes_is_still_quoted() {
+        let capabilities = Capabilities::default();
+        assert_eq!(
+            capabilities.read_table_statement("public", r#"a"b"#),
+            r#"SELECT * FROM "public"."a""b""#
+        );
     }
 }
 
@@ -292,6 +435,61 @@ mod connection_form_tests {
             other => other.into(),
         });
         assert_eq!(url, "engine://a%40b@real.example/database?p=");
+    }
+
+    /// The defect this closes. A URL pasted into the import field is one
+    /// plain field with no `secret` on it, so `build_url` had nothing to blank
+    /// and the whole string -- password included -- was written into the
+    /// settings file, which people share, sync and back up. The keychain got
+    /// nothing, because nothing was marked as a secret to put there.
+    #[test]
+    fn a_pasted_url_gives_up_its_password() {
+        let (url, password) =
+            split_password("mongodb://tgiap:s3cret@db.example:27017/app?authSource=admin");
+        assert_eq!(url, "mongodb://tgiap@db.example:27017/app?authSource=admin");
+        assert_eq!(password.as_deref(), Some("s3cret"));
+        assert!(!url.contains("s3cret"), "{url}");
+    }
+
+    /// The user has to stay: every driver connects as whoever the URL names,
+    /// and only the password travels separately.
+    #[test]
+    fn the_user_stays_in_the_url() {
+        let (url, _) = split_password("postgres://someone:pw@host:5432/app");
+        assert_eq!(url, "postgres://someone@host:5432/app");
+    }
+
+    /// The driver is handed a plain string rather than parsing it out of a URL,
+    /// so what comes out here has to be the password itself.
+    #[test]
+    fn an_encoded_password_is_decoded_on_its_way_out() {
+        let (_, password) = split_password("postgres://someone:p%40ss%20word@host/app");
+        assert_eq!(password.as_deref(), Some("p@ss word"));
+    }
+
+    /// An unencoded `@` inside a password is what makes a URL ambiguous. The
+    /// `@` that separates userinfo from host is the last one.
+    #[test]
+    fn the_host_is_found_past_an_at_sign_in_the_password() {
+        let (url, password) = split_password("mysql://someone:a@b@host:3306/app");
+        assert_eq!(url, "mysql://someone@host:3306/app");
+        assert_eq!(password.as_deref(), Some("a@b"));
+    }
+
+    /// Nothing to take, nothing changed -- including a SQLite path, which has
+    /// no userinfo to look for and must survive untouched.
+    #[test]
+    fn a_url_without_a_password_is_left_exactly_as_it_was() {
+        for url in [
+            "postgres://someone@host/app",
+            "postgres://host/app",
+            "/home/someone/my app.sqlite",
+            "mongodb://someone:@host/app",
+        ] {
+            let (out, password) = split_password(url);
+            assert_eq!(out, url, "{url} was rewritten");
+            assert_eq!(password, None, "{url} gave up a password it does not have");
+        }
     }
 
     /// A file path is not a URL, and encoding one turns every separator into

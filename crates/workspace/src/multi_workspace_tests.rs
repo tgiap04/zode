@@ -2476,3 +2476,80 @@ async fn a_restored_group_still_carries_the_windows_own_workspace(cx: &mut TestA
         );
     });
 }
+
+/// `retain_background_projects` promises a project that loses focus stays
+/// alive in the background, and it ships on by default -- but `activate` only
+/// ever retained the workspace coming *in*. A window's own project is the one
+/// nothing else retains, so activating a second project dropped it, and the
+/// rail's click handler (`workspace_for_paths` over `workspaces()`) then found
+/// nothing to switch back to and reopened the project from disk instead.
+#[gpui::test]
+async fn test_outgoing_workspace_is_retained_when_retention_is_on(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/root_b"), json!({ "b.txt": "" }))
+        .await;
+    let project_a = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let project_b = Project::test(fs, [path!("/root_b").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    // Hibernation off, so retention is the only thing under test here.
+    multi_workspace.update(cx, |_mw, cx| set_multi_project_settings(cx, true, 0));
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx);
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(
+            mw.is_workspace_retained(&workspace_a),
+            "the project that lost focus must stay retained while \
+             retain_background_projects is on"
+        );
+        let key_a = workspace_a.read(cx).project_group_key(cx);
+        assert_eq!(
+            mw.workspace_for_paths(key_a.path_list(), key_a.host().as_ref(), cx)
+                .as_ref(),
+            Some(&workspace_a),
+            "switching back must find the workspace the project already has, \
+             rather than leaving the rail to reopen it from disk"
+        );
+    });
+}
+
+/// The other half of the same rule: with retention off, the outgoing project
+/// is still detached. Turning the setting off has to keep meaning "at most one
+/// project alive per window".
+#[gpui::test]
+async fn test_outgoing_workspace_is_dropped_when_retention_is_off(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/root_b"), json!({ "b.txt": "" }))
+        .await;
+    let project_a = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let project_b = Project::test(fs, [path!("/root_b").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let workspace_a = multi_workspace.read_with(cx, |mw, _cx| mw.workspace().clone());
+    multi_workspace.update(cx, |_mw, cx| disable_background_project_retention(cx));
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx);
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(
+            !mw.is_workspace_retained(&workspace_a),
+            "retention off must still detach the project that lost focus"
+        );
+    });
+}

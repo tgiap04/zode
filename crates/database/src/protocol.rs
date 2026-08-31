@@ -95,6 +95,33 @@ pub struct ResponseError {
     pub detail: Option<String>,
 }
 
+/// Every link of an error's `source()` chain, joined into one line.
+///
+/// `to_string()` alone is not enough and the gap is not academic: a
+/// `tokio_postgres` connect failure Displays as the fixed sentence
+/// "error connecting to server" and carries the `io::Error` that actually
+/// explains it -- refused, unreachable, unresolved -- as its `source`. Reported
+/// through `to_string()`, the one fact worth having never reached the user, who
+/// saw a connection fail for no stated reason.
+///
+/// A link the line already carries is skipped, wherever it already sits. A
+/// wrapper that restates its cause is common, and an engine whose own `Display`
+/// prints its source in full (MongoDB does) would otherwise have that source
+/// appended to it a second time.
+pub fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut chain = error.to_string();
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        let text = error.to_string();
+        if !text.is_empty() && !chain.contains(&text) {
+            chain.push_str(": ");
+            chain.push_str(&text);
+        }
+        cause = error.source();
+    }
+    chain
+}
+
 impl ResponseError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -205,5 +232,67 @@ mod tests {
         let count = names.len();
         names.dedup();
         assert_eq!(count, names.len(), "two methods share a wire name");
+    }
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|layer| layer as &dyn std::error::Error)
+        }
+    }
+
+    /// The whole reason this exists: the outermost error of a connect failure
+    /// is a fixed sentence, and the one that says *why* is two links down.
+    #[test]
+    fn a_cause_two_links_down_still_reaches_the_line() {
+        let error = Layer(
+            "error connecting to server",
+            Some(Box::new(Layer(
+                "tcp connect error",
+                Some(Box::new(Layer(
+                    "Network is unreachable (os error 51)",
+                    None,
+                ))),
+            ))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "error connecting to server: tcp connect error: Network is unreachable (os error 51)"
+        );
+    }
+
+    /// A wrapper that restates its cause is common, and reads as a stutter.
+    #[test]
+    fn a_link_that_merely_repeats_its_parent_is_left_out() {
+        let error = Layer(
+            "could not reach db.example:5432",
+            Some(Box::new(Layer("could not reach db.example:5432", None))),
+        );
+        assert_eq!(error_chain(&error), "could not reach db.example:5432");
+    }
+
+    /// An engine whose own `Display` already prints its source -- MongoDB does,
+    /// in full -- would otherwise have that source appended a second time, and
+    /// the reader gets the same failure three times over in one line.
+    #[test]
+    fn a_cause_the_outer_message_already_quotes_is_not_appended_again() {
+        let error = Layer(
+            "SCRAM failure: Authentication failed., source: Authentication failed.",
+            Some(Box::new(Layer("Authentication failed.", None))),
+        );
+        assert_eq!(
+            error_chain(&error),
+            "SCRAM failure: Authentication failed., source: Authentication failed."
+        );
     }
 }

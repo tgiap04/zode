@@ -74,7 +74,7 @@ build: ## Compile the zode binary and the database drivers (PROFILE=dev, increme
 # did not.
 drivers: ## Compile the database driver sidecars beside the zode binary
 	$(CARGO) build --profile $(PROFILE) \
-		-p zode-db-sqlite -p zode-db-postgres -p zode-db-mysql
+		-p zode-db-sqlite -p zode-db-postgres -p zode-db-mysql -p zode-db-mongodb
 
 dev: ## Launch the already-built binary — never recompiles (PROJECT= opens nothing)
 	@test -x $(BIN) || { \

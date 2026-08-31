@@ -63,7 +63,7 @@ fn is_binary(kind: ColumnType) -> bool {
 
 /// MySQL's errors, sorted into the few kinds the UI reacts to differently.
 pub fn error(error: mysql::Error) -> ResponseError {
-    let detail = error.to_string();
+    let detail = database::protocol::error_chain(&error);
     let code = match &error {
         mysql::Error::MySqlError(server) => match server.code {
             // 1290 ER_OPTION_PREVENTS_STATEMENT -- what a read-only transaction

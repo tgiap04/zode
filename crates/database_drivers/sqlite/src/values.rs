@@ -79,7 +79,7 @@ fn is_json(declared_type: &str) -> bool {
 /// The read-only case is the one that matters: a user typing `delete` needs to
 /// be told the column is read-only, not that their SQL is wrong.
 pub fn error(error: rusqlite::Error) -> ResponseError {
-    let detail = error.to_string();
+    let detail = database::protocol::error_chain(&error);
     let code = match &error {
         rusqlite::Error::SqliteFailure(failure, _) => match failure.code {
             rusqlite::ErrorCode::ReadOnly => ErrorCode::ReadOnly,

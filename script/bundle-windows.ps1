@@ -34,7 +34,7 @@ $CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
 
 # Sidecars the app starts by name from beside its own executable. Nothing links
 # against them, so they are built and shipped explicitly or not at all.
-$databaseDrivers = @("zode-db-sqlite", "zode-db-postgres", "zode-db-mysql")
+$databaseDrivers = @("zode-db-sqlite", "zode-db-postgres", "zode-db-mysql", "zode-db-mongodb")
 
 function Get-VSArch {
     param(
@@ -168,7 +168,7 @@ function BuildZedAndItsFriends {
     # replaces the app and relaunches it. Without it in `tools`, an in-app update on Windows
     # cannot complete.
     cargo build --release --package zode --package cli --package auto_update_helper `
-        --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql `
+        --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb `
         --target $target
     Copy-Item -Path ".\$CargoOutDir\zode.exe" -Destination "$innoDir\Zode.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force

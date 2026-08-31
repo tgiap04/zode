@@ -4,7 +4,9 @@ use fs::FakeFs;
 use gpui::{AppContext as _, TestAppContext, px};
 use project::{Project, ProjectActivity};
 use serde_json::json;
-use workspace::MultiWorkspace;
+use std::path::PathBuf;
+use util::path_list::PathList;
+use workspace::{MultiWorkspace, ProjectGroupKey, SerializedProjectGroupState};
 
 /// FR3: typing into the filter editor must narrow `contents.entries` down to
 /// the matching project, with byte-offset highlight positions into its
@@ -156,5 +158,59 @@ async fn test_serialized_state_round_trips_width(cx: &mut TestAppContext) {
 
     sidebar.update(cx, |sidebar, cx| {
         sidebar.apply_serialized_state(r#"{"active_view":"ThreadList"}"#, cx);
+    });
+}
+
+/// A session restore replays the previous window's rail into `MultiWorkspace`
+/// *after* the window (and this sidebar) already exist, so the projects it
+/// brings back only reach the rail if that replay announces itself. It did not,
+/// and a window closed on two projects reopened showing just the one
+/// `derived_project_groups` synthesizes for the active workspace -- while the
+/// persisted record still held both.
+#[gpui::test]
+async fn test_restored_project_groups_reach_the_rail(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "a.txt": "" })).await;
+    let project_a = Project::test(fs, ["/root_a".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let sidebar = multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar.clone(), cx);
+        sidebar
+    });
+    cx.run_until_parked();
+
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_eq!(
+            sidebar.contents.rail_entries.len(),
+            1,
+            "before the restore the rail shows only the window's own project"
+        );
+    });
+
+    let restored = ["/root_a", "/root_b"]
+        .into_iter()
+        .map(|path| SerializedProjectGroupState {
+            key: ProjectGroupKey::new(None, PathList::new(&[PathBuf::from(path)])),
+            expanded: true,
+            initials: None,
+            colour: None,
+        })
+        .collect();
+    multi_workspace.update(cx, |mw, cx| {
+        mw.restore_project_groups(restored, cx);
+    });
+    cx.run_until_parked();
+
+    sidebar.read_with(cx, |sidebar, _cx| {
+        assert_eq!(
+            sidebar.contents.rail_entries.len(),
+            2,
+            "every restored project must land on the rail, not just the active one"
+        );
     });
 }

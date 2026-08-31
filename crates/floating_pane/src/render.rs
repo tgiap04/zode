@@ -135,12 +135,32 @@ impl Render for FloatingPane {
             // so it is read here and used on the next frame.
             .child({
                 let this = cx.entity().downgrade();
+                // What the last frame measured, carried into the closure rather
+                // than read back out of the entity: the comparison below has to
+                // happen inside a prepaint, and a value copied at render time
+                // needs no borrow there.
+                let measured = self.last_container;
                 gpui::canvas(
                     move |bounds: Bounds<Pixels>, _window, cx: &mut gpui::App| {
                         let container = bounds.size;
+                        // The layer is drawn on every frame of the editor's
+                        // life, open or shut, and the size it reports is the
+                        // same one on nearly all of them. Deferring regardless
+                        // costs a boxed closure and an effect cycle per frame
+                        // to re-store a value that has not changed.
+                        //
+                        // Only the container is checked, and that is enough:
+                        // every path that moves or resizes the window clamps
+                        // against this same container as it writes, so a
+                        // position reached without the container changing is
+                        // already inside it and `note_container` would find
+                        // nothing to correct.
+                        if measured == Some(container) {
+                            return;
+                        }
                         // Deferred: this runs inside the prepaint of the very
-                        // view it would update, and the size is wanted for the
-                        // next frame anyway.
+                        // view it would update, and a `notify` raised during a
+                        // draw phase is discarded rather than queued.
                         cx.defer(move |cx| {
                             this.update(cx, |this, cx| this.note_container(container, cx))
                                 .ok();
@@ -289,7 +309,11 @@ impl FloatingPane {
                         IconButton::new("floating-pane-close", IconName::Close)
                             .icon_size(IconSize::Small)
                             .tooltip(|_window, cx| {
-                                Tooltip::simple("Close \u{2014} ends its terminals and threads", cx)
+                                Tooltip::for_action(
+                                    "Close \u{2014} ends its terminals and threads",
+                                    &zed_actions::floating_pane::CloseFloatingPane,
+                                    cx,
+                                )
                             })
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.confirm_shut_down(window, cx)
@@ -440,7 +464,7 @@ impl FloatingPane {
     /// Asked because it is not undoable: a shell with a half-finished command
     /// and an agent mid-answer both die, and the button that does it sits one
     /// pixel from the one that does not.
-    fn confirm_shut_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_shut_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Nothing running is nothing to lose, and a dialog over an empty window
         // is a dialog that teaches people to dismiss dialogs.
         if self.is_empty(cx) {

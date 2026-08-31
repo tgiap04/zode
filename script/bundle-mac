@@ -86,7 +86,7 @@ script/generate-licenses
 
 rustup target add $target_triple
 
-database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql)
+database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql zode-db-mongodb)
 
 echo "Compiling zed binaries"
 # The database drivers are sidecars the app starts by name from beside its own
@@ -94,7 +94,7 @@ echo "Compiling zed binaries"
 # on them at link time, and without these they simply would not be in the
 # bundle.
 cargo build ${build_flag} --package zode --package cli \
-    --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql \
+    --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb \
     --target $target_triple
 
 echo "Creating application bundle"

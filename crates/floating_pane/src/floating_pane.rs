@@ -48,6 +48,17 @@ pub fn init(cx: &mut App) {
                 view.update(cx, |this, cx| this.toggle(window, cx)).ok();
             }
         });
+        // Through `confirm_shut_down` rather than `shut_down`, so the keystroke
+        // asks the same question the button does. A shortcut that ends running
+        // terminals without a word would be the one place in this feature where
+        // the keyboard is more dangerous than the mouse.
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::CloseFloatingPane, window, cx| {
+                view.update(cx, |this, cx| this.confirm_shut_down(window, cx))
+                    .ok();
+            }
+        });
     })
     .detach();
 }

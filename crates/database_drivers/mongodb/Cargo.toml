@@ -1,0 +1,23 @@
+[package]
+name = "zode-db-mongodb"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zode-db-mongodb"
+path = "src/main.rs"
+
+[dependencies]
+# No `client` feature: a driver needs the protocol and the serve loop, and
+# nothing that would drag gpui into a sidecar binary.
+database.workspace = true
+mongodb.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+database = { workspace = true, features = ["driver-test-suite"] }
