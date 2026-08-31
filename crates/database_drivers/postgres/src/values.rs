@@ -111,6 +111,11 @@ pub fn server_address(config: &postgres::Config) -> String {
                     None => host.clone(),
                 }
             }
+            // Gated because the variant is: `Host::Unix` is declared
+            // `#[cfg(unix)]` in tokio-postgres, so naming it at all fails to
+            // compile on Windows. With it gone the match is still exhaustive
+            // there -- `Tcp` is the only variant the enum has.
+            #[cfg(unix)]
             postgres::config::Host::Unix(path) => path.display().to_string(),
         })
         .collect::<Vec<_>>()
