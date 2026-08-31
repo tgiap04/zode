@@ -1632,6 +1632,11 @@ mod tests {
     /// is never rendered is not in the dispatch tree, so focus placed on it does
     /// not survive the next frame -- which is the whole subject of one of these
     /// tests.
+    ///
+    /// Gated with the tests it serves. All three build an `ExitStatus` from a raw
+    /// wait status, which only Unix has; without the gate this is dead code on
+    /// Windows, and `script/clippy` runs with `--deny warnings`.
+    #[cfg(unix)]
     async fn an_agent_showing_a_terminal(
         cx: &mut TestAppContext,
     ) -> (Entity<AgentView>, &mut gpui::VisualTestContext) {
