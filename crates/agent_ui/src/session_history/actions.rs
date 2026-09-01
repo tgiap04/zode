@@ -167,7 +167,7 @@ impl AgentHistoryPanel {
             // Drop the row rather than re-reading both stores: the list is a view
             // of what was found, and one gone session does not invalidate the rest.
             this.update(cx, |this, cx| {
-                this.sessions.retain(|session| session.id != id);
+                this.store.update(cx, |store, cx| store.forget(&id, cx));
                 this.counts.remove(&id);
                 cx.notify();
             })

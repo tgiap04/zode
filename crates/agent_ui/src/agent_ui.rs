@@ -10,10 +10,12 @@ mod actions;
 mod agent_view;
 mod missing_binary;
 mod session_history;
+mod session_store;
 
 pub use actions::*;
 pub use agent_view::{AgentView, agent_icon};
 pub use session_history::AgentHistoryPanel;
+pub use session_store::SessionStore;
 
 use gpui::App;
 use project::AgentId;

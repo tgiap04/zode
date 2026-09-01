@@ -21,12 +21,14 @@ mod claude_log;
 mod codex;
 mod copilot;
 mod provider;
+mod session_index;
 mod summary;
 
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
 pub use provider::SessionProvider;
+pub use session_index::SessionIndex;
 pub use summary::{
     AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionSummary, Speaker,
 };
