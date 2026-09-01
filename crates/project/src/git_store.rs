@@ -7741,7 +7741,6 @@ fn proto_to_tag(tag: &proto::GitTag) -> Tag {
     }
 }
 
-
 fn branch_to_proto(branch: &git::repository::Branch) -> proto::Branch {
     proto::Branch {
         is_head: branch.is_head,

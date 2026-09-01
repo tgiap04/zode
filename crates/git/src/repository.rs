@@ -201,7 +201,6 @@ pub struct Tag {
     pub message: Option<SharedString>,
 }
 
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Branch {
     pub is_head: bool,
@@ -3759,7 +3758,6 @@ fn parse_tag_input(input: &str) -> Vec<Tag> {
     tags.sort_by(|(a, _), (b, _)| b.cmp(a));
     tags.into_iter().map(|(_, tag)| tag).collect()
 }
-
 
 fn parse_branch_input(input: &str) -> Result<Vec<Branch>> {
     let mut branches = Vec::new();
