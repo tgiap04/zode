@@ -115,7 +115,7 @@ impl BranchPanel {
         root: &std::path::Path,
         current_branch: Option<&str>,
         cx: &App,
-    ) -> collections::HashMap<SharedString, Vec<AgentEntry>> {
+    ) -> collections::HashMap<SharedString, std::sync::Arc<[AgentEntry]>> {
         let mut by_branch: collections::HashMap<SharedString, Vec<AgentEntry>> = Default::default();
 
         if let Some(current) = current_branch
@@ -127,6 +127,7 @@ impl BranchPanel {
                 .filter(|view| view.read(cx).is_working(cx))
                 .map(|view| AgentEntry::Running {
                     label: view.read(cx).tab_label(),
+                    agent: view.read(cx).agent_id().to_string().into(),
                     view: view.downgrade(),
                 });
             by_branch
@@ -140,7 +141,7 @@ impl BranchPanel {
             .as_ref()
             .map(|store| store.read(cx).index().clone())
         else {
-            return by_branch;
+            return finish(by_branch);
         };
 
         // One pass over the sessions rather than a lookup per branch: the panel
@@ -158,12 +159,25 @@ impl BranchPanel {
                 .or_default()
                 .push(AgentEntry::Past {
                     label: session.title.clone().into(),
+                    agent: session.agent.builtin_agent_id().into(),
                     id: session.id.clone(),
+                    updated_at: session.updated_at,
                 });
         }
 
-        by_branch
+        finish(by_branch)
     }
+}
+
+/// Freezes the gathered lists so a branch row can clone an `Arc` rather than a
+/// `Vec` on every rebuild.
+fn finish(
+    by_branch: collections::HashMap<SharedString, Vec<AgentEntry>>,
+) -> collections::HashMap<SharedString, std::sync::Arc<[AgentEntry]>> {
+    by_branch
+        .into_iter()
+        .map(|(branch, entries)| (branch, std::sync::Arc::from(entries)))
+        .collect()
 }
 
 /// The directory name is what the user calls the repository; the full path is

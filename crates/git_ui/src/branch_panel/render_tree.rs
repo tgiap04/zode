@@ -80,12 +80,10 @@ impl BranchPanel {
             TreeRow::Branch {
                 id,
                 branch,
-                agent_count,
+                agents,
                 expanded,
                 ..
-            } => self.branch_card(ix, indent, *id, branch, *agent_count, *expanded, row, cx),
-
-            TreeRow::Agent { id, entry, .. } => self.agent_row(ix, indent, *id, entry, cx),
+            } => self.branch_card(ix, indent, *id, branch, agents, *expanded, row, cx),
 
             TreeRow::Worktree { worktree, .. } => {
                 let label = worktree_label(worktree);

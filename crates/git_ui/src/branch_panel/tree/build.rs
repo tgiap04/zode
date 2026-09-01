@@ -85,9 +85,7 @@ fn push_section(
     if kind == SectionKind::Remote {
         push_remote_groups(rows, repo, children, expanded, filtering);
     } else {
-        for child in children {
-            push_branch(rows, repo, child);
-        }
+        rows.extend(children);
     }
 }
 
@@ -124,28 +122,22 @@ fn push_remote_groups(
             expanded: group_expanded,
         });
         if group_expanded {
-            for row in branches {
-                match row {
-                    TreeRow::Branch {
-                        id,
-                        branch,
-                        agent_count,
-                        expanded: branch_expanded,
-                        ..
-                    } => push_branch(
-                        rows,
-                        repo,
-                        TreeRow::Branch {
-                            id,
-                            branch,
-                            depth: 3,
-                            agent_count,
-                            expanded: branch_expanded,
-                        },
-                    ),
-                    other => rows.push(other),
-                }
-            }
+            rows.extend(branches.into_iter().map(|row| match row {
+                TreeRow::Branch {
+                    id,
+                    branch,
+                    agents,
+                    expanded: branch_expanded,
+                    ..
+                } => TreeRow::Branch {
+                    id,
+                    branch,
+                    depth: 3,
+                    agents,
+                    expanded: branch_expanded,
+                },
+                other => other,
+            }));
         }
     }
 }
@@ -162,41 +154,19 @@ fn branch_row(
     expanded: &dyn Fn(&RowKey) -> bool,
 ) -> TreeRow {
     let name: SharedString = branch.name().to_string().into();
-    let agent_count = repo.agents.get(&name).map_or(0, Vec::len);
+    let agents = repo
+        .agents
+        .get(&name)
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::from([]));
+    let has_agents = !agents.is_empty();
     TreeRow::Branch {
         id: repo.id,
         branch: branch.clone(),
         depth,
-        agent_count,
-        expanded: agent_count > 0 && expanded(&RowKey::BranchAgents(repo.id, name)),
+        agents,
+        expanded: has_agents && expanded(&RowKey::BranchAgents(repo.id, name)),
     }
-}
-
-/// Pushes a branch row and, when it is open, its agents beneath it.
-fn push_branch(rows: &mut Vec<TreeRow>, repo: &RepoData, row: TreeRow) {
-    let TreeRow::Branch {
-        ref branch,
-        depth,
-        expanded,
-        ..
-    } = row
-    else {
-        rows.push(row);
-        return;
-    };
-    let name: SharedString = branch.name().to_string().into();
-    rows.push(row.clone());
-    if !expanded {
-        return;
-    }
-    let Some(agents) = repo.agents.get(&name) else {
-        return;
-    };
-    rows.extend(agents.iter().map(|entry| TreeRow::Agent {
-        id: repo.id,
-        entry: entry.clone(),
-        depth: depth + 1,
-    }));
 }
 
 fn section_children(

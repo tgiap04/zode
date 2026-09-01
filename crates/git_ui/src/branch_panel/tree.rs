@@ -92,16 +92,14 @@ pub(crate) enum TreeRow {
         id: RepositoryId,
         branch: Branch,
         depth: usize,
-        /// How many agents have run on this branch. Drawn on the card, and the
-        /// reason the card gets a disclosure at all.
-        agent_count: usize,
+        /// The agents that have run on this branch.
+        ///
+        /// Carried by the row rather than emitted as rows of their own: they
+        /// are drawn *inside* the branch card, so the card's border encloses
+        /// them. An `Arc` because the same list is cloned onto the row on every
+        /// rebuild and the entries never change once gathered.
+        agents: std::sync::Arc<[AgentEntry]>,
         expanded: bool,
-    },
-    /// One agent under a branch.
-    Agent {
-        id: RepositoryId,
-        entry: AgentEntry,
-        depth: usize,
     },
     /// Acts on its own path, so it needs no repository id.
     Worktree {
@@ -135,11 +133,15 @@ pub(crate) enum TreeRow {
 pub(crate) enum AgentEntry {
     Running {
         label: SharedString,
+        /// The agent's builtin id, for its vendor mark and colour.
+        agent: SharedString,
         view: gpui::WeakEntity<agent_ui::AgentView>,
     },
     Past {
         label: SharedString,
+        agent: SharedString,
         id: std::sync::Arc<str>,
+        updated_at: std::time::SystemTime,
     },
 }
 
@@ -150,8 +152,21 @@ impl AgentEntry {
         }
     }
 
+    pub(crate) fn agent(&self) -> &SharedString {
+        match self {
+            AgentEntry::Running { agent, .. } | AgentEntry::Past { agent, .. } => agent,
+        }
+    }
+
     pub(crate) fn is_running(&self) -> bool {
         matches!(self, AgentEntry::Running { .. })
+    }
+
+    pub(crate) fn updated_at(&self) -> Option<std::time::SystemTime> {
+        match self {
+            AgentEntry::Running { .. } => None,
+            AgentEntry::Past { updated_at, .. } => Some(*updated_at),
+        }
     }
 }
 
@@ -167,11 +182,8 @@ impl TreeRow {
             // Only when there is something to show. A disclosure that opens on
             // nothing reads as a broken control.
             TreeRow::Branch {
-                id,
-                branch,
-                agent_count,
-                ..
-            } if *agent_count > 0 => {
+                id, branch, agents, ..
+            } if !agents.is_empty() => {
                 Some(RowKey::BranchAgents(*id, branch.name().to_string().into()))
             }
             _ => None,
@@ -183,7 +195,7 @@ impl TreeRow {
             TreeRow::Repo { .. } => 0,
             TreeRow::Section { .. } => 1,
             TreeRow::RemoteGroup { .. } => 2,
-            TreeRow::Branch { depth, .. } | TreeRow::Agent { depth, .. } => *depth,
+            TreeRow::Branch { depth, .. } => *depth,
             TreeRow::Worktree { .. }
             | TreeRow::Stash { .. }
             | TreeRow::Tag { .. }
@@ -208,7 +220,7 @@ pub(crate) struct RepoData {
     pub(crate) branches: Vec<Branch>,
     /// Agents per branch name, gathered once per rebuild so `build_rows` stays
     /// a pure function of its input.
-    pub(crate) agents: collections::HashMap<SharedString, Vec<AgentEntry>>,
+    pub(crate) agents: collections::HashMap<SharedString, std::sync::Arc<[AgentEntry]>>,
     pub(crate) worktrees: Arc<[GitWorktree]>,
     pub(crate) stashes: Arc<[StashEntry]>,
     /// Unlike the other fields this is not on `RepositorySnapshot`: the store

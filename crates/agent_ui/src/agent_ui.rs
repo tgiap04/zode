@@ -13,7 +13,7 @@ mod session_history;
 mod session_store;
 
 pub use actions::*;
-pub use agent_view::{AgentView, agent_icon};
+pub use agent_view::{AgentView, agent_color, agent_icon};
 pub use session_history::{AgentHistoryPanel, resume_session};
 pub use session_store::SessionStore;
 

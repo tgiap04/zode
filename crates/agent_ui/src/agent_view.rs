@@ -30,6 +30,30 @@ pub fn agent_icon(agent: &str) -> IconName {
     }
 }
 
+/// The vendor's own colour for an agent's mark.
+///
+/// A brand colour is the one case where detaching from the theme is right:
+/// Claude's orange is Claude's orange on a light theme and a dark one, and
+/// recolouring it by theme would make the mark stop being the mark. Everything
+/// else in this crate uses semantic `Color` variants.
+///
+/// Beside [`agent_icon`] for the same reason that function exists: the rail,
+/// the tab and every list draw one vendor's mark, and a second copy of the
+/// mapping is a second place to forget when an agent is added.
+pub fn agent_color(agent: &str) -> gpui::Hsla {
+    match agent {
+        // Anthropic's clay orange.
+        project::CLAUDE_CODE_AGENT_ID => gpui::rgb(0xD97757).into(),
+        // OpenAI's green.
+        project::CODEX_AGENT_ID => gpui::rgb(0x10A37F).into(),
+        project::ANTIGRAVITY_AGENT_ID => gpui::rgb(0x4285F4).into(),
+        // GitHub's mark is monochrome, so this is a chosen hue rather than a
+        // brand one -- picked to stay apart from the three above.
+        project::COPILOT_AGENT_ID => gpui::rgb(0x8957E5).into(),
+        _ => gpui::rgb(0x9A9A9A).into(),
+    }
+}
+
 pub struct AgentView {
     /// Which session this tab belongs to. See [`SessionIntent`].
     intent: SessionIntent,
@@ -126,6 +150,11 @@ impl AgentView {
 
     /// Public because the rail asks it: a button is lit when a tab for its agent
     /// is open, and the rail lives in another crate.
+    /// This tab's agent, for the vendor mark and colour a list wants to draw.
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent
+    }
+
     pub fn is_agent(&self, agent: &AgentId) -> bool {
         &self.agent == agent
     }
