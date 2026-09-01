@@ -72,6 +72,7 @@ fn repo(id: u64, name: &str) -> RepoData {
         worktrees: Arc::from([]),
         stashes: Arc::from([]),
         tags: Arc::from([]),
+        agents: Default::default(),
     }
 }
 
@@ -93,6 +94,7 @@ fn labels(rows: &[TreeRow]) -> Vec<String> {
             }
             TreeRow::Stash { entry, .. } => format!("stash:{}", entry.message),
             TreeRow::Tag { tag, .. } => format!("tag:{}", tag.name),
+            TreeRow::Agent { entry, .. } => format!("agent:{}", entry.label()),
             TreeRow::Empty { label } => format!("empty:{label}"),
         })
         .collect()
@@ -299,4 +301,148 @@ fn loaded_tags_list_and_filter() {
     let filtered = labels(&build_rows(&[data], &opened(vec![]), "v2"));
     assert!(filtered.contains(&"tag:v2.0.0".to_string()));
     assert!(!filtered.contains(&"tag:v1.0.0".to_string()));
+}
+
+/// Agents under a branch.
+///
+/// The transcripts record which branch they ran on, so this needs no worktree
+/// and no window -- which is also why it can be asserted here rather than only
+/// on screen.
+mod agents {
+    use super::*;
+    use crate::branch_panel::tree::AgentEntry;
+
+    fn past(id: &str, label: &str) -> AgentEntry {
+        AgentEntry::Past {
+            label: label.to_string().into(),
+            id: std::sync::Arc::from(id),
+        }
+    }
+
+    fn repo_with_agents(pairs: Vec<(&str, Vec<AgentEntry>)>) -> RepoData {
+        let mut repo = repo(1, "zode");
+        repo.branches = vec![branch("main", None, true), branch("feature", None, false)];
+        repo.agents = pairs
+            .into_iter()
+            .map(|(name, entries)| (SharedString::from(name.to_string()), entries))
+            .collect();
+        repo
+    }
+
+    fn all_open(repo: &RepoData) -> Vec<RowKey> {
+        vec![
+            RowKey::Repo(repo.id),
+            RowKey::Section(repo.id, SectionKind::Local),
+        ]
+    }
+
+    /// No agents, no disclosure. A control that opens on nothing reads as
+    /// broken.
+    #[test]
+    fn a_branch_with_no_agents_has_nothing_to_open() {
+        let repo = repo_with_agents(vec![]);
+        let rows = build_rows(std::slice::from_ref(&repo), &opened(all_open(&repo)), "");
+
+        let branch_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| matches!(row, TreeRow::Branch { .. }))
+            .collect();
+        assert!(!branch_rows.is_empty(), "the branches are still listed");
+        for row in branch_rows {
+            assert!(
+                row.toggle_key().is_none(),
+                "a branch with no agents must not offer a disclosure"
+            );
+        }
+    }
+
+    /// Closed, a branch with agents is still one row -- the children are not
+    /// built, so the list costs what is shown.
+    #[test]
+    fn a_closed_branch_builds_no_agent_rows() {
+        let repo = repo_with_agents(vec![(
+            "main",
+            vec![past("a", "First"), past("b", "Second")],
+        )]);
+        let rows = build_rows(std::slice::from_ref(&repo), &opened(all_open(&repo)), "");
+
+        assert!(
+            !labels(&rows)
+                .iter()
+                .any(|label| label.starts_with("agent:")),
+            "the branch is closed, so its agents are not rows yet"
+        );
+        let count = rows.iter().find_map(|row| match row {
+            TreeRow::Branch {
+                branch,
+                agent_count,
+                ..
+            } if branch.name() == "main" => Some(*agent_count),
+            _ => None,
+        });
+        assert_eq!(count, Some(2), "the count is on the row even when closed");
+    }
+
+    #[test]
+    fn an_open_branch_lists_its_agents_beneath_it() {
+        let repo = repo_with_agents(vec![(
+            "main",
+            vec![past("a", "First"), past("b", "Second")],
+        )]);
+        let mut open = all_open(&repo);
+        open.push(RowKey::BranchAgents(repo.id, "main".into()));
+
+        let rows = build_rows(std::slice::from_ref(&repo), &opened(open), "");
+
+        let labels = labels(&rows);
+        let branch_at = labels.iter().position(|l| l == "branch:main").unwrap();
+        assert_eq!(labels[branch_at + 1], "agent:First");
+        assert_eq!(labels[branch_at + 2], "agent:Second");
+    }
+
+    /// Two branches, two sets. Opening one must not spill the other's agents.
+    #[test]
+    fn agents_stay_under_the_branch_they_ran_on() {
+        let repo = repo_with_agents(vec![
+            ("main", vec![past("a", "On main")]),
+            ("feature", vec![past("b", "On feature")]),
+        ]);
+        let mut open = all_open(&repo);
+        open.push(RowKey::BranchAgents(repo.id, "feature".into()));
+
+        let labels = labels(&build_rows(std::slice::from_ref(&repo), &opened(open), ""));
+
+        assert!(labels.contains(&"agent:On feature".to_string()));
+        assert!(
+            !labels.contains(&"agent:On main".to_string()),
+            "only the branch that was opened contributes agent rows"
+        );
+    }
+
+    /// An agent row sits one level in from its branch, so the tree reads as a
+    /// tree rather than as a flat list with odd labels in it.
+    #[test]
+    fn an_agent_row_is_indented_under_its_branch() {
+        let repo = repo_with_agents(vec![("main", vec![past("a", "First")])]);
+        let mut open = all_open(&repo);
+        open.push(RowKey::BranchAgents(repo.id, "main".into()));
+
+        let rows = build_rows(std::slice::from_ref(&repo), &opened(open), "");
+        let branch_depth = rows
+            .iter()
+            .find_map(|row| match row {
+                TreeRow::Branch { branch, depth, .. } if branch.name() == "main" => Some(*depth),
+                _ => None,
+            })
+            .unwrap();
+        let agent_depth = rows
+            .iter()
+            .find_map(|row| match row {
+                TreeRow::Agent { depth, .. } => Some(*depth),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(agent_depth, branch_depth + 1);
+    }
 }

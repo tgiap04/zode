@@ -24,6 +24,14 @@ use crate::SessionSummary;
 pub struct SessionIndex {
     sessions: Arc<[SessionSummary]>,
     by_cwd: HashMap<Arc<Path>, Vec<u32>>,
+    /// Branch name to the sessions that ran on it, across every repository.
+    ///
+    /// Not keyed by (repository, branch): a branch name is short and shared --
+    /// half the machine has a `main` -- so the map would need the repository
+    /// root, which a session only knows as a `cwd` that may be a subdirectory.
+    /// Keyed by name and filtered by root at lookup instead: one hash, then a
+    /// pass over the handful of sessions that share the name.
+    by_branch: HashMap<Arc<str>, Vec<u32>>,
 }
 
 impl SessionIndex {
@@ -31,6 +39,7 @@ impl SessionIndex {
         Self {
             sessions: Arc::from([]),
             by_cwd: HashMap::new(),
+            by_branch: HashMap::new(),
         }
     }
 
@@ -41,14 +50,22 @@ impl SessionIndex {
     pub fn new(sessions: Vec<SessionSummary>) -> Self {
         let sessions: Arc<[SessionSummary]> = Arc::from(sessions);
         let mut by_cwd: HashMap<Arc<Path>, Vec<u32>> = HashMap::new();
+        let mut by_branch: HashMap<Arc<str>, Vec<u32>> = HashMap::new();
 
         for (ix, session) in sessions.iter().enumerate() {
             let Ok(ix) = u32::try_from(ix) else { break };
             let cwd: Arc<Path> = Arc::from(session.cwd.as_path());
             by_cwd.entry(cwd).or_default().push(ix);
+            if let Some(branch) = session.branch.as_deref() {
+                by_branch.entry(Arc::from(branch)).or_default().push(ix);
+            }
         }
 
-        Self { sessions, by_cwd }
+        Self {
+            sessions,
+            by_cwd,
+            by_branch,
+        }
     }
 
     /// Every session, in the order the providers returned them (newest first).
@@ -81,6 +98,38 @@ impl SessionIndex {
             .filter_map(|ix| self.sessions.get(*ix as usize))
     }
 
+    /// The sessions that ran on `branch` inside `root`, newest first.
+    ///
+    /// `root` is required and not optional: a branch name says nothing about
+    /// which repository it belongs to, and `main` from someone else's checkout
+    /// listed under this one would invite resuming work in the wrong tree.
+    ///
+    /// Component-wise prefix matching, so `/a/zode` does not match `/a/zode-kit`
+    /// -- and a session run from a subdirectory still counts, because it is the
+    /// same checkout.
+    pub fn sessions_on_branch<'a>(
+        &'a self,
+        root: &'a Path,
+        branch: &str,
+    ) -> impl Iterator<Item = &'a SessionSummary> {
+        self.by_branch
+            .get(branch)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(move |ix| self.sessions.get(*ix as usize))
+            .filter(move |session| session.cwd.starts_with(root))
+    }
+
+    /// One session by id. Linear, and deliberately so: this runs when a row is
+    /// clicked, never while one is drawn, and a second map to keep in step
+    /// would cost more than the scan it saves.
+    pub fn find(&self, id: &str) -> Option<&SessionSummary> {
+        self.sessions
+            .iter()
+            .find(|session| session.id.as_ref() == id)
+    }
+
     /// Drops one session and rebuilds the map. `O(S)`, and only ever called
     /// after a delete has already touched the disk -- the rebuild is not the
     /// expensive half of that operation.
@@ -107,6 +156,13 @@ mod tests {
     use crate::{AgentKind, SessionSummary};
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
+
+    fn on_branch(id: &str, cwd: &str, branch: &str) -> SessionSummary {
+        SessionSummary {
+            branch: Some(branch.to_string()),
+            ..session(id, cwd, 0)
+        }
+    }
 
     fn session(id: &str, cwd: &str, age_secs: u64) -> SessionSummary {
         SessionSummary {
@@ -189,6 +245,75 @@ mod tests {
 
         assert_eq!(ids(&after, "/repo/main"), vec!["b"]);
         assert_eq!(after.len(), 1);
+    }
+
+    #[test]
+    fn a_branch_lookup_is_scoped_to_one_checkout() {
+        let index = SessionIndex::new(vec![
+            on_branch("ours", "/repos/zode", "main"),
+            on_branch("theirs", "/repos/other", "main"),
+        ]);
+
+        let found: Vec<_> = index
+            .sessions_on_branch(Path::new("/repos/zode"), "main")
+            .map(|session| session.id.to_string())
+            .collect();
+
+        assert_eq!(
+            found,
+            vec!["ours"],
+            "another checkout's `main` must not be offered under this one"
+        );
+    }
+
+    /// A session started in a subdirectory is still a session of that checkout.
+    #[test]
+    fn a_session_from_a_subdirectory_counts() {
+        let index = SessionIndex::new(vec![on_branch("docs", "/repos/zode/docs", "main")]);
+
+        assert_eq!(
+            index
+                .sessions_on_branch(Path::new("/repos/zode"), "main")
+                .count(),
+            1
+        );
+    }
+
+    /// Component-wise, not string prefix: `/repos/zode` must not swallow
+    /// `/repos/zode-kit`.
+    #[test]
+    fn a_sibling_directory_with_a_shared_prefix_is_not_matched() {
+        let index = SessionIndex::new(vec![on_branch("kit", "/repos/zode-kit", "main")]);
+
+        assert_eq!(
+            index
+                .sessions_on_branch(Path::new("/repos/zode"), "main")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_branch_is_absent_from_the_branch_map() {
+        let index = SessionIndex::new(vec![session("a", "/repos/zode", 1)]);
+
+        assert_eq!(
+            index
+                .sessions_on_branch(Path::new("/repos/zode"), "main")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn find_returns_the_session_with_that_id() {
+        let index = SessionIndex::new(vec![
+            session("a", "/repos/zode", 2),
+            session("b", "/repos/zode", 1),
+        ]);
+
+        assert_eq!(index.find("b").map(|s| s.id.to_string()), Some("b".into()));
+        assert!(index.find("missing").is_none());
     }
 
     /// Scale is the whole point of the type. Ten thousand sessions across a

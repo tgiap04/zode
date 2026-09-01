@@ -5,6 +5,8 @@
 
 use gpui::SharedString;
 
+use git::repository::Branch;
+
 use super::{RepoData, RowKey, SectionKind, TreeRow, worktree_label};
 
 /// Builds the visible row list.
@@ -52,7 +54,7 @@ fn push_section(
     filtering: bool,
     matches: &dyn Fn(&str) -> bool,
 ) {
-    let children = section_children(repo, kind, matches);
+    let children = section_children(repo, kind, matches, expanded);
 
     // Under an active filter a section with no match is not worth a line of its
     // own -- the panel should read as the answer to the query, not as the whole
@@ -83,7 +85,9 @@ fn push_section(
     if kind == SectionKind::Remote {
         push_remote_groups(rows, repo, children, expanded, filtering);
     } else {
-        rows.extend(children);
+        for child in children {
+            push_branch(rows, repo, child);
+        }
     }
 }
 
@@ -120,43 +124,99 @@ fn push_remote_groups(
             expanded: group_expanded,
         });
         if group_expanded {
-            rows.extend(branches.into_iter().map(|row| match row {
-                TreeRow::Branch { id, branch, .. } => TreeRow::Branch {
-                    id,
-                    branch,
-                    depth: 3,
-                },
-                other => other,
-            }));
+            for row in branches {
+                match row {
+                    TreeRow::Branch {
+                        id,
+                        branch,
+                        agent_count,
+                        expanded: branch_expanded,
+                        ..
+                    } => push_branch(
+                        rows,
+                        repo,
+                        TreeRow::Branch {
+                            id,
+                            branch,
+                            depth: 3,
+                            agent_count,
+                            expanded: branch_expanded,
+                        },
+                    ),
+                    other => rows.push(other),
+                }
+            }
         }
     }
+}
+
+/// A branch row, with however many agents have run on it.
+///
+/// The count comes from `RepoData::agents`, gathered once per rebuild -- this
+/// function stays a pure map from data to rows, which is what lets the tree be
+/// asserted against without a window.
+fn branch_row(
+    repo: &RepoData,
+    branch: &Branch,
+    depth: usize,
+    expanded: &dyn Fn(&RowKey) -> bool,
+) -> TreeRow {
+    let name: SharedString = branch.name().to_string().into();
+    let agent_count = repo.agents.get(&name).map_or(0, Vec::len);
+    TreeRow::Branch {
+        id: repo.id,
+        branch: branch.clone(),
+        depth,
+        agent_count,
+        expanded: agent_count > 0 && expanded(&RowKey::BranchAgents(repo.id, name)),
+    }
+}
+
+/// Pushes a branch row and, when it is open, its agents beneath it.
+fn push_branch(rows: &mut Vec<TreeRow>, repo: &RepoData, row: TreeRow) {
+    let TreeRow::Branch {
+        ref branch,
+        depth,
+        expanded,
+        ..
+    } = row
+    else {
+        rows.push(row);
+        return;
+    };
+    let name: SharedString = branch.name().to_string().into();
+    rows.push(row.clone());
+    if !expanded {
+        return;
+    }
+    let Some(agents) = repo.agents.get(&name) else {
+        return;
+    };
+    rows.extend(agents.iter().map(|entry| TreeRow::Agent {
+        id: repo.id,
+        entry: entry.clone(),
+        depth: depth + 1,
+    }));
 }
 
 fn section_children(
     repo: &RepoData,
     kind: SectionKind,
     matches: &dyn Fn(&str) -> bool,
+    expanded: &dyn Fn(&RowKey) -> bool,
 ) -> Vec<TreeRow> {
     match kind {
         SectionKind::Local => repo
             .branches
             .iter()
             .filter(|branch| !branch.is_remote() && matches(branch.name()))
-            .map(|branch| TreeRow::Branch {
-                id: repo.id,
-                branch: branch.clone(),
-                depth: 2,
-            })
+            .map(|branch| branch_row(repo, branch, 2, expanded))
             .collect(),
         SectionKind::Remote => repo
             .branches
             .iter()
             .filter(|branch| branch.is_remote() && matches(branch.name()))
-            .map(|branch| TreeRow::Branch {
-                id: repo.id,
-                branch: branch.clone(),
-                depth: 3,
-            })
+            .map(|branch| branch_row(repo, branch, 3, expanded))
             .collect(),
         SectionKind::Worktrees => repo
             .worktrees

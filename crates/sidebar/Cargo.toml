@@ -14,7 +14,6 @@ path = "src/sidebar.rs"
 [dependencies]
 container_ui.workspace = true
 database_ui.workspace = true
-agent_sessions.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
 collections.workspace = true
@@ -38,7 +37,6 @@ zode_account.workspace = true
 zode_account_ui.workspace = true
 
 [dev-dependencies]
-agent_ui = { workspace = true, features = ["test-support"] }
 zode_account = { workspace = true, features = ["test-support"] }
 # `test-support` so the rail's tests open the container tab over an engine that
 # never leaves the process. Without it, pressing the button runs `docker`, whose

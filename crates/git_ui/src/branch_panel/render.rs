@@ -8,6 +8,7 @@ impl Render for BranchPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Rebuilding here rather than on each git event means a burst of events
         // costs one rebuild, and a panel nobody is looking at costs none.
+        self.ensure_session_store(cx);
         self.refresh_if_stale(cx);
 
         let empty = self.rows.is_empty();

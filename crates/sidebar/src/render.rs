@@ -35,7 +35,6 @@ impl Sidebar {
     /// Shown only while `MultiWorkspace::sidebar_open` is set; the rail
     /// beside it is always visible.
     fn render_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.ensure_session_store(cx);
         let entry_count = self.contents.entries.len();
         let has_open_projects = self.contents.has_open_projects;
         let has_query = self.has_filter_query(cx);

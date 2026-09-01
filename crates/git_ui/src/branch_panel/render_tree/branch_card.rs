@@ -12,12 +12,16 @@ use ui::{Chip, Indicator, Tooltip, prelude::*};
 use crate::branch_panel::panel::BranchPanel;
 
 impl BranchPanel {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn branch_card(
         &self,
         ix: usize,
         indent: Pixels,
         id: RepositoryId,
         branch: &Branch,
+        agent_count: usize,
+        expanded: bool,
+        row: &crate::branch_panel::tree::TreeRow,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let name: SharedString = branch.name().to_string().into();
@@ -26,6 +30,7 @@ impl BranchPanel {
         let subtitle = branch_subtitle(branch);
         let (checkout, menu_branch) = (branch.clone(), branch.clone());
 
+        let toggle_key = row.toggle_key();
         let colors = cx.theme().colors();
         let background = if is_head {
             colors.element_selected
@@ -94,6 +99,43 @@ impl BranchPanel {
                                 )
                             }),
                     )
+                    .when(agent_count > 0, |this| {
+                        // Its own line, and its own click target. The title row
+                        // already carries a name that needs the width, and a
+                        // click there already means "check this branch out".
+                        this.child(
+                            h_flex()
+                                .id(("branch-agents", ix))
+                                .gap_1()
+                                .child(
+                                    Icon::new(if expanded {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new(if agent_count == 1 {
+                                        "1 agent".to_string()
+                                    } else {
+                                        format!("{agent_count} agents")
+                                    })
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                                )
+                                .on_click(cx.listener(move |panel, _: &ClickEvent, _, cx| {
+                                    // Without this the click also reaches the
+                                    // card and checks the branch out -- opening
+                                    // a list is not asking to switch to it.
+                                    cx.stop_propagation();
+                                    if let Some(key) = toggle_key.clone() {
+                                        panel.toggle_row(key, cx);
+                                    }
+                                })),
+                        )
+                    })
                     .child(
                         Label::new(subtitle)
                             .size(LabelSize::XSmall)

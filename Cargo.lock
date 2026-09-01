@@ -5650,6 +5650,8 @@ dependencies = [
 name = "git_ui"
 version = "0.1.0"
 dependencies = [
+ "agent_sessions",
+ "agent_ui",
  "alacritty_terminal",
  "anyhow",
  "askpass",
@@ -13832,7 +13834,6 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 name = "sidebar"
 version = "0.1.0"
 dependencies = [
- "agent_sessions",
  "agent_ui",
  "anyhow",
  "collections",

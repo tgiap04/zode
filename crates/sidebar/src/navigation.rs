@@ -1,7 +1,7 @@
-use crate::project_list::PanelRow;
 use crate::{FocusSidebarFilter, Sidebar};
 use gpui::{App, Context, Focusable, KeyContext, Window};
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
+use project::ProjectGroupKey;
 
 impl Sidebar {
     pub(crate) fn select_first_entry(&mut self) {
@@ -10,6 +10,11 @@ impl Sidebar {
         } else {
             Some(0)
         };
+    }
+
+    fn selected_group_key(&self) -> Option<ProjectGroupKey> {
+        let ix = self.selection?;
+        Some(self.contents.entries.get(ix)?.key.clone())
     }
 
     pub(crate) fn dispatch_context(&self, window: &Window, cx: &Context<Self>) -> KeyContext {
@@ -127,24 +132,10 @@ impl Sidebar {
     }
 
     pub(crate) fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        // A worktree row names one workspace; the project row above it names a
-        // group. Sending both through the group would activate whichever
-        // workspace was last used there, which is exactly not what pressing
-        // Enter on a particular worktree asks for.
-        let Some(row) = self
-            .selection
-            .and_then(|ix| self.contents.entries.get(ix))
-            .cloned()
-        else {
+        let Some(key) = self.selected_group_key() else {
             return;
         };
-        match row {
-            PanelRow::Project(entry) => {
-                self.activate_or_open_workspace_for_group(&entry.key, window, cx)
-            }
-            PanelRow::Worktree(row) => self.activate_worktree(&row.workspace, window, cx),
-            PanelRow::Agent(row) => self.open_agent_row(&row, window, cx),
-        }
+        self.activate_or_open_workspace_for_group(&key, window, cx);
     }
 
     pub(crate) fn on_focus_sidebar_filter(

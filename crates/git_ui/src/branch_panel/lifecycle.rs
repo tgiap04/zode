@@ -41,6 +41,8 @@ impl BranchPanel {
                 filter_editor,
                 filter_visible: false,
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
+                session_store: None,
+                _session_subscription: None,
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,
@@ -210,6 +212,28 @@ impl BranchPanel {
         let state = SerializedBranchPanel { expanded: stored };
         let workspace = self.workspace.clone();
         self.pending_serialization = cx.spawn(async move |_, cx| state.write(workspace, cx).await);
+    }
+
+    /// Creates the shared session store the first time the panel is drawn, and
+    /// asks it for its one sweep.
+    ///
+    /// Not at construction: reading the agents' histories opens every
+    /// transcript on disk. `AgentHistoryPanel` already carries the rule that
+    /// none of that belongs on the startup path, and a panel nobody opens must
+    /// not pay for it either.
+    pub(crate) fn ensure_session_store(&mut self, cx: &mut Context<Self>) {
+        if self.session_store.is_some() {
+            return;
+        }
+        let store = agent_ui::SessionStore::global(cx);
+        // The sweep lands on the store, so the panel has to be told when it
+        // does. Held in a field, never detached: a detached observe outlives
+        // the panel and fires into a dropped handle.
+        self._session_subscription = Some(cx.observe(&store, |panel, _, cx| {
+            panel.mark_stale(cx);
+        }));
+        store.update(cx, |store, cx| store.refresh(cx));
+        self.session_store = Some(store);
     }
 }
 

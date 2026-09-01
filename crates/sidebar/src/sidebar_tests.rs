@@ -143,13 +143,14 @@ async fn test_rebuild_contents_reflects_open_projects(cx: &mut TestAppContext) {
 
     sidebar.read_with(cx, |sidebar, _cx| {
         assert_eq!(
-            sidebar.contents.projects().count(),
+            sidebar.contents.entries.len(),
             2,
             "both open projects should be listed"
         );
         let active_count = sidebar
             .contents
-            .projects()
+            .entries
+            .iter()
             .filter(|entry| entry.is_active)
             .count();
         assert_eq!(

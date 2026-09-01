@@ -50,6 +50,13 @@ pub struct BranchPanel {
     /// so `uniform_list` cannot draw them; `ListState` virtualizes variable
     /// heights instead.
     pub(crate) list_state: gpui::ListState,
+    /// The one sweep of the agents' session stores, shared with the history
+    /// panel. `None` until the panel is first drawn: reading the histories
+    /// opens every transcript on disk, and none of that belongs on the startup
+    /// path of a panel nobody has opened.
+    pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
+    /// Dropped with the panel, so the store never notifies a dead handle.
+    pub(crate) _session_subscription: Option<Subscription>,
     /// The variant of each row as `list_state` last saw it. A row's height is
     /// decided entirely by its variant, so this is enough to work out which
     /// slice of the list actually changed and splice only that -- resetting the

@@ -10,6 +10,7 @@ use ui::{Tooltip, prelude::*};
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{SectionKind, TreeRow, worktree_label};
 
+mod agent;
 mod branch_card;
 mod leaf;
 
@@ -76,7 +77,15 @@ impl BranchPanel {
                 .section_row(ix, indent, *expanded, remote.clone(), *count, row, cx)
                 .into_any_element(),
 
-            TreeRow::Branch { id, branch, .. } => self.branch_card(ix, indent, *id, branch, cx),
+            TreeRow::Branch {
+                id,
+                branch,
+                agent_count,
+                expanded,
+                ..
+            } => self.branch_card(ix, indent, *id, branch, *agent_count, *expanded, row, cx),
+
+            TreeRow::Agent { id, entry, .. } => self.agent_row(ix, indent, *id, entry, cx),
 
             TreeRow::Worktree { worktree, .. } => {
                 let label = worktree_label(worktree);

@@ -146,6 +146,7 @@ mod restoring_expansion {
             worktrees: Arc::from([]),
             stashes: Arc::from([]),
             tags: Arc::from([]),
+            agents: Default::default(),
         }
     }
 

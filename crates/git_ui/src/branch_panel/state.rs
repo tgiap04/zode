@@ -32,6 +32,7 @@ pub(crate) enum StoredKey {
     Repo(String),
     Section(String, String),
     RemoteGroup(String, String),
+    BranchAgents(String, String),
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -50,6 +51,9 @@ impl StoredKey {
             RowKey::RemoteGroup(_, remote) => {
                 StoredKey::RemoteGroup(repo_path.to_string(), remote.to_string())
             }
+            RowKey::BranchAgents(_, branch) => {
+                StoredKey::BranchAgents(repo_path.to_string(), branch.to_string())
+            }
         }
     }
 
@@ -67,6 +71,9 @@ impl StoredKey {
                 .map(|kind| RowKey::Section(id, kind)),
             StoredKey::RemoteGroup(path, remote) if path == repo_path => {
                 Some(RowKey::RemoteGroup(id, remote.clone().into()))
+            }
+            StoredKey::BranchAgents(path, branch) if path == repo_path => {
+                Some(RowKey::BranchAgents(id, branch.clone().into()))
             }
             _ => None,
         }

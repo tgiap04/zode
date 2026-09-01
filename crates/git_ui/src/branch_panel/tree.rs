@@ -51,12 +51,17 @@ pub(crate) enum RowKey {
     Repo(RepositoryId),
     Section(RepositoryId, SectionKind),
     RemoteGroup(RepositoryId, SharedString),
+    /// The agents that ran on one branch.
+    BranchAgents(RepositoryId, SharedString),
 }
 
 impl RowKey {
     pub(crate) fn repository_id(&self) -> RepositoryId {
         match self {
-            RowKey::Repo(id) | RowKey::Section(id, _) | RowKey::RemoteGroup(id, _) => *id,
+            RowKey::Repo(id)
+            | RowKey::Section(id, _)
+            | RowKey::RemoteGroup(id, _)
+            | RowKey::BranchAgents(id, _) => *id,
         }
     }
 }
@@ -87,6 +92,16 @@ pub(crate) enum TreeRow {
         id: RepositoryId,
         branch: Branch,
         depth: usize,
+        /// How many agents have run on this branch. Drawn on the card, and the
+        /// reason the card gets a disclosure at all.
+        agent_count: usize,
+        expanded: bool,
+    },
+    /// One agent under a branch.
+    Agent {
+        id: RepositoryId,
+        entry: AgentEntry,
+        depth: usize,
     },
     /// Acts on its own path, so it needs no repository id.
     Worktree {
@@ -107,6 +122,39 @@ pub(crate) enum TreeRow {
     },
 }
 
+/// One agent of a branch.
+///
+/// Two kinds and not one list: a CLI still running is what someone juggling
+/// several branches is looking for, and burying it among finished transcripts
+/// would be the same as not showing it.
+///
+/// Neither variant carries a `SessionSummary`. It holds four `String`s and two
+/// `PathBuf`s, and the row needs a label -- the rest is fetched by id at click
+/// time, which happens once, rather than copied on every rebuild.
+#[derive(Clone, Debug)]
+pub(crate) enum AgentEntry {
+    Running {
+        label: SharedString,
+        view: gpui::WeakEntity<agent_ui::AgentView>,
+    },
+    Past {
+        label: SharedString,
+        id: std::sync::Arc<str>,
+    },
+}
+
+impl AgentEntry {
+    pub(crate) fn label(&self) -> &SharedString {
+        match self {
+            AgentEntry::Running { label, .. } | AgentEntry::Past { label, .. } => label,
+        }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self, AgentEntry::Running { .. })
+    }
+}
+
 impl TreeRow {
     /// The key to toggle when this row is clicked, or `None` for a leaf.
     pub(crate) fn toggle_key(&self) -> Option<RowKey> {
@@ -115,6 +163,16 @@ impl TreeRow {
             TreeRow::Section { id, kind, .. } => Some(RowKey::Section(*id, *kind)),
             TreeRow::RemoteGroup { id, remote, .. } => {
                 Some(RowKey::RemoteGroup(*id, remote.clone()))
+            }
+            // Only when there is something to show. A disclosure that opens on
+            // nothing reads as a broken control.
+            TreeRow::Branch {
+                id,
+                branch,
+                agent_count,
+                ..
+            } if *agent_count > 0 => {
+                Some(RowKey::BranchAgents(*id, branch.name().to_string().into()))
             }
             _ => None,
         }
@@ -125,7 +183,7 @@ impl TreeRow {
             TreeRow::Repo { .. } => 0,
             TreeRow::Section { .. } => 1,
             TreeRow::RemoteGroup { .. } => 2,
-            TreeRow::Branch { depth, .. } => *depth,
+            TreeRow::Branch { depth, .. } | TreeRow::Agent { depth, .. } => *depth,
             TreeRow::Worktree { .. }
             | TreeRow::Stash { .. }
             | TreeRow::Tag { .. }
@@ -148,6 +206,9 @@ pub(crate) struct RepoData {
     /// Already run through `branch_service::process_branches`, so a remote ref
     /// that a local branch tracks has been folded away.
     pub(crate) branches: Vec<Branch>,
+    /// Agents per branch name, gathered once per rebuild so `build_rows` stays
+    /// a pure function of its input.
+    pub(crate) agents: collections::HashMap<SharedString, Vec<AgentEntry>>,
     pub(crate) worktrees: Arc<[GitWorktree]>,
     pub(crate) stashes: Arc<[StashEntry]>,
     /// Unlike the other fields this is not on `RepositorySnapshot`: the store
