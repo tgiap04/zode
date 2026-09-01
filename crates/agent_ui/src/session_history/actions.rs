@@ -52,6 +52,75 @@ pub fn resume_session(
     });
 }
 
+/// Moves a session's transcript to the trash, after asking.
+///
+/// Free rather than a method on the history panel, for the reason
+/// [`resume_session`] is: the panel is no longer the only surface listing
+/// sessions, and what a delete takes -- and what it warns about before taking
+/// it -- belongs to the operation rather than to whichever list asked.
+///
+/// The confirmation names every path and the bytes involved: "delete session"
+/// and "delete forty megabytes of a conversation nobody has read since" look
+/// identical from a menu.
+pub fn delete_session(
+    workspace: &Entity<workspace::Workspace>,
+    session: &SessionSummary,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let provider = agent_sessions::provider_for(session.agent);
+    let paths = provider.paths_to_trash(session);
+    if paths.is_empty() {
+        return;
+    }
+    let fs = workspace.read(cx).project().read(cx).fs().clone();
+
+    let detail = format!(
+        "{}\n\n{} will move to the trash ({}).",
+        session.title,
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        format_bytes(session.log_bytes)
+    );
+    let prompt = window.prompt(
+        gpui::PromptLevel::Warning,
+        "Delete this session?",
+        Some(&detail),
+        &["Move to Trash", "Cancel"],
+        cx,
+    );
+
+    let store = crate::SessionStore::global(cx);
+    let id = session.id.clone();
+    cx.spawn(async move |cx| {
+        if prompt.await.ok() != Some(0) {
+            return;
+        }
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
+            fs.trash(
+                &path,
+                fs::RemoveOptions {
+                    recursive: true,
+                    ignore_if_not_exists: true,
+                },
+            )
+            .await
+            .log_err();
+        }
+        // Drop the entry rather than re-sweeping: the delete already knows
+        // exactly what it removed, and a sweep would open every other
+        // transcript on disk to learn one fact it was told.
+        store.update(cx, |store, cx| store.forget(&id, cx));
+    })
+    .detach();
+}
+
 impl AgentHistoryPanel {
     /// Continue a session, or branch a new one off it.
     pub(crate) fn resume(
@@ -127,69 +196,11 @@ impl AgentHistoryPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = self.provider_for(session) else {
+        let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
-        let paths = provider.paths_to_trash(session);
-        if paths.is_empty() {
-            return;
-        }
-        let Some(fs) = self
-            .workspace()
-            .update(cx, |workspace, cx| {
-                workspace.project().read(cx).fs().clone()
-            })
-            .log_err()
-        else {
-            return;
-        };
-
-        let detail = format!(
-            "{}\n\n{} will move to the trash ({}).",
-            session.title,
-            paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            format_bytes(session.log_bytes)
-        );
-        let prompt = window.prompt(
-            gpui::PromptLevel::Warning,
-            "Delete this session?",
-            Some(&detail),
-            &["Move to Trash", "Cancel"],
-            cx,
-        );
-        let id = session.id.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            if prompt.await.ok() != Some(0) {
-                return;
-            }
-            for path in paths {
-                if !path.exists() {
-                    continue;
-                }
-                fs.trash(
-                    &path,
-                    fs::RemoveOptions {
-                        recursive: true,
-                        ignore_if_not_exists: true,
-                    },
-                )
-                .await
-                .log_err();
-            }
-            // Drop the row rather than re-reading both stores: the list is a view
-            // of what was found, and one gone session does not invalidate the rest.
-            this.update(cx, |this, cx| {
-                this.store.update(cx, |store, cx| store.forget(&id, cx));
-                this.counts.remove(&id);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.counts.remove(&session.id);
+        delete_session(&workspace, session, window, cx);
     }
 
     /// Whether a fork is on offer for this session's agent. Claude has

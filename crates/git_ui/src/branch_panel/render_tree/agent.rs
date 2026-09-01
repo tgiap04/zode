@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui::{AnyElement, ClickEvent};
-use ui::{Indicator, Tooltip, prelude::*};
+use ui::{CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{AgentEntry, RowKey};
@@ -103,11 +103,21 @@ impl BranchPanel {
             .py_0p5()
             .rounded_sm()
             .hover(|style| style.bg(cx.theme().colors().element_hover))
-            .child(Indicator::dot().color(if running {
-                Color::Success
+            // A spinner rather than a dot while it works: "still going" is a
+            // moving fact, and a static mark says it no better than the words
+            // beside it do.
+            .child(if running {
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::XSmall)
+                    .color(Color::Accent)
+                    // Keyed, not caller-located: every running agent in the
+                    // list shares this call site, and one id for all of them
+                    // is one animation state for all of them.
+                    .with_keyed_rotate_animation(("agent-spinner", ix * 1000 + nth), 3)
+                    .into_any_element()
             } else {
-                Color::Muted
-            }))
+                Indicator::dot().color(Color::Muted).into_any_element()
+            })
             // The vendor's own mark in the vendor's own colour, so a glance at
             // the list says which agent as well as which session.
             .child(
@@ -135,10 +145,97 @@ impl BranchPanel {
                 )
             })
             .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
-            .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
-                panel.open_agent(&entry, window, cx);
+            .on_click(cx.listener({
+                let entry = entry.clone();
+                move |panel, _: &ClickEvent, window, cx| {
+                    panel.open_agent(&entry, window, cx);
+                }
             }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |panel, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let menu = panel.agent_context_menu(&entry, window, cx);
+                    panel.open_context_menu(menu, event.position, window, cx);
+                }),
+            )
             .into_any_element()
+    }
+
+    /// The right-click menu on an agent.
+    ///
+    /// A running agent has no transcript to remove yet -- what is on disk is
+    /// still being written -- so deleting is offered only for finished ones.
+    fn agent_context_menu(
+        &self,
+        entry: &AgentEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<ui::ContextMenu> {
+        let panel = cx.entity();
+        let entry = entry.clone();
+
+        ui::ContextMenu::build(window, cx, move |menu, _window, _cx| {
+            let open = panel.clone();
+            let open_entry = entry.clone();
+            let delete = panel.clone();
+            let delete_entry = entry.clone();
+            let running = entry.is_running();
+
+            menu.item(
+                ui::ContextMenuEntry::new(if running { "Go to Tab" } else { "Resume" })
+                    .icon(if running {
+                        IconName::ArrowUpRight
+                    } else {
+                        IconName::PlayOutlined
+                    })
+                    .icon_position(ui::IconPosition::Start)
+                    .handler(move |window, cx| {
+                        open.update(cx, |panel, cx| panel.open_agent(&open_entry, window, cx));
+                    }),
+            )
+            .separator()
+            .item(
+                ui::ContextMenuEntry::new("Delete Session\u{2026}")
+                    .icon(IconName::Trash)
+                    .icon_position(ui::IconPosition::Start)
+                    .icon_color(Color::Error)
+                    .disabled(running)
+                    .handler(move |window, cx| {
+                        delete.update(cx, |panel, cx| {
+                            panel.delete_agent_session(&delete_entry, window, cx)
+                        });
+                    }),
+            )
+        })
+    }
+
+    /// Moves one session's transcript to the trash, after asking.
+    ///
+    /// Through `agent_ui::delete_session`, the same call the history panel
+    /// makes: what a delete takes and what it warns about belong to the
+    /// operation, not to whichever surface asked for it.
+    fn delete_agent_session(
+        &mut self,
+        entry: &AgentEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let AgentEntry::Past { id, .. } = entry else {
+            return;
+        };
+        let (Some(workspace), Some(store)) = (self.workspace.upgrade(), self.session_store.clone())
+        else {
+            return;
+        };
+        let index = store.read(cx).index().clone();
+        let Some(session) = index.find(id) else {
+            return;
+        };
+
+        // The store is shared, so removing the entry there is what refreshes
+        // this panel -- no callback needed.
+        agent_ui::delete_session(&workspace, session, window, cx);
     }
 
     /// Jumps to a running agent's tab, or brings a finished session back.

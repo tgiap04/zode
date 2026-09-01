@@ -14,6 +14,29 @@ use ui::{Chip, Indicator, Tooltip, prelude::*};
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{AgentEntry, TreeRow, worktree_label};
 
+/// The checkout being dragged, by path.
+///
+/// A path and not an index: the list rebuilds while a drag is in flight -- a
+/// git event is enough -- and an index would then name a different card.
+#[derive(Clone)]
+pub(crate) struct DraggedCheckout(pub(crate) std::path::PathBuf);
+
+/// What follows the cursor during a drag.
+struct DragPreview(SharedString);
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border_focused)
+            .child(Label::new(self.0.clone()).size(LabelSize::Small))
+    }
+}
+
 impl BranchPanel {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn worktree_card(
@@ -29,8 +52,13 @@ impl BranchPanel {
         let label: SharedString = worktree_label(worktree).into();
         let path: SharedString = worktree.path.display().to_string().into();
         let is_current = self.is_current_checkout(worktree, cx);
+        let is_pinned = self.pinned.contains(&worktree.path);
         let toggle_key = row.toggle_key();
         let switch_to = worktree.clone();
+        let menu_for = worktree.clone();
+        let drag_path = worktree.path.clone();
+        let drop_path = worktree.path.clone();
+        let drag_label = label.clone();
 
         let colors = cx.theme().colors();
         let background = if is_current {
@@ -87,6 +115,13 @@ impl BranchPanel {
                             // window is in is already said by the dot and the
                             // background, while which one is the repository's
                             // own is a fact about the repository.
+                            .when(is_pinned, |this| {
+                                this.child(
+                                    Icon::new(IconName::Pin)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Accent),
+                                )
+                            })
                             .when(worktree.is_main, |this| {
                                 this.child(
                                     Chip::new("main")
@@ -109,8 +144,19 @@ impl BranchPanel {
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |panel, event: &gpui::MouseDownEvent, window, cx| {
-                            let menu = panel.repo_context_menu(id, window, cx);
+                            let menu = panel.checkout_context_menu(id, &menu_for, window, cx);
                             panel.open_context_menu(menu, event.position, window, cx);
+                        }),
+                    )
+                    .on_drag(DraggedCheckout(drag_path), move |_, _, _, cx| {
+                        cx.new(|_| DragPreview(drag_label.clone()))
+                    })
+                    .drag_over::<DraggedCheckout>(|style, _, _, cx| {
+                        style.border_color(cx.theme().colors().drop_target_background)
+                    })
+                    .on_drop(
+                        cx.listener(move |panel, dragged: &DraggedCheckout, _window, cx| {
+                            panel.reorder_checkout(&dragged.0, &drop_path, cx);
                         }),
                     ),
             )

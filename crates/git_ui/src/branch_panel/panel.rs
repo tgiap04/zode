@@ -40,6 +40,12 @@ pub struct BranchPanel {
     /// the life of the process.
     pub(crate) workspace: WeakEntity<Workspace>,
     pub(crate) focus_handle: FocusHandle,
+    /// Checkouts the reader pinned, by absolute path. Pinned ones sort above
+    /// the rest. Paths rather than ids: a checkout outlives a session.
+    pub(crate) pinned: collections::HashSet<std::path::PathBuf>,
+    /// The order the reader dragged checkouts into. Anything absent keeps its
+    /// natural place, so this holds only what they actually moved.
+    pub(crate) manual_order: Vec<std::path::PathBuf>,
     /// Height cache and scroll position for the row list. Rows are not a
     /// uniform height -- a branch card is two lines, a section header one --
     /// so `uniform_list` cannot draw them; `ListState` virtualizes variable

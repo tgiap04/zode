@@ -27,6 +27,8 @@ impl BranchPanel {
             let mut panel = Self {
                 workspace: workspace_handle,
                 focus_handle: cx.focus_handle(),
+                pinned: Default::default(),
+                manual_order: Vec::new(),
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
@@ -65,7 +67,19 @@ impl BranchPanel {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let panel = BranchPanel::new(workspace, window, cx);
             if let Some(serialized) = serialized {
-                panel.update(cx, |panel, _| panel.stored_expanded = serialized.expanded);
+                panel.update(cx, |panel, _| {
+                    panel.stored_expanded = serialized.expanded;
+                    panel.pinned = serialized
+                        .pinned
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    panel.manual_order = serialized
+                        .order
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                });
             }
             panel
         })
@@ -163,7 +177,7 @@ impl BranchPanel {
         cx.notify();
     }
 
-    fn serialize(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
         let mut stored = HashSet::default();
         for repo in &self.repos {
             let path = repo.path.to_string_lossy().to_string();
@@ -174,7 +188,19 @@ impl BranchPanel {
             }
         }
 
-        let state = SerializedBranchPanel { expanded: stored };
+        let state = SerializedBranchPanel {
+            expanded: stored,
+            pinned: self
+                .pinned
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+            order: self
+                .manual_order
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+        };
         let workspace = self.workspace.clone();
         self.pending_serialization = cx.spawn(async move |_, cx| state.write(workspace, cx).await);
     }

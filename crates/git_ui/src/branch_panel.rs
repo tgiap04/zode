@@ -14,6 +14,7 @@
 //! branch list, worktrees and stashes, and the git store announces every change
 //! to them -- so this is a pure reader, and a closed panel costs nothing.
 
+mod checkout_menu;
 mod context_menu;
 mod create_remote_repo;
 mod create_repo_modal;

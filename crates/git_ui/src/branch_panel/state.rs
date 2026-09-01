@@ -37,6 +37,12 @@ pub(crate) enum StoredKey {
 #[derive(Serialize, Debug, Default)]
 pub(crate) struct SerializedBranchPanel {
     pub(crate) expanded: HashSet<StoredKey>,
+    /// Checkouts pinned to the top, by absolute path.
+    #[serde(default)]
+    pub(crate) pinned: Vec<String>,
+    /// The order the reader dragged checkouts into. Only what they moved.
+    #[serde(default)]
+    pub(crate) order: Vec<String>,
 }
 
 /// The wire shape, read entry by entry.
@@ -51,6 +57,10 @@ pub(crate) struct SerializedBranchPanel {
 struct RawSerializedBranchPanel {
     #[serde(default)]
     expanded: Vec<serde_json::Value>,
+    #[serde(default)]
+    pinned: Vec<String>,
+    #[serde(default)]
+    order: Vec<String>,
 }
 
 impl From<RawSerializedBranchPanel> for SerializedBranchPanel {
@@ -61,6 +71,8 @@ impl From<RawSerializedBranchPanel> for SerializedBranchPanel {
                 .into_iter()
                 .filter_map(|entry| serde_json::from_value::<StoredKey>(entry).ok())
                 .collect(),
+            pinned: raw.pinned,
+            order: raw.order,
         }
     }
 }
@@ -193,7 +205,12 @@ mod tests {
             "/repos/zode".into(),
             "/wt/feature".into(),
         ));
-        let written = serde_json::to_string(&SerializedBranchPanel { expanded }).unwrap();
+        let written = serde_json::to_string(&SerializedBranchPanel {
+            expanded,
+            pinned: vec!["/wt/feature".into()],
+            order: vec!["/wt/feature".into(), "/repos/zode".into()],
+        })
+        .unwrap();
 
         let parsed: SerializedBranchPanel =
             serde_json::from_str::<RawSerializedBranchPanel>(&written)
@@ -201,5 +218,21 @@ mod tests {
                 .into();
 
         assert_eq!(parsed.expanded.len(), 1);
+        assert_eq!(parsed.pinned, vec!["/wt/feature".to_string()]);
+        assert_eq!(parsed.order.len(), 2);
+    }
+
+    /// A blob written before pinning existed has neither field. It must read
+    /// as "nothing pinned, nothing reordered" rather than failing.
+    #[test]
+    fn a_blob_without_the_newer_fields_still_reads() {
+        let raw = r#"{"expanded":[{"Repo":"/repos/zode"}]}"#;
+
+        let parsed: SerializedBranchPanel = serde_json::from_str::<RawSerializedBranchPanel>(raw)
+            .expect("the outer shape still parses")
+            .into();
+
+        assert!(parsed.pinned.is_empty());
+        assert!(parsed.order.is_empty());
     }
 }

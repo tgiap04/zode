@@ -192,6 +192,32 @@ pub(crate) fn all_checkouts(
     let mut checkouts = Vec::with_capacity(linked.len() + 1);
     checkouts.push(here);
     checkouts.extend(linked.iter().cloned());
+    // The main checkout first, then the rest in the order git listed them.
+    // Stable, and stable is the point: an order that depends on which checkout
+    // you happen to be in makes every card move whenever you switch, and a card
+    // that moves under the cursor is a card you cannot aim at.
+    checkouts.sort_by_key(|checkout| !checkout.is_main);
+    checkouts
+}
+
+/// Applies the reader's own ordering: pinned checkouts first, then whatever
+/// order they dragged things into, then the natural order for anything they
+/// have never touched.
+///
+/// Stable throughout, so a checkout nobody has an opinion about keeps the place
+/// `all_checkouts` gave it.
+pub(crate) fn order_checkouts(
+    mut checkouts: Vec<GitWorktree>,
+    pinned: &collections::HashSet<std::path::PathBuf>,
+    manual: &[std::path::PathBuf],
+) -> Vec<GitWorktree> {
+    checkouts.sort_by_key(|checkout| {
+        let position = manual
+            .iter()
+            .position(|path| path == &checkout.path)
+            .unwrap_or(usize::MAX);
+        (!pinned.contains(&checkout.path), position)
+    });
     checkouts
 }
 

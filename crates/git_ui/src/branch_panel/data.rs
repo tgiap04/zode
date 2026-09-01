@@ -73,11 +73,15 @@ impl BranchPanel {
             .values()
             .map(|repo| {
                 let repo = repo.read(cx);
-                let checkouts = crate::branch_panel::tree::all_checkouts(
-                    repo.work_directory_abs_path.as_ref(),
-                    repo.branch.as_ref(),
-                    repo.head_commit.as_ref().map(|commit| commit.sha.clone()),
-                    &repo.linked_worktrees,
+                let checkouts = crate::branch_panel::tree::order_checkouts(
+                    crate::branch_panel::tree::all_checkouts(
+                        repo.work_directory_abs_path.as_ref(),
+                        repo.branch.as_ref(),
+                        repo.head_commit.as_ref().map(|commit| commit.sha.clone()),
+                        &repo.linked_worktrees,
+                    ),
+                    &self.pinned,
+                    &self.manual_order,
                 );
                 RepoData {
                     id: repo.id,

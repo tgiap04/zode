@@ -371,8 +371,11 @@ mod checkouts {
     use crate::branch_panel::tree::all_checkouts;
     use std::path::Path;
 
+    /// The checkout the window is in is in the list at all -- which is the
+    /// whole bug this function exists to fix. Where it lands is the ordering
+    /// rule's business (main first), not this one's.
     #[test]
-    fn the_checkout_this_window_is_in_is_listed_first() {
+    fn the_checkout_this_window_is_in_is_listed() {
         let linked = vec![worktree("/wt/feature", Some("feature"), false)];
 
         let all = all_checkouts(
@@ -383,8 +386,27 @@ mod checkouts {
         );
 
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].path, PathBuf::from("/repos/zode"));
-        assert_eq!(all[1].path, PathBuf::from("/wt/feature"));
+        assert!(
+            all.iter()
+                .any(|checkout| checkout.path == Path::new("/repos/zode"))
+        );
+        assert!(
+            all.iter()
+                .any(|checkout| checkout.path == Path::new("/wt/feature"))
+        );
+    }
+
+    /// Main leads, whichever checkout the window happens to be in.
+    #[test]
+    fn the_main_checkout_leads() {
+        let from_linked = all_checkouts(
+            Path::new("/wt/feature"),
+            None,
+            None,
+            &[worktree("/repos/zode", Some("develop"), true)],
+        );
+
+        assert_eq!(from_linked[0].path, PathBuf::from("/repos/zode"));
     }
 
     /// Standing in the main checkout: nothing else claims `is_main`, so this
@@ -406,8 +428,15 @@ mod checkouts {
 
         let all = all_checkouts(Path::new("/wt/feature"), None, None, &linked);
 
-        assert!(!all[0].is_main, "the checkout we are in is the linked one");
-        assert!(all[1].is_main);
+        let here = all
+            .iter()
+            .find(|checkout| checkout.path == Path::new("/wt/feature"))
+            .expect("the checkout we are in is listed");
+        assert!(!here.is_main, "the checkout we are in is the linked one");
+        assert!(
+            all.iter()
+                .any(|checkout| checkout.is_main && checkout.path == Path::new("/repos/zode"))
+        );
     }
 
     /// A repository with no linked worktrees still has one checkout, and the
@@ -433,5 +462,119 @@ mod checkouts {
         let all = all_checkouts(Path::new("/wt/glad-prism"), None, None, &[]);
 
         assert_eq!(super::super::worktree_label(&all[0]), "glad-prism");
+    }
+}
+
+/// Pinning and manual order.
+///
+/// The base order has to be stable on its own -- an order that depends on which
+/// checkout you are standing in makes every card move when you switch, and a
+/// card that moves under the cursor is a card you cannot aim at.
+mod ordering {
+    use super::*;
+    use crate::branch_panel::tree::{all_checkouts, order_checkouts};
+    use std::path::Path;
+
+    fn paths(checkouts: &[GitWorktree]) -> Vec<String> {
+        checkouts
+            .iter()
+            .map(|checkout| checkout.path.display().to_string())
+            .collect()
+    }
+
+    /// Standing anywhere, the list reads the same way: main first, then git's
+    /// order.
+    #[test]
+    fn the_base_order_does_not_depend_on_where_you_are_standing() {
+        let from_main = all_checkouts(
+            Path::new("/repos/zode"),
+            None,
+            None,
+            &[worktree("/wt/a", Some("a"), false)],
+        );
+        let from_linked = all_checkouts(
+            Path::new("/wt/a"),
+            None,
+            None,
+            &[worktree("/repos/zode", Some("develop"), true)],
+        );
+
+        assert_eq!(paths(&from_main), vec!["/repos/zode", "/wt/a"]);
+        assert_eq!(
+            paths(&from_linked),
+            vec!["/repos/zode", "/wt/a"],
+            "the same two checkouts must read in the same order from either side"
+        );
+    }
+
+    #[test]
+    fn a_pinned_checkout_sorts_above_the_rest() {
+        let checkouts = vec![
+            worktree("/repos/zode", Some("develop"), true),
+            worktree("/wt/a", Some("a"), false),
+            worktree("/wt/b", Some("b"), false),
+        ];
+        let mut pinned = collections::HashSet::default();
+        pinned.insert(PathBuf::from("/wt/b"));
+
+        let ordered = order_checkouts(checkouts, &pinned, &[]);
+
+        assert_eq!(paths(&ordered), vec!["/wt/b", "/repos/zode", "/wt/a"]);
+    }
+
+    #[test]
+    fn manual_order_places_what_was_dragged() {
+        let checkouts = vec![
+            worktree("/repos/zode", Some("develop"), true),
+            worktree("/wt/a", Some("a"), false),
+            worktree("/wt/b", Some("b"), false),
+        ];
+        let manual = vec![
+            PathBuf::from("/wt/b"),
+            PathBuf::from("/repos/zode"),
+            PathBuf::from("/wt/a"),
+        ];
+
+        let ordered = order_checkouts(checkouts, &Default::default(), &manual);
+
+        assert_eq!(paths(&ordered), vec!["/wt/b", "/repos/zode", "/wt/a"]);
+    }
+
+    /// Pinning wins over dragging: pinning says "always at the top", and a
+    /// manual order that could override it would make the pin a lie.
+    #[test]
+    fn pinning_outranks_manual_order() {
+        let checkouts = vec![
+            worktree("/repos/zode", Some("develop"), true),
+            worktree("/wt/a", Some("a"), false),
+        ];
+        let mut pinned = collections::HashSet::default();
+        pinned.insert(PathBuf::from("/wt/a"));
+        let manual = vec![PathBuf::from("/repos/zode"), PathBuf::from("/wt/a")];
+
+        let ordered = order_checkouts(checkouts, &pinned, &manual);
+
+        assert_eq!(paths(&ordered), vec!["/wt/a", "/repos/zode"]);
+    }
+
+    /// A checkout nobody has an opinion about keeps the place the base order
+    /// gave it, rather than being shuffled to one end.
+    #[test]
+    fn an_untouched_checkout_keeps_its_natural_place() {
+        let checkouts = vec![
+            worktree("/repos/zode", Some("develop"), true),
+            worktree("/wt/a", Some("a"), false),
+            worktree("/wt/b", Some("b"), false),
+        ];
+        // Only `b` was ever dragged, and only to the front.
+        let manual = vec![PathBuf::from("/wt/b")];
+
+        let ordered = order_checkouts(checkouts, &Default::default(), &manual);
+
+        assert_eq!(
+            paths(&ordered),
+            vec!["/wt/b", "/repos/zode", "/wt/a"],
+            "the two nobody moved stay in their own order"
+        );
     }
 }
