@@ -5069,6 +5069,7 @@ mod tests {
                 "app_menu",
                 "assistant",
                 "auto_update",
+                "branch_panel",
                 "branch_picker",
                 "branches",
                 "buffer_search",
