@@ -126,6 +126,53 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Jumps to a running agent's tab, or brings a finished session back.
+    ///
+    /// Resuming goes through `agent_ui::resume_session`, the same call the
+    /// history panel makes -- the rules about what may be resumed (the agent
+    /// must support it, the directory must still exist) belong to the operation
+    /// and must not be re-decided here.
+    pub(crate) fn open_agent_row(
+        &mut self,
+        row: &crate::project_list::AgentRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = row.workspace.upgrade() else {
+            return;
+        };
+        self.activate_workspace(&workspace, window, cx);
+
+        match &row.kind {
+            crate::project_list::AgentRowKind::Running => {
+                let Some(view) = row.view.as_ref().and_then(|view| view.upgrade()) else {
+                    return;
+                };
+                workspace.update(cx, |workspace, cx| {
+                    workspace.activate_item(&view, true, true, window, cx);
+                });
+            }
+            crate::project_list::AgentRowKind::Past { session } => {
+                let Some(store) = self.session_store.clone() else {
+                    return;
+                };
+                let index = store.read(cx).index().clone();
+                let Some(summary) = index.sessions().get(*session as usize) else {
+                    return;
+                };
+                agent_ui::resume_session(
+                    &workspace,
+                    summary,
+                    agent_sessions::Fork::Continue,
+                    window,
+                    cx,
+                );
+            }
+        }
+        self.selection = None;
+        cx.notify();
+    }
+
     /// Opens or closes a project's worktree rows.
     ///
     /// Records the *closed* projects: they are open by default, so the set only

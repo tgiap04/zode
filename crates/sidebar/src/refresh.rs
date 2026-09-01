@@ -19,8 +19,15 @@ impl Sidebar {
 
         let query = self.filter_editor.read(cx).text(cx);
         let collapsed = self.collapsed_projects.clone();
-        self.contents =
-            multi_workspace.read_with(cx, |mw, cx| rebuild_contents(mw, &query, &collapsed, cx));
+        // Read once, not once per row: the index is behind an `Arc`, so this is
+        // a refcount bump and every worktree row below shares it.
+        let sessions = self
+            .session_store
+            .as_ref()
+            .map(|store| store.read(cx).index().clone());
+        self.contents = multi_workspace.read_with(cx, |mw, cx| {
+            rebuild_contents(mw, &query, &collapsed, sessions.as_ref(), cx)
+        });
 
         // The entry list can shrink (a project closes, or a filter narrows
         // it) without any navigation method running in between, so a
@@ -70,5 +77,28 @@ impl Sidebar {
             self.list_state.splice(old_range, new_count);
             self.row_kinds = new_kinds;
         }
+    }
+
+    /// Creates the shared session store the first time the panel is actually
+    /// drawn, and asks it for its one sweep.
+    ///
+    /// Not at construction: reading the agents' histories opens every
+    /// transcript on disk, and the history panel already carries the rule that
+    /// none of that belongs on the startup path (`AgentHistoryPanel`'s
+    /// `loaded_once`). A window whose sidebar panel is never opened must not
+    /// pay for it either.
+    pub(crate) fn ensure_session_store(&mut self, cx: &mut Context<Self>) {
+        if self.session_store.is_some() {
+            return;
+        }
+        let store = agent_ui::SessionStore::global(cx);
+        // The sweep lands on the store, so the sidebar has to be told when it
+        // does. Held in `_session_subscription`, never detached: a detached
+        // observe outlives the sidebar and fires into a dropped handle.
+        self._session_subscription = Some(cx.observe(&store, |sidebar, _, cx| {
+            sidebar.update_entries(cx);
+        }));
+        store.update(cx, |store, cx| store.refresh(cx));
+        self.session_store = Some(store);
     }
 }

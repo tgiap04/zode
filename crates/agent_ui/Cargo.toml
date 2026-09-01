@@ -11,6 +11,11 @@ workspace = true
 [lib]
 path = "src/agent_ui.rs"
 
+[features]
+# Lets another crate's tests stock the shared session store instead of
+# sweeping the real transcripts under the user's home directory.
+test-support = []
+
 [dependencies]
 agent_sessions.workspace = true
 anyhow.workspace = true

@@ -26,7 +26,6 @@ use gpui::{
     Subscription, Task, Window, div,
 };
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
-use terminal::TaskStatus;
 use ui::prelude::*;
 use ui::{ButtonLike, ContextMenu, IconPosition, PopoverMenu, Tooltip};
 use workspace::{StatusItemView, Workspace};
@@ -412,13 +411,10 @@ impl KeepAwake {
         // `Unknown` means the terminal went away without reporting an exit code.
         // Counted as not working: releasing a moment early costs a display that
         // sleeps on time, while holding on a status nobody will ever update pins
-        // the display on until the window closes.
-        let working = terminal.as_ref().is_some_and(|terminal| {
-            terminal
-                .read(cx)
-                .task()
-                .is_some_and(|task| task.status == TaskStatus::Running)
-        });
+        // the display on until the window closes. The rule lives on `AgentView`
+        // so the sidebar's "which agents are running here" asks the same
+        // question this does, and gets the same answer.
+        let working = agent.is_working(cx);
 
         // Dropping any previous completion cancels the waiter on the terminal that
         // has just been replaced.

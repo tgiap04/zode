@@ -1,8 +1,8 @@
 use crate::Sidebar;
-use crate::project_list::{ListEntry, PanelRow, WorktreeRow};
+use crate::project_list::{AgentRow, AgentRowKind, ListEntry, PanelRow, WorktreeRow};
 use gpui::{AnyElement, Context, SharedString, Window, px};
 use remote::RemoteConnectionOptions;
-use ui::{GradientFade, HighlightedLabel, Tab, Tooltip, prelude::*};
+use ui::{GradientFade, HighlightedLabel, Indicator, Tab, Tooltip, prelude::*};
 
 impl Sidebar {
     /// FR2: renders one project row. `is_group_header_after_first` (a
@@ -25,6 +25,7 @@ impl Sidebar {
         match entry {
             PanelRow::Project(entry) => self.render_project_header(ix, &entry, is_selected, cx),
             PanelRow::Worktree(row) => self.render_worktree_row(ix, &row, is_selected, cx),
+            PanelRow::Agent(row) => self.render_agent_row(ix, &row, is_selected, cx),
         }
     }
 
@@ -129,6 +130,54 @@ impl Sidebar {
                 .tooltip(Tooltip::text("Remote Project"))
                 .into_any_element(),
         )
+    }
+
+    /// One agent under a worktree.
+    ///
+    /// A running agent keeps full contrast and a live dot; a finished session is
+    /// muted. The distinction is the point of the row -- someone running four
+    /// features at once is looking for which of them is still moving.
+    fn render_agent_row(
+        &self,
+        ix: usize,
+        row: &AgentRow,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let running = matches!(row.kind, AgentRowKind::Running);
+        let row_for_click = row.clone();
+        let colors = cx.theme().colors();
+
+        h_flex()
+            .id(("agent-row", ix))
+            .w_full()
+            .pl(px(34.))
+            .pr_2()
+            .py_0p5()
+            .gap_1p5()
+            .when(is_selected, |this| this.bg(colors.element_selected))
+            .hover(|style| style.bg(colors.element_hover))
+            .child(Indicator::dot().color(if running {
+                Color::Success
+            } else {
+                Color::Muted
+            }))
+            .child(
+                div().flex_1().min_w_0().child(
+                    Label::new(row.label.clone())
+                        .size(LabelSize::Small)
+                        .truncate()
+                        .color(if running {
+                            Color::Default
+                        } else {
+                            Color::Muted
+                        }),
+                ),
+            )
+            .on_click(cx.listener(move |sidebar, _, window, cx| {
+                sidebar.open_agent_row(&row_for_click, window, cx);
+            }))
+            .into_any_element()
     }
 
     /// The affordance for opening and closing a project's worktrees.

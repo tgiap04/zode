@@ -12,7 +12,6 @@ impl Sidebar {
         };
     }
 
-
     pub(crate) fn dispatch_context(&self, window: &Window, cx: &Context<Self>) -> KeyContext {
         let mut context = KeyContext::new_with_defaults();
         context.add("Sidebar");
@@ -144,6 +143,7 @@ impl Sidebar {
                 self.activate_or_open_workspace_for_group(&entry.key, window, cx)
             }
             PanelRow::Worktree(row) => self.activate_worktree(&row.workspace, window, cx),
+            PanelRow::Agent(row) => self.open_agent_row(&row, window, cx),
         }
     }
 

@@ -1,3 +1,4 @@
+use agent_sessions::SessionIndex;
 use gpui::{App, Entity, SharedString, WeakEntity};
 use project::ProjectGroupKey;
 use std::collections::{HashMap, HashSet};
@@ -56,6 +57,31 @@ pub(crate) struct WorktreeRow {
     pub(crate) is_active: bool,
 }
 
+/// An agent under a worktree row.
+///
+/// Two kinds, deliberately not one list: a CLI still running is the thing
+/// someone working on several features at once needs to see, and burying it
+/// among finished transcripts would be the same as not showing it.
+#[derive(Clone, Debug)]
+pub(crate) enum AgentRowKind {
+    /// A tab in that workspace whose CLI is still running.
+    Running,
+    /// A transcript on disk. Carries its index into the shared session list --
+    /// never a copy: `SessionSummary` holds four `String`s and two `PathBuf`s,
+    /// and a copy per row per frame is six allocations for nothing.
+    Past { session: u32 },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentRow {
+    pub(crate) key: ProjectGroupKey,
+    pub(crate) kind: AgentRowKind,
+    pub(crate) label: SharedString,
+    /// Weak: an agent tab can close between two rebuilds.
+    pub(crate) workspace: WeakEntity<Workspace>,
+    pub(crate) view: Option<WeakEntity<agent_ui::AgentView>>,
+}
+
 /// A row of the panel's tree, flattened.
 ///
 /// Flattened rather than rendered recursively for the same two reasons the
@@ -65,6 +91,7 @@ pub(crate) struct WorktreeRow {
 pub(crate) enum PanelRow {
     Project(ListEntry),
     Worktree(WorktreeRow),
+    Agent(AgentRow),
 }
 
 /// Views over the flattened rows.
@@ -80,14 +107,21 @@ impl SidebarContents {
     pub(crate) fn projects(&self) -> impl Iterator<Item = &ListEntry> {
         self.entries.iter().filter_map(|row| match row {
             PanelRow::Project(entry) => Some(entry),
-            PanelRow::Worktree(_) => None,
+            _ => None,
         })
     }
 
     pub(crate) fn worktrees(&self) -> impl Iterator<Item = &WorktreeRow> {
         self.entries.iter().filter_map(|row| match row {
             PanelRow::Worktree(row) => Some(row),
-            PanelRow::Project(_) => None,
+            _ => None,
+        })
+    }
+
+    pub(crate) fn agents(&self) -> impl Iterator<Item = &AgentRow> {
+        self.entries.iter().filter_map(|row| match row {
+            PanelRow::Agent(row) => Some(row),
+            _ => None,
         })
     }
 }
@@ -97,6 +131,7 @@ impl PanelRow {
         match self {
             PanelRow::Project(entry) => &entry.key,
             PanelRow::Worktree(row) => &row.key,
+            PanelRow::Agent(row) => &row.key,
         }
     }
 }
@@ -154,6 +189,7 @@ pub(crate) fn rebuild_contents(
     multi_workspace: &workspace::MultiWorkspace,
     query: &str,
     collapsed: &HashSet<Vec<PathBuf>>,
+    sessions: Option<&Arc<SessionIndex>>,
     cx: &App,
 ) -> SidebarContents {
     let workspaces: Vec<_> = multi_workspace.workspaces().cloned().collect();
@@ -233,9 +269,12 @@ pub(crate) fn rebuild_contents(
             continue;
         };
         for workspace in &group.workspaces {
-            if let Some(row) = worktree_row(&key, workspace, &active_workspace, cx) {
-                entries.push(PanelRow::Worktree(row));
-            }
+            let Some(row) = worktree_row(&key, workspace, &active_workspace, cx) else {
+                continue;
+            };
+            let path = row.path.clone();
+            entries.push(PanelRow::Worktree(row));
+            push_agent_rows(&mut entries, &key, workspace, &path, sessions, cx);
         }
     }
 
@@ -243,6 +282,48 @@ pub(crate) fn rebuild_contents(
         entries,
         rail_entries,
         has_open_projects,
+    }
+}
+
+/// The agents of one worktree: running first, then what has finished there.
+///
+/// Running comes from the workspace's own items -- `items_of_type` is linear in
+/// the tab count, which is tens, not the thousands a session store holds.
+/// Finished comes from the shared index, one hash and no scan; the alternative,
+/// filtering the session list per row, is `O(rows * sessions)`.
+fn push_agent_rows(
+    entries: &mut Vec<PanelRow>,
+    key: &ProjectGroupKey,
+    workspace: &Entity<Workspace>,
+    path: &Arc<Path>,
+    sessions: Option<&Arc<SessionIndex>>,
+    cx: &App,
+) {
+    for view in workspace.read(cx).items_of_type::<agent_ui::AgentView>(cx) {
+        if !view.read(cx).is_working(cx) {
+            continue;
+        }
+        entries.push(PanelRow::Agent(AgentRow {
+            key: key.clone(),
+            kind: AgentRowKind::Running,
+            label: view.read(cx).tab_label(),
+            workspace: workspace.downgrade(),
+            view: Some(view.downgrade()),
+        }));
+    }
+
+    let Some(sessions) = sessions else { return };
+    for index in sessions.indices_for(path) {
+        let Some(session) = sessions.sessions().get(*index as usize) else {
+            continue;
+        };
+        entries.push(PanelRow::Agent(AgentRow {
+            key: key.clone(),
+            kind: AgentRowKind::Past { session: *index },
+            label: session.title.clone().into(),
+            workspace: workspace.downgrade(),
+            view: None,
+        }));
     }
 }
 

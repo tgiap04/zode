@@ -1,6 +1,6 @@
 use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
 use agent_sessions::{Fork, SessionProvider, SessionSummary};
-use gpui::{App, ClipboardItem, Context, Window};
+use gpui::{App, ClipboardItem, Context, Entity, Window};
 use std::sync::Arc;
 use util::ResultExt as _;
 
@@ -13,6 +13,45 @@ pub(crate) fn cwd_exists(session: &SessionSummary) -> bool {
     !session.cwd.as_os_str().is_empty() && session.cwd.is_dir()
 }
 
+/// Opens a tab back on `session`, or branches a new one off it.
+///
+/// Free rather than a method on the history panel: the sidebar reaches the same
+/// sessions through the shared session index, and the rules about what may be
+/// resumed -- the agent must support it, the working directory must still exist,
+/// a fork must not carry the id it forked from -- belong to the operation, not
+/// to whichever surface asked for it.
+pub fn resume_session(
+    workspace: &Entity<workspace::Workspace>,
+    session: &SessionSummary,
+    fork: Fork,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let provider = agent_sessions::provider_for(session.agent);
+    // Asked only so the control stays disabled where the agent cannot honour
+    // it — Codex has no fork. The command itself is rebuilt at spawn time from
+    // the id, so what comes back here is discarded.
+    if provider.resume_command(session, fork).is_none() {
+        return;
+    }
+    if !cwd_exists(session) {
+        return;
+    }
+    let agent = session.agent.builtin_agent_id();
+    // A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint
+    // a *new* id, so a tab carrying the id we resumed from would come back on
+    // the original conversation rather than the fork — the one failure this
+    // whole feature exists to avoid, and silent. Until a flag exists to name a
+    // fork's id, a forked tab is an untracked tab.
+    let intent = match fork {
+        Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
+        Fork::New => SessionIntent::Untracked,
+    };
+    workspace.update(cx, |workspace, cx| {
+        AgentView::open_tracked(workspace, agent, intent, window, cx);
+    });
+}
+
 impl AgentHistoryPanel {
     /// Continue a session, or branch a new one off it.
     pub(crate) fn resume(
@@ -22,33 +61,10 @@ impl AgentHistoryPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = self.provider_for(session) else {
+        let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
-        // Asked only so the control stays disabled where the agent cannot honour
-        // it — Codex has no fork. The command itself is rebuilt at spawn time from
-        // the id, so what comes back here is discarded.
-        if provider.resume_command(session, fork).is_none() {
-            return;
-        }
-        if !cwd_exists(session) {
-            return;
-        }
-        let agent = session.agent.builtin_agent_id();
-        // A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint
-        // a *new* id, so a tab carrying the id we resumed from would come back on
-        // the original conversation rather than the fork — the one failure this
-        // whole feature exists to avoid, and silent. Until a flag exists to name a
-        // fork's id, a forked tab is an untracked tab.
-        let intent = match fork {
-            Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
-            Fork::New => SessionIntent::Untracked,
-        };
-        self.workspace()
-            .update(cx, |workspace, cx| {
-                AgentView::open_tracked(workspace, agent, intent, window, cx);
-            })
-            .log_err();
+        resume_session(&workspace, session, fork, window, cx);
     }
 
     pub(crate) fn copy_resume_command(&self, session: &SessionSummary, cx: &mut App) {

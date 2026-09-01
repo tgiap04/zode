@@ -503,6 +503,27 @@ impl AgentView {
         }
     }
 
+    /// Whether this agent's CLI is still running.
+    ///
+    /// Not "is the tab open": `agent_task` sets `HideStrategy::Never`, so a tab
+    /// deliberately outlives the process it hosted. Only the terminal's task
+    /// status distinguishes an agent that is working from a tab left behind by
+    /// one that finished.
+    ///
+    /// A terminal that vanished without reporting an exit code reads as not
+    /// working -- the same call `keep_awake` makes, for the same reason: a
+    /// status nobody will ever update must not be treated as activity.
+    pub fn is_working(&self, cx: &App) -> bool {
+        self.terminal().is_some_and(|terminal_view| {
+            terminal_view
+                .read(cx)
+                .terminal()
+                .read(cx)
+                .task()
+                .is_some_and(|task| task.status == ::terminal::TaskStatus::Running)
+        })
+    }
+
     /// What the tab shows: the name the user gave this session, or the agent's.
     pub fn tab_label(&self) -> SharedString {
         self.custom_name

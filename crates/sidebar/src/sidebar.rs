@@ -83,6 +83,12 @@ pub struct Sidebar {
     /// Gaps rather than rows because the question a drop answers is "between
     /// which two", and the ends are the two answers a row index cannot give.
     pub(crate) drop_gap: Option<usize>,
+    /// The one sweep of the agents' session stores, shared with the history
+    /// panel. `None` until something creates it -- a window that never opens an
+    /// agent surface must not pay for a scan of every transcript on disk.
+    pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
+    /// Dropped with the sidebar, so the store never notifies a dead handle.
+    pub(crate) _session_subscription: Option<Subscription>,
     /// Which projects the reader has closed, keyed by their paths rather than
     /// by `ProjectGroupKey` -- the key carries a host and is session-local,
     /// while the paths still mean something after a restart.
@@ -163,6 +169,8 @@ impl Sidebar {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
             contents: SidebarContents::default(),
             selection: None,
+            session_store: None,
+            _session_subscription: None,
             collapsed_projects: Default::default(),
             row_kinds: Vec::new(),
             colour_preview: None,

@@ -16,4 +16,5 @@ mod panel;
 mod panel_tests;
 mod row;
 
+pub use actions::resume_session;
 pub use panel::AgentHistoryPanel;
