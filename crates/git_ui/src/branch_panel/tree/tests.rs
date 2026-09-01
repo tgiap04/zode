@@ -358,3 +358,80 @@ mod agents {
         assert!(Arc::ptr_eq(&gathered, &on_card));
     }
 }
+
+/// Which checkouts the panel lists.
+///
+/// The panel showed only the *other* checkouts for a while, because
+/// `linked_worktrees` leaves out the one the repository is open at and nothing
+/// put it back. With one worktree that meant a single card that switched you to
+/// it, whereupon the list showed the one you had just left -- two one-item
+/// lists bouncing off each other.
+mod checkouts {
+    use super::*;
+    use crate::branch_panel::tree::all_checkouts;
+    use std::path::Path;
+
+    #[test]
+    fn the_checkout_this_window_is_in_is_listed_first() {
+        let linked = vec![worktree("/wt/feature", Some("feature"), false)];
+
+        let all = all_checkouts(
+            Path::new("/repos/zode"),
+            Some(&branch("develop", true)),
+            Some("abc123".into()),
+            &linked,
+        );
+
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].path, PathBuf::from("/repos/zode"));
+        assert_eq!(all[1].path, PathBuf::from("/wt/feature"));
+    }
+
+    /// Standing in the main checkout: nothing else claims `is_main`, so this
+    /// one is it.
+    #[test]
+    fn the_current_checkout_is_main_when_no_other_claims_it() {
+        let linked = vec![worktree("/wt/feature", Some("feature"), false)];
+
+        let all = all_checkouts(Path::new("/repos/zode"), None, None, &linked);
+
+        assert!(all[0].is_main);
+    }
+
+    /// Standing in a linked worktree: the main one is in the list and says so,
+    /// which is how we know this one is not.
+    #[test]
+    fn the_current_checkout_is_not_main_when_another_claims_it() {
+        let linked = vec![worktree("/repos/zode", Some("develop"), true)];
+
+        let all = all_checkouts(Path::new("/wt/feature"), None, None, &linked);
+
+        assert!(!all[0].is_main, "the checkout we are in is the linked one");
+        assert!(all[1].is_main);
+    }
+
+    /// A repository with no linked worktrees still has one checkout, and the
+    /// panel has to show it -- otherwise every project without a worktree gets
+    /// an empty panel.
+    #[test]
+    fn a_repository_with_no_linked_worktrees_still_lists_one() {
+        let all = all_checkouts(
+            Path::new("/repos/zode"),
+            Some(&branch("develop", true)),
+            None,
+            &[],
+        );
+
+        assert_eq!(all.len(), 1);
+        assert!(all[0].is_main);
+        assert_eq!(super::super::worktree_label(&all[0]), "develop");
+    }
+
+    /// A detached checkout has no branch to name it, so the directory does.
+    #[test]
+    fn a_detached_current_checkout_falls_back_to_its_directory() {
+        let all = all_checkouts(Path::new("/wt/glad-prism"), None, None, &[]);
+
+        assert_eq!(super::super::worktree_label(&all[0]), "glad-prism");
+    }
+}

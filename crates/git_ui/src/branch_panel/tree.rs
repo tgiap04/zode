@@ -161,6 +161,40 @@ pub(crate) struct RepoData {
     pub(crate) worktrees: Arc<[GitWorktree]>,
 }
 
+/// Every checkout of a repository, the one this window is in first.
+///
+/// `RepositorySnapshot::linked_worktrees` deliberately leaves out the checkout
+/// the repository is open at (`git_store.rs`, where it filters on
+/// `wt.path != work_directory_abs_path`) -- "linked" means "other than this
+/// one" in git's own vocabulary. A panel that listed only that would show every
+/// checkout except the one you are looking at, and clicking the only card would
+/// bounce you between two one-item lists.
+///
+/// So the current one is rebuilt here from what the snapshot does carry.
+///
+/// **`is_main` is inferred, not read.** The flag rides on each entry, but the
+/// current entry never reaches us to carry it. Exactly one checkout of a
+/// repository is the main one, so if none of the others claims it, this is it.
+pub(crate) fn all_checkouts(
+    work_directory: &std::path::Path,
+    current_branch: Option<&Branch>,
+    head_sha: Option<SharedString>,
+    linked: &[GitWorktree],
+) -> Vec<GitWorktree> {
+    let here = GitWorktree {
+        path: work_directory.to_path_buf(),
+        ref_name: current_branch.map(|branch| branch.ref_name.clone()),
+        sha: head_sha.unwrap_or_default(),
+        is_main: !linked.iter().any(|worktree| worktree.is_main),
+        is_bare: false,
+    };
+
+    let mut checkouts = Vec::with_capacity(linked.len() + 1);
+    checkouts.push(here);
+    checkouts.extend(linked.iter().cloned());
+    checkouts
+}
+
 /// A worktree reads best by its branch; the directory name is the fallback for a
 /// detached one.
 pub(crate) fn worktree_label(worktree: &GitWorktree) -> String {

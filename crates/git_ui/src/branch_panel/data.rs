@@ -73,6 +73,12 @@ impl BranchPanel {
             .values()
             .map(|repo| {
                 let repo = repo.read(cx);
+                let checkouts = crate::branch_panel::tree::all_checkouts(
+                    repo.work_directory_abs_path.as_ref(),
+                    repo.branch.as_ref(),
+                    repo.head_commit.as_ref().map(|commit| commit.sha.clone()),
+                    &repo.linked_worktrees,
+                );
                 RepoData {
                     id: repo.id,
                     path: repo.work_directory_abs_path.clone(),
@@ -82,8 +88,8 @@ impl BranchPanel {
                         .as_ref()
                         .map(|branch| SharedString::from(branch.name().to_string())),
                     branches: process_branches(&repo.branch_list),
-                    worktrees: repo.linked_worktrees.clone(),
-                    agents: self.agents_by_checkout(&repo.linked_worktrees, cx),
+                    worktrees: std::sync::Arc::from(checkouts.clone()),
+                    agents: self.agents_by_checkout(&checkouts, cx),
                 }
             })
             .collect();
