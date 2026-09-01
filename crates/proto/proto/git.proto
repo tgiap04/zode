@@ -172,6 +172,28 @@ message GitGetBranches {
   uint64 repository_id = 3;
 }
 
+message GitTag {
+  string name = 1;
+  string sha = 2;
+  bool is_annotated = 3;
+  optional string message = 4;
+}
+
+message GitGetTags {
+  uint64 project_id = 1;
+  uint64 repository_id = 2;
+}
+
+message GitTagsResponse {
+  repeated GitTag tags = 1;
+}
+
+message GitCheckoutTag {
+  uint64 project_id = 1;
+  uint64 repository_id = 2;
+  string name = 3;
+}
+
 message GitCreateBranch {
   uint64 project_id = 1;
   reserved 2;

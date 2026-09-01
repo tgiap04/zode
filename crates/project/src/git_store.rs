@@ -36,7 +36,7 @@ use git::{
         Branch, CommitDetails, CommitDiff, CommitFile, CommitOptions, CreateWorktreeTarget,
         DiffType, FetchOptions, GitCommitTemplate, GitRepository, GitRepositoryCheckpoint,
         GraphCommitData, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, UpstreamTrackingStatus,
+        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag, UpstreamTrackingStatus,
         Worktree as GitWorktree,
     },
     stash::{GitStash, StashEntry},
@@ -543,6 +543,8 @@ impl GitStore {
     pub fn init(client: &AnyProtoClient) {
         client.add_entity_request_handler(Self::handle_get_remotes);
         client.add_entity_request_handler(Self::handle_get_branches);
+        client.add_entity_request_handler(Self::handle_get_tags);
+        client.add_entity_request_handler(Self::handle_checkout_tag);
         client.add_entity_request_handler(Self::handle_get_default_branch);
         client.add_entity_request_handler(Self::handle_change_branch);
         client.add_entity_request_handler(Self::handle_create_branch);
@@ -2600,6 +2602,40 @@ impl GitStore {
                 .collect::<Vec<_>>(),
         })
     }
+    async fn handle_get_tags(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitGetTags>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GitTagsResponse> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        let tags = repository_handle
+            .update(&mut cx, |repository_handle, _| repository_handle.tags())
+            .await??;
+
+        Ok(proto::GitTagsResponse {
+            tags: tags.iter().map(tag_to_proto).collect(),
+        })
+    }
+
+    async fn handle_checkout_tag(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitCheckoutTag>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        repository_handle
+            .update(&mut cx, |repository_handle, _| {
+                repository_handle.checkout_tag(envelope.payload.name)
+            })
+            .await??;
+
+        Ok(proto::Ack {})
+    }
+
     async fn handle_get_default_branch(
         this: Entity<Self>,
         envelope: TypedEnvelope<proto::GetDefaultBranch>,
@@ -6094,6 +6130,53 @@ impl Repository {
         })
     }
 
+    pub fn tags(&mut self) -> oneshot::Receiver<Result<Vec<Tag>>> {
+        let id = self.id;
+        self.send_job(None, move |repo, _| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.tags().await
+                }
+                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                    let response = client
+                        .request(proto::GitGetTags {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                        })
+                        .await?;
+
+                    Ok(response.tags.iter().map(proto_to_tag).collect())
+                }
+            }
+        })
+    }
+
+    /// Checks out a tag, leaving the repository in detached HEAD. The caller is
+    /// expected to have told the user that first.
+    pub fn checkout_tag(&mut self, name: String) -> oneshot::Receiver<Result<()>> {
+        let id = self.id;
+        self.send_job(
+            Some(format!("git checkout tags/{name}").into()),
+            move |repo, _| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.checkout_tag(name).await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        client
+                            .request(proto::GitCheckoutTag {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                name,
+                            })
+                            .await?;
+                        Ok(())
+                    }
+                }
+            },
+        )
+    }
+
     /// If this is a linked worktree (*NOT* the main checkout of a repository),
     /// returns the pathed for the linked worktree.
     ///
@@ -7640,6 +7723,24 @@ fn deserialize_blame_buffer_response(
 
     Some(Blame { entries, messages })
 }
+fn tag_to_proto(tag: &Tag) -> proto::GitTag {
+    proto::GitTag {
+        name: tag.name.to_string(),
+        sha: tag.sha.to_string(),
+        is_annotated: tag.is_annotated,
+        message: tag.message.as_ref().map(|message| message.to_string()),
+    }
+}
+
+fn proto_to_tag(tag: &proto::GitTag) -> Tag {
+    Tag {
+        name: tag.name.clone().into(),
+        sha: tag.sha.clone().into(),
+        is_annotated: tag.is_annotated,
+        message: tag.message.clone().map(Into::into),
+    }
+}
+
 
 fn branch_to_proto(branch: &git::repository::Branch) -> proto::Branch {
     proto::Branch {

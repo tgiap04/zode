@@ -187,6 +187,21 @@ fn parse_cat_file_commit(sha: Oid, content: &str) -> Option<GraphCommitData> {
     })
 }
 
+/// A git tag, as the branch panel needs it: enough to list, identify and check
+/// out. Deliberately thinner than [`Branch`] -- a tag has no upstream, no
+/// tracking status and no head flag, and inventing those fields would only
+/// invite code that pretends otherwise.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct Tag {
+    pub name: SharedString,
+    pub sha: SharedString,
+    /// An annotated tag is its own object with a message; a lightweight tag is
+    /// just a ref pointing at a commit.
+    pub is_annotated: bool,
+    pub message: Option<SharedString>,
+}
+
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Branch {
     pub is_head: bool,
@@ -783,6 +798,13 @@ pub trait GitRepository: Send + Sync {
     fn stash_entries(&self) -> BoxFuture<'_, Result<GitStash>>;
 
     fn branches(&self) -> BoxFuture<'_, Result<Vec<Branch>>>;
+
+    /// Every tag in the repository, most recently created first.
+    fn tags(&self) -> BoxFuture<'_, Result<Vec<Tag>>>;
+
+    /// Checks out a tag, which leaves the repository in detached HEAD. Callers
+    /// are expected to have said so before getting here.
+    fn checkout_tag(&self, name: String) -> BoxFuture<'_, Result<()>>;
 
     fn change_branch(&self, name: String) -> BoxFuture<'_, Result<()>>;
     fn create_branch(&self, name: String, base_branch: Option<String>)
@@ -1829,6 +1851,60 @@ impl GitRepository for RealGitRepository {
                 }
 
                 Ok(branches)
+            })
+            .boxed()
+    }
+
+    /// One `for-each-ref` pass, not one command per tag: a repository with a
+    /// thousand release tags must not mean a thousand processes.
+    ///
+    /// `%00` separates the fields because a NUL can never appear inside a ref
+    /// name, message or sha -- a space or a tab could.
+    fn tags(&self) -> BoxFuture<'_, Result<Vec<Tag>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let fields = [
+                    "%(refname:short)",
+                    "%(objectname)",
+                    "%(objecttype)",
+                    "%(contents:subject)",
+                    "%(creatordate:unix)",
+                ]
+                .join("%00");
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["for-each-ref", "refs/tags/**", "--format", &fields])
+                    .output()
+                    .await?;
+
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to list git tags:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+
+                Ok(parse_tag_input(&String::from_utf8_lossy(&output.stdout)))
+            })
+            .boxed()
+    }
+
+    fn checkout_tag(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["checkout", &format!("tags/{name}")])
+                    .output()
+                    .await?;
+
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to checkout tag:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
             })
             .boxed()
     }
@@ -3642,6 +3718,49 @@ impl MapSeekTarget<RepoPath> for RepoPathDescendants<'_> {
     }
 }
 
+/// Parses the `for-each-ref` output produced by [`GitRepository::tags`].
+///
+/// Sorting happens here rather than via `--sort` so the ordering is testable
+/// without a git binary, and so a tag with no creator date still lands
+/// somewhere sensible instead of being dropped by git's own sort.
+fn parse_tag_input(input: &str) -> Vec<Tag> {
+    let mut tags: Vec<(i64, Tag)> = input
+        .split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let mut fields = line.split('\0');
+            let name = fields.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let sha = fields.next().unwrap_or_default().trim();
+            let object_type = fields.next().unwrap_or_default().trim();
+            let subject = fields.next().unwrap_or_default().trim();
+            let timestamp = fields
+                .next()
+                .and_then(|field| field.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+
+            let is_annotated = object_type == "tag";
+            Some((
+                timestamp,
+                Tag {
+                    name: name.to_string().into(),
+                    sha: sha.to_string().into(),
+                    is_annotated,
+                    message: (is_annotated && !subject.is_empty())
+                        .then(|| subject.to_string().into()),
+                },
+            ))
+        })
+        .collect();
+
+    // Newest first: a release tag list is read from the top.
+    tags.sort_by(|(a, _), (b, _)| b.cmp(a));
+    tags.into_iter().map(|(_, tag)| tag).collect()
+}
+
+
 fn parse_branch_input(input: &str) -> Result<Vec<Branch>> {
     let mut branches = Vec::new();
     for line in input.split('\n') {
@@ -3754,6 +3873,62 @@ mod tests {
 
     use super::*;
     use gpui::TestAppContext;
+
+    /// A tag list is read newest-first, like a release page. Sorting by name
+    /// would put v10 before v9 and bury the latest release in the middle.
+    #[test]
+    fn tags_are_parsed_newest_first() {
+        let input = "v1.0.0\0aaa\0commit\0\x00100\nv2.0.0\0bbb\0commit\0\x00300\nv1.5.0\0ccc\0commit\0\x00200\n";
+        let tags = parse_tag_input(input);
+        let names: Vec<_> = tags.iter().map(|tag| tag.name.to_string()).collect();
+        assert_eq!(names, vec!["v2.0.0", "v1.5.0", "v1.0.0"]);
+    }
+
+    /// An annotated tag carries its own message; a lightweight one is just a
+    /// pointer and must not be given a phantom message.
+    #[test]
+    fn only_annotated_tags_carry_a_message() {
+        let input = "annotated\0aaa\0tag\0Ship it\x00100\nlightweight\0bbb\0commit\0\x00100\n";
+        let tags = parse_tag_input(input);
+
+        let annotated = tags.iter().find(|tag| tag.name == "annotated").unwrap();
+        assert!(annotated.is_annotated);
+        assert_eq!(
+            annotated.message.as_ref().map(|m| m.as_ref()),
+            Some("Ship it")
+        );
+
+        let lightweight = tags.iter().find(|tag| tag.name == "lightweight").unwrap();
+        assert!(!lightweight.is_annotated);
+        assert_eq!(lightweight.message, None);
+    }
+
+    /// A repository with no tags is an ordinary state, not an error.
+    #[test]
+    fn no_tags_parses_to_an_empty_list() {
+        assert!(parse_tag_input("").is_empty());
+        assert!(parse_tag_input("\n\n").is_empty());
+    }
+
+    /// Tag names legally contain slashes and dots. The NUL separator is what
+    /// makes that safe -- a space-separated format would split `release/1.0`
+    /// down the middle if anything ever put a space in a name.
+    #[test]
+    fn tag_names_with_slashes_and_dots_survive() {
+        let input = "release/2024.11.1\0aaa\0commit\0\x00100\n";
+        let tags = parse_tag_input(input);
+        assert_eq!(tags[0].name, "release/2024.11.1");
+    }
+
+    /// A tag whose creator date git could not produce still appears, at the
+    /// bottom, rather than vanishing from the list.
+    #[test]
+    fn a_tag_without_a_date_is_kept() {
+        let input = "dated\0aaa\0commit\0\x00100\nundated\0bbb\0commit\0\0\n";
+        let tags = parse_tag_input(input);
+        let names: Vec<_> = tags.iter().map(|tag| tag.name.to_string()).collect();
+        assert_eq!(names, vec!["dated", "undated"]);
+    }
 
     fn disable_git_global_config() {
         unsafe {
