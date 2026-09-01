@@ -40,11 +40,6 @@ pub struct BranchPanel {
     /// the life of the process.
     pub(crate) workspace: WeakEntity<Workspace>,
     pub(crate) focus_handle: FocusHandle,
-    pub(crate) filter_editor: Entity<editor::Editor>,
-    /// Whether the filter field is on screen. Hidden by default so the panel
-    /// reads as a list of branches rather than a search box; the header's
-    /// filter button reveals it.
-    pub(crate) filter_visible: bool,
     /// Height cache and scroll position for the row list. Rows are not a
     /// uniform height -- a branch card is two lines, a section header one --
     /// so `uniform_list` cannot draw them; `ListState` virtualizes variable
@@ -82,22 +77,9 @@ pub struct BranchPanel {
     /// session-local `RepositoryId`, so what was stored is matched back by path
     /// the first time each repository is seen.
     pub(crate) stored_expanded: HashSet<StoredKey>,
-    /// Tags per repository, loaded on demand. Absent means "never asked for".
-    pub(crate) tags: collections::HashMap<
-        project::git_store::RepositoryId,
-        std::sync::Arc<[git::repository::Tag]>,
-    >,
-    pub(crate) tags_loading: HashSet<project::git_store::RepositoryId>,
     /// Network operations currently in flight, one slot per kind. Leaning on
     /// the fetch button must not spawn a queue of git processes.
     pub(crate) running_remote_ops: HashSet<crate::branch_panel::remote::RemoteOp>,
-    /// The inline "new branch" field, and the repository it will create in.
-    /// `None` whenever the field is not on screen.
-    pub(crate) new_branch: Option<(
-        project::git_store::RepositoryId,
-        Entity<editor::Editor>,
-        crate::branch_panel::new_branch::NameFieldIntent,
-    )>,
     /// The open right-click menu, its anchor, and the subscription that clears
     /// it on dismiss. Dropping the tuple drops all three together.
     pub(crate) context_menu: Option<(Entity<ui::ContextMenu>, gpui::Point<Pixels>, Subscription)>,

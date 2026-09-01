@@ -16,8 +16,8 @@ use crate::branch_panel::panel::BranchPanel;
 use crate::git_panel::show_error_toast;
 use crate::remote_output::{RemoteAction, show_remote_output};
 
-/// The network operations the header offers. One in-flight slot per kind, so a
-/// fetch and a push can overlap but two fetches cannot.
+/// The network operations the repository menu offers. One in-flight slot per
+/// kind, so a fetch and a push can overlap but two fetches cannot.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum RemoteOp {
     Fetch,
@@ -26,27 +26,11 @@ pub(crate) enum RemoteOp {
 }
 
 impl RemoteOp {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            RemoteOp::Fetch => "Fetch",
-            RemoteOp::Pull => "Pull",
-            RemoteOp::Push => "Push",
-        }
-    }
-
-    fn git_label(self) -> &'static str {
+    pub(crate) fn git_label(self) -> &'static str {
         match self {
             RemoteOp::Fetch => "git fetch",
             RemoteOp::Pull => "git pull",
             RemoteOp::Push => "git push",
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            RemoteOp::Fetch => IconName::ArrowCircle,
-            RemoteOp::Pull => IconName::ArrowDown,
-            RemoteOp::Push => IconName::ArrowUp,
         }
     }
 }
@@ -343,36 +327,6 @@ impl BranchPanel {
             .strip_prefix("refs/remotes/")
             .and_then(|rest| rest.split('/').next())?;
         Some((branch.name().to_string(), remote.to_string()))
-    }
-
-    /// Whether the current branch has somewhere to push to yet. Drives the
-    /// difference between "Push" and "Publish Branch".
-    pub(crate) fn branch_has_upstream(&self, id: RepositoryId, cx: &App) -> bool {
-        self.repository(id, cx)
-            .and_then(|repo| repo.read(cx).branch.as_ref().map(|b| b.upstream.is_some()))
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn remote_button(
-        &self,
-        id: RepositoryId,
-        op: RemoteOp,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let running = self.is_running(op);
-        let label = if op == RemoteOp::Push && !self.branch_has_upstream(id, cx) {
-            "Publish Branch"
-        } else {
-            op.label()
-        };
-
-        IconButton::new(("remote-op", op as usize), op.icon())
-            .icon_size(IconSize::Small)
-            .disabled(running)
-            .tooltip(move |_, cx| ui::Tooltip::simple(label, cx))
-            .on_click(cx.listener(move |panel, _, window, cx| {
-                panel.run_remote_op(id, op, window, cx);
-            }))
     }
 }
 

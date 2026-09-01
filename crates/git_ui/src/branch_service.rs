@@ -88,18 +88,6 @@ pub(crate) async fn create_branch(
     Ok(())
 }
 
-pub(crate) async fn rename_branch(
-    repo: Entity<Repository>,
-    branch: String,
-    new_name: String,
-    cx: &mut AsyncApp,
-) -> Result<()> {
-    let new_name = new_name.replace(' ', "-");
-    repo.update(cx, |repo, _| repo.rename_branch(branch, new_name))
-        .await??;
-    Ok(())
-}
-
 pub(crate) async fn delete_branch(
     repo: Entity<Repository>,
     is_remote: bool,

@@ -8,40 +8,9 @@
 
 use std::sync::Arc;
 
-use git::repository::{Branch, Tag as GitTag, Worktree as GitWorktree};
-use git::stash::StashEntry;
+use git::repository::{Branch, Worktree as GitWorktree};
 use gpui::SharedString;
 use project::git_store::RepositoryId;
-
-/// The collapsible groupings under a repository.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum SectionKind {
-    Local,
-    Remote,
-    Worktrees,
-    Stashes,
-    Tags,
-}
-
-impl SectionKind {
-    pub(crate) const ALL: [SectionKind; 5] = [
-        SectionKind::Local,
-        SectionKind::Remote,
-        SectionKind::Worktrees,
-        SectionKind::Stashes,
-        SectionKind::Tags,
-    ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            SectionKind::Local => "Local",
-            SectionKind::Remote => "Remote",
-            SectionKind::Worktrees => "Worktrees",
-            SectionKind::Stashes => "Stashes",
-            SectionKind::Tags => "Tags",
-        }
-    }
-}
 
 /// Identifies a collapsible row. Kept separate from [`TreeRow`] because the
 /// expanded set outlives any particular build: rows are rebuilt on every change,
@@ -49,19 +18,18 @@ impl SectionKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum RowKey {
     Repo(RepositoryId),
-    Section(RepositoryId, SectionKind),
-    RemoteGroup(RepositoryId, SharedString),
-    /// The agents that ran on one branch.
-    BranchAgents(RepositoryId, SharedString),
+    /// The agents that have run in one worktree, keyed by its path.
+    ///
+    /// By path and not by branch: a worktree created here starts detached, and
+    /// two repositories can both have a `main`. The path is what a checkout
+    /// actually is.
+    WorktreeAgents(RepositoryId, Arc<std::path::Path>),
 }
 
 impl RowKey {
     pub(crate) fn repository_id(&self) -> RepositoryId {
         match self {
-            RowKey::Repo(id)
-            | RowKey::Section(id, _)
-            | RowKey::RemoteGroup(id, _)
-            | RowKey::BranchAgents(id, _) => *id,
+            RowKey::Repo(id) | RowKey::WorktreeAgents(id, _) => *id,
         }
     }
 }
@@ -76,54 +44,32 @@ pub(crate) enum TreeRow {
         current_branch: Option<SharedString>,
         expanded: bool,
     },
-    Section {
-        id: RepositoryId,
-        kind: SectionKind,
-        count: usize,
-        expanded: bool,
-    },
-    RemoteGroup {
-        id: RepositoryId,
-        remote: SharedString,
-        count: usize,
-        expanded: bool,
-    },
-    Branch {
-        id: RepositoryId,
-        branch: Branch,
-        depth: usize,
-        /// The agents that have run on this branch.
-        ///
-        /// Carried by the row rather than emitted as rows of their own: they
-        /// are drawn *inside* the branch card, so the card's border encloses
-        /// them. An `Arc` because the same list is cloned onto the row on every
-        /// rebuild and the entries never change once gathered.
-        agents: std::sync::Arc<[AgentEntry]>,
-        expanded: bool,
-    },
-    /// Acts on its own path, so it needs no repository id.
+    /// One checkout of the repository: the main one, or a linked worktree.
+    ///
+    /// The panel's only row type below the repository. There are no sections
+    /// any more -- branches, remotes, stashes and tags each have their own
+    /// picker, and a tree of five collapsible groups was five things to read
+    /// before finding the one that matters: which checkout am I in, and what is
+    /// running there.
     Worktree {
+        id: RepositoryId,
         worktree: GitWorktree,
+        /// The agents that have run in this checkout. Carried by the row rather
+        /// than emitted as rows of their own, so the card's border encloses
+        /// them.
+        agents: Arc<[AgentEntry]>,
+        expanded: bool,
     },
-    Stash {
-        id: RepositoryId,
-        entry: StashEntry,
-    },
-    Tag {
-        id: RepositoryId,
-        tag: GitTag,
-    },
-    /// A section that is open but has nothing in it. Without this the user
-    /// cannot tell "empty" from "still loading" or from a stray click.
-    Empty {
-        label: SharedString,
-    },
+    /// Shown when a repository has no checkout to list, which should not happen
+    /// -- `git worktree list` always names the main one. Without this the panel
+    /// would go blank instead of saying something is wrong.
+    Empty { label: SharedString },
 }
 
-/// One agent of a branch.
+/// One agent of a checkout.
 ///
 /// Two kinds and not one list: a CLI still running is what someone juggling
-/// several branches is looking for, and burying it among finished transcripts
+/// several worktrees is looking for, and burying it among finished transcripts
 /// would be the same as not showing it.
 ///
 /// Neither variant carries a `SessionSummary`. It holds four `String`s and two
@@ -171,35 +117,23 @@ impl AgentEntry {
 }
 
 impl TreeRow {
-    /// The key to toggle when this row is clicked, or `None` for a leaf.
+    /// The key to toggle when this row is clicked, or `None` when there is
+    /// nothing to open.
     pub(crate) fn toggle_key(&self) -> Option<RowKey> {
         match self {
             TreeRow::Repo { id, .. } => Some(RowKey::Repo(*id)),
-            TreeRow::Section { id, kind, .. } => Some(RowKey::Section(*id, *kind)),
-            TreeRow::RemoteGroup { id, remote, .. } => {
-                Some(RowKey::RemoteGroup(*id, remote.clone()))
-            }
             // Only when there is something to show. A disclosure that opens on
             // nothing reads as a broken control.
-            TreeRow::Branch {
-                id, branch, agents, ..
-            } if !agents.is_empty() => {
-                Some(RowKey::BranchAgents(*id, branch.name().to_string().into()))
-            }
+            TreeRow::Worktree {
+                id,
+                worktree,
+                agents,
+                ..
+            } if !agents.is_empty() => Some(RowKey::WorktreeAgents(
+                *id,
+                Arc::from(worktree.path.as_path()),
+            )),
             _ => None,
-        }
-    }
-
-    pub(crate) fn depth(&self) -> usize {
-        match self {
-            TreeRow::Repo { .. } => 0,
-            TreeRow::Section { .. } => 1,
-            TreeRow::RemoteGroup { .. } => 2,
-            TreeRow::Branch { depth, .. } => *depth,
-            TreeRow::Worktree { .. }
-            | TreeRow::Stash { .. }
-            | TreeRow::Tag { .. }
-            | TreeRow::Empty { .. } => 2,
         }
     }
 }
@@ -218,15 +152,13 @@ pub(crate) struct RepoData {
     /// Already run through `branch_service::process_branches`, so a remote ref
     /// that a local branch tracks has been folded away.
     pub(crate) branches: Vec<Branch>,
-    /// Agents per branch name, gathered once per rebuild so `build_rows` stays
-    /// a pure function of its input.
-    pub(crate) agents: collections::HashMap<SharedString, std::sync::Arc<[AgentEntry]>>,
+    /// Agents per checkout, keyed by the worktree's own path and gathered once
+    /// per rebuild so `build_rows` stays a pure function of its input.
+    pub(crate) agents: collections::HashMap<Arc<std::path::Path>, std::sync::Arc<[AgentEntry]>>,
+    /// Every checkout of this repository. `git worktree list` names the main
+    /// one too, so this is the whole list rather than only the linked ones --
+    /// `GitWorktree::is_main` tells them apart.
     pub(crate) worktrees: Arc<[GitWorktree]>,
-    pub(crate) stashes: Arc<[StashEntry]>,
-    /// Unlike the other fields this is not on `RepositorySnapshot`: the store
-    /// does not track tags, so the panel loads them itself the first time the
-    /// Tags section is opened, and never before.
-    pub(crate) tags: Arc<[GitTag]>,
 }
 
 /// A worktree reads best by its branch; the directory name is the fallback for a

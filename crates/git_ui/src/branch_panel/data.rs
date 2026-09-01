@@ -10,6 +10,9 @@ use gpui::{App, Context, Entity, SharedString, Subscription};
 use project::git_store::{GitStore, GitStoreEvent, RepositoryEvent};
 
 use crate::branch_panel::panel::BranchPanel;
+use std::path::Path;
+use std::sync::Arc;
+
 use crate::branch_panel::tree::{AgentEntry, RepoData};
 use crate::branch_service::process_branches;
 
@@ -80,13 +83,7 @@ impl BranchPanel {
                         .map(|branch| SharedString::from(branch.name().to_string())),
                     branches: process_branches(&repo.branch_list),
                     worktrees: repo.linked_worktrees.clone(),
-                    stashes: repo.stash_entries.entries.clone(),
-                    tags: self.tags_for(repo.id),
-                    agents: self.agents_by_branch(
-                        repo.work_directory_abs_path.as_ref(),
-                        repo.branch.as_ref().map(|branch| branch.name()),
-                        cx,
-                    ),
+                    agents: self.agents_by_checkout(&repo.linked_worktrees, cx),
                 }
             })
             .collect();
@@ -99,41 +96,51 @@ impl BranchPanel {
 }
 
 impl BranchPanel {
-    /// Which agents belong to which branch of this repository.
+    /// Which agents belong to which checkout.
+    ///
+    /// Keyed by the worktree's own path, which is what a checkout actually is:
+    /// a worktree created here starts detached and has no branch name, and two
+    /// repositories can both have a `main`.
     ///
     /// Two sources, gathered once per rebuild so `build_rows` stays pure:
     ///
     /// - **Running**: the agent tabs of this window whose CLI is still alive.
-    ///   They belong to whatever branch is checked out right now, because that
-    ///   is the tree they are editing -- a running agent has no other branch it
-    ///   could be on.
-    /// - **Finished**: read off the transcripts, which record the branch they
-    ///   ran on. Looked up by name and scoped to this repository's root, so
-    ///   another checkout's `main` never appears under this one.
-    fn agents_by_branch(
+    ///   They belong to the checkout this workspace has open.
+    /// - **Finished**: from the shared session index, one hash per checkout.
+    fn agents_by_checkout(
         &self,
-        root: &std::path::Path,
-        current_branch: Option<&str>,
+        worktrees: &[git::repository::Worktree],
         cx: &App,
-    ) -> collections::HashMap<SharedString, std::sync::Arc<[AgentEntry]>> {
-        let mut by_branch: collections::HashMap<SharedString, Vec<AgentEntry>> = Default::default();
+    ) -> collections::HashMap<Arc<Path>, Arc<[AgentEntry]>> {
+        let mut by_path: collections::HashMap<Arc<Path>, Vec<AgentEntry>> = Default::default();
 
-        if let Some(current) = current_branch
-            && let Some(workspace) = self.workspace.upgrade()
-        {
-            let running = workspace
-                .read(cx)
-                .items_of_type::<agent_ui::AgentView>(cx)
-                .filter(|view| view.read(cx).is_working(cx))
-                .map(|view| AgentEntry::Running {
-                    label: view.read(cx).tab_label(),
-                    agent: view.read(cx).agent_id().to_string().into(),
-                    view: view.downgrade(),
-                });
-            by_branch
-                .entry(current.to_string().into())
-                .or_default()
-                .extend(running);
+        if let Some(workspace) = self.workspace.upgrade() {
+            // The checkout this window is in: the worktree whose path a root of
+            // the workspace sits under. A running agent has no other checkout
+            // it could be editing.
+            let roots = workspace.read(cx).root_paths(cx);
+            let here = worktrees
+                .iter()
+                .find(|worktree| roots.iter().any(|root| root.starts_with(&worktree.path)));
+
+            if let Some(here) = here {
+                let running: Vec<_> = workspace
+                    .read(cx)
+                    .items_of_type::<agent_ui::AgentView>(cx)
+                    .filter(|view| view.read(cx).is_working(cx))
+                    .map(|view| AgentEntry::Running {
+                        label: view.read(cx).tab_label(),
+                        agent: view.read(cx).agent_id().to_string().into(),
+                        view: view.downgrade(),
+                    })
+                    .collect();
+                if !running.is_empty() {
+                    by_path
+                        .entry(Arc::from(here.path.as_path()))
+                        .or_default()
+                        .extend(running);
+                }
+            }
         }
 
         let Some(index) = self
@@ -141,42 +148,35 @@ impl BranchPanel {
             .as_ref()
             .map(|store| store.read(cx).index().clone())
         else {
-            return finish(by_branch);
+            return finish(by_path);
         };
 
-        // One pass over the sessions rather than a lookup per branch: the panel
-        // draws every branch, so per-branch lookups would walk the same list
-        // once for each of them.
-        for session in index.sessions().iter() {
-            let Some(branch) = session.branch.as_deref() else {
-                continue;
-            };
-            if !session.cwd.starts_with(root) {
-                continue;
+        for worktree in worktrees {
+            let path: Arc<Path> = Arc::from(worktree.path.as_path());
+            let past = index.sessions_for(&path).map(|session| AgentEntry::Past {
+                label: session.title.clone().into(),
+                agent: session.agent.builtin_agent_id().into(),
+                id: session.id.clone(),
+                updated_at: session.updated_at,
+            });
+            let past: Vec<_> = past.collect();
+            if !past.is_empty() {
+                by_path.entry(path).or_default().extend(past);
             }
-            by_branch
-                .entry(branch.to_string().into())
-                .or_default()
-                .push(AgentEntry::Past {
-                    label: session.title.clone().into(),
-                    agent: session.agent.builtin_agent_id().into(),
-                    id: session.id.clone(),
-                    updated_at: session.updated_at,
-                });
         }
 
-        finish(by_branch)
+        finish(by_path)
     }
 }
 
 /// Freezes the gathered lists so a branch row can clone an `Arc` rather than a
 /// `Vec` on every rebuild.
 fn finish(
-    by_branch: collections::HashMap<SharedString, Vec<AgentEntry>>,
-) -> collections::HashMap<SharedString, std::sync::Arc<[AgentEntry]>> {
-    by_branch
+    by_path: collections::HashMap<Arc<Path>, Vec<AgentEntry>>,
+) -> collections::HashMap<Arc<Path>, Arc<[AgentEntry]>> {
+    by_path
         .into_iter()
-        .map(|(branch, entries)| (branch, std::sync::Arc::from(entries)))
+        .map(|(path, entries)| (path, Arc::from(entries)))
         .collect()
 }
 

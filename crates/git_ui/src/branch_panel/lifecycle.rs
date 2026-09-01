@@ -5,41 +5,28 @@
 
 use collections::HashSet;
 use gpui::{
-    AppContext as _, AsyncWindowContext, Context, Entity, Focusable as _, ListAlignment, ListState,
-    Task, WeakEntity, Window, px,
+    AppContext as _, AsyncWindowContext, Context, Entity, ListAlignment, ListState, Task,
+    WeakEntity, Window, px,
 };
 use workspace::Workspace;
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
-use crate::branch_panel::tree::{RowKey, SectionKind, build_rows};
+use crate::branch_panel::tree::{RowKey, build_rows};
 
 impl BranchPanel {
     pub fn new(
         workspace: &mut Workspace,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let workspace_handle = workspace.weak_handle();
         cx.new(|cx| {
-            let filter_editor = cx.new(|cx| {
-                let mut editor = editor::Editor::single_line(window, cx);
-                editor.set_placeholder_text("Filter branches", window, cx);
-                editor
-            });
-
-            let mut subscriptions = vec![cx.subscribe(
-                &filter_editor,
-                |panel: &mut BranchPanel, _, _: &editor::EditorEvent, cx| {
-                    panel.mark_stale(cx);
-                },
-            )];
+            let mut subscriptions = Vec::new();
 
             let mut panel = Self {
                 workspace: workspace_handle,
                 focus_handle: cx.focus_handle(),
-                filter_editor,
-                filter_visible: false,
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
@@ -51,10 +38,7 @@ impl BranchPanel {
                 rows: Vec::new(),
                 expanded: HashSet::default(),
                 stored_expanded: HashSet::default(),
-                tags: Default::default(),
-                tags_loading: HashSet::default(),
                 running_remote_ops: HashSet::default(),
-                new_branch: None,
                 context_menu: None,
                 pending_serialization: Task::ready(None),
                 _subscriptions: Vec::new(),
@@ -106,13 +90,10 @@ impl BranchPanel {
         self.repos = self.collect_repos(cx);
         self.adopt_stored_expansion();
 
-        let filter = if self.filter_visible {
-            self.filter_editor.read(cx).text(cx)
-        } else {
-            String::new()
-        };
         let expanded = &self.expanded;
-        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), &filter);
+        // No filter from the panel: the header carries one button, and the row
+        // builder's filter stays for whatever exposes one next.
+        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
         self.sync_list_state();
     }
 
@@ -145,17 +126,6 @@ impl BranchPanel {
         }
     }
 
-    /// Shows or hides the filter field. A hidden field applies no filter, so a
-    /// query left behind cannot go on silently hiding branches.
-    pub(crate) fn toggle_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.filter_visible = !self.filter_visible;
-        if self.filter_visible {
-            self.filter_editor.focus_handle(cx).focus(window, cx);
-        }
-        self.mark_stale(cx);
-        cx.notify();
-    }
-
     /// Turns the paths restored from disk into live row keys, once the
     /// repositories they name have actually turned up.
     ///
@@ -186,11 +156,6 @@ impl BranchPanel {
 
     pub(crate) fn toggle_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
         if !self.expanded.remove(&key) {
-            // Opening the Tags section is the only thing in the panel that
-            // triggers a git command, and only the first time.
-            if let RowKey::Section(id, SectionKind::Tags) = &key {
-                self.load_tags(*id, cx);
-            }
             self.expanded.insert(key);
         }
         self.stale = true;

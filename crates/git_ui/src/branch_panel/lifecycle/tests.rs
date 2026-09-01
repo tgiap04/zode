@@ -129,7 +129,7 @@ mod restoring_expansion {
     use project::git_store::RepositoryId;
 
     use crate::branch_panel::state::StoredKey;
-    use crate::branch_panel::tree::{RepoData, RowKey, SectionKind};
+    use crate::branch_panel::tree::{RepoData, RowKey};
 
     use super::panel;
     use gpui::TestAppContext;
@@ -144,8 +144,6 @@ mod restoring_expansion {
             current_branch: Some("develop".into()),
             branches: Vec::new(),
             worktrees: Arc::from([]),
-            stashes: Arc::from([]),
-            tags: Arc::from([]),
             agents: Default::default(),
         }
     }
@@ -154,25 +152,27 @@ mod restoring_expansion {
     async fn a_collapsed_section_stays_collapsed(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
         let id = RepositoryId(1);
-        let key = RowKey::Section(id, SectionKind::Local);
+        let checkout = std::sync::Arc::from(std::path::Path::new("/repos/zode/wt"));
+        let key = RowKey::WorktreeAgents(id, std::sync::Arc::clone(&checkout));
 
         panel.update(cx, |panel, _| {
             panel.repos = vec![repo_data(id)];
-            panel
-                .stored_expanded
-                .insert(StoredKey::Section(REPO_PATH.to_string(), "Local".into()));
+            panel.stored_expanded.insert(StoredKey::WorktreeAgents(
+                REPO_PATH.to_string(),
+                "/repos/zode/wt".to_string(),
+            ));
 
             panel.adopt_stored_expansion();
             assert!(
                 panel.expanded.contains(&key),
-                "a stored section must open on the first build after it is restored"
+                "a stored checkout must open on the first build after it is restored"
             );
 
             panel.expanded.remove(&key);
             panel.adopt_stored_expansion();
             assert!(
                 !panel.expanded.contains(&key),
-                "a section the user closed must not be reopened by the restored state"
+                "a card the user closed must not be reopened by the restored state"
             );
         });
     }

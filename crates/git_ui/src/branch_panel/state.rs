@@ -16,7 +16,7 @@ use workspace::Workspace;
 
 use project::git_store::RepositoryId;
 
-use crate::branch_panel::tree::{RowKey, SectionKind};
+use crate::branch_panel::tree::RowKey;
 
 pub(crate) const BRANCH_PANEL_KEY: &str = "BranchPanel";
 
@@ -30,14 +30,39 @@ const SERIALIZATION_THROTTLE: Duration = Duration::from_millis(500);
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum StoredKey {
     Repo(String),
-    Section(String, String),
-    RemoteGroup(String, String),
-    BranchAgents(String, String),
+    /// A checkout whose agents are showing, by its own absolute path.
+    WorktreeAgents(String, String),
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Debug, Default)]
 pub(crate) struct SerializedBranchPanel {
     pub(crate) expanded: HashSet<StoredKey>,
+}
+
+/// The wire shape, read entry by entry.
+///
+/// Serde rejects the whole enum on an unknown variant, so a blob written by a
+/// build that had rows this one does not -- every blob written before the tree
+/// became a list of checkouts -- would throw away the entries this build *can*
+/// still read, and log an error on every start until something overwrote it.
+/// Reading into `Value` first drops only the entries that no longer mean
+/// anything.
+#[derive(Deserialize, Default)]
+struct RawSerializedBranchPanel {
+    #[serde(default)]
+    expanded: Vec<serde_json::Value>,
+}
+
+impl From<RawSerializedBranchPanel> for SerializedBranchPanel {
+    fn from(raw: RawSerializedBranchPanel) -> Self {
+        Self {
+            expanded: raw
+                .expanded
+                .into_iter()
+                .filter_map(|entry| serde_json::from_value::<StoredKey>(entry).ok())
+                .collect(),
+        }
+    }
 }
 
 impl StoredKey {
@@ -45,36 +70,23 @@ impl StoredKey {
     pub(crate) fn from_row_key(key: &RowKey, repo_path: &str) -> Self {
         match key {
             RowKey::Repo(_) => StoredKey::Repo(repo_path.to_string()),
-            RowKey::Section(_, kind) => {
-                StoredKey::Section(repo_path.to_string(), kind.label().to_string())
-            }
-            RowKey::RemoteGroup(_, remote) => {
-                StoredKey::RemoteGroup(repo_path.to_string(), remote.to_string())
-            }
-            RowKey::BranchAgents(_, branch) => {
-                StoredKey::BranchAgents(repo_path.to_string(), branch.to_string())
+            RowKey::WorktreeAgents(_, path) => {
+                StoredKey::WorktreeAgents(repo_path.to_string(), path.to_string_lossy().to_string())
             }
         }
     }
 
     /// Turns a stored entry back into a live key, if it names this repository.
     ///
-    /// Returns `None` for another repository's entry, and for a section label
-    /// this build no longer has -- a stored key from a future version must be
+    /// Returns `None` for another repository's entry, and for a shape this
+    /// build no longer has -- a stored key from a future version must be
     /// ignored, not panic.
     pub(crate) fn to_row_key(&self, id: RepositoryId, repo_path: &str) -> Option<RowKey> {
         match self {
             StoredKey::Repo(path) if path == repo_path => Some(RowKey::Repo(id)),
-            StoredKey::Section(path, label) if path == repo_path => SectionKind::ALL
-                .into_iter()
-                .find(|kind| kind.label() == label)
-                .map(|kind| RowKey::Section(id, kind)),
-            StoredKey::RemoteGroup(path, remote) if path == repo_path => {
-                Some(RowKey::RemoteGroup(id, remote.clone().into()))
-            }
-            StoredKey::BranchAgents(path, branch) if path == repo_path => {
-                Some(RowKey::BranchAgents(id, branch.clone().into()))
-            }
+            StoredKey::WorktreeAgents(path, worktree) if path == repo_path => Some(
+                RowKey::WorktreeAgents(id, std::sync::Arc::from(std::path::Path::new(worktree))),
+            ),
             _ => None,
         }
     }
@@ -107,7 +119,9 @@ impl SerializedBranchPanel {
             .log_err()
             .flatten()?;
 
-        serde_json::from_str::<Self>(&raw).log_err()
+        serde_json::from_str::<RawSerializedBranchPanel>(&raw)
+            .log_err()
+            .map(Self::from)
     }
 
     pub(crate) async fn write(
@@ -130,5 +144,62 @@ impl SerializedBranchPanel {
             .context("writing branch panel state")
             .log_err()
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RawSerializedBranchPanel, SerializedBranchPanel, StoredKey};
+
+    /// A blob written before the tree became a list of checkouts carries
+    /// `Section` entries this build has never heard of. It must lose those and
+    /// keep the rest, rather than losing everything -- which is what serde does
+    /// on its own, because an unknown variant fails the whole enum.
+    #[test]
+    fn an_entry_from_an_older_shape_is_dropped_not_fatal() {
+        let raw = r#"{"expanded":[
+            {"Section":["/repos/zode","Local"]},
+            {"Repo":"/repos/zode"}
+        ]}"#;
+
+        let parsed: SerializedBranchPanel = serde_json::from_str::<RawSerializedBranchPanel>(raw)
+            .expect("the outer shape still parses")
+            .into();
+
+        assert_eq!(parsed.expanded.len(), 1, "the unknown entry is dropped");
+        assert!(
+            parsed
+                .expanded
+                .contains(&StoredKey::Repo("/repos/zode".into())),
+            "and the one this build understands survives"
+        );
+    }
+
+    #[test]
+    fn a_blob_of_only_unknown_entries_reads_as_empty() {
+        let raw = r#"{"expanded":[{"Tag":["/repos/zode","v1"]}]}"#;
+
+        let parsed: SerializedBranchPanel = serde_json::from_str::<RawSerializedBranchPanel>(raw)
+            .expect("the outer shape still parses")
+            .into();
+
+        assert!(parsed.expanded.is_empty());
+    }
+
+    #[test]
+    fn a_round_trip_keeps_what_it_wrote() {
+        let mut expanded = collections::HashSet::default();
+        expanded.insert(StoredKey::WorktreeAgents(
+            "/repos/zode".into(),
+            "/wt/feature".into(),
+        ));
+        let written = serde_json::to_string(&SerializedBranchPanel { expanded }).unwrap();
+
+        let parsed: SerializedBranchPanel =
+            serde_json::from_str::<RawSerializedBranchPanel>(&written)
+                .unwrap()
+                .into();
+
+        assert_eq!(parsed.expanded.len(), 1);
     }
 }
