@@ -24,6 +24,8 @@ mod render;
 mod serialization;
 #[cfg(test)]
 mod sidebar_tests;
+#[cfg(test)]
+mod tree_tests;
 mod workspace_actions;
 
 use crate::project_list::SidebarContents;
@@ -81,6 +83,21 @@ pub struct Sidebar {
     /// Gaps rather than rows because the question a drop answers is "between
     /// which two", and the ends are the two answers a row index cannot give.
     pub(crate) drop_gap: Option<usize>,
+    /// Which projects the reader has closed, keyed by their paths rather than
+    /// by `ProjectGroupKey` -- the key carries a host and is session-local,
+    /// while the paths still mean something after a restart.
+    ///
+    /// The *closed* set, not the open one: projects are open by default, so
+    /// storing the exception keeps the record small and makes a project nobody
+    /// has touched behave the same on every machine. This is user intent and
+    /// cannot be re-derived from the world, which is why it is state and the
+    /// crate's "compute it in the rebuild" rule does not reach it.
+    pub(crate) collapsed_projects: std::collections::HashSet<Vec<std::path::PathBuf>>,
+    /// The kind of each row as `list_state` last measured it. A row's height
+    /// depends only on its kind, so this is enough to splice just the slice
+    /// that moved instead of resetting -- a reset drops the scroll position,
+    /// and collapsing a project would then throw the reader to the top.
+    pub(crate) row_kinds: Vec<std::mem::Discriminant<crate::project_list::PanelRow>>,
     /// The colour a picker is showing right now, before anyone has agreed to it.
     ///
     /// Held here and not written to the project, so the avatar can be previewed
@@ -146,6 +163,8 @@ impl Sidebar {
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
             contents: SidebarContents::default(),
             selection: None,
+            collapsed_projects: Default::default(),
+            row_kinds: Vec::new(),
             colour_preview: None,
             drop_gap: None,
             recent_projects_popover_handle: PopoverMenuHandle::default(),

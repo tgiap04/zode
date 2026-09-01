@@ -116,50 +116,6 @@ async fn becoming_visible_schedules_exactly_one_rebuild(cx: &mut TestAppContext)
     });
 }
 
-mod changed_range {
-    use crate::branch_panel::lifecycle::changed_range;
-
-    #[test]
-    fn an_unchanged_layout_needs_no_splice() {
-        assert_eq!(changed_range(&[1, 2, 3], &[1, 2, 3]), None);
-    }
-
-    #[test]
-    fn expanding_a_section_splices_only_the_rows_it_revealed() {
-        // Section at index 1 opens and puts three rows under it.
-        let before = [0, 1, 9];
-        let after = [0, 1, 5, 5, 5, 9];
-        assert_eq!(changed_range(&before, &after), Some((2..2, 3)));
-    }
-
-    #[test]
-    fn collapsing_a_section_splices_only_the_rows_it_hid() {
-        let before = [0, 1, 5, 5, 5, 9];
-        let after = [0, 1, 9];
-        assert_eq!(changed_range(&before, &after), Some((2..5, 0)));
-    }
-
-    #[test]
-    fn a_layout_replaced_wholesale_splices_everything() {
-        assert_eq!(changed_range(&[1, 1], &[2, 2, 2]), Some((0..2, 3)));
-    }
-
-    /// The prefix and the suffix must not both claim the same rows -- a
-    /// repeated element makes them try, and an unclamped suffix would produce a
-    /// backwards range and panic inside `splice`.
-    #[test]
-    fn a_repeated_row_kind_cannot_make_the_range_run_backwards() {
-        let (range, count) = changed_range(&[7, 7], &[7, 7, 7]).expect("layout changed");
-        assert!(range.start <= range.end);
-        assert_eq!(2 - (range.end - range.start) + count, 3);
-    }
-
-    #[test]
-    fn an_empty_list_filling_up_splices_from_zero() {
-        assert_eq!(changed_range::<u8>(&[], &[1, 2]), Some((0..0, 2)));
-    }
-}
-
 /// Restoring the expanded sections from disk must be a one-shot per repository.
 ///
 /// It was not: the stored entries were re-applied on every rebuild, and since

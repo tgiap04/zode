@@ -41,9 +41,14 @@ async fn test_keyboard_navigation_clamps_at_boundaries(cx: &mut TestAppContext) 
     cx.run_until_parked();
     sidebar.read_with(cx, |sidebar, _cx| {
         assert_eq!(
-            sidebar.contents.entries.len(),
+            sidebar.contents.projects().count(),
             3,
             "all three projects should be listed"
+        );
+        assert_eq!(
+            sidebar.contents.entries.len(),
+            6,
+            "each project is open by default, so each brings its own worktree row"
         );
     });
 
@@ -63,10 +68,15 @@ async fn test_keyboard_navigation_clamps_at_boundaries(cx: &mut TestAppContext) 
     assert_eq!(sidebar.read_with(cx, |s, _cx| s.selection), Some(1));
     cx.dispatch_action(menu::SelectNext);
     assert_eq!(sidebar.read_with(cx, |s, _cx| s.selection), Some(2));
+
+    // Walking reaches worktree rows too -- they are rows of the list, not
+    // decoration hung off the project above them.
+    cx.dispatch_action(menu::SelectLast);
+    assert_eq!(sidebar.read_with(cx, |s, _cx| s.selection), Some(5));
     cx.dispatch_action(menu::SelectNext);
     assert_eq!(
         sidebar.read_with(cx, |s, _cx| s.selection),
-        Some(2),
+        Some(5),
         "SelectNext past the last entry must clamp, not wrap"
     );
 
@@ -80,7 +90,7 @@ async fn test_keyboard_navigation_clamps_at_boundaries(cx: &mut TestAppContext) 
     );
 
     cx.dispatch_action(menu::SelectLast);
-    assert_eq!(sidebar.read_with(cx, |s, _cx| s.selection), Some(2));
+    assert_eq!(sidebar.read_with(cx, |s, _cx| s.selection), Some(5));
 }
 
 /// Navigating an empty entry list (e.g. a filter query with no matches)
@@ -169,14 +179,14 @@ async fn test_selection_clamps_after_project_removed(cx: &mut TestAppContext) {
     let (selected_key, entry_count_before) = sidebar.read_with(cx, |sidebar, _cx| {
         (
             sidebar.contents.entries[sidebar.selection.unwrap()]
-                .key
+                .key()
                 .clone(),
             sidebar.contents.entries.len(),
         )
     });
     assert_eq!(
-        entry_count_before, 2,
-        "both projects should be listed before removal"
+        entry_count_before, 4,
+        "two projects, each open and so each bringing one worktree row"
     );
 
     multi_workspace
@@ -189,7 +199,11 @@ async fn test_selection_clamps_after_project_removed(cx: &mut TestAppContext) {
 
     sidebar.read_with(cx, |sidebar, _cx| {
         let entry_count = sidebar.contents.entries.len();
-        assert_eq!(entry_count, 1, "the removed project's entry should be gone");
+        assert_eq!(
+            sidebar.contents.projects().count(),
+            1,
+            "the removed project's entry should be gone"
+        );
         let selection = sidebar.selection;
         assert!(
             selection.is_none_or(|ix| ix < entry_count),

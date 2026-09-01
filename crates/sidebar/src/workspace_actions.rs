@@ -106,6 +106,43 @@ impl Sidebar {
         self.selection = None;
         cx.notify();
     }
+
+    /// Brings one worktree's workspace to the front.
+    ///
+    /// The row holds a `WeakEntity`, so a workspace closed between the last
+    /// rebuild and this click simply does nothing rather than resurrecting
+    /// anything -- the next rebuild drops the row.
+    pub(crate) fn activate_worktree(
+        &mut self,
+        workspace: &gpui::WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        self.activate_workspace(&workspace, window, cx);
+        self.selection = None;
+        cx.notify();
+    }
+
+    /// Opens or closes a project's worktree rows.
+    ///
+    /// Records the *closed* projects: they are open by default, so the set only
+    /// ever holds the exceptions, and a project nobody has touched behaves the
+    /// same on every machine.
+    pub(crate) fn toggle_project_expansion(
+        &mut self,
+        key: &ProjectGroupKey,
+        cx: &mut Context<Self>,
+    ) {
+        let marker = crate::project_list::collapsed_marker(key);
+        if !self.collapsed_projects.remove(&marker) {
+            self.collapsed_projects.insert(marker);
+        }
+        self.update_entries(cx);
+        self.serialize(cx);
+    }
 }
 
 /// Shows a remote-connection modal and establishes an SSH/WSL/Docker

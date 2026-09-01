@@ -37,7 +37,11 @@ async fn test_filter_query_narrows_entries(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
-        assert_eq!(sidebar.contents.entries.len(), 2, "no filter query yet");
+        assert_eq!(
+            sidebar.contents.projects().count(),
+            2,
+            "no filter query yet"
+        );
     });
 
     sidebar.update_in(cx, |sidebar, window, cx| {
@@ -48,13 +52,14 @@ async fn test_filter_query_narrows_entries(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     sidebar.read_with(cx, |sidebar, _cx| {
+        let matched: Vec<_> = sidebar.contents.projects().collect();
         assert_eq!(
-            sidebar.contents.entries.len(),
+            matched.len(),
             1,
             "\"zeb\" should match only the zebra project"
         );
         assert!(
-            !sidebar.contents.entries[0].highlight_positions.is_empty(),
+            !matched[0].highlight_positions.is_empty(),
             "a matching entry should carry highlight positions for its match"
         );
         // The rail is the only project switcher visible while the panel is
@@ -107,8 +112,7 @@ async fn test_hibernated_project_reflected_in_entry_activity(cx: &mut TestAppCon
     sidebar.read_with(cx, |sidebar, _cx| {
         let hibernated_count = sidebar
             .contents
-            .entries
-            .iter()
+            .projects()
             .filter(|entry| entry.activity == Some(ProjectActivity::Hibernated))
             .count();
         assert_eq!(

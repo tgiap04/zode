@@ -17,9 +17,10 @@ impl Sidebar {
         }
         self.resync_project_activity_subscriptions(&multi_workspace, cx);
 
-        let scroll_position = self.list_state.logical_scroll_top();
         let query = self.filter_editor.read(cx).text(cx);
-        self.contents = multi_workspace.read_with(cx, |mw, cx| rebuild_contents(mw, &query, cx));
+        let collapsed = self.collapsed_projects.clone();
+        self.contents =
+            multi_workspace.read_with(cx, |mw, cx| rebuild_contents(mw, &query, &collapsed, cx));
 
         // The entry list can shrink (a project closes, or a filter narrows
         // it) without any navigation method running in between, so a
@@ -34,10 +35,40 @@ impl Sidebar {
         }
 
         self.project_header_menu_handles
-            .retain(|key, _| self.contents.entries.iter().any(|entry| &entry.key == key));
+            .retain(|key, _| self.contents.entries.iter().any(|entry| entry.key() == key));
 
-        self.list_state.reset(self.contents.entries.len());
-        self.list_state.scroll_to(scroll_position);
+        self.sync_list_state();
         cx.notify();
+    }
+
+    /// Tells `ListState` which rows moved.
+    ///
+    /// `reset` would be simpler and would throw the scroll position away with
+    /// the height cache -- collapsing a project near the bottom of a long list
+    /// would jump the reader to the top, which reads as the click having done
+    /// nothing. A project header and a worktree row are different heights, so
+    /// the cache does have to be invalidated; comparing row kinds finds the one
+    /// slice that actually changed.
+    fn sync_list_state(&mut self) {
+        let new_kinds: Vec<_> = self
+            .contents
+            .entries
+            .iter()
+            .map(std::mem::discriminant)
+            .collect();
+
+        // The two are kept in step here and nowhere else; a disagreement would
+        // corrupt every splice after it.
+        if self.list_state.item_count() != self.row_kinds.len() {
+            self.list_state.reset(new_kinds.len());
+            self.row_kinds = new_kinds;
+            return;
+        }
+
+        if let Some((old_range, new_count)) = ui::utils::changed_range(&self.row_kinds, &new_kinds)
+        {
+            self.list_state.splice(old_range, new_count);
+            self.row_kinds = new_kinds;
+        }
     }
 }

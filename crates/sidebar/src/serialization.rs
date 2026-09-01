@@ -1,6 +1,7 @@
 use crate::Sidebar;
 use gpui::{Context, px};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use util::ResultExt as _;
 
 /// Persisted sidebar state. A session saved before this crate replaced the
@@ -11,12 +12,20 @@ use util::ResultExt as _;
 struct SerializedSidebar {
     #[serde(default)]
     width: Option<f32>,
+    /// Projects the reader closed, by path.
+    ///
+    /// The closed ones rather than the open ones: projects are open by
+    /// default, so a blob from before this field existed restores to
+    /// "everything open", which is what it looked like when it was written.
+    #[serde(default)]
+    collapsed_projects: Vec<Vec<PathBuf>>,
 }
 
 impl Sidebar {
     pub(crate) fn serialize_to_string(&self) -> Option<String> {
         serde_json::to_string(&SerializedSidebar {
             width: Some(f32::from(self.width)),
+            collapsed_projects: self.collapsed_projects.iter().cloned().collect(),
         })
         .log_err()
     }
@@ -27,7 +36,8 @@ impl Sidebar {
         };
         if let Some(width) = serialized.width {
             self.width = px(width);
-            cx.notify();
         }
+        self.collapsed_projects = serialized.collapsed_projects.into_iter().collect();
+        cx.notify();
     }
 }

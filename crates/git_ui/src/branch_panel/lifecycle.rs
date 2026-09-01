@@ -136,7 +136,8 @@ impl BranchPanel {
             return;
         }
 
-        if let Some((old_range, new_count)) = changed_range(&self.row_kinds, &new_kinds) {
+        if let Some((old_range, new_count)) = ui::utils::changed_range(&self.row_kinds, &new_kinds)
+        {
             self.list_state.splice(old_range, new_count);
             self.row_kinds = new_kinds;
         }
@@ -210,38 +211,6 @@ impl BranchPanel {
         let workspace = self.workspace.clone();
         self.pending_serialization = cx.spawn(async move |_, cx| state.write(workspace, cx).await);
     }
-}
-
-/// The slice that differs between two row layouts, as the `(old_range,
-/// new_count)` pair `ListState::splice` expects. `None` when they match.
-///
-/// Split out from [`BranchPanel::sync_list_state`] because getting it wrong is
-/// silent: the list would keep stale heights for rows that had moved, and only
-/// show up later as misplaced hit targets.
-pub(crate) fn changed_range<T: PartialEq>(
-    old: &[T],
-    new: &[T],
-) -> Option<(std::ops::Range<usize>, usize)> {
-    if old == new {
-        return None;
-    }
-
-    let prefix = old
-        .iter()
-        .zip(new)
-        .take_while(|(old, new)| old == new)
-        .count();
-    // The prefix and suffix must not overlap, or the range would run backwards.
-    let unmatched = old.len().min(new.len()) - prefix;
-    let suffix = old
-        .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take_while(|(old, new)| old == new)
-        .count()
-        .min(unmatched);
-
-    Some((prefix..old.len() - suffix, new.len() - suffix - prefix))
 }
 
 #[cfg(test)]

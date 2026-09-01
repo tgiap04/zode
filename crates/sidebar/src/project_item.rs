@@ -1,5 +1,5 @@
 use crate::Sidebar;
-use crate::project_list::ListEntry;
+use crate::project_list::{ListEntry, PanelRow, WorktreeRow};
 use gpui::{AnyElement, Context, SharedString, Window, px};
 use remote::RemoteConnectionOptions;
 use ui::{GradientFade, HighlightedLabel, Tab, Tooltip, prelude::*};
@@ -20,9 +20,91 @@ impl Sidebar {
         let is_focused = self.focus_handle.contains_focused(window, cx);
         let is_selected = is_focused && self.selection == Some(ix);
         self.project_header_menu_handles
-            .entry(entry.key.clone())
+            .entry(entry.key().clone())
             .or_default();
-        self.render_project_header(ix, &entry, is_selected, cx)
+        match entry {
+            PanelRow::Project(entry) => self.render_project_header(ix, &entry, is_selected, cx),
+            PanelRow::Worktree(row) => self.render_worktree_row(ix, &row, is_selected, cx),
+        }
+    }
+
+    /// One open workspace under a project: its branch, and whether it is the
+    /// repository's own checkout or a linked worktree.
+    ///
+    /// Indented rather than iconified into the header, because the point of the
+    /// row is that several of them sit under one project at once -- that is
+    /// what working on features in parallel looks like from here.
+    fn render_worktree_row(
+        &self,
+        ix: usize,
+        row: &WorktreeRow,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace = row.workspace.clone();
+        let tooltip: SharedString = row.path.display().to_string().into();
+        let colors = cx.theme().colors();
+        let background = if row.is_active {
+            colors.element_selected
+        } else {
+            colors.elevated_surface_background
+        };
+        let border = if row.is_active {
+            colors.border_focused
+        } else {
+            colors.border_variant
+        };
+        let hover = colors.element_hover;
+
+        div()
+            .w_full()
+            .pl_4()
+            .pr_2()
+            .py_0p5()
+            .child(
+                h_flex()
+                    .id(("worktree-row", ix))
+                    .w_full()
+                    .gap_1p5()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .bg(background)
+                    .when(is_selected, |this| this.border_color(colors.border_focused))
+                    .hover(|style| style.bg(hover))
+                    .child(
+                        Icon::new(if row.is_main {
+                            IconName::FolderGit
+                        } else {
+                            IconName::GitWorktree
+                        })
+                        .size(IconSize::XSmall)
+                        .color(if row.is_active {
+                            Color::Accent
+                        } else {
+                            Color::Muted
+                        }),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(row.label.clone())
+                                .size(LabelSize::Small)
+                                .truncate()
+                                .color(if row.is_active {
+                                    Color::Default
+                                } else {
+                                    Color::Muted
+                                }),
+                        ),
+                    )
+                    .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+                    .on_click(cx.listener(move |sidebar, _, window, cx| {
+                        sidebar.activate_worktree(&workspace, window, cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     pub(crate) fn render_remote_project_icon(
@@ -47,6 +129,33 @@ impl Sidebar {
                 .tooltip(Tooltip::text("Remote Project"))
                 .into_any_element(),
         )
+    }
+
+    /// The affordance for opening and closing a project's worktrees.
+    ///
+    /// Its own click target rather than the whole row: clicking the row already
+    /// means "switch to this project", and one gesture cannot mean two things.
+    fn render_expansion_chevron(
+        &self,
+        ix: usize,
+        entry: &ListEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = entry.key.clone();
+        IconButton::new(
+            ("project-expansion", ix),
+            if entry.expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+        )
+        .icon_size(IconSize::XSmall)
+        .icon_color(Color::Muted)
+        .on_click(cx.listener(move |sidebar, _, _, cx| {
+            sidebar.toggle_project_expansion(&key, cx);
+        }))
+        .into_any_element()
     }
 
     /// FR7: surfaces `ProjectActivity` on the row -- re-indexing takes
@@ -162,6 +271,7 @@ impl Sidebar {
                     .min_w_0()
                     .w_full()
                     .gap_1()
+                    .child(self.render_expansion_chevron(ix, entry, cx))
                     .child(label)
                     .when_some(
                         self.render_remote_project_icon(ix, host.as_ref()),
@@ -174,9 +284,20 @@ impl Sidebar {
             .child(gradient_overlay())
             .child(
                 h_flex()
+                    .gap_1()
                     .child(gradient_overlay())
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
+                    })
+                    .when(entry.worktree_count > 1, |this| {
+                        // Only worth saying when there is more than the main
+                        // checkout: "1" under every project is noise, and the
+                        // number is here to answer "how much is hidden".
+                        this.child(
+                            Label::new(entry.worktree_count.to_string())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
                     })
                     .child(self.render_project_header_ellipsis_menu(key, &group_name, cx)),
             )
