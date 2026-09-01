@@ -508,6 +508,7 @@
       "ctrl-shift-e": "project_panel::ToggleFocus",
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
+      "ctrl-alt-shift-g": "branch_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
       "ctrl-k s": "workspace::SaveAll",
       "ctrl-k n": "encoding_selector::Toggle",
@@ -816,6 +817,13 @@
       "ctrl-enter": "git::Commit",
       "ctrl-shift-enter": "git::Amend",
     },
+  },
+  {
+    "context": "BranchPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "escape": "branch_panel::ToggleFocus"
+    }
   },
   {
     "context": "GitPanel",

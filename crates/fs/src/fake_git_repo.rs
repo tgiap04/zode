@@ -480,6 +480,17 @@ impl GitRepository for FakeGitRepository {
         self.with_state_async(false, |state| Ok(state.stash_entries.clone()))
     }
 
+    /// The fake repository has no tag store: tests that care about tags drive
+    /// them through the panel's own fixtures, and an empty list is the honest
+    /// answer for a repository nobody gave tags to.
+    fn tags(&self) -> BoxFuture<'_, Result<Vec<git::repository::Tag>>> {
+        async move { Ok(Vec::new()) }.boxed()
+    }
+
+    fn checkout_tag(&self, _name: String) -> BoxFuture<'_, Result<()>> {
+        async move { Ok(()) }.boxed()
+    }
+
     fn branches(&self) -> BoxFuture<'_, Result<Vec<Branch>>> {
         self.with_state_async(false, move |state| {
             let current_branch = &state.current_branch_name;
