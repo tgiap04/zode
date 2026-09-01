@@ -523,6 +523,7 @@
       "ctrl-shift-e": "project_panel::ToggleFocus",
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
+      "ctrl-alt-shift-g": "branch_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
@@ -839,6 +840,13 @@
       "alt-ctrl-left": "database::PreviousPage",
       "ctrl-shift-c": "database::CopyResultsAsCsv",
     },
+  },
+  {
+    "context": "BranchPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "escape": "branch_panel::ToggleFocus"
+    }
   },
   {
     "context": "GitPanel",
