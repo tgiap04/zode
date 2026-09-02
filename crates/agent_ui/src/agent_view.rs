@@ -1628,6 +1628,9 @@ mod tests {
     ///
     /// Only these two tests need it. `a_failed_agent_keeps_its_terminal` exits
     /// non-zero, never reaches a shell, and stays fully deterministic.
+    /// `cfg(unix)` to match its only two callers: on Windows the helper would
+    /// be dead code, which the lint gate rejects as an error.
+    #[cfg(unix)]
     fn tolerate_the_pty_reader(cx: &TestAppContext) {
         cx.executor().allow_parking();
     }
