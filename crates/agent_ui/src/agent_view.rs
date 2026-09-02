@@ -1613,6 +1613,25 @@ mod tests {
     /// The defect this closes: the tab used to stop at a dead terminal with no
     /// prompt and no way to keep working in that folder.
     ///
+    /// Let the pty's reader thread wake the scheduler without failing the test.
+    ///
+    /// The two tests below start a real shell, because a hand-off to a prompt
+    /// nobody can type at is not a hand-off -- proving it needs a real process.
+    /// A real process brings a reader thread, and that thread wakes the
+    /// foreground scheduler from outside the test's own thread, which the
+    /// determinism assertion reports as a non-deterministic test.
+    ///
+    /// It is right about the non-determinism and wrong to fail here: the
+    /// cross-thread wakeup is the thing under test, not an accident. This is
+    /// the sanctioned way to say so -- the same call the cli tests in
+    /// `open_listener` make, for the same reason.
+    ///
+    /// Only these two tests need it. `a_failed_agent_keeps_its_terminal` exits
+    /// non-zero, never reaches a shell, and stays fully deterministic.
+    fn tolerate_the_pty_reader(cx: &TestAppContext) {
+        cx.executor().allow_parking();
+    }
+
     /// This one builds a real shell, which is the only way to prove the hand-off
     /// produces something usable rather than merely changing a field. The pty it
     /// starts dies with the view, by the ownership chain
@@ -1622,6 +1641,7 @@ mod tests {
     async fn an_interrupted_agent_hands_back_a_shell(cx: &mut TestAppContext) {
         use std::os::unix::process::ExitStatusExt as _;
 
+        tolerate_the_pty_reader(cx);
         let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
 
         agent_view.update_in(cx, |view, window, cx| {
@@ -1648,6 +1668,7 @@ mod tests {
     async fn the_shell_inherits_the_keyboard(cx: &mut TestAppContext) {
         use std::os::unix::process::ExitStatusExt as _;
 
+        tolerate_the_pty_reader(cx);
         let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
 
         agent_view.update_in(cx, |view, window, cx| {
