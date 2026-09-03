@@ -294,6 +294,15 @@ pub struct CreateWorktree {
     /// being left behind -- which looks identical from the tab.
     #[serde(default)]
     pub agent: Option<String>,
+    /// An absolute directory to put the checkout in, overriding
+    /// `git.worktree_directory` for this one creation. `None` uses the setting.
+    ///
+    /// Absolute, unlike the setting: this is what a folder picker hands back,
+    /// and the setting's confinement to the repository and its parent exists
+    /// for a value typed once in a config file, not for a directory chosen on
+    /// the spot.
+    #[serde(default)]
+    pub location: Option<PathBuf>,
 }
 
 /// Switches the workspace to an existing linked worktree.
@@ -304,6 +313,13 @@ pub struct CreateWorktree {
 pub struct SwitchWorktree {
     pub path: PathBuf,
     pub display_name: String,
+    /// An agent to start once the switch has landed.
+    ///
+    /// After and not before: an agent runs in the directory its workspace has
+    /// open, so starting it on this side would run it in the checkout being
+    /// left behind -- which looks identical from the tab and is not.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Opens an existing worktree in a new window.

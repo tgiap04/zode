@@ -6195,10 +6195,27 @@ impl Repository {
         worktree_directory_setting: &str,
     ) -> Result<PathBuf> {
         let original_repo = self.original_repo_abs_path.clone();
-        let project_name = original_repo
+        let directory = worktrees_directory_for_repo(&original_repo, worktree_directory_setting)?;
+        self.path_for_new_linked_worktree_in(&directory, branch_name)
+    }
+
+    /// The same path, under a directory the caller chose outright rather than
+    /// one resolved from the setting.
+    ///
+    /// The setting is deliberately confined to the repository and its parent;
+    /// a directory picked from the file system is not, because `git worktree
+    /// add` has never cared and a picker that refuses most of the disk is not
+    /// a picker. The `<branch>/<project>` tail is kept either way, so pointing
+    /// two projects at one folder still keeps their checkouts apart.
+    pub fn path_for_new_linked_worktree_in(
+        &self,
+        directory: &Path,
+        branch_name: &str,
+    ) -> Result<PathBuf> {
+        let project_name = self
+            .original_repo_abs_path
             .file_name()
             .ok_or_else(|| anyhow!("git repo must have a directory name"))?;
-        let directory = worktrees_directory_for_repo(&original_repo, worktree_directory_setting)?;
         Ok(directory.join(branch_name).join(project_name))
     }
 

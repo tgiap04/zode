@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -101,6 +101,7 @@ fn start_worktree_creations(
     worktree_name: Option<String>,
     existing_worktree_names: &[String],
     existing_worktree_paths: &HashSet<PathBuf>,
+    location: Option<&Path>,
     base_ref: Option<String>,
     // `new_branch`: the branch the new worktree creates for itself, `None` for
     // a detached checkout.
@@ -127,8 +128,14 @@ fn start_worktree_creations(
 
     for repo in git_repos {
         let (work_dir, new_path, receiver) = repo.update(cx, |repo, _cx| {
-            let new_path =
-                repo.path_for_new_linked_worktree(&worktree_name, worktree_directory_setting)?;
+            let new_path = match location {
+                Some(directory) => {
+                    repo.path_for_new_linked_worktree_in(directory, &worktree_name)?
+                }
+                None => {
+                    repo.path_for_new_linked_worktree(&worktree_name, worktree_directory_setting)?
+                }
+            };
             if existing_worktree_paths.contains(&new_path) {
                 anyhow::bail!("A worktree already exists at {}", new_path.display());
             }
@@ -374,6 +381,7 @@ pub fn handle_create_worktree(
 
     let worktree_name = action.worktree_name.clone();
     let branch_target = action.branch_target.clone();
+    let location = action.location.clone();
     let display_name: SharedString = worktree_name
         .as_deref()
         .unwrap_or("worktree")
@@ -393,6 +401,7 @@ pub fn handle_create_worktree(
             window_handle,
             remote_connection_options,
             agent,
+            location,
             &mut cx,
         )
         .await;
@@ -453,6 +462,7 @@ pub fn handle_switch_worktree(
     workspace.set_active_worktree_creation(Some(display_name), true, cx);
 
     let worktree_path = action.path.clone();
+    let agent = action.agent.clone();
 
     cx.spawn_in(window, async move |_workspace_entity, mut cx| {
         let result = do_switch_worktree(
@@ -466,6 +476,29 @@ pub fn handle_switch_worktree(
             &mut cx,
         )
         .await;
+
+        // Only once the switch has landed: the window's active workspace is
+        // the destination now, and that is the directory the agent has to run
+        // in. A failed switch leaves the reader where they were, so starting
+        // anything would put it in the wrong checkout.
+        if result.is_ok()
+            && let Some(agent) = agent
+            && let Some(window_handle) = window_handle
+        {
+            window_handle
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.workspace().update(cx, |workspace, cx| {
+                        agent_ui::AgentView::open_tracked(
+                            workspace,
+                            &agent,
+                            Default::default(),
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .log_err();
+        }
 
         if let Err(err) = &result {
             log::error!("Failed to switch worktree: {err}");
@@ -492,6 +525,10 @@ async fn do_create_worktree(
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
     agent: Option<String>,
+    // An absolute directory overriding `git.worktree_directory` for this
+    // creation only. The form offers it; the setting remains what every other
+    // entry point uses.
+    location: Option<PathBuf>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     // List existing worktrees from all repos to detect name collisions
@@ -543,6 +580,7 @@ async fn do_create_worktree(
             worktree_name,
             &existing_worktree_names,
             &existing_worktree_paths,
+            location.as_deref(),
             base_ref,
             new_branch,
             &worktree_directory_setting,

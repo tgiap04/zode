@@ -16,10 +16,44 @@ impl BranchPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.switch_to_worktree_with_agent(worktree, None, window, cx);
+    }
+
+    /// The same switch, optionally starting an agent once it lands.
+    ///
+    /// Starting an agent in the checkout already open takes the short way: a
+    /// switch to where you already are still captures and restores the whole
+    /// workspace and flashes a "switching" label, all to arrive back at the
+    /// same directory.
+    pub(crate) fn switch_to_worktree_with_agent(
+        &mut self,
+        worktree: &git::repository::Worktree,
+        agent: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(agent) = agent.clone()
+            && self.is_current_checkout(worktree, cx)
+        {
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    agent_ui::AgentView::open_tracked(
+                        workspace,
+                        &agent,
+                        Default::default(),
+                        window,
+                        cx,
+                    );
+                })
+                .ok();
+            return;
+        }
+
         window.dispatch_action(
             Box::new(zed_actions::SwitchWorktree {
                 path: worktree.path.clone(),
                 display_name: crate::branch_panel::tree::worktree_label(worktree),
+                agent,
             }),
             cx,
         );

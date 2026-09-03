@@ -10,10 +10,13 @@
 //! connection from the project itself, so the field reports where the checkout
 //! will land rather than offering a choice the code below it cannot honour.
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, Window, prelude::*,
 };
 use project::git_store::RepositoryId;
+use settings::Settings as _;
 use ui::{Chip, Divider, KeyBinding, Tooltip, prelude::*};
 use workspace::{ModalView, Workspace};
 use zed_actions::NewWorktreeBranchTarget;
@@ -80,6 +83,24 @@ pub(crate) fn chosen_target(
     }
 }
 
+/// Where the form starts: the absolute directory `git.worktree_directory`
+/// currently points at.
+///
+/// The setting is relative and confined to the repository or its parent; what
+/// the form holds is the absolute directory that resolves to, because that is
+/// what a folder picker replaces it with. A setting the resolver rejects falls
+/// back to the repository itself rather than leaving the form empty -- the
+/// reader can see where it would go and pick elsewhere.
+pub(crate) fn default_location(repo_path: &Path, setting: &str) -> PathBuf {
+    match project::git_store::worktrees_directory_for_repo(repo_path, setting) {
+        Ok(directory) => directory,
+        Err(error) => {
+            log::warn!("git.worktree_directory is not usable ({error}); offering the repository");
+            repo_path.to_path_buf()
+        }
+    }
+}
+
 pub(crate) struct CreateWorktreeModal {
     focus_handle: FocusHandle,
     workspace: gpui::WeakEntity<Workspace>,
@@ -87,6 +108,10 @@ pub(crate) struct CreateWorktreeModal {
     /// Where the checkout will be made. Read from the project, not chosen.
     run_on: SharedString,
     run_on_path: SharedString,
+    /// The directory the worktree goes in. Starts where
+    /// `git.worktree_directory` points, so leaving it alone is the behaviour
+    /// every other entry point has.
+    location: PathBuf,
     mode: NameMode,
     name_editor: Entity<editor::Editor>,
     /// Local branch names, for the Branch tab.
@@ -116,6 +141,7 @@ impl CreateWorktreeModal {
         project_name: SharedString,
         run_on: SharedString,
         run_on_path: SharedString,
+        location: PathBuf,
         branches: Vec<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -138,6 +164,7 @@ impl CreateWorktreeModal {
             project_name,
             run_on,
             run_on_path,
+            location,
             mode: NameMode::Name,
             name_editor,
             branches,
@@ -157,6 +184,33 @@ impl CreateWorktreeModal {
             &self.name_editor.read(cx).text(cx),
             self.selected_branch.as_ref().map(|name| name.as_ref()),
         )
+    }
+
+    /// Opens the system's folder chooser and takes what it returns.
+    ///
+    /// Cancelling leaves the current location alone -- the form always holds a
+    /// real directory, so there is no empty state to fall into.
+    fn choose_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+
+        cx.spawn_in(window, async move |modal, cx| {
+            if let Ok(Ok(Some(mut paths))) = chosen.await
+                && let Some(directory) = paths.pop()
+            {
+                modal
+                    .update(cx, |modal, cx| {
+                        modal.location = directory;
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        })
+        .detach();
     }
 
     fn set_mode(&mut self, mode: NameMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -187,6 +241,7 @@ impl CreateWorktreeModal {
         let Some(branch_target) = self.target(cx) else {
             return;
         };
+        let location = self.location.clone();
         let worktree_name = match &branch_target {
             NewWorktreeBranchTarget::NewBranch { name } => Some(name.clone()),
             _ => None,
@@ -205,6 +260,7 @@ impl CreateWorktreeModal {
                         worktree_name,
                         branch_target,
                         agent: self.agent.map(|agent| agent.to_string()),
+                        location: Some(location),
                     },
                     window,
                     None,
@@ -262,6 +318,7 @@ impl Render for CreateWorktreeModal {
                 Some(self.run_on_path.clone()),
                 cx,
             ))
+            .child(self.render_location_section(cx))
             .child(self.render_name_section(window, cx))
             .child(self.render_agent_section(cx))
             .child(Divider::horizontal())
@@ -342,6 +399,57 @@ impl CreateWorktreeModal {
                             ),
                         )
                     }),
+            )
+    }
+
+    /// The Location field: where it goes, and a button to change it.
+    ///
+    /// Shown in full rather than as a name: two folders called `worktrees` are
+    /// a mistake waiting to happen, and the whole path is what tells them
+    /// apart.
+    fn render_location_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                Label::new("Location")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1p5()
+                    .justify_between()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .bg(cx.theme().colors().editor_background)
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(self.location.display().to_string())
+                                .size(LabelSize::Small)
+                                .truncate(),
+                        ),
+                    )
+                    .child(
+                        Button::new("choose-location", "Choose\u{2026}")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|modal, _, window, cx| {
+                                modal.choose_location(window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                Label::new(format!(
+                    "The checkout lands in a folder named after the branch, inside {}",
+                    self.location.display()
+                ))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
             )
     }
 
@@ -502,7 +610,16 @@ impl BranchPanel {
         };
 
         let project_name = repo.name.clone();
+        let repo_path = repo.path.to_path_buf();
         let run_on_path: SharedString = repo.path.display().to_string().into();
+        // The setting is the starting point, not a floor: the field is free to
+        // be changed, and what it is changed to applies to this creation only.
+        let location = default_location(
+            &repo_path,
+            &project::project_settings::ProjectSettings::get_global(cx)
+                .git
+                .worktree_directory,
+        );
         // Read from the project rather than offered as a choice, because
         // `handle_create_worktree` reads it from the project too.
         let run_on: SharedString = workspace
@@ -527,6 +644,7 @@ impl BranchPanel {
                     project_name,
                     run_on,
                     run_on_path,
+                    location,
                     branches,
                     window,
                     cx,
@@ -587,5 +705,50 @@ mod tests {
     #[test]
     fn typing_on_the_branch_tab_does_not_name_a_branch() {
         assert_eq!(chosen_target(NameMode::Branch, "dev", None), None);
+    }
+}
+
+/// Where the form starts before anyone touches the Choose button.
+///
+/// The picker itself belongs to the platform and is not asserted here. What is
+/// asserted is the value it starts from, because that is the one the reader
+/// most often keeps: the form has to open pointing at the same directory every
+/// other entry point would have used.
+#[cfg(test)]
+mod location {
+    use super::default_location;
+    use std::path::Path;
+
+    const REPO: &str = "/home/dev/zode";
+
+    #[test]
+    fn the_form_opens_where_the_setting_points() {
+        assert_eq!(
+            default_location(Path::new(REPO), "../worktrees"),
+            Path::new("/home/dev/worktrees/zode").to_path_buf(),
+            "the repo's own name is appended once the path leaves the repo, \
+             so two projects sharing a worktrees folder do not collide"
+        );
+    }
+
+    #[test]
+    fn a_directory_inside_the_repository_resolves_too() {
+        assert_eq!(
+            default_location(Path::new(REPO), ".git/zode-worktrees"),
+            Path::new("/home/dev/zode/.git/zode-worktrees").to_path_buf()
+        );
+    }
+
+    /// A setting the resolver refuses must not leave the form with nothing to
+    /// show. The reader sees the repository, and can pick elsewhere.
+    #[test]
+    fn an_unusable_setting_falls_back_to_the_repository() {
+        for unusable in ["/tmp/worktrees", "", "..", "../../elsewhere"] {
+            assert_eq!(
+                default_location(Path::new(REPO), unusable),
+                Path::new(REPO).to_path_buf(),
+                "{unusable:?} is refused by the setting's own validator"
+            );
+        }
     }
 }

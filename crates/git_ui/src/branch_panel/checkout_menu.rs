@@ -29,6 +29,7 @@ impl BranchPanel {
         // offering it would be offering to fail.
         let can_delete = !worktree.is_main;
         let label = worktree_label(worktree);
+        let worktree = worktree.clone();
 
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let pin = panel.clone();
@@ -39,7 +40,36 @@ impl BranchPanel {
             let path_for_remove = path.clone();
             let label = label.clone();
 
+            // Starting an agent switches to the checkout first, because an
+            // agent runs in the directory its workspace has open -- there is no
+            // way to start one "over there" without going there. Listed one per
+            // agent rather than behind a submenu: the whole point of the panel
+            // is picking a worktree and putting something to work in it, and
+            // that should be one click from the card.
+            let mut menu = menu;
+            for builtin in project::BUILTIN_AGENTS {
+                let start = panel.clone();
+                let worktree = worktree.clone();
+                menu = menu.item(
+                    ContextMenuEntry::new(format!("New {}", builtin.display_name))
+                        .icon(agent_ui::agent_icon(builtin.id))
+                        .icon_position(IconPosition::Start)
+                        .icon_color(Color::Custom(agent_ui::agent_color(builtin.id)))
+                        .handler(move |window, cx| {
+                            start.update(cx, |panel, cx| {
+                                panel.switch_to_worktree_with_agent(
+                                    &worktree,
+                                    Some(builtin.id.to_string()),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                );
+            }
+
             let menu = menu
+                .separator()
                 .item(
                     ContextMenuEntry::new(if pinned { "Unpin" } else { "Pin to Top" })
                         .icon(IconName::Pin)
