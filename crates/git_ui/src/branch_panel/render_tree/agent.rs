@@ -12,7 +12,7 @@ use gpui::{AnyElement, ClickEvent};
 use ui::{CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
-use crate::branch_panel::tree::{AgentEntry, RowKey};
+use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey};
 
 impl BranchPanel {
     /// The disclosure line and, when open, the agents under it.
@@ -88,7 +88,7 @@ impl BranchPanel {
         entry: &AgentEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let running = entry.is_running();
+        let activity = entry.activity(cx);
         let label = entry.label().clone();
         let tooltip = label.clone();
         let age = entry.updated_at().map(compact_age);
@@ -103,20 +103,22 @@ impl BranchPanel {
             .py_0p5()
             .rounded_sm()
             .hover(|style| style.bg(cx.theme().colors().element_hover))
-            // A spinner rather than a dot while it works: "still going" is a
-            // moving fact, and a static mark says it no better than the words
-            // beside it do.
-            .child(if running {
-                Icon::new(IconName::LoadCircle)
+            // A spinner only while it is answering: "still going" is a moving
+            // fact and a static mark says it no better than the words beside
+            // it, but a spinner that never stops says nothing at all. A green
+            // dot is the one worth scanning for -- that agent is done and
+            // waiting for you.
+            .child(match activity {
+                AgentActivity::Responding => Icon::new(IconName::LoadCircle)
                     .size(IconSize::XSmall)
                     .color(Color::Accent)
                     // Keyed, not caller-located: every running agent in the
                     // list shares this call site, and one id for all of them
                     // is one animation state for all of them.
-                    .with_keyed_rotate_animation(("agent-spinner", ix * 1000 + nth), 3)
-                    .into_any_element()
-            } else {
-                Indicator::dot().color(Color::Muted).into_any_element()
+                    .with_keyed_rotate_animation(("agent-spinner", ix * 1000 + nth), 1)
+                    .into_any_element(),
+                AgentActivity::Ready => Indicator::dot().color(Color::Success).into_any_element(),
+                AgentActivity::Gone => Indicator::dot().color(Color::Muted).into_any_element(),
             })
             // The vendor's own mark in the vendor's own colour, so a glance at
             // the list says which agent as well as which session.
@@ -125,18 +127,15 @@ impl BranchPanel {
                     .size(IconSize::XSmall)
                     .color(Color::Custom(agent_ui::agent_color(&agent))),
             )
-            .child(
-                div().flex_1().min_w_0().child(
-                    Label::new(label)
-                        .size(LabelSize::XSmall)
-                        .truncate()
-                        .color(if running {
-                            Color::Default
-                        } else {
-                            Color::Muted
-                        }),
+            .child(div().flex_1().min_w_0().child(
+                Label::new(label).size(LabelSize::XSmall).truncate().color(
+                    if activity == AgentActivity::Gone {
+                        Color::Muted
+                    } else {
+                        Color::Default
+                    },
                 ),
-            )
+            ))
             .when_some(age, |this, age| {
                 this.child(
                     Label::new(age)
@@ -164,8 +163,9 @@ impl BranchPanel {
 
     /// The right-click menu on an agent.
     ///
-    /// A running agent has no transcript to remove yet -- what is on disk is
-    /// still being written -- so deleting is offered only for finished ones.
+    /// Deleting is offered only for a session with no tab open on it. A tab
+    /// may still be writing its transcript, and one that has finished is still
+    /// showing what would be removed out from under it.
     fn agent_context_menu(
         &self,
         entry: &AgentEntry,
@@ -180,11 +180,11 @@ impl BranchPanel {
             let open_entry = entry.clone();
             let delete = panel.clone();
             let delete_entry = entry.clone();
-            let running = entry.is_running();
+            let has_tab = entry.is_open();
 
             menu.item(
-                ui::ContextMenuEntry::new(if running { "Go to Tab" } else { "Resume" })
-                    .icon(if running {
+                ui::ContextMenuEntry::new(if has_tab { "Go to Tab" } else { "Resume" })
+                    .icon(if has_tab {
                         IconName::ArrowUpRight
                     } else {
                         IconName::PlayOutlined
@@ -200,7 +200,7 @@ impl BranchPanel {
                     .icon(IconName::Trash)
                     .icon_position(ui::IconPosition::Start)
                     .icon_color(Color::Error)
-                    .disabled(running)
+                    .disabled(has_tab)
                     .handler(move |window, cx| {
                         delete.update(cx, |panel, cx| {
                             panel.delete_agent_session(&delete_entry, window, cx)
@@ -255,7 +255,7 @@ impl BranchPanel {
         };
 
         match entry {
-            AgentEntry::Running { view, .. } => {
+            AgentEntry::Open { view, .. } => {
                 let Some(view) = view.upgrade() else {
                     return;
                 };

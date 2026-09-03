@@ -166,8 +166,11 @@ impl BranchPanel {
     /// Whether this window is looking at this checkout.
     ///
     /// By path prefix rather than equality: a workspace can be rooted at a
-    /// subdirectory of the checkout, and it is still that checkout.
-    fn is_current_checkout(&self, worktree: &GitWorktree, cx: &App) -> bool {
+    /// subdirectory of the checkout, and it is still that checkout. The same
+    /// question `agents_by_checkout` asks to decide where a running agent
+    /// belongs, so the card's mark and the agent list cannot disagree about
+    /// where "here" is.
+    pub(crate) fn is_current_checkout(&self, worktree: &GitWorktree, cx: &App) -> bool {
         let Some(workspace) = self.workspace.upgrade() else {
             return false;
         };

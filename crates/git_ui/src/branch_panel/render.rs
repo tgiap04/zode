@@ -9,6 +9,8 @@ impl Render for BranchPanel {
         // Rebuilding here rather than on each git event means a burst of events
         // costs one rebuild, and a panel nobody is looking at costs none.
         self.refresh_if_stale(cx);
+        // After the rebuild: it reads the rows the rebuild just produced.
+        self.track_agent_activity(cx);
 
         let empty = self.rows.is_empty();
 

@@ -578,3 +578,97 @@ mod ordering {
         );
     }
 }
+
+/// The three marks an agent can wear.
+///
+/// Two of these are the point of the feature and one is the trap. An agent
+/// that has answered and one that is still typing look the same under a single
+/// "running" flag, and the reader scanning for something to pick up needs
+/// exactly that difference. The trap is the third: a tab whose CLI has exited
+/// is still an open tab, and `HideStrategy::Never` means it stays open on
+/// purpose -- calling it ready would send someone to a session that ended.
+mod activity {
+    use crate::branch_panel::tree::{AgentActivity, activity_for};
+
+    #[test]
+    fn an_agent_producing_output_is_responding() {
+        assert_eq!(activity_for(true, true), AgentActivity::Responding);
+    }
+
+    #[test]
+    fn an_agent_that_has_answered_is_ready() {
+        assert_eq!(
+            activity_for(true, false),
+            AgentActivity::Ready,
+            "a live CLI sitting quiet is the one waiting for you"
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_cli_has_exited_is_gone() {
+        assert_eq!(
+            activity_for(false, false),
+            AgentActivity::Gone,
+            "the tab outlives the process by design; the mark must not"
+        );
+    }
+}
+
+/// The order must not depend on which checkout you are standing in.
+///
+/// It did. `linked_worktrees` leaves out the checkout you are in, and
+/// `all_checkouts` put it back at the front before sorting the main one to the
+/// top -- so from the last of three worktrees the middle of the list came out
+/// reversed, and every card jumped as you switched between them. This is the
+/// bug the previous ordering fix was supposed to close and did not: it pinned
+/// the main checkout and left the rest to git's vantage-dependent order.
+mod stable_across_checkouts {
+    use crate::branch_panel::tree::all_checkouts;
+    use git::repository::Worktree as GitWorktree;
+    use std::path::PathBuf;
+
+    fn worktree(path: &str, is_main: bool) -> GitWorktree {
+        GitWorktree {
+            path: PathBuf::from(path),
+            ref_name: None,
+            sha: "sha".into(),
+            is_main,
+            is_bare: false,
+        }
+    }
+
+    /// What the panel shows when standing in `here`, given the three real
+    /// checkouts. `linked` is what git reports from there: everything but
+    /// `here` itself.
+    fn seen_from(here: &str) -> Vec<String> {
+        let all = ["/repos/zode", "/wt/alpha", "/wt/beta"];
+        let linked: Vec<_> = all
+            .iter()
+            .filter(|path| **path != here)
+            .map(|path| worktree(path, *path == "/repos/zode"))
+            .collect();
+
+        all_checkouts(std::path::Path::new(here), None, None, &linked)
+            .iter()
+            .map(|checkout| checkout.path.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn every_vantage_point_sees_the_same_order() {
+        let from_main = seen_from("/repos/zode");
+        assert_eq!(
+            from_main,
+            vec!["/repos/zode", "/wt/alpha", "/wt/beta"],
+            "main first, then the rest by path"
+        );
+
+        for here in ["/wt/alpha", "/wt/beta"] {
+            assert_eq!(
+                seen_from(here),
+                from_main,
+                "standing in {here} must not move a single card"
+            );
+        }
+    }
+}

@@ -13,8 +13,9 @@ use crate::branch_panel::panel::BranchPanel;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::branch_panel::tree::{AgentEntry, RepoData};
+use crate::branch_panel::tree::{AgentEntry, RepoData, TreeRow};
 use crate::branch_service::process_branches;
+use workspace::Workspace;
 
 /// The repository events that can change what the tree shows.
 ///
@@ -54,6 +55,43 @@ impl BranchPanel {
                 panel.mark_stale(cx);
             }
             _ => {}
+        })
+    }
+
+    /// Marks the tree stale when an agent tab opens or closes.
+    ///
+    /// Without this the panel only learned about agents when something *else*
+    /// rebuilt it -- a git event, or switching checkouts, which builds a whole
+    /// new panel. So pressing New Agent on the rail or in the editor added
+    /// nothing visible, and the list only caught up once you switched away and
+    /// back. That is not a refresh; that is a new panel.
+    ///
+    /// `ItemAdded` is filtered to agent tabs, because opening a file is not
+    /// news here. `ItemRemoved` carries only an id, so it cannot be filtered
+    /// the same way -- it is acted on only while the panel is actually showing
+    /// an open tab, which is the only case where a close could change anything.
+    pub(crate) fn observe_agent_tabs(
+        cx: &mut Context<Self>,
+        workspace: &Entity<Workspace>,
+    ) -> Subscription {
+        cx.subscribe(workspace, |panel, _, event, cx| match event {
+            workspace::Event::ItemAdded { item } => {
+                if item.downcast::<agent_ui::AgentView>().is_some() {
+                    panel.mark_stale(cx);
+                }
+            }
+            workspace::Event::ItemRemoved { .. } if panel.lists_an_open_tab() => {
+                panel.mark_stale(cx);
+            }
+            _ => {}
+        })
+    }
+
+    /// Whether any row currently shows a tab, rather than only transcripts.
+    fn lists_an_open_tab(&self) -> bool {
+        self.rows.iter().any(|row| match row {
+            TreeRow::Worktree { agents, .. } => agents.iter().any(|agent| agent.is_open()),
+            _ => false,
         })
     }
 
@@ -114,8 +152,11 @@ impl BranchPanel {
     ///
     /// Two sources, gathered once per rebuild so `build_rows` stays pure:
     ///
-    /// - **Running**: the agent tabs of this window whose CLI is still alive.
-    ///   They belong to the checkout this workspace has open.
+    /// - **Open**: every agent tab of this window. They belong to the checkout
+    ///   this workspace has open, so opening one from the editor's own New
+    ///   Agent button lands under the checkout you are in -- from the moment it
+    ///   opens, not from the moment its CLI answers. Whether it is working is
+    ///   the mark's business, not this list's.
     /// - **Finished**: from the shared session index, one hash per checkout.
     fn agents_by_checkout(
         &self,
@@ -123,6 +164,11 @@ impl BranchPanel {
         cx: &App,
     ) -> collections::HashMap<Arc<Path>, Arc<[AgentEntry]>> {
         let mut by_path: collections::HashMap<Arc<Path>, Vec<AgentEntry>> = Default::default();
+        // Sessions an open tab is already showing. Their transcripts are on
+        // disk and the index finds them, so without this the same session is
+        // listed twice -- once as the tab you are looking at, once as a
+        // finished one you could resume into a second copy of itself.
+        let mut open_sessions: collections::HashSet<String> = Default::default();
 
         if let Some(workspace) = self.workspace.upgrade() {
             // The checkout this window is in: the worktree whose path a root of
@@ -134,21 +180,23 @@ impl BranchPanel {
                 .find(|worktree| roots.iter().any(|root| root.starts_with(&worktree.path)));
 
             if let Some(here) = here {
-                let running: Vec<_> = workspace
-                    .read(cx)
-                    .items_of_type::<agent_ui::AgentView>(cx)
-                    .filter(|view| view.read(cx).is_working(cx))
-                    .map(|view| AgentEntry::Running {
-                        label: view.read(cx).tab_label(),
-                        agent: view.read(cx).agent_id().to_string().into(),
+                let mut open = Vec::new();
+                for view in workspace.read(cx).items_of_type::<agent_ui::AgentView>(cx) {
+                    let tab = view.read(cx);
+                    if let Some(id) = tab.session_id() {
+                        open_sessions.insert(id.to_string());
+                    }
+                    open.push(AgentEntry::Open {
+                        label: tab.tab_label(),
+                        agent: tab.agent_id().to_string().into(),
                         view: view.downgrade(),
-                    })
-                    .collect();
-                if !running.is_empty() {
+                    });
+                }
+                if !open.is_empty() {
                     by_path
                         .entry(Arc::from(here.path.as_path()))
                         .or_default()
-                        .extend(running);
+                        .extend(open);
                 }
             }
         }
@@ -163,12 +211,15 @@ impl BranchPanel {
 
         for worktree in worktrees {
             let path: Arc<Path> = Arc::from(worktree.path.as_path());
-            let past = index.sessions_for(&path).map(|session| AgentEntry::Past {
-                label: session.title.clone().into(),
-                agent: session.agent.builtin_agent_id().into(),
-                id: session.id.clone(),
-                updated_at: session.updated_at,
-            });
+            let past = index
+                .sessions_for(&path)
+                .filter(|session| !open_sessions.contains(session.id.as_ref()))
+                .map(|session| AgentEntry::Past {
+                    label: session.title.clone().into(),
+                    agent: session.agent.builtin_agent_id().into(),
+                    id: session.id.clone(),
+                    updated_at: session.updated_at,
+                });
             let past: Vec<_> = past.collect();
             if !past.is_empty() {
                 by_path.entry(path).or_default().extend(past);

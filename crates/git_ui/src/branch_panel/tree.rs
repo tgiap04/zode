@@ -77,7 +77,14 @@ pub(crate) enum TreeRow {
 /// time, which happens once, rather than copied on every rebuild.
 #[derive(Clone, Debug)]
 pub(crate) enum AgentEntry {
-    Running {
+    /// A tab open in this window.
+    ///
+    /// Open, not running: `HideStrategy::Never` keeps a tab after its CLI
+    /// exits, and a tab opened a moment ago has not started one yet. Whether
+    /// it is working is [`AgentEntry::activity`]'s question, not this
+    /// variant's -- which is what lets New Agent put a row here the instant it
+    /// is pressed.
+    Open {
         label: SharedString,
         /// The agent's builtin id, for its vendor mark and colour.
         agent: SharedString,
@@ -91,26 +98,71 @@ pub(crate) enum AgentEntry {
     },
 }
 
+/// What an agent's mark reports.
+///
+/// Three states rather than two because "the tab is open" and "the agent is
+/// working" are different facts, and a reader scanning the panel for something
+/// to pick up needs them apart: an agent that has answered is the one waiting
+/// for them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AgentActivity {
+    /// No live session -- a past transcript, or a tab whose CLI has exited.
+    Gone,
+    /// The CLI is alive and quiet: it has answered, or has not been asked yet.
+    Ready,
+    /// Producing a response right now.
+    Responding,
+}
+
+/// The mark for a tab that still exists, from the two questions asked of it.
+///
+/// Split out because the case worth pinning is the quiet one: a tab whose CLI
+/// has exited is still an open tab, and reporting it as ready would send
+/// someone to a session that ended.
+pub(crate) fn activity_for(working: bool, responding: bool) -> AgentActivity {
+    match (working, responding) {
+        (false, _) => AgentActivity::Gone,
+        (true, true) => AgentActivity::Responding,
+        (true, false) => AgentActivity::Ready,
+    }
+}
+
 impl AgentEntry {
     pub(crate) fn label(&self) -> &SharedString {
         match self {
-            AgentEntry::Running { label, .. } | AgentEntry::Past { label, .. } => label,
+            AgentEntry::Open { label, .. } | AgentEntry::Past { label, .. } => label,
         }
     }
 
     pub(crate) fn agent(&self) -> &SharedString {
         match self {
-            AgentEntry::Running { agent, .. } | AgentEntry::Past { agent, .. } => agent,
+            AgentEntry::Open { agent, .. } | AgentEntry::Past { agent, .. } => agent,
         }
     }
 
-    pub(crate) fn is_running(&self) -> bool {
-        matches!(self, AgentEntry::Running { .. })
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(self, AgentEntry::Open { .. })
+    }
+
+    /// Asked at render, never cached: this changes while nothing else about
+    /// the row does, so a copy taken when the tree was built would be stale
+    /// before it was drawn.
+    pub(crate) fn activity(&self, cx: &gpui::App) -> AgentActivity {
+        let AgentEntry::Open { view, .. } = self else {
+            return AgentActivity::Gone;
+        };
+        // A tab outlives its process by design, so an upgrade that succeeds
+        // still proves nothing about the CLI.
+        let Some(view) = view.upgrade() else {
+            return AgentActivity::Gone;
+        };
+        let view = view.read(cx);
+        activity_for(view.is_working(cx), view.is_responding(cx))
     }
 
     pub(crate) fn updated_at(&self) -> Option<std::time::SystemTime> {
         match self {
-            AgentEntry::Running { .. } => None,
+            AgentEntry::Open { .. } => None,
             AgentEntry::Past { updated_at, .. } => Some(*updated_at),
         }
     }
@@ -192,11 +244,17 @@ pub(crate) fn all_checkouts(
     let mut checkouts = Vec::with_capacity(linked.len() + 1);
     checkouts.push(here);
     checkouts.extend(linked.iter().cloned());
-    // The main checkout first, then the rest in the order git listed them.
-    // Stable, and stable is the point: an order that depends on which checkout
-    // you happen to be in makes every card move whenever you switch, and a card
-    // that moves under the cursor is a card you cannot aim at.
-    checkouts.sort_by_key(|checkout| !checkout.is_main);
+    // The main checkout first, then the rest by path.
+    //
+    // By path and not by the order git listed them, because that order is not
+    // the same from every checkout: `linked_worktrees` omits the one you are
+    // standing in, and this function puts it back at the front. Standing in the
+    // last of three therefore produced a different middle order than standing
+    // in the first -- so every card moved when you switched, which is exactly
+    // what the ordering was supposed to stop. A path is the same seen from
+    // anywhere.
+    checkouts
+        .sort_by(|left, right| (!left.is_main, &left.path).cmp(&(!right.is_main, &right.path)));
     checkouts
 }
 

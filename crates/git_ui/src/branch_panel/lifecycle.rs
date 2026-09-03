@@ -12,7 +12,14 @@ use workspace::Workspace;
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
-use crate::branch_panel::tree::{RowKey, build_rows};
+use crate::branch_panel::tree::{AgentActivity, RowKey, TreeRow, build_rows};
+
+/// How often the panel redraws while an agent is live.
+///
+/// Fast enough that the mark keeps up with an answer starting and finishing,
+/// slow enough that it is a rounding error next to drawing the frame it asks
+/// for.
+const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl BranchPanel {
     pub fn new(
@@ -21,6 +28,7 @@ impl BranchPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let workspace_handle = workspace.weak_handle();
+        let workspace_entity = cx.entity();
         cx.new(|cx| {
             let mut subscriptions = Vec::new();
 
@@ -43,6 +51,7 @@ impl BranchPanel {
                 running_remote_ops: HashSet::default(),
                 context_menu: None,
                 pending_serialization: Task::ready(None),
+                _activity_tick: None,
                 _subscriptions: Vec::new(),
             };
 
@@ -53,6 +62,11 @@ impl BranchPanel {
             // panel toggle hit once before.
             let store = workspace.project().read(cx).git_store().clone();
             subscriptions.push(Self::observe_git_store(cx, &store));
+            // Registering a subscription does not read the entity, so this is
+            // safe where a `read` inside this closure would panic.
+            subscriptions.push(Self::observe_agent_tabs(cx, &workspace_entity));
+            // Registering a subscription does not read the entity, so this is
+            // safe where a `read` inside this closure would panic.
             panel._subscriptions = subscriptions;
             panel
         })
@@ -109,6 +123,43 @@ impl BranchPanel {
         // builder's filter stays for whatever exposes one next.
         self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
         self.sync_list_state();
+    }
+
+    /// Keeps the panel redrawing while a live agent is listed, and stops when
+    /// none is.
+    ///
+    /// An agent's mark is the one thing here that changes without an event to
+    /// hang a redraw on: no git command ran, no row was rebuilt, the CLI simply
+    /// started or stopped writing. So it is polled. The tick exists only while
+    /// there is something whose mark could change -- a panel showing nothing
+    /// but finished transcripts costs nothing, which is the same rule the
+    /// rebuild follows.
+    pub(crate) fn track_agent_activity(&mut self, cx: &mut Context<Self>) {
+        let live = self.rows.iter().any(|row| match row {
+            TreeRow::Worktree { agents, .. } => agents
+                .iter()
+                .any(|agent| agent.activity(cx) != AgentActivity::Gone),
+            _ => false,
+        });
+
+        if !live {
+            self._activity_tick = None;
+            return;
+        }
+        if self._activity_tick.is_some() {
+            return;
+        }
+
+        self._activity_tick = Some(cx.spawn(async move |panel, cx| {
+            loop {
+                cx.background_executor().timer(ACTIVITY_TICK).await;
+                // The panel owns this task, so a failed update means the panel
+                // is gone and so is the task about to be dropped with it.
+                if panel.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
     }
 
     /// Tells `ListState` which rows changed.

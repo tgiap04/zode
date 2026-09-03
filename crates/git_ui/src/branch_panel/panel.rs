@@ -90,6 +90,15 @@ pub struct BranchPanel {
     /// it on dismiss. Dropping the tuple drops all three together.
     pub(crate) context_menu: Option<(Entity<ui::ContextMenu>, gpui::Point<Pixels>, Subscription)>,
     pub(crate) pending_serialization: Task<Option<()>>,
+    /// Redraws the panel while a live agent is listed.
+    ///
+    /// An agent's mark changes when nothing else about the row does -- no git
+    /// event, no rebuild -- so without a tick a spinner would never settle to
+    /// a dot and a dot would never become a spinner. Held in a field so it
+    /// stops when the panel is dropped, and cleared when the panel is hidden
+    /// or nothing live is listed: this is the only thing here that costs
+    /// anything while the user is doing nothing.
+    pub(crate) _activity_tick: Option<Task<()>>,
     /// Subscriptions live and die with the panel. Never `.detach()` one that is
     /// tied to panel state -- a detached subscription outlives the entity it
     /// updates and fires into a dropped handle forever after.
@@ -158,6 +167,9 @@ impl Panel for BranchPanel {
         if active {
             self.stale = true;
             cx.notify();
+        } else {
+            // Nothing is drawing it, so nothing needs waking.
+            self._activity_tick = None;
         }
     }
 
