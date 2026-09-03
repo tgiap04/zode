@@ -54,6 +54,30 @@ pub fn agent_color(agent: &str) -> gpui::Hsla {
     }
 }
 
+/// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
+/// being produced. Split out so the threshold can be held against the two
+/// rates it has to separate -- see the tests.
+fn responding_at(writes_in_window: usize) -> bool {
+    writes_in_window >= RESPONDING_WRITES
+}
+
+/// The window the agent's pty writes are counted over.
+const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// How many writes inside [`RESPONDING_WINDOW`] mean the agent is answering.
+///
+/// The number exists because "wrote something" was not enough: these CLIs
+/// repaint while idle -- a cursor, a hint, a token counter -- and any single
+/// write made the mark flicker from ready to busy while nothing was being
+/// asked or answered.
+///
+/// A repaint of that kind arrives once or twice a second. An agent producing a
+/// response writes far more often than that: the terminal coalesces on a 4ms
+/// timer, so even a spinner being animated while the model thinks clears this
+/// easily. Eight is comfortably above the idle rate and comfortably below the
+/// working one, which is the only property it needs.
+const RESPONDING_WRITES: usize = 8;
+
 pub struct AgentView {
     /// Which session this tab belongs to. See [`SessionIntent`].
     intent: SessionIntent,
@@ -150,6 +174,17 @@ impl AgentView {
 
     /// Public because the rail asks it: a button is lit when a tab for its agent
     /// is open, and the rail lives in another crate.
+    /// The session this tab is writing, when it owns one.
+    ///
+    /// `None` for an untracked tab -- an agent without `--session-id` writes a
+    /// transcript this editor cannot name, so nothing can be matched to it.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.intent {
+            SessionIntent::Untracked => None,
+            SessionIntent::Tracked(id) => Some(id),
+        }
+    }
+
     /// This tab's agent, for the vendor mark and colour a list wants to draw.
     pub fn agent_id(&self) -> &AgentId {
         &self.agent
@@ -551,6 +586,31 @@ impl AgentView {
                 .task()
                 .is_some_and(|task| task.status == ::terminal::TaskStatus::Running)
         })
+    }
+
+    /// Whether the agent is producing a response right now.
+    ///
+    /// Distinct from [`Self::is_working`], which only says the CLI is alive: an
+    /// agent that has answered and is waiting at its prompt is running and not
+    /// responding, and those are the two states a reader most wants told apart.
+    ///
+    /// There is no signal for it beyond the pty: these agents are TUIs, and
+    /// this editor does not speak their protocol. So the question is answered
+    /// by how *often* the terminal is written to -- see [`RESPONDING_WRITES`]
+    /// for why the rate and not the fact of a write. Keystroke echo still
+    /// reads as activity if you type fast enough, which is the accepted cost
+    /// of the only signal there is.
+    pub fn is_responding(&self, cx: &App) -> bool {
+        self.is_working(cx)
+            && self.terminal().is_some_and(|terminal_view| {
+                responding_at(
+                    terminal_view
+                        .read(cx)
+                        .terminal()
+                        .read(cx)
+                        .pty_writes_within(RESPONDING_WINDOW),
+                )
+            })
     }
 
     /// What the tab shows: the name the user gave this session, or the agent's.
@@ -1542,6 +1602,51 @@ fn centered_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The threshold that separates an agent answering from one sitting idle.
+    ///
+    /// The defect these close: any single write counted as activity, so the
+    /// mark flickered from ready to working while nothing was being asked.
+    /// These CLIs repaint their prompt on their own -- a cursor, a hint, a
+    /// token count -- at a rate of roughly one or two a second. An agent
+    /// producing a response writes far more often; the terminal coalesces on a
+    /// 4ms timer, so even a spinner animated while the model thinks clears the
+    /// bar. The constant only has to sit between those two rates, and these
+    /// name both so that lowering it back toward the idle one fails here.
+    mod responding_rate {
+        use super::super::{RESPONDING_WRITES, responding_at};
+
+        /// A TUI redrawing its own prompt while waiting for you.
+        const IDLE_REPAINTS_PER_SECOND: usize = 2;
+
+        #[test]
+        fn an_idle_repaint_is_not_an_answer() {
+            assert!(
+                !responding_at(IDLE_REPAINTS_PER_SECOND),
+                "a prompt redrawing itself must not read as work"
+            );
+        }
+
+        #[test]
+        fn silence_is_not_an_answer() {
+            assert!(!responding_at(0));
+        }
+
+        /// The terminal's history saturates at sixteen, so a streaming agent
+        /// always reports at least that.
+        #[test]
+        fn a_streaming_answer_reads_as_one() {
+            assert!(responding_at(16));
+        }
+
+        #[test]
+        fn the_threshold_sits_above_the_idle_rate() {
+            assert!(
+                RESPONDING_WRITES > IDLE_REPAINTS_PER_SECOND,
+                "a threshold at or below the idle rate is the original defect"
+            );
+        }
+    }
     use gpui::TestAppContext;
     use project::FakeFs;
     use serde_json::json;

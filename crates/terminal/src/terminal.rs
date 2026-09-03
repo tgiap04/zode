@@ -340,6 +340,11 @@ impl Display for TerminalError {
 
 // https://github.com/alacritty/alacritty/blob/cb3a79dbf6472740daca8440d5166c1d4af5029e/extra/man/alacritty.5.scd?plain=1#L207-L213
 const DEFAULT_SCROLL_HISTORY_LINES: usize = 10_000;
+
+/// How many pty write timestamps are kept. Bounded on purpose: a streaming
+/// program writes hundreds of times a second, and the question this history
+/// answers -- steady or occasional -- is settled long before sixteen.
+const PTY_OUTPUT_HISTORY: usize = 16;
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 
 pub struct TerminalBuilder {
@@ -402,6 +407,7 @@ impl TerminalBuilder {
             vi_mode_enabled: false,
             is_remote_terminal: false,
             last_mouse_move_time: Instant::now(),
+            recent_pty_output: VecDeque::new(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
             #[cfg(windows)]
@@ -637,6 +643,7 @@ impl TerminalBuilder {
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
+                recent_pty_output: VecDeque::new(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
                 #[cfg(windows)]
@@ -882,6 +889,20 @@ pub struct Terminal {
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
     last_mouse_move_time: Instant,
+    /// When the pty last handed us output, most recent last.
+    ///
+    /// A rate and not a timestamp, because a single write proves nothing: a
+    /// TUI sitting at its prompt still repaints -- a cursor, a hint line -- and
+    /// one write says "alive", not "working". Only the rate tells a program
+    /// producing a response from one waiting for input.
+    ///
+    /// Only real pty output lands here. The internal wakeups this file emits
+    /// for a resize, a clear or a scroll are our own redraws, and counting them
+    /// would make an idle terminal look busy every time its pane moved.
+    ///
+    /// Capped at [`PTY_OUTPUT_HISTORY`], so a fast writer costs a fixed
+    /// sixteen timestamps rather than one per write.
+    recent_pty_output: VecDeque<Instant>,
     last_hyperlink_search_position: Option<Point<Pixels>>,
     mouse_down_hyperlink: Option<(String, bool, Match)>,
     #[cfg(windows)]
@@ -998,6 +1019,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             AlacTermEvent::Wakeup => {
+                self.record_pty_output();
                 cx.emit(Event::Wakeup);
 
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
@@ -2264,6 +2286,25 @@ impl Terminal {
             TerminalType::Pty { info, .. } => Some(info.pid_getter()),
             TerminalType::DisplayOnly => None,
         }
+    }
+
+    fn record_pty_output(&mut self) {
+        if self.recent_pty_output.len() == PTY_OUTPUT_HISTORY {
+            self.recent_pty_output.pop_front();
+        }
+        self.recent_pty_output.push_back(Instant::now());
+    }
+
+    /// How many separate writes the pty has made within `window`.
+    ///
+    /// Saturates at [`PTY_OUTPUT_HISTORY`]: this answers "is it writing
+    /// steadily", and past that many writes in a window the answer no longer
+    /// changes.
+    pub fn pty_writes_within(&self, window: Duration) -> usize {
+        self.recent_pty_output
+            .iter()
+            .filter(|at| at.elapsed() < window)
+            .count()
     }
 
     pub fn task(&self) -> Option<&TaskState> {
@@ -3783,6 +3824,94 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The rate signal behind an agent's "is it answering" mark.
+    ///
+    /// The defect these pin: a single write was enough to read as busy, and
+    /// these CLIs repaint while idle, so the mark flickered from ready to
+    /// working with nothing being asked or answered. Counting writes is what
+    /// separates a repaint from a response, and the counting has two edges
+    /// worth holding -- the window it looks back over, and the ceiling that
+    /// keeps a fast writer from costing one timestamp per write.
+    mod pty_write_rate {
+        use super::*;
+
+        fn terminal(cx: &mut TestAppContext) -> Entity<Terminal> {
+            cx.update(|cx| {
+                let settings_store = settings::SettingsStore::test(cx);
+                cx.set_global(settings_store);
+            });
+            cx.new(|cx| {
+                TerminalBuilder::new_display_only(
+                    CursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    PathStyle::local(),
+                )
+                .unwrap()
+                .subscribe(cx)
+            })
+        }
+
+        #[gpui::test]
+        async fn a_fresh_terminal_has_written_nothing(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                assert_eq!(terminal.pty_writes_within(Duration::from_secs(1)), 0);
+            });
+        }
+
+        #[gpui::test]
+        async fn one_repaint_is_one_write(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                terminal.record_pty_output();
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::from_secs(1)),
+                    1,
+                    "an idle TUI redrawing its prompt must not look like a stream"
+                );
+            });
+        }
+
+        /// Nothing counts once it falls out of the window, which is what lets
+        /// the mark settle back to ready when the answer ends.
+        #[gpui::test]
+        async fn writes_outside_the_window_do_not_count(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                for _ in 0..5 {
+                    terminal.record_pty_output();
+                }
+                assert_eq!(terminal.pty_writes_within(Duration::from_secs(1)), 5);
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::ZERO),
+                    0,
+                    "a window that has already closed holds nothing"
+                );
+            });
+        }
+
+        /// A streaming agent writes hundreds of times a second. The history is
+        /// capped so that costs sixteen timestamps, not hundreds.
+        #[gpui::test]
+        async fn a_fast_writer_costs_a_fixed_amount(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                for _ in 0..500 {
+                    terminal.record_pty_output();
+                }
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::from_secs(1)),
+                    PTY_OUTPUT_HISTORY,
+                    "the count saturates rather than growing with the writer"
+                );
+                assert_eq!(terminal.recent_pty_output.len(), PTY_OUTPUT_HISTORY);
+            });
         }
     }
 }
