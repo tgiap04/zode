@@ -7654,10 +7654,14 @@ name = "keep_awake"
 version = "0.1.0"
 dependencies = [
  "agent_ui",
+ "editor",
  "fs",
  "gpui",
  "log",
+ "project",
  "settings",
+ "theme",
+ "theme_settings",
  "ui",
  "workspace",
 ]

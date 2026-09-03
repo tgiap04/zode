@@ -1,21 +1,33 @@
-//! Keeps the display lit while an agent's CLI is still working.
+//! Keeps the display lit while an agent is producing an answer.
 //!
-//! The question is narrower than it looks, and there is one specific way to get
-//! it wrong. An agent tab stays open after its CLI exits -- `agent_ui`'s
+//! The question is narrower than it looks, and there are two ways to get it
+//! wrong, one behind the other.
+//!
+//! The first: an agent tab stays open after its CLI exits -- `agent_ui`'s
 //! `agent_task` sets `HideStrategy::Never` on purpose, so the transcript
-//! survives for reading. So "an agent tab is open" is *not* "an agent is
-//! working", and a lock keyed on the former would pin the display on for the
-//! rest of the session. Only the task status of the tab's terminal answers it.
+//! survives for reading. "A tab is open" is not "an agent is alive", and a lock
+//! keyed on the former would pin the display on for the rest of the session.
 //!
-//! Almost nothing here polls. Terminals report their own completion through
-//! `Terminal::wait_for_completed_task`, and tabs arriving and leaving come
-//! through `workspace::Event::{ItemAdded, ItemRemoved}`. The one exception is
-//! the power source: pulling the charger raises no event this process can see,
-//! so it is re-read on a timer -- and only while some agent is working. That is
-//! not the same as "while a lock is held", and the difference matters: on
-//! battery there is a working agent and no lock, and something still has to
-//! notice the charger going back in. With no agent working this crate holds no
-//! lock, runs no timer, and wakes for nothing.
+//! The second, and the one that survived the first fix: a CLI sitting at its
+//! prompt waiting for you to type is alive and doing nothing. Holding the
+//! display for it means walking away from an idle agent and coming back to a
+//! screen that never slept. So the lock follows
+//! [`AgentView::is_responding`](agent_ui::AgentView::is_responding) -- output
+//! actually arriving -- and not merely a live process.
+//!
+//! That answer is sampled rather than announced, so it is polled, and only
+//! while some tab has a live CLI. A tab with none costs nothing: no timer, no
+//! lock, no wake. The poll is also why [`RESPONDING_GRACE`] exists -- an agent
+//! reading a file or waiting on a model writes nothing for seconds at a time,
+//! and a lock taken and dropped across every one of those pauses would be worse
+//! than no lock at all.
+//!
+//! Tabs arriving and leaving still come through
+//! `workspace::Event::{ItemAdded, ItemRemoved}`, and the power source is re-read
+//! on its own timer: pulling the charger raises no event this process can see.
+//! That timer is tied to working agents rather than to holding the lock,
+//! because on battery there is a working agent and no lock, and something still
+//! has to notice the charger going back in.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -60,7 +72,7 @@ impl KeepDisplayAwakeSetting {
 pub enum Status {
     /// A lock is held for at least one working agent.
     Holding,
-    /// No agent is working, so there is nothing to hold it for.
+    /// No agent is answering, so there is nothing to hold it for.
     Idle,
     /// An agent is working, but the machine is on battery.
     OnBattery,
@@ -99,7 +111,24 @@ const POWER_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// without a restart.
 const FAILED_ACQUISITION_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// Holds one display-wake lock for as long as any agent tab's CLI is running.
+/// How often each live tab is asked whether it is answering.
+///
+/// Matched to the window `is_responding` counts over: sampling slower than the
+/// window would step over quiet gaps that never happened, and faster would ask
+/// the same question twice about the same second.
+const ACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long an agent goes on counting as answering after its last output.
+///
+/// An agent reading a file, running a command or waiting on a model writes
+/// nothing for seconds at a time. Releasing the lock into each of those pauses
+/// and taking it back afterwards would flap the display's wake state through a
+/// single answer -- and each acquisition can cost a foreground stall. A minute
+/// covers the pauses that happen inside one answer and still lets the display
+/// sleep on time once the answer is finished.
+const RESPONDING_GRACE: Duration = Duration::from_secs(60);
+
+/// Holds one display-wake lock for as long as an agent is producing an answer.
 pub struct KeepAwake {
     holds: Holds,
     watched: HashMap<EntityId, Watched>,
@@ -108,6 +137,9 @@ pub struct KeepAwake {
     /// Re-reads the power source while a lock is held, and does not exist
     /// otherwise -- an idle editor must not wake for this.
     power_check: Option<Task<()>>,
+    /// Asks each live tab whether it is answering. Exists only while some tab
+    /// has a live CLI, so an editor with no agent running wakes for nothing.
+    activity_check: Option<Task<()>>,
 }
 
 /// The bookkeeping half, kept apart from the wiring that feeds it.
@@ -139,6 +171,10 @@ struct Holds {
 
 /// What is kept alive per agent tab.
 struct Watched {
+    /// The tab itself, so the activity poll can ask it whether it is answering.
+    /// Weak: the workspace owns the tab, and a strong handle here would keep a
+    /// closed one alive.
+    view: gpui::WeakEntity<AgentView>,
     /// Fires when the tab's state changes. An agent begins as `State::Starting`
     /// and only later holds a terminal, so the terminal has to be picked up on a
     /// later notification rather than when the tab is added.
@@ -149,6 +185,10 @@ struct Watched {
     /// Awaits this tab's CLI exiting. `None` until a running terminal is seen, so
     /// a tab that never starts one costs nothing.
     completion: Option<Task<()>>,
+    /// When this tab was last seen answering. `None` for a tab that has not
+    /// answered since its CLI started -- which is every tab that is merely
+    /// sitting at its prompt.
+    last_answered: Option<Instant>,
 }
 
 /// Whether a tab needs to be looked at again, given what is being awaited.
@@ -159,6 +199,15 @@ struct Watched {
 /// starts a new one in the same tab. Asking merely "is a completion task
 /// running" answers yes for the *dead* terminal's task, so the restarted agent
 /// would be skipped and never hold the display again for the life of that tab.
+/// Whether a tab still counts as answering, given when it last was.
+///
+/// A free function so the grace can be asserted without a terminal, a poll or
+/// a clock: the rule is the whole difference between a lock that follows one
+/// answer and a lock that flaps through it.
+fn still_answering(last_answered: Option<Instant>, now: Instant) -> bool {
+    last_answered.is_some_and(|at| now.duration_since(at) < RESPONDING_GRACE)
+}
+
 fn needs_rereading(awaited: Option<EntityId>, current: Option<EntityId>) -> bool {
     awaited != current
 }
@@ -261,9 +310,9 @@ impl Holds {
     fn reason(&self) -> String {
         let count = self.running.len();
         match (self.running.values().next(), count) {
-            (Some(name), 1) => format!("{name} is running"),
-            (Some(_), count) => format!("{count} agents are running"),
-            (None, _) => "an agent is running".to_string(),
+            (Some(name), 1) => format!("{name} is answering"),
+            (Some(_), count) => format!("{count} agents are answering"),
+            (None, _) => "an agent is answering".to_string(),
         }
     }
 }
@@ -300,6 +349,7 @@ impl KeepAwake {
             _workspace: subscription,
             _settings: settings,
             power_check: None,
+            activity_check: None,
         };
         // Tabs restored from the last session exist before this entity does, so
         // the subscription above would never hear about them.
@@ -325,6 +375,48 @@ impl KeepAwake {
         self.holds.status(cx)
     }
 
+    /// Asks every live tab whether it is answering, and moves the lock to match.
+    ///
+    /// Deliberately not through `settled`: this runs from the activity timer,
+    /// and `settled` may drop that very timer from inside itself. Only `sync`
+    /// runs here -- the paths that end a tab's CLI cancel the timer on their
+    /// own.
+    fn sample_activity(&mut self, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let mut answering: Vec<(EntityId, SharedString)> = Vec::new();
+        let mut quiet: Vec<EntityId> = Vec::new();
+
+        for (id, watched) in &mut self.watched {
+            let Some(view) = watched.view.upgrade() else {
+                quiet.push(*id);
+                continue;
+            };
+            let agent = view.read(cx);
+            if agent.is_responding(cx) {
+                watched.last_answered = Some(now);
+            }
+            if still_answering(watched.last_answered, now) {
+                answering.push((*id, agent.tab_label()));
+            } else {
+                quiet.push(*id);
+            }
+        }
+
+        // Applied after the walk rather than inside it: `set` and `clear` reach
+        // the settings store and the platform, and neither can be called while
+        // `watched` is still borrowed.
+        let mut changed = false;
+        for (id, label) in answering {
+            changed |= self.holds.set(id, label, cx);
+        }
+        for id in quiet {
+            changed |= self.holds.clear(id, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
     /// Applies a change in `holds`, keeping the power-check timer's existence tied
     /// to whether any agent is working. Every caller that touches `holds` goes
     /// through here, so there is one place where the timer can leak or go missing.
@@ -335,6 +427,29 @@ impl KeepAwake {
     /// on the lock, the watcher would die with the release it performed and the
     /// hold would never come back.
     fn settled(&mut self, changed: bool, cx: &mut Context<Self>) {
+        // Tied to tabs with a live CLI, not to the lock: a tab that is alive and
+        // quiet holds nothing, and it is exactly the one the poll has to keep
+        // asking about.
+        let any_live = self.watched.values().any(|w| w.completion.is_some());
+        if !any_live {
+            self.activity_check = None;
+        } else if self.activity_check.is_none() {
+            self.activity_check = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(ACTIVITY_CHECK_INTERVAL)
+                        .await;
+                    let live = this.update(cx, |this, cx| {
+                        this.sample_activity(cx);
+                        this.watched.values().any(|w| w.completion.is_some())
+                    });
+                    if !matches!(live, Ok(true)) {
+                        break;
+                    }
+                }
+            }));
+        }
+
         let watching_wanted = !self.holds.running.is_empty();
         if !watching_wanted {
             // Dropping the task cancels it. Safe from here because every path
@@ -373,9 +488,11 @@ impl KeepAwake {
         self.watched.insert(
             id,
             Watched {
+                view: view.downgrade(),
                 _view: subscription,
                 terminal: None,
                 completion: None,
+                last_answered: None,
             },
         );
         self.reread(view, cx);
@@ -400,7 +517,6 @@ impl KeepAwake {
         let terminal = agent
             .terminal()
             .map(|terminal_view| terminal_view.read(cx).terminal().clone());
-        let label = agent.tab_label();
         let terminal_id = terminal.as_ref().map(|terminal| terminal.entity_id());
 
         let awaited = self.watched.get(&id).and_then(|watched| watched.terminal);
@@ -438,6 +554,7 @@ impl KeepAwake {
                 if let Some(watched) = this.watched.get_mut(&id) {
                     watched.completion = None;
                     watched.terminal = None;
+                    watched.last_answered = None;
                 }
                 let changed = this.holds.clear(id, cx);
                 this.settled(changed, cx);
@@ -447,7 +564,10 @@ impl KeepAwake {
         if let Some(watched) = self.watched.get_mut(&id) {
             watched.completion = Some(task);
         }
-        let changed = self.holds.set(id, label, cx);
+        // A live CLI makes this tab eligible, and nothing more. Whether it is
+        // *answering* is what the lock follows, and only the poll can see that:
+        // an agent waiting at its prompt is alive and doing nothing.
+        let changed = false;
         self.settled(changed, cx);
     }
 }
@@ -457,7 +577,7 @@ impl Status {
     fn explanation(self) -> &'static str {
         match self {
             Status::Holding => "The display is being held awake",
-            Status::Idle => "No agent is working",
+            Status::Idle => "No agent is answering",
             Status::OnBattery => "Paused - running on battery",
             Status::Disabled => "Turned off in settings",
             Status::Unsupported => "The system refused the request",
@@ -525,7 +645,7 @@ impl KeepAwake {
             // draws `Icon::new(icon.unwrap_or(IconName::Check))`, so passing one
             // would *replace* the checkmark rather than join it.
             menu.toggleable_entry(
-                "Keep display awake while an agent works",
+                "Keep display awake while an agent answers",
                 enabled,
                 IconPosition::Start,
                 None,
