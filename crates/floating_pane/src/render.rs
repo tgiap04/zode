@@ -8,7 +8,8 @@
 use std::sync::LazyLock;
 
 use gpui::{
-    Anchor, Bounds, ClickEvent, DragMoveEvent, MouseButton, MouseDownEvent, Pixels, Point, Size, px,
+    Anchor, Bounds, ClickEvent, DragMoveEvent, MouseButton, MouseDownEvent, Pixels, Point, Size,
+    WeakEntity, px,
 };
 use ui::prelude::*;
 use ui::{ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip};
@@ -93,6 +94,60 @@ impl Entry {
             Entry::Agent(agent, _, _) => pane.open_agent(agent, window, cx),
         }
     }
+}
+
+/// The one list, as menu entries.
+///
+/// Shared so the window's own `+`, the tab bar's `+` and the empty state can
+/// never offer three different sets. That was the whole reason `Entry` exists.
+fn entry_items(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
+    for entry in Entry::all() {
+        if entry.opens_a_group() {
+            menu = menu.separator().header("Agent");
+        }
+        let this = this.clone();
+        menu = menu.item(
+            ContextMenuEntry::new(entry.label())
+                .icon(entry.icon())
+                .handler(move |window, cx| {
+                    this.update(cx, |pane, cx| entry.run(pane, window, cx)).ok();
+                }),
+        );
+    }
+    menu
+}
+
+/// The `+` at the end of this window's tab bar.
+///
+/// A pane draws one by default, and the default offers New File, New Terminal
+/// and the agents as *workspace* actions -- which resolve against the active
+/// pane of the editor. This pane is not one of those, so every entry on that
+/// menu opened in the editor behind the window. It only showed once a tab
+/// existed, because until then the empty state is what fills the pane.
+pub(crate) fn tab_bar_menu(this: WeakEntity<FloatingPane>) -> AnyElement {
+    // Wrapped so a test can tell this `+` from the one in the window's title
+    // bar: `IconButton` names its debug selector after the icon, and both are
+    // a plus.
+    h_flex()
+        .debug_selector(|| "floating-pane-tab-bar-add".into())
+        .child(menu_for(this))
+        .into_any_element()
+}
+
+fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
+    PopoverMenu::new("floating-pane-tab-bar-menu")
+        .trigger_with_tooltip(
+            IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+            Tooltip::text("New\u{2026}"),
+        )
+        .anchor(Anchor::TopRight)
+        .menu(move |window, cx| {
+            let this = this.clone();
+            Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                entry_items(menu, &this)
+            }))
+        })
+        .into_any_element()
 }
 
 /// How far in from an edge counts as grabbing it.
@@ -334,20 +389,8 @@ impl FloatingPane {
             .anchor(Anchor::TopLeft)
             .menu(move |window, cx| {
                 let this = this.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
-                    for entry in Entry::all() {
-                        if entry.opens_a_group() {
-                            menu = menu.separator().header("Agent");
-                        }
-                        let this = this.clone();
-                        menu = menu.item(
-                            ContextMenuEntry::new(entry.label())
-                                .icon(entry.icon())
-                                .handler(move |window, cx| {
-                                    this.update(cx, |pane, cx| entry.run(pane, window, cx)).ok();
-                                }),
-                        );
-                    }
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    let menu = entry_items(menu, &this);
                     // Takes `this` outright: nothing after it needs a handle.
                     menu.separator().entry("Minimise", None, move |window, cx| {
                         this.update(cx, |this, cx| this.toggle(window, cx)).ok();
