@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -73,10 +73,22 @@ pub fn classify_worktrees(
 
 /// Resolves a branch target into the ref the new worktree should be based on.
 /// Returns `None` for `CurrentBranch`, meaning "use the current HEAD".
+/// The ref a new worktree is based on, for the variants that check out an
+/// existing one. `None` means HEAD.
 pub fn resolve_worktree_branch_target(branch_target: &NewWorktreeBranchTarget) -> Option<String> {
     match branch_target {
-        NewWorktreeBranchTarget::CurrentBranch => None,
+        NewWorktreeBranchTarget::CurrentBranch | NewWorktreeBranchTarget::NewBranch { .. } => None,
         NewWorktreeBranchTarget::ExistingBranch { name } => Some(name.clone()),
+    }
+}
+
+/// The branch a new worktree should create for itself, if any.
+pub fn new_branch_for_worktree(branch_target: &NewWorktreeBranchTarget) -> Option<String> {
+    match branch_target {
+        NewWorktreeBranchTarget::NewBranch { name } => Some(name.clone()),
+        NewWorktreeBranchTarget::CurrentBranch | NewWorktreeBranchTarget::ExistingBranch { .. } => {
+            None
+        }
     }
 }
 
@@ -89,7 +101,11 @@ fn start_worktree_creations(
     worktree_name: Option<String>,
     existing_worktree_names: &[String],
     existing_worktree_paths: &HashSet<PathBuf>,
+    location: Option<&Path>,
     base_ref: Option<String>,
+    // `new_branch`: the branch the new worktree creates for itself, `None` for
+    // a detached checkout.
+    new_branch: Option<String>,
     worktree_directory_setting: &str,
     rng: &mut impl rand::Rng,
     cx: &mut gpui::App,
@@ -112,13 +128,28 @@ fn start_worktree_creations(
 
     for repo in git_repos {
         let (work_dir, new_path, receiver) = repo.update(cx, |repo, _cx| {
-            let new_path =
-                repo.path_for_new_linked_worktree(&worktree_name, worktree_directory_setting)?;
+            let new_path = match location {
+                Some(directory) => {
+                    repo.path_for_new_linked_worktree_in(directory, &worktree_name)?
+                }
+                None => {
+                    repo.path_for_new_linked_worktree(&worktree_name, worktree_directory_setting)?
+                }
+            };
             if existing_worktree_paths.contains(&new_path) {
                 anyhow::bail!("A worktree already exists at {}", new_path.display());
             }
-            let target = git::repository::CreateWorktreeTarget::Detached {
-                base_sha: base_ref.clone(),
+            // A worktree with a branch of its own is the point of the panel:
+            // a detached checkout has nowhere to commit, so parallel feature
+            // work cannot happen in one.
+            let target = match new_branch.clone() {
+                Some(branch_name) => git::repository::CreateWorktreeTarget::NewBranch {
+                    branch_name,
+                    base_sha: base_ref.clone(),
+                },
+                None => git::repository::CreateWorktreeTarget::Detached {
+                    base_sha: base_ref.clone(),
+                },
             };
             let receiver = repo.create_worktree(target, new_path.clone());
             let work_dir = repo.work_directory_abs_path.clone();
@@ -313,6 +344,7 @@ pub fn handle_create_worktree(
         return;
     }
 
+    let agent = action.agent.clone();
     let previous_state =
         workspace.capture_state_for_worktree_switch(window, fallback_focused_dock, cx);
     let workspace_handle = workspace.weak_handle();
@@ -349,6 +381,7 @@ pub fn handle_create_worktree(
 
     let worktree_name = action.worktree_name.clone();
     let branch_target = action.branch_target.clone();
+    let location = action.location.clone();
     let display_name: SharedString = worktree_name
         .as_deref()
         .unwrap_or("worktree")
@@ -367,6 +400,8 @@ pub fn handle_create_worktree(
             workspace_handle.clone(),
             window_handle,
             remote_connection_options,
+            agent,
+            location,
             &mut cx,
         )
         .await;
@@ -427,6 +462,7 @@ pub fn handle_switch_worktree(
     workspace.set_active_worktree_creation(Some(display_name), true, cx);
 
     let worktree_path = action.path.clone();
+    let agent = action.agent.clone();
 
     cx.spawn_in(window, async move |_workspace_entity, mut cx| {
         let result = do_switch_worktree(
@@ -440,6 +476,29 @@ pub fn handle_switch_worktree(
             &mut cx,
         )
         .await;
+
+        // Only once the switch has landed: the window's active workspace is
+        // the destination now, and that is the directory the agent has to run
+        // in. A failed switch leaves the reader where they were, so starting
+        // anything would put it in the wrong checkout.
+        if result.is_ok()
+            && let Some(agent) = agent
+            && let Some(window_handle) = window_handle
+        {
+            window_handle
+                .update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.workspace().update(cx, |workspace, cx| {
+                        agent_ui::AgentView::open_tracked(
+                            workspace,
+                            &agent,
+                            Default::default(),
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .log_err();
+        }
 
         if let Err(err) = &result {
             log::error!("Failed to switch worktree: {err}");
@@ -465,6 +524,11 @@ async fn do_create_worktree(
     workspace: WeakEntity<Workspace>,
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
+    agent: Option<String>,
+    // An absolute directory overriding `git.worktree_directory` for this
+    // creation only. The form offers it; the setting remains what every other
+    // entry point uses.
+    location: Option<PathBuf>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     // List existing worktrees from all repos to detect name collisions
@@ -508,6 +572,7 @@ async fn do_create_worktree(
     let mut rng = rand::rng();
 
     let base_ref = resolve_worktree_branch_target(&branch_target);
+    let new_branch = new_branch_for_worktree(&branch_target);
 
     let (creation_infos, path_remapping) = cx.update(|_, cx| {
         start_worktree_creations(
@@ -515,7 +580,9 @@ async fn do_create_worktree(
             worktree_name,
             &existing_worktree_names,
             &existing_worktree_paths,
+            location.as_deref(),
             base_ref,
+            new_branch,
             &worktree_directory_setting,
             &mut rng,
             cx,
@@ -540,6 +607,7 @@ async fn do_create_worktree(
         window_handle,
         remote_connection_options,
         WorktreeOperation::Create,
+        agent,
         cx,
     )
     .await
@@ -574,6 +642,9 @@ async fn do_switch_worktree(
         window_handle,
         remote_connection_options,
         WorktreeOperation::Switch,
+        // Switching goes to a checkout that already exists; whatever is running
+        // there is already running.
+        None,
         cx,
     )
     .await
@@ -590,6 +661,7 @@ async fn open_worktree_workspace(
     window_handle: Option<gpui::WindowHandle<MultiWorkspace>>,
     remote_connection_options: Option<RemoteConnectionOptions>,
     operation: WorktreeOperation,
+    agent: Option<String>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     let window_handle = window_handle
@@ -618,11 +690,21 @@ async fn open_worktree_workspace(
                 >,
             > = if is_creating_new_worktree {
                 let dock_structure = previous_state.dock_structure;
+                let agent = agent.clone();
                 Some(Box::new(
                     move |workspace: &mut Workspace,
                           window: &mut gpui::Window,
                           cx: &mut gpui::Context<Workspace>| {
                         workspace.set_dock_structure(dock_structure, window, cx);
+                        if let Some(agent) = agent {
+                            agent_ui::AgentView::open_tracked(
+                                workspace,
+                                &agent,
+                                Default::default(),
+                                window,
+                                cx,
+                            );
+                        }
                     },
                 ))
             } else {
@@ -806,4 +888,47 @@ async fn open_worktree_workspace(
     }
 
     anyhow::Ok(())
+}
+
+#[cfg(test)]
+mod branch_target_tests {
+    use super::{new_branch_for_worktree, resolve_worktree_branch_target};
+    use zed_actions::NewWorktreeBranchTarget;
+
+    /// The two questions a target answers are separate: what to base the
+    /// checkout on, and whether to give it a branch. Confusing them is silent
+    /// -- the worktree still appears, just with nowhere to commit.
+    #[test]
+    fn a_new_branch_is_based_on_head_and_names_itself() {
+        let target = NewWorktreeBranchTarget::NewBranch {
+            name: "feat.parser".into(),
+        };
+
+        assert_eq!(resolve_worktree_branch_target(&target), None);
+        assert_eq!(
+            new_branch_for_worktree(&target),
+            Some("feat.parser".to_string())
+        );
+    }
+
+    #[test]
+    fn an_existing_branch_is_the_base_and_creates_nothing() {
+        let target = NewWorktreeBranchTarget::ExistingBranch {
+            name: "develop".into(),
+        };
+
+        assert_eq!(
+            resolve_worktree_branch_target(&target),
+            Some("develop".to_string())
+        );
+        assert_eq!(new_branch_for_worktree(&target), None);
+    }
+
+    #[test]
+    fn the_current_branch_is_neither() {
+        let target = NewWorktreeBranchTarget::CurrentBranch;
+
+        assert_eq!(resolve_worktree_branch_target(&target), None);
+        assert_eq!(new_branch_for_worktree(&target), None);
+    }
 }

@@ -40,16 +40,24 @@ pub struct BranchPanel {
     /// the life of the process.
     pub(crate) workspace: WeakEntity<Workspace>,
     pub(crate) focus_handle: FocusHandle,
-    pub(crate) filter_editor: Entity<editor::Editor>,
-    /// Whether the filter field is on screen. Hidden by default so the panel
-    /// reads as a list of branches rather than a search box; the header's
-    /// filter button reveals it.
-    pub(crate) filter_visible: bool,
+    /// Checkouts the reader pinned, by absolute path. Pinned ones sort above
+    /// the rest. Paths rather than ids: a checkout outlives a session.
+    pub(crate) pinned: collections::HashSet<std::path::PathBuf>,
+    /// The order the reader dragged checkouts into. Anything absent keeps its
+    /// natural place, so this holds only what they actually moved.
+    pub(crate) manual_order: Vec<std::path::PathBuf>,
     /// Height cache and scroll position for the row list. Rows are not a
     /// uniform height -- a branch card is two lines, a section header one --
     /// so `uniform_list` cannot draw them; `ListState` virtualizes variable
     /// heights instead.
     pub(crate) list_state: gpui::ListState,
+    /// The one sweep of the agents' session stores, shared with the history
+    /// panel. `None` until the panel is first drawn: reading the histories
+    /// opens every transcript on disk, and none of that belongs on the startup
+    /// path of a panel nobody has opened.
+    pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
+    /// Dropped with the panel, so the store never notifies a dead handle.
+    pub(crate) _session_subscription: Option<Subscription>,
     /// The variant of each row as `list_state` last saw it. A row's height is
     /// decided entirely by its variant, so this is enough to work out which
     /// slice of the list actually changed and splice only that -- resetting the
@@ -75,26 +83,22 @@ pub struct BranchPanel {
     /// session-local `RepositoryId`, so what was stored is matched back by path
     /// the first time each repository is seen.
     pub(crate) stored_expanded: HashSet<StoredKey>,
-    /// Tags per repository, loaded on demand. Absent means "never asked for".
-    pub(crate) tags: collections::HashMap<
-        project::git_store::RepositoryId,
-        std::sync::Arc<[git::repository::Tag]>,
-    >,
-    pub(crate) tags_loading: HashSet<project::git_store::RepositoryId>,
     /// Network operations currently in flight, one slot per kind. Leaning on
     /// the fetch button must not spawn a queue of git processes.
     pub(crate) running_remote_ops: HashSet<crate::branch_panel::remote::RemoteOp>,
-    /// The inline "new branch" field, and the repository it will create in.
-    /// `None` whenever the field is not on screen.
-    pub(crate) new_branch: Option<(
-        project::git_store::RepositoryId,
-        Entity<editor::Editor>,
-        crate::branch_panel::new_branch::NameFieldIntent,
-    )>,
     /// The open right-click menu, its anchor, and the subscription that clears
     /// it on dismiss. Dropping the tuple drops all three together.
     pub(crate) context_menu: Option<(Entity<ui::ContextMenu>, gpui::Point<Pixels>, Subscription)>,
     pub(crate) pending_serialization: Task<Option<()>>,
+    /// Redraws the panel while a live agent is listed.
+    ///
+    /// An agent's mark changes when nothing else about the row does -- no git
+    /// event, no rebuild -- so without a tick a spinner would never settle to
+    /// a dot and a dot would never become a spinner. Held in a field so it
+    /// stops when the panel is dropped, and cleared when the panel is hidden
+    /// or nothing live is listed: this is the only thing here that costs
+    /// anything while the user is doing nothing.
+    pub(crate) _activity_tick: Option<Task<()>>,
     /// Subscriptions live and die with the panel. Never `.detach()` one that is
     /// tied to panel state -- a detached subscription outlives the entity it
     /// updates and fires into a dropped handle forever after.
@@ -163,6 +167,9 @@ impl Panel for BranchPanel {
         if active {
             self.stale = true;
             cx.notify();
+        } else {
+            // Nothing is drawing it, so nothing needs waking.
+            self._activity_tick = None;
         }
     }
 

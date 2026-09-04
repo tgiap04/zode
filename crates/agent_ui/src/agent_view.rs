@@ -30,6 +30,54 @@ pub fn agent_icon(agent: &str) -> IconName {
     }
 }
 
+/// The vendor's own colour for an agent's mark.
+///
+/// A brand colour is the one case where detaching from the theme is right:
+/// Claude's orange is Claude's orange on a light theme and a dark one, and
+/// recolouring it by theme would make the mark stop being the mark. Everything
+/// else in this crate uses semantic `Color` variants.
+///
+/// Beside [`agent_icon`] for the same reason that function exists: the rail,
+/// the tab and every list draw one vendor's mark, and a second copy of the
+/// mapping is a second place to forget when an agent is added.
+pub fn agent_color(agent: &str) -> gpui::Hsla {
+    match agent {
+        // Anthropic's clay orange.
+        project::CLAUDE_CODE_AGENT_ID => gpui::rgb(0xD97757).into(),
+        // OpenAI's green.
+        project::CODEX_AGENT_ID => gpui::rgb(0x10A37F).into(),
+        project::ANTIGRAVITY_AGENT_ID => gpui::rgb(0x4285F4).into(),
+        // GitHub's mark is monochrome, so this is a chosen hue rather than a
+        // brand one -- picked to stay apart from the three above.
+        project::COPILOT_AGENT_ID => gpui::rgb(0x8957E5).into(),
+        _ => gpui::rgb(0x9A9A9A).into(),
+    }
+}
+
+/// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
+/// being produced. Split out so the threshold can be held against the two
+/// rates it has to separate -- see the tests.
+fn responding_at(writes_in_window: usize) -> bool {
+    writes_in_window >= RESPONDING_WRITES
+}
+
+/// The window the agent's pty writes are counted over.
+const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// How many writes inside [`RESPONDING_WINDOW`] mean the agent is answering.
+///
+/// The number exists because "wrote something" was not enough: these CLIs
+/// repaint while idle -- a cursor, a hint, a token counter -- and any single
+/// write made the mark flicker from ready to busy while nothing was being
+/// asked or answered.
+///
+/// A repaint of that kind arrives once or twice a second. An agent producing a
+/// response writes far more often than that: the terminal coalesces on a 4ms
+/// timer, so even a spinner being animated while the model thinks clears this
+/// easily. Eight is comfortably above the idle rate and comfortably below the
+/// working one, which is the only property it needs.
+const RESPONDING_WRITES: usize = 8;
+
 pub struct AgentView {
     /// Which session this tab belongs to. See [`SessionIntent`].
     intent: SessionIntent,
@@ -126,6 +174,22 @@ impl AgentView {
 
     /// Public because the rail asks it: a button is lit when a tab for its agent
     /// is open, and the rail lives in another crate.
+    /// The session this tab is writing, when it owns one.
+    ///
+    /// `None` for an untracked tab -- an agent without `--session-id` writes a
+    /// transcript this editor cannot name, so nothing can be matched to it.
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.intent {
+            SessionIntent::Untracked => None,
+            SessionIntent::Tracked(id) => Some(id),
+        }
+    }
+
+    /// This tab's agent, for the vendor mark and colour a list wants to draw.
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent
+    }
+
     pub fn is_agent(&self, agent: &AgentId) -> bool {
         &self.agent == agent
     }
@@ -501,6 +565,52 @@ impl AgentView {
             | State::SessionGone
             | State::Failed(_) => None,
         }
+    }
+
+    /// Whether this agent's CLI is still running.
+    ///
+    /// Not "is the tab open": `agent_task` sets `HideStrategy::Never`, so a tab
+    /// deliberately outlives the process it hosted. Only the terminal's task
+    /// status distinguishes an agent that is working from a tab left behind by
+    /// one that finished.
+    ///
+    /// A terminal that vanished without reporting an exit code reads as not
+    /// working -- the same call `keep_awake` makes, for the same reason: a
+    /// status nobody will ever update must not be treated as activity.
+    pub fn is_working(&self, cx: &App) -> bool {
+        self.terminal().is_some_and(|terminal_view| {
+            terminal_view
+                .read(cx)
+                .terminal()
+                .read(cx)
+                .task()
+                .is_some_and(|task| task.status == ::terminal::TaskStatus::Running)
+        })
+    }
+
+    /// Whether the agent is producing a response right now.
+    ///
+    /// Distinct from [`Self::is_working`], which only says the CLI is alive: an
+    /// agent that has answered and is waiting at its prompt is running and not
+    /// responding, and those are the two states a reader most wants told apart.
+    ///
+    /// There is no signal for it beyond the pty: these agents are TUIs, and
+    /// this editor does not speak their protocol. So the question is answered
+    /// by how *often* the terminal is written to -- see [`RESPONDING_WRITES`]
+    /// for why the rate and not the fact of a write. Keystroke echo still
+    /// reads as activity if you type fast enough, which is the accepted cost
+    /// of the only signal there is.
+    pub fn is_responding(&self, cx: &App) -> bool {
+        self.is_working(cx)
+            && self.terminal().is_some_and(|terminal_view| {
+                responding_at(
+                    terminal_view
+                        .read(cx)
+                        .terminal()
+                        .read(cx)
+                        .pty_writes_within(RESPONDING_WINDOW),
+                )
+            })
     }
 
     /// What the tab shows: the name the user gave this session, or the agent's.
@@ -1492,6 +1602,51 @@ fn centered_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The threshold that separates an agent answering from one sitting idle.
+    ///
+    /// The defect these close: any single write counted as activity, so the
+    /// mark flickered from ready to working while nothing was being asked.
+    /// These CLIs repaint their prompt on their own -- a cursor, a hint, a
+    /// token count -- at a rate of roughly one or two a second. An agent
+    /// producing a response writes far more often; the terminal coalesces on a
+    /// 4ms timer, so even a spinner animated while the model thinks clears the
+    /// bar. The constant only has to sit between those two rates, and these
+    /// name both so that lowering it back toward the idle one fails here.
+    mod responding_rate {
+        use super::super::{RESPONDING_WRITES, responding_at};
+
+        /// A TUI redrawing its own prompt while waiting for you.
+        const IDLE_REPAINTS_PER_SECOND: usize = 2;
+
+        #[test]
+        fn an_idle_repaint_is_not_an_answer() {
+            assert!(
+                !responding_at(IDLE_REPAINTS_PER_SECOND),
+                "a prompt redrawing itself must not read as work"
+            );
+        }
+
+        #[test]
+        fn silence_is_not_an_answer() {
+            assert!(!responding_at(0));
+        }
+
+        /// The terminal's history saturates at sixteen, so a streaming agent
+        /// always reports at least that.
+        #[test]
+        fn a_streaming_answer_reads_as_one() {
+            assert!(responding_at(16));
+        }
+
+        #[test]
+        fn the_threshold_sits_above_the_idle_rate() {
+            assert!(
+                RESPONDING_WRITES > IDLE_REPAINTS_PER_SECOND,
+                "a threshold at or below the idle rate is the original defect"
+            );
+        }
+    }
     use gpui::TestAppContext;
     use project::FakeFs;
     use serde_json::json;
@@ -1563,6 +1718,28 @@ mod tests {
     /// The defect this closes: the tab used to stop at a dead terminal with no
     /// prompt and no way to keep working in that folder.
     ///
+    /// Let the pty's reader thread wake the scheduler without failing the test.
+    ///
+    /// The two tests below start a real shell, because a hand-off to a prompt
+    /// nobody can type at is not a hand-off -- proving it needs a real process.
+    /// A real process brings a reader thread, and that thread wakes the
+    /// foreground scheduler from outside the test's own thread, which the
+    /// determinism assertion reports as a non-deterministic test.
+    ///
+    /// It is right about the non-determinism and wrong to fail here: the
+    /// cross-thread wakeup is the thing under test, not an accident. This is
+    /// the sanctioned way to say so -- the same call the cli tests in
+    /// `open_listener` make, for the same reason.
+    ///
+    /// Only these two tests need it. `a_failed_agent_keeps_its_terminal` exits
+    /// non-zero, never reaches a shell, and stays fully deterministic.
+    /// `cfg(unix)` to match its only two callers: on Windows the helper would
+    /// be dead code, which the lint gate rejects as an error.
+    #[cfg(unix)]
+    fn tolerate_the_pty_reader(cx: &TestAppContext) {
+        cx.executor().allow_parking();
+    }
+
     /// This one builds a real shell, which is the only way to prove the hand-off
     /// produces something usable rather than merely changing a field. The pty it
     /// starts dies with the view, by the ownership chain
@@ -1572,6 +1749,7 @@ mod tests {
     async fn an_interrupted_agent_hands_back_a_shell(cx: &mut TestAppContext) {
         use std::os::unix::process::ExitStatusExt as _;
 
+        tolerate_the_pty_reader(cx);
         let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
 
         agent_view.update_in(cx, |view, window, cx| {
@@ -1598,6 +1776,7 @@ mod tests {
     async fn the_shell_inherits_the_keyboard(cx: &mut TestAppContext) {
         use std::os::unix::process::ExitStatusExt as _;
 
+        tolerate_the_pty_reader(cx);
         let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
 
         agent_view.update_in(cx, |view, window, cx| {

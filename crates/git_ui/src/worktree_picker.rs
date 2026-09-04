@@ -573,6 +573,8 @@ impl PickerDelegate for WorktreePickerDelegate {
                             &CreateWorktree {
                                 worktree_name: None,
                                 branch_target: NewWorktreeBranchTarget::CurrentBranch,
+                                agent: None,
+                                location: None,
                             },
                             window,
                             self.focused_dock,
@@ -596,6 +598,8 @@ impl PickerDelegate for WorktreePickerDelegate {
                                 branch_target: NewWorktreeBranchTarget::ExistingBranch {
                                     name: default_branch_name.clone(),
                                 },
+                                agent: None,
+                                location: None,
                             },
                             window,
                             self.focused_dock,
@@ -628,6 +632,7 @@ impl PickerDelegate for WorktreePickerDelegate {
                                     &SwitchWorktree {
                                         path: worktree.path.clone(),
                                         display_name: worktree.directory_name(main_worktree_path),
+                                        agent: None,
                                     },
                                     window,
                                     self.focused_dock,
@@ -656,6 +661,8 @@ impl PickerDelegate for WorktreePickerDelegate {
                             &CreateWorktree {
                                 worktree_name: Some(name.clone()),
                                 branch_target,
+                                agent: None,
+                                location: None,
                             },
                             window,
                             self.focused_dock,

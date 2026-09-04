@@ -570,3 +570,161 @@ mod opening {
         });
     }
 }
+
+/// Everything the window is asked to hold has to land in it -- the second
+/// time as well as the first.
+///
+/// Reported: the first choice opens in the window, and every one after it
+/// opens in the editor instead.
+#[cfg(test)]
+mod repeated_opens {
+    use super::a_window;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn a_second_note_joins_the_first(cx: &mut TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.read_with(cx, |window, cx| {
+            assert_eq!(window.pane.read(cx).items_len(), 1, "the first note opened");
+        });
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.pane.read(cx).items_len(),
+                2,
+                "the second note must join the window, not go to the editor"
+            );
+        });
+    }
+
+    /// The `+` at the end of the tab bar has to be the window's own.
+    ///
+    /// This is the reported bug. A `Pane` draws a `+` by default, and the
+    /// default offers New File, New Terminal and the agents as *workspace*
+    /// actions -- which resolve against the editor's active pane. This pane is
+    /// not one of those, so every entry on it opened behind the window.
+    ///
+    /// It only showed up after the first tab, because until then the empty
+    /// state covers the pane and that list was always correct. Hence "the first
+    /// one works, the rest go to the IDE".
+    #[gpui::test]
+    async fn the_tab_bar_offers_this_window_and_not_the_editor(cx: &mut TestAppContext) {
+        use gpui::Modifiers;
+
+        let (window, cx) = super::a_painted_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        let plus = cx
+            .debug_bounds("floating-pane-tab-bar-add")
+            .expect("a tab bar with a tab in it must draw its own new-item button");
+        cx.simulate_click(plus.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New Markdown Note").is_some(),
+            "the tab bar must offer what this window can hold"
+        );
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New File").is_none(),
+            "New File is a workspace action: it opens in the editor behind this window"
+        );
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New Center Terminal").is_none(),
+            "and so is New Center Terminal"
+        );
+    }
+
+    /// The agent path has the most indirection of the three: it defers through
+    /// the workspace and comes back to add the tab, so it is the one that could
+    /// lose track of where it was told to put it.
+    #[gpui::test]
+    async fn agents_land_in_the_window_both_times(cx: &mut TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.open_agent(project::CLAUDE_CODE_AGENT_ID, window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.pane.read(cx).items_len(),
+                1,
+                "the first agent opened"
+            );
+        });
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.open_agent(project::CODEX_AGENT_ID, window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let in_editor = window.read_with(cx, |window, cx| {
+            window
+                .workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace
+                        .panes()
+                        .iter()
+                        .map(|pane| pane.read(cx).items_len())
+                        .sum::<usize>()
+                })
+                .unwrap()
+        });
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.pane.read(cx).items_len(),
+                2,
+                "the second agent must join the window"
+            );
+        });
+        assert_eq!(in_editor, 0, "and the editor must have collected neither");
+    }
+
+    /// And the editor must not have collected any of them.
+    #[gpui::test]
+    async fn the_editor_collects_none_of_them(cx: &mut TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let in_editor = window.read_with(cx, |window, cx| {
+            window
+                .workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace
+                        .panes()
+                        .iter()
+                        .map(|pane| pane.read(cx).items_len())
+                        .sum::<usize>()
+                })
+                .unwrap()
+        });
+        assert_eq!(in_editor, 0, "nothing chosen here belongs to the editor");
+    }
+}

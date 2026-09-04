@@ -6,7 +6,7 @@
 //! not evidence. `rebuild_count` makes the claim falsifiable, and these tests
 //! are what falsify it if someone later moves the rebuild to the event handler.
 
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 use project::Project;
 use settings::SettingsStore;
 use workspace::dock::Panel as _;
@@ -116,48 +116,119 @@ async fn becoming_visible_schedules_exactly_one_rebuild(cx: &mut TestAppContext)
     });
 }
 
-mod changed_range {
-    use crate::branch_panel::lifecycle::changed_range;
+/// Hiding the panel stops the agent-activity tick.
+///
+/// The tick is the one thing here that runs while the user does nothing, so it
+/// has to answer to the same rule as everything else: a panel nobody is
+/// looking at costs nothing. Nothing else would notice it leaking -- it fires
+/// into an entity that is simply not being drawn -- which is exactly why it is
+/// asserted rather than trusted.
+#[gpui::test]
+async fn hiding_the_panel_stops_the_activity_tick(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
 
-    #[test]
-    fn an_unchanged_layout_needs_no_splice() {
-        assert_eq!(changed_range(&[1, 2, 3], &[1, 2, 3]), None);
-    }
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel._activity_tick = Some(gpui::Task::ready(()));
 
-    #[test]
-    fn expanding_a_section_splices_only_the_rows_it_revealed() {
-        // Section at index 1 opens and puts three rows under it.
-        let before = [0, 1, 9];
-        let after = [0, 1, 5, 5, 5, 9];
-        assert_eq!(changed_range(&before, &after), Some((2..2, 3)));
-    }
+        panel.set_active(false, window, cx);
+        assert!(
+            panel._activity_tick.is_none(),
+            "a hidden panel must not keep asking to be redrawn"
+        );
+    });
+}
 
-    #[test]
-    fn collapsing_a_section_splices_only_the_rows_it_hid() {
-        let before = [0, 1, 5, 5, 5, 9];
-        let after = [0, 1, 9];
-        assert_eq!(changed_range(&before, &after), Some((2..5, 0)));
-    }
+/// With nothing live to watch, the tick is not started at all.
+#[gpui::test]
+async fn a_panel_with_no_live_agent_runs_no_tick(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
 
-    #[test]
-    fn a_layout_replaced_wholesale_splices_everything() {
-        assert_eq!(changed_range(&[1, 1], &[2, 2, 2]), Some((0..2, 3)));
-    }
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.refresh_if_stale(cx);
+        panel.track_agent_activity(cx);
+        assert!(
+            panel._activity_tick.is_none(),
+            "finished transcripts have no mark that can change"
+        );
+    });
+}
 
-    /// The prefix and the suffix must not both claim the same rows -- a
-    /// repeated element makes them try, and an unclamped suffix would produce a
-    /// backwards range and panic inside `splice`.
-    #[test]
-    fn a_repeated_row_kind_cannot_make_the_range_run_backwards() {
-        let (range, count) = changed_range(&[7, 7], &[7, 7, 7]).expect("layout changed");
-        assert!(range.start <= range.end);
-        assert_eq!(2 - (range.end - range.start) + count, 3);
-    }
+/// Opening an agent tab has to reach the panel.
+///
+/// It did not. The panel learned about agents only when something else
+/// rebuilt it -- a git event, or switching checkouts, which throws the panel
+/// away and builds a new one. So pressing New Agent on the rail or in the
+/// editor added nothing visible, and the list appeared to "need" a switch away
+/// and back. That was not a refresh; it was a different panel.
+///
+/// The tab here never starts a CLI -- there is no agent binary in a test -- and
+/// it does not need to. What is asserted is that the tab's arrival reaches the
+/// panel at all, which is the link that was missing.
+#[gpui::test]
+async fn opening_an_agent_tab_marks_the_panel_stale(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
 
-    #[test]
-    fn an_empty_list_filling_up_splices_from_zero() {
-        assert_eq!(changed_range::<u8>(&[], &[1, 2]), Some((0..0, 2)));
-    }
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.refresh_if_stale(cx);
+        assert!(!panel.stale, "nothing has happened yet");
+    });
+
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            panel.stale,
+            "a new agent tab must reach the panel without a checkout switch"
+        );
+    });
+}
+
+/// Opening a file must not.
+///
+/// The same subscription sees every item this workspace opens, and rebuilding
+/// the tree on each one would undo the panel's whole rebuild discipline for
+/// events that cannot change what it shows.
+#[gpui::test]
+async fn opening_an_ordinary_item_does_not(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.refresh_if_stale(cx);
+    });
+
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            let editor = cx.new(|cx| editor::Editor::single_line(window, cx));
+            workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            !panel.stale,
+            "opening a file is not news to the branch panel"
+        );
+    });
 }
 
 /// Restoring the expanded sections from disk must be a one-shot per repository.
@@ -173,7 +244,7 @@ mod restoring_expansion {
     use project::git_store::RepositoryId;
 
     use crate::branch_panel::state::StoredKey;
-    use crate::branch_panel::tree::{RepoData, RowKey, SectionKind};
+    use crate::branch_panel::tree::{RepoData, RowKey};
 
     use super::panel;
     use gpui::TestAppContext;
@@ -188,8 +259,7 @@ mod restoring_expansion {
             current_branch: Some("develop".into()),
             branches: Vec::new(),
             worktrees: Arc::from([]),
-            stashes: Arc::from([]),
-            tags: Arc::from([]),
+            agents: Default::default(),
         }
     }
 
@@ -197,25 +267,27 @@ mod restoring_expansion {
     async fn a_collapsed_section_stays_collapsed(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
         let id = RepositoryId(1);
-        let key = RowKey::Section(id, SectionKind::Local);
+        let checkout = std::sync::Arc::from(std::path::Path::new("/repos/zode/wt"));
+        let key = RowKey::WorktreeAgents(id, std::sync::Arc::clone(&checkout));
 
         panel.update(cx, |panel, _| {
             panel.repos = vec![repo_data(id)];
-            panel
-                .stored_expanded
-                .insert(StoredKey::Section(REPO_PATH.to_string(), "Local".into()));
+            panel.stored_expanded.insert(StoredKey::WorktreeAgents(
+                REPO_PATH.to_string(),
+                "/repos/zode/wt".to_string(),
+            ));
 
             panel.adopt_stored_expansion();
             assert!(
                 panel.expanded.contains(&key),
-                "a stored section must open on the first build after it is restored"
+                "a stored checkout must open on the first build after it is restored"
             );
 
             panel.expanded.remove(&key);
             panel.adopt_stored_expansion();
             assert!(
                 !panel.expanded.contains(&key),
-                "a section the user closed must not be reopened by the restored state"
+                "a card the user closed must not be reopened by the restored state"
             );
         });
     }

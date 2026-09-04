@@ -3,15 +3,16 @@
 //! Split out of `tree.rs` so the data shapes and the algorithm that arranges
 //! them stay separately readable. Pure functions only -- no GPUI, no git.
 
-use gpui::SharedString;
+use std::sync::Arc;
 
-use super::{RepoData, RowKey, SectionKind, TreeRow, worktree_label};
+use super::{RepoData, RowKey, TreeRow, worktree_label};
 
-/// Builds the visible row list.
+/// Builds the visible row list: each repository, then its checkouts.
 ///
-/// `filter` is matched case-insensitively against branch, worktree and stash
-/// labels. A non-empty filter forces every section open: hiding a match behind a
-/// collapsed section would make the search look broken.
+/// `filter` is matched case-insensitively against a checkout's label and its
+/// path. A repository whose checkouts all fail the filter drops out entirely
+/// rather than sitting there as an empty header -- under a query the panel
+/// should read as the answer, not as the whole list with the matches in it.
 pub(crate) fn build_rows(
     repos: &[RepoData],
     expanded: &dyn Fn(&RowKey) -> bool,
@@ -19,11 +20,28 @@ pub(crate) fn build_rows(
 ) -> Vec<TreeRow> {
     let filter = filter.trim().to_lowercase();
     let filtering = !filter.is_empty();
-    let matches = |text: &str| !filtering || text.to_lowercase().contains(&filter);
 
     let mut rows = Vec::new();
 
     for repo in repos {
+        let checkouts: Vec<_> = repo
+            .worktrees
+            .iter()
+            .filter(|worktree| {
+                !filtering || {
+                    let label = worktree_label(worktree).to_lowercase();
+                    let path = worktree.path.to_string_lossy().to_lowercase();
+                    label.contains(&filter) || path.contains(&filter)
+                }
+            })
+            .collect();
+
+        if filtering && checkouts.is_empty() {
+            continue;
+        }
+
+        // A filter forces the repository open: hiding a match behind a
+        // collapsed row would make the search look broken.
         let repo_expanded = filtering || expanded(&RowKey::Repo(repo.id));
         rows.push(TreeRow::Repo {
             id: repo.id,
@@ -36,153 +54,32 @@ pub(crate) fn build_rows(
             continue;
         }
 
-        for kind in SectionKind::ALL {
-            push_section(&mut rows, repo, kind, expanded, filtering, &matches);
+        if checkouts.is_empty() {
+            // `git worktree list` always names the main checkout, so an empty
+            // list means something went wrong rather than that there is nothing
+            // to show. Saying so beats a blank panel.
+            rows.push(TreeRow::Empty {
+                label: "No checkouts found".into(),
+            });
+            continue;
+        }
+
+        for worktree in checkouts {
+            let path: Arc<std::path::Path> = Arc::from(worktree.path.as_path());
+            let agents = repo
+                .agents
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| Arc::from([]));
+            let has_agents = !agents.is_empty();
+            rows.push(TreeRow::Worktree {
+                id: repo.id,
+                worktree: worktree.clone(),
+                agents,
+                expanded: has_agents && expanded(&RowKey::WorktreeAgents(repo.id, path)),
+            });
         }
     }
 
     rows
-}
-
-fn push_section(
-    rows: &mut Vec<TreeRow>,
-    repo: &RepoData,
-    kind: SectionKind,
-    expanded: &dyn Fn(&RowKey) -> bool,
-    filtering: bool,
-    matches: &dyn Fn(&str) -> bool,
-) {
-    let children = section_children(repo, kind, matches);
-
-    // Under an active filter a section with no match is not worth a line of its
-    // own -- the panel should read as the answer to the query, not as the whole
-    // tree with empty headers.
-    if filtering && children.is_empty() {
-        return;
-    }
-
-    let section_expanded = filtering || expanded(&RowKey::Section(repo.id, kind));
-    rows.push(TreeRow::Section {
-        id: repo.id,
-        kind,
-        count: children.len(),
-        expanded: section_expanded,
-    });
-
-    if !section_expanded {
-        return;
-    }
-
-    if children.is_empty() {
-        rows.push(TreeRow::Empty {
-            label: format!("No {}", kind.label().to_lowercase()).into(),
-        });
-        return;
-    }
-
-    if kind == SectionKind::Remote {
-        push_remote_groups(rows, repo, children, expanded, filtering);
-    } else {
-        rows.extend(children);
-    }
-}
-
-/// Remote branches are grouped by their remote, so a repo with `origin` and
-/// `upstream` does not present one flat list where `origin/main` and
-/// `upstream/main` sit side by side looking identical.
-fn push_remote_groups(
-    rows: &mut Vec<TreeRow>,
-    repo: &RepoData,
-    children: Vec<TreeRow>,
-    expanded: &dyn Fn(&RowKey) -> bool,
-    filtering: bool,
-) {
-    let mut groups: Vec<(SharedString, Vec<TreeRow>)> = Vec::new();
-    for row in children {
-        let remote: SharedString = match &row {
-            TreeRow::Branch { branch, .. } => {
-                branch.remote_name().unwrap_or("remote").to_string().into()
-            }
-            _ => continue,
-        };
-        match groups.iter_mut().find(|(name, _)| *name == remote) {
-            Some((_, rows)) => rows.push(row),
-            None => groups.push((remote, vec![row])),
-        }
-    }
-
-    for (remote, branches) in groups {
-        let group_expanded = filtering || expanded(&RowKey::RemoteGroup(repo.id, remote.clone()));
-        rows.push(TreeRow::RemoteGroup {
-            id: repo.id,
-            remote,
-            count: branches.len(),
-            expanded: group_expanded,
-        });
-        if group_expanded {
-            rows.extend(branches.into_iter().map(|row| match row {
-                TreeRow::Branch { id, branch, .. } => TreeRow::Branch {
-                    id,
-                    branch,
-                    depth: 3,
-                },
-                other => other,
-            }));
-        }
-    }
-}
-
-fn section_children(
-    repo: &RepoData,
-    kind: SectionKind,
-    matches: &dyn Fn(&str) -> bool,
-) -> Vec<TreeRow> {
-    match kind {
-        SectionKind::Local => repo
-            .branches
-            .iter()
-            .filter(|branch| !branch.is_remote() && matches(branch.name()))
-            .map(|branch| TreeRow::Branch {
-                id: repo.id,
-                branch: branch.clone(),
-                depth: 2,
-            })
-            .collect(),
-        SectionKind::Remote => repo
-            .branches
-            .iter()
-            .filter(|branch| branch.is_remote() && matches(branch.name()))
-            .map(|branch| TreeRow::Branch {
-                id: repo.id,
-                branch: branch.clone(),
-                depth: 3,
-            })
-            .collect(),
-        SectionKind::Worktrees => repo
-            .worktrees
-            .iter()
-            .filter(|worktree| matches(&worktree_label(worktree)))
-            .map(|worktree| TreeRow::Worktree {
-                worktree: worktree.clone(),
-            })
-            .collect(),
-        SectionKind::Tags => repo
-            .tags
-            .iter()
-            .filter(|tag| matches(&tag.name))
-            .map(|tag| TreeRow::Tag {
-                id: repo.id,
-                tag: tag.clone(),
-            })
-            .collect(),
-        SectionKind::Stashes => repo
-            .stashes
-            .iter()
-            .filter(|entry| matches(&entry.message))
-            .map(|entry| TreeRow::Stash {
-                id: repo.id,
-                entry: entry.clone(),
-            })
-            .collect(),
-    }
 }

@@ -5,42 +5,41 @@
 
 use collections::HashSet;
 use gpui::{
-    AppContext as _, AsyncWindowContext, Context, Entity, Focusable as _, ListAlignment, ListState,
-    Task, WeakEntity, Window, px,
+    AppContext as _, AsyncWindowContext, Context, Entity, ListAlignment, ListState, Task,
+    WeakEntity, Window, px,
 };
 use workspace::Workspace;
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
-use crate::branch_panel::tree::{RowKey, SectionKind, build_rows};
+use crate::branch_panel::tree::{AgentActivity, RowKey, TreeRow, build_rows};
+
+/// How often the panel redraws while an agent is live.
+///
+/// Fast enough that the mark keeps up with an answer starting and finishing,
+/// slow enough that it is a rounding error next to drawing the frame it asks
+/// for.
+const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl BranchPanel {
     pub fn new(
         workspace: &mut Workspace,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let workspace_handle = workspace.weak_handle();
+        let workspace_entity = cx.entity();
         cx.new(|cx| {
-            let filter_editor = cx.new(|cx| {
-                let mut editor = editor::Editor::single_line(window, cx);
-                editor.set_placeholder_text("Filter branches", window, cx);
-                editor
-            });
-
-            let mut subscriptions = vec![cx.subscribe(
-                &filter_editor,
-                |panel: &mut BranchPanel, _, _: &editor::EditorEvent, cx| {
-                    panel.mark_stale(cx);
-                },
-            )];
+            let mut subscriptions = Vec::new();
 
             let mut panel = Self {
                 workspace: workspace_handle,
                 focus_handle: cx.focus_handle(),
-                filter_editor,
-                filter_visible: false,
+                pinned: Default::default(),
+                manual_order: Vec::new(),
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
+                session_store: None,
+                _session_subscription: None,
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,
@@ -49,12 +48,10 @@ impl BranchPanel {
                 rows: Vec::new(),
                 expanded: HashSet::default(),
                 stored_expanded: HashSet::default(),
-                tags: Default::default(),
-                tags_loading: HashSet::default(),
                 running_remote_ops: HashSet::default(),
-                new_branch: None,
                 context_menu: None,
                 pending_serialization: Task::ready(None),
+                _activity_tick: None,
                 _subscriptions: Vec::new(),
             };
 
@@ -65,6 +62,11 @@ impl BranchPanel {
             // panel toggle hit once before.
             let store = workspace.project().read(cx).git_store().clone();
             subscriptions.push(Self::observe_git_store(cx, &store));
+            // Registering a subscription does not read the entity, so this is
+            // safe where a `read` inside this closure would panic.
+            subscriptions.push(Self::observe_agent_tabs(cx, &workspace_entity));
+            // Registering a subscription does not read the entity, so this is
+            // safe where a `read` inside this closure would panic.
             panel._subscriptions = subscriptions;
             panel
         })
@@ -79,7 +81,19 @@ impl BranchPanel {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let panel = BranchPanel::new(workspace, window, cx);
             if let Some(serialized) = serialized {
-                panel.update(cx, |panel, _| panel.stored_expanded = serialized.expanded);
+                panel.update(cx, |panel, _| {
+                    panel.stored_expanded = serialized.expanded;
+                    panel.pinned = serialized
+                        .pinned
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    panel.manual_order = serialized
+                        .order
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                });
             }
             panel
         })
@@ -104,14 +118,48 @@ impl BranchPanel {
         self.repos = self.collect_repos(cx);
         self.adopt_stored_expansion();
 
-        let filter = if self.filter_visible {
-            self.filter_editor.read(cx).text(cx)
-        } else {
-            String::new()
-        };
         let expanded = &self.expanded;
-        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), &filter);
+        // No filter from the panel: the header carries one button, and the row
+        // builder's filter stays for whatever exposes one next.
+        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
         self.sync_list_state();
+    }
+
+    /// Keeps the panel redrawing while a live agent is listed, and stops when
+    /// none is.
+    ///
+    /// An agent's mark is the one thing here that changes without an event to
+    /// hang a redraw on: no git command ran, no row was rebuilt, the CLI simply
+    /// started or stopped writing. So it is polled. The tick exists only while
+    /// there is something whose mark could change -- a panel showing nothing
+    /// but finished transcripts costs nothing, which is the same rule the
+    /// rebuild follows.
+    pub(crate) fn track_agent_activity(&mut self, cx: &mut Context<Self>) {
+        let live = self.rows.iter().any(|row| match row {
+            TreeRow::Worktree { agents, .. } => agents
+                .iter()
+                .any(|agent| agent.activity(cx) != AgentActivity::Gone),
+            _ => false,
+        });
+
+        if !live {
+            self._activity_tick = None;
+            return;
+        }
+        if self._activity_tick.is_some() {
+            return;
+        }
+
+        self._activity_tick = Some(cx.spawn(async move |panel, cx| {
+            loop {
+                cx.background_executor().timer(ACTIVITY_TICK).await;
+                // The panel owns this task, so a failed update means the panel
+                // is gone and so is the task about to be dropped with it.
+                if panel.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
     }
 
     /// Tells `ListState` which rows changed.
@@ -136,21 +184,11 @@ impl BranchPanel {
             return;
         }
 
-        if let Some((old_range, new_count)) = changed_range(&self.row_kinds, &new_kinds) {
+        if let Some((old_range, new_count)) = ui::utils::changed_range(&self.row_kinds, &new_kinds)
+        {
             self.list_state.splice(old_range, new_count);
             self.row_kinds = new_kinds;
         }
-    }
-
-    /// Shows or hides the filter field. A hidden field applies no filter, so a
-    /// query left behind cannot go on silently hiding branches.
-    pub(crate) fn toggle_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.filter_visible = !self.filter_visible;
-        if self.filter_visible {
-            self.filter_editor.focus_handle(cx).focus(window, cx);
-        }
-        self.mark_stale(cx);
-        cx.notify();
     }
 
     /// Turns the paths restored from disk into live row keys, once the
@@ -183,11 +221,6 @@ impl BranchPanel {
 
     pub(crate) fn toggle_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
         if !self.expanded.remove(&key) {
-            // Opening the Tags section is the only thing in the panel that
-            // triggers a git command, and only the first time.
-            if let RowKey::Section(id, SectionKind::Tags) = &key {
-                self.load_tags(*id, cx);
-            }
             self.expanded.insert(key);
         }
         self.stale = true;
@@ -195,7 +228,7 @@ impl BranchPanel {
         cx.notify();
     }
 
-    fn serialize(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
         let mut stored = HashSet::default();
         for repo in &self.repos {
             let path = repo.path.to_string_lossy().to_string();
@@ -206,42 +239,44 @@ impl BranchPanel {
             }
         }
 
-        let state = SerializedBranchPanel { expanded: stored };
+        let state = SerializedBranchPanel {
+            expanded: stored,
+            pinned: self
+                .pinned
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+            order: self
+                .manual_order
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+        };
         let workspace = self.workspace.clone();
         self.pending_serialization = cx.spawn(async move |_, cx| state.write(workspace, cx).await);
     }
-}
 
-/// The slice that differs between two row layouts, as the `(old_range,
-/// new_count)` pair `ListState::splice` expects. `None` when they match.
-///
-/// Split out from [`BranchPanel::sync_list_state`] because getting it wrong is
-/// silent: the list would keep stale heights for rows that had moved, and only
-/// show up later as misplaced hit targets.
-pub(crate) fn changed_range<T: PartialEq>(
-    old: &[T],
-    new: &[T],
-) -> Option<(std::ops::Range<usize>, usize)> {
-    if old == new {
-        return None;
+    /// Creates the shared session store the first time the panel is drawn, and
+    /// asks it for its one sweep.
+    ///
+    /// Not at construction: reading the agents' histories opens every
+    /// transcript on disk. `AgentHistoryPanel` already carries the rule that
+    /// none of that belongs on the startup path, and a panel nobody opens must
+    /// not pay for it either.
+    pub(crate) fn ensure_session_store(&mut self, cx: &mut Context<Self>) {
+        if self.session_store.is_some() {
+            return;
+        }
+        let store = agent_ui::SessionStore::global(cx);
+        // The sweep lands on the store, so the panel has to be told when it
+        // does. Held in a field, never detached: a detached observe outlives
+        // the panel and fires into a dropped handle.
+        self._session_subscription = Some(cx.observe(&store, |panel, _, cx| {
+            panel.mark_stale(cx);
+        }));
+        store.update(cx, |store, cx| store.refresh(cx));
+        self.session_store = Some(store);
     }
-
-    let prefix = old
-        .iter()
-        .zip(new)
-        .take_while(|(old, new)| old == new)
-        .count();
-    // The prefix and suffix must not overlap, or the range would run backwards.
-    let unmatched = old.len().min(new.len()) - prefix;
-    let suffix = old
-        .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take_while(|(old, new)| old == new)
-        .count()
-        .min(unmatched);
-
-    Some((prefix..old.len() - suffix, new.len() - suffix - prefix))
 }
 
 #[cfg(test)]

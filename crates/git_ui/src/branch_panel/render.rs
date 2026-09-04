@@ -2,13 +2,15 @@ use gpui::{AnyElement, FontWeight, IntoElement, Render, Window, list};
 use ui::{Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
-use crate::branch_panel::remote::RemoteOp;
 
 impl Render for BranchPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_session_store(cx);
         // Rebuilding here rather than on each git event means a burst of events
         // costs one rebuild, and a panel nobody is looking at costs none.
         self.refresh_if_stale(cx);
+        // After the rebuild: it reads the rows the rebuild just produced.
+        self.track_agent_activity(cx);
 
         let empty = self.rows.is_empty();
 
@@ -17,10 +19,6 @@ impl Render for BranchPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(cx.theme().colors().panel_background)
-            .on_action(cx.listener(|panel, _: &menu::Confirm, window, cx| {
-                panel.confirm_new_branch(window, cx)
-            }))
-            .on_action(cx.listener(|panel, _: &menu::Cancel, _, cx| panel.cancel_new_branch(cx)))
             .child(self.render_header(cx))
             .children(
                 self.repos
@@ -28,8 +26,6 @@ impl Render for BranchPanel {
                     .map(|repo| repo.id)
                     .and_then(|id| self.render_create_repo_prompt(id, cx)),
             )
-            .children(self.render_filter(cx))
-            .children(self.render_new_branch_field(cx))
             .child(if empty {
                 self.render_empty(cx)
             } else {
@@ -67,10 +63,13 @@ impl BranchPanel {
         )
     }
 
-    /// The panel's own title bar: what this panel is, and the actions that
-    /// belong to the whole panel rather than to one row. The remote operations
-    /// live here because they are the ones worth a single click; everything
-    /// per-repository is on the repository row itself.
+    /// Title and one button.
+    ///
+    /// One button on purpose: `+` is the only thing this panel is *for* at the
+    /// top level. Fetch, pull and push act on a repository rather than on the
+    /// panel, so they live on the repository row's own menu -- putting them
+    /// here made the header look like the panel's toolbar when it was really
+    /// one repository's.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let repo_id = self.repos.first().map(|repo| repo.id);
 
@@ -83,55 +82,20 @@ impl BranchPanel {
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .child(
-                Label::new("Branches")
+                Label::new("Worktrees")
                     .size(LabelSize::Small)
                     .color(Color::Muted)
                     .weight(FontWeight::SEMIBOLD),
             )
-            .child(
-                h_flex()
-                    .gap_0p5()
-                    .child(
-                        IconButton::new("toggle-filter", IconName::Sliders)
-                            .icon_size(IconSize::Small)
-                            .toggle_state(self.filter_visible)
-                            .tooltip(|_, cx| Tooltip::simple("Filter Branches", cx))
-                            .on_click(
-                                cx.listener(|panel, _, window, cx| panel.toggle_filter(window, cx)),
-                            ),
-                    )
-                    .when_some(repo_id, |this, id| {
-                        this.child(self.remote_button(id, RemoteOp::Fetch, cx))
-                            .child(self.remote_button(id, RemoteOp::Pull, cx))
-                            .child(self.remote_button(id, RemoteOp::Push, cx))
-                    }),
-            )
+            .children(repo_id.map(|id| {
+                IconButton::new("create-worktree", IconName::Plus)
+                    .icon_size(IconSize::Small)
+                    .tooltip(|_, cx| Tooltip::simple("Create Worktree", cx))
+                    .on_click(cx.listener(move |panel, _, window, cx| {
+                        panel.open_create_worktree_modal(id, window, cx);
+                    }))
+            }))
             .into_any_element()
-    }
-
-    /// How far a branch has drifted from its upstream. `None` when there is no
-    /// upstream or the two are level -- "up 0 down 0" is noise.
-    pub(crate) fn tracking_label(branch: &git::repository::Branch) -> Option<SharedString> {
-        let status = branch.tracking_status()?;
-        (status.ahead + status.behind > 0)
-            .then(|| format!("\u{2191}{} \u{2193}{}", status.ahead, status.behind).into())
-    }
-
-    fn render_filter(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if !self.filter_visible {
-            return None;
-        }
-        Some(
-            h_flex()
-                .w_full()
-                .flex_none()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(cx.theme().colors().border_variant)
-                .child(self.filter_editor.clone())
-                .into_any_element(),
-        )
     }
 
     /// Distinguishes "this project has no git repository" from "the panel is

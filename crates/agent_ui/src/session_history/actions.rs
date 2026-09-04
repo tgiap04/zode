@@ -1,6 +1,6 @@
 use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
 use agent_sessions::{Fork, SessionProvider, SessionSummary};
-use gpui::{App, ClipboardItem, Context, Window};
+use gpui::{App, ClipboardItem, Context, Entity, Window};
 use std::sync::Arc;
 use util::ResultExt as _;
 
@@ -13,6 +13,114 @@ pub(crate) fn cwd_exists(session: &SessionSummary) -> bool {
     !session.cwd.as_os_str().is_empty() && session.cwd.is_dir()
 }
 
+/// Opens a tab back on `session`, or branches a new one off it.
+///
+/// Free rather than a method on the history panel: the sidebar reaches the same
+/// sessions through the shared session index, and the rules about what may be
+/// resumed -- the agent must support it, the working directory must still exist,
+/// a fork must not carry the id it forked from -- belong to the operation, not
+/// to whichever surface asked for it.
+pub fn resume_session(
+    workspace: &Entity<workspace::Workspace>,
+    session: &SessionSummary,
+    fork: Fork,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let provider = agent_sessions::provider_for(session.agent);
+    // Asked only so the control stays disabled where the agent cannot honour
+    // it — Codex has no fork. The command itself is rebuilt at spawn time from
+    // the id, so what comes back here is discarded.
+    if provider.resume_command(session, fork).is_none() {
+        return;
+    }
+    if !cwd_exists(session) {
+        return;
+    }
+    let agent = session.agent.builtin_agent_id();
+    // A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint
+    // a *new* id, so a tab carrying the id we resumed from would come back on
+    // the original conversation rather than the fork — the one failure this
+    // whole feature exists to avoid, and silent. Until a flag exists to name a
+    // fork's id, a forked tab is an untracked tab.
+    let intent = match fork {
+        Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
+        Fork::New => SessionIntent::Untracked,
+    };
+    workspace.update(cx, |workspace, cx| {
+        AgentView::open_tracked(workspace, agent, intent, window, cx);
+    });
+}
+
+/// Moves a session's transcript to the trash, after asking.
+///
+/// Free rather than a method on the history panel, for the reason
+/// [`resume_session`] is: the panel is no longer the only surface listing
+/// sessions, and what a delete takes -- and what it warns about before taking
+/// it -- belongs to the operation rather than to whichever list asked.
+///
+/// The confirmation names every path and the bytes involved: "delete session"
+/// and "delete forty megabytes of a conversation nobody has read since" look
+/// identical from a menu.
+pub fn delete_session(
+    workspace: &Entity<workspace::Workspace>,
+    session: &SessionSummary,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let provider = agent_sessions::provider_for(session.agent);
+    let paths = provider.paths_to_trash(session);
+    if paths.is_empty() {
+        return;
+    }
+    let fs = workspace.read(cx).project().read(cx).fs().clone();
+
+    let detail = format!(
+        "{}\n\n{} will move to the trash ({}).",
+        session.title,
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        format_bytes(session.log_bytes)
+    );
+    let prompt = window.prompt(
+        gpui::PromptLevel::Warning,
+        "Delete this session?",
+        Some(&detail),
+        &["Move to Trash", "Cancel"],
+        cx,
+    );
+
+    let store = crate::SessionStore::global(cx);
+    let id = session.id.clone();
+    cx.spawn(async move |cx| {
+        if prompt.await.ok() != Some(0) {
+            return;
+        }
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
+            fs.trash(
+                &path,
+                fs::RemoveOptions {
+                    recursive: true,
+                    ignore_if_not_exists: true,
+                },
+            )
+            .await
+            .log_err();
+        }
+        // Drop the entry rather than re-sweeping: the delete already knows
+        // exactly what it removed, and a sweep would open every other
+        // transcript on disk to learn one fact it was told.
+        store.update(cx, |store, cx| store.forget(&id, cx));
+    })
+    .detach();
+}
+
 impl AgentHistoryPanel {
     /// Continue a session, or branch a new one off it.
     pub(crate) fn resume(
@@ -22,33 +130,10 @@ impl AgentHistoryPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = self.provider_for(session) else {
+        let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
-        // Asked only so the control stays disabled where the agent cannot honour
-        // it — Codex has no fork. The command itself is rebuilt at spawn time from
-        // the id, so what comes back here is discarded.
-        if provider.resume_command(session, fork).is_none() {
-            return;
-        }
-        if !cwd_exists(session) {
-            return;
-        }
-        let agent = session.agent.builtin_agent_id();
-        // A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint
-        // a *new* id, so a tab carrying the id we resumed from would come back on
-        // the original conversation rather than the fork — the one failure this
-        // whole feature exists to avoid, and silent. Until a flag exists to name a
-        // fork's id, a forked tab is an untracked tab.
-        let intent = match fork {
-            Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
-            Fork::New => SessionIntent::Untracked,
-        };
-        self.workspace()
-            .update(cx, |workspace, cx| {
-                AgentView::open_tracked(workspace, agent, intent, window, cx);
-            })
-            .log_err();
+        resume_session(&workspace, session, fork, window, cx);
     }
 
     pub(crate) fn copy_resume_command(&self, session: &SessionSummary, cx: &mut App) {
@@ -111,69 +196,11 @@ impl AgentHistoryPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = self.provider_for(session) else {
+        let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
-        let paths = provider.paths_to_trash(session);
-        if paths.is_empty() {
-            return;
-        }
-        let Some(fs) = self
-            .workspace()
-            .update(cx, |workspace, cx| {
-                workspace.project().read(cx).fs().clone()
-            })
-            .log_err()
-        else {
-            return;
-        };
-
-        let detail = format!(
-            "{}\n\n{} will move to the trash ({}).",
-            session.title,
-            paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            format_bytes(session.log_bytes)
-        );
-        let prompt = window.prompt(
-            gpui::PromptLevel::Warning,
-            "Delete this session?",
-            Some(&detail),
-            &["Move to Trash", "Cancel"],
-            cx,
-        );
-        let id = session.id.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            if prompt.await.ok() != Some(0) {
-                return;
-            }
-            for path in paths {
-                if !path.exists() {
-                    continue;
-                }
-                fs.trash(
-                    &path,
-                    fs::RemoveOptions {
-                        recursive: true,
-                        ignore_if_not_exists: true,
-                    },
-                )
-                .await
-                .log_err();
-            }
-            // Drop the row rather than re-reading both stores: the list is a view
-            // of what was found, and one gone session does not invalidate the rest.
-            this.update(cx, |this, cx| {
-                this.sessions.retain(|session| session.id != id);
-                this.counts.remove(&id);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.counts.remove(&session.id);
+        delete_session(&workspace, session, window, cx);
     }
 
     /// Whether a fork is on offer for this session's agent. Claude has

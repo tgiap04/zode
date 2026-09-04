@@ -48,6 +48,17 @@ pub fn init(cx: &mut App) {
                 view.update(cx, |this, cx| this.toggle(window, cx)).ok();
             }
         });
+        // `Pane::new` was handed this as the double-click action, so the pane
+        // has been advertising it on empty tab-bar space with nothing behind
+        // it. Registered here rather than dropped: a double-click on a tab bar
+        // opening a new tab is what every other tab bar in the editor does.
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::NewTerminal, window, cx| {
+                view.update(cx, |this, cx| this.open_terminal(window, cx))
+                    .ok();
+            }
+        });
         // Through `confirm_shut_down` rather than `shut_down`, so the keystroke
         // asks the same question the button does. A shortcut that ends running
         // terminals without a word would be the one place in this feature where

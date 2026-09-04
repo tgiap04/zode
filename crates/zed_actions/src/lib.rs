@@ -260,9 +260,12 @@ pub mod workspace {
     );
 }
 
-/// Describes which ref to base a new git worktree on. The worktree is
-/// always created in a detached HEAD state; users can opt into creating
-/// a branch afterwards from the worktree itself.
+/// Describes what a new git worktree checks out.
+///
+/// The first two variants create a detached worktree; `NewBranch` gives it a
+/// branch of its own. Detached is right for a quick look at a ref, and wrong
+/// for the case this panel exists to serve -- work on a feature -- because a
+/// detached checkout has nowhere to commit.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum NewWorktreeBranchTarget {
@@ -271,6 +274,8 @@ pub enum NewWorktreeBranchTarget {
     CurrentBranch,
     /// Create a detached worktree at the tip of an existing branch.
     ExistingBranch { name: String },
+    /// Create a new branch off the current HEAD and check it out.
+    NewBranch { name: String },
 }
 
 /// Creates a new git worktree and switches the workspace to it.
@@ -282,6 +287,22 @@ pub struct CreateWorktree {
     /// When this is None, Zed will randomly generate a worktree name.
     pub worktree_name: Option<String>,
     pub branch_target: NewWorktreeBranchTarget,
+    /// An agent to start in the new worktree once its workspace is open.
+    ///
+    /// Started there and not before: the checkout has to exist and the
+    /// workspace has to be the one showing it, or the agent runs in the tree
+    /// being left behind -- which looks identical from the tab.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// An absolute directory to put the checkout in, overriding
+    /// `git.worktree_directory` for this one creation. `None` uses the setting.
+    ///
+    /// Absolute, unlike the setting: this is what a folder picker hands back,
+    /// and the setting's confinement to the repository and its parent exists
+    /// for a value typed once in a config file, not for a directory chosen on
+    /// the spot.
+    #[serde(default)]
+    pub location: Option<PathBuf>,
 }
 
 /// Switches the workspace to an existing linked worktree.
@@ -292,6 +313,13 @@ pub struct CreateWorktree {
 pub struct SwitchWorktree {
     pub path: PathBuf,
     pub display_name: String,
+    /// An agent to start once the switch has landed.
+    ///
+    /// After and not before: an agent runs in the directory its workspace has
+    /// open, so starting it on this side would run it in the checkout being
+    /// left behind -- which looks identical from the tab and is not.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// Opens an existing worktree in a new window.

@@ -8,40 +8,9 @@
 
 use std::sync::Arc;
 
-use git::repository::{Branch, Tag as GitTag, Worktree as GitWorktree};
-use git::stash::StashEntry;
+use git::repository::{Branch, Worktree as GitWorktree};
 use gpui::SharedString;
 use project::git_store::RepositoryId;
-
-/// The collapsible groupings under a repository.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum SectionKind {
-    Local,
-    Remote,
-    Worktrees,
-    Stashes,
-    Tags,
-}
-
-impl SectionKind {
-    pub(crate) const ALL: [SectionKind; 5] = [
-        SectionKind::Local,
-        SectionKind::Remote,
-        SectionKind::Worktrees,
-        SectionKind::Stashes,
-        SectionKind::Tags,
-    ];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            SectionKind::Local => "Local",
-            SectionKind::Remote => "Remote",
-            SectionKind::Worktrees => "Worktrees",
-            SectionKind::Stashes => "Stashes",
-            SectionKind::Tags => "Tags",
-        }
-    }
-}
 
 /// Identifies a collapsible row. Kept separate from [`TreeRow`] because the
 /// expanded set outlives any particular build: rows are rebuilt on every change,
@@ -49,14 +18,18 @@ impl SectionKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum RowKey {
     Repo(RepositoryId),
-    Section(RepositoryId, SectionKind),
-    RemoteGroup(RepositoryId, SharedString),
+    /// The agents that have run in one worktree, keyed by its path.
+    ///
+    /// By path and not by branch: a worktree created here starts detached, and
+    /// two repositories can both have a `main`. The path is what a checkout
+    /// actually is.
+    WorktreeAgents(RepositoryId, Arc<std::path::Path>),
 }
 
 impl RowKey {
     pub(crate) fn repository_id(&self) -> RepositoryId {
         match self {
-            RowKey::Repo(id) | RowKey::Section(id, _) | RowKey::RemoteGroup(id, _) => *id,
+            RowKey::Repo(id) | RowKey::WorktreeAgents(id, _) => *id,
         }
     }
 }
@@ -71,65 +44,148 @@ pub(crate) enum TreeRow {
         current_branch: Option<SharedString>,
         expanded: bool,
     },
-    Section {
-        id: RepositoryId,
-        kind: SectionKind,
-        count: usize,
-        expanded: bool,
-    },
-    RemoteGroup {
-        id: RepositoryId,
-        remote: SharedString,
-        count: usize,
-        expanded: bool,
-    },
-    Branch {
-        id: RepositoryId,
-        branch: Branch,
-        depth: usize,
-    },
-    /// Acts on its own path, so it needs no repository id.
+    /// One checkout of the repository: the main one, or a linked worktree.
+    ///
+    /// The panel's only row type below the repository. There are no sections
+    /// any more -- branches, remotes, stashes and tags each have their own
+    /// picker, and a tree of five collapsible groups was five things to read
+    /// before finding the one that matters: which checkout am I in, and what is
+    /// running there.
     Worktree {
+        id: RepositoryId,
         worktree: GitWorktree,
+        /// The agents that have run in this checkout. Carried by the row rather
+        /// than emitted as rows of their own, so the card's border encloses
+        /// them.
+        agents: Arc<[AgentEntry]>,
+        expanded: bool,
     },
-    Stash {
-        id: RepositoryId,
-        entry: StashEntry,
-    },
-    Tag {
-        id: RepositoryId,
-        tag: GitTag,
-    },
-    /// A section that is open but has nothing in it. Without this the user
-    /// cannot tell "empty" from "still loading" or from a stray click.
-    Empty {
+    /// Shown when a repository has no checkout to list, which should not happen
+    /// -- `git worktree list` always names the main one. Without this the panel
+    /// would go blank instead of saying something is wrong.
+    Empty { label: SharedString },
+}
+
+/// One agent of a checkout.
+///
+/// Two kinds and not one list: a CLI still running is what someone juggling
+/// several worktrees is looking for, and burying it among finished transcripts
+/// would be the same as not showing it.
+///
+/// Neither variant carries a `SessionSummary`. It holds four `String`s and two
+/// `PathBuf`s, and the row needs a label -- the rest is fetched by id at click
+/// time, which happens once, rather than copied on every rebuild.
+#[derive(Clone, Debug)]
+pub(crate) enum AgentEntry {
+    /// A tab open in this window.
+    ///
+    /// Open, not running: `HideStrategy::Never` keeps a tab after its CLI
+    /// exits, and a tab opened a moment ago has not started one yet. Whether
+    /// it is working is [`AgentEntry::activity`]'s question, not this
+    /// variant's -- which is what lets New Agent put a row here the instant it
+    /// is pressed.
+    Open {
         label: SharedString,
+        /// The agent's builtin id, for its vendor mark and colour.
+        agent: SharedString,
+        view: gpui::WeakEntity<agent_ui::AgentView>,
+    },
+    Past {
+        label: SharedString,
+        agent: SharedString,
+        id: std::sync::Arc<str>,
+        updated_at: std::time::SystemTime,
     },
 }
 
-impl TreeRow {
-    /// The key to toggle when this row is clicked, or `None` for a leaf.
-    pub(crate) fn toggle_key(&self) -> Option<RowKey> {
+/// What an agent's mark reports.
+///
+/// Three states rather than two because "the tab is open" and "the agent is
+/// working" are different facts, and a reader scanning the panel for something
+/// to pick up needs them apart: an agent that has answered is the one waiting
+/// for them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AgentActivity {
+    /// No live session -- a past transcript, or a tab whose CLI has exited.
+    Gone,
+    /// The CLI is alive and quiet: it has answered, or has not been asked yet.
+    Ready,
+    /// Producing a response right now.
+    Responding,
+}
+
+/// The mark for a tab that still exists, from the two questions asked of it.
+///
+/// Split out because the case worth pinning is the quiet one: a tab whose CLI
+/// has exited is still an open tab, and reporting it as ready would send
+/// someone to a session that ended.
+pub(crate) fn activity_for(working: bool, responding: bool) -> AgentActivity {
+    match (working, responding) {
+        (false, _) => AgentActivity::Gone,
+        (true, true) => AgentActivity::Responding,
+        (true, false) => AgentActivity::Ready,
+    }
+}
+
+impl AgentEntry {
+    pub(crate) fn label(&self) -> &SharedString {
         match self {
-            TreeRow::Repo { id, .. } => Some(RowKey::Repo(*id)),
-            TreeRow::Section { id, kind, .. } => Some(RowKey::Section(*id, *kind)),
-            TreeRow::RemoteGroup { id, remote, .. } => {
-                Some(RowKey::RemoteGroup(*id, remote.clone()))
-            }
-            _ => None,
+            AgentEntry::Open { label, .. } | AgentEntry::Past { label, .. } => label,
         }
     }
 
-    pub(crate) fn depth(&self) -> usize {
+    pub(crate) fn agent(&self) -> &SharedString {
         match self {
-            TreeRow::Repo { .. } => 0,
-            TreeRow::Section { .. } => 1,
-            TreeRow::RemoteGroup { .. } => 2,
-            TreeRow::Branch { depth, .. } => *depth,
-            TreeRow::Worktree { .. }
-            | TreeRow::Stash { .. }
-            | TreeRow::Tag { .. }
-            | TreeRow::Empty { .. } => 2,
+            AgentEntry::Open { agent, .. } | AgentEntry::Past { agent, .. } => agent,
+        }
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(self, AgentEntry::Open { .. })
+    }
+
+    /// Asked at render, never cached: this changes while nothing else about
+    /// the row does, so a copy taken when the tree was built would be stale
+    /// before it was drawn.
+    pub(crate) fn activity(&self, cx: &gpui::App) -> AgentActivity {
+        let AgentEntry::Open { view, .. } = self else {
+            return AgentActivity::Gone;
+        };
+        // A tab outlives its process by design, so an upgrade that succeeds
+        // still proves nothing about the CLI.
+        let Some(view) = view.upgrade() else {
+            return AgentActivity::Gone;
+        };
+        let view = view.read(cx);
+        activity_for(view.is_working(cx), view.is_responding(cx))
+    }
+
+    pub(crate) fn updated_at(&self) -> Option<std::time::SystemTime> {
+        match self {
+            AgentEntry::Open { .. } => None,
+            AgentEntry::Past { updated_at, .. } => Some(*updated_at),
+        }
+    }
+}
+
+impl TreeRow {
+    /// The key to toggle when this row is clicked, or `None` when there is
+    /// nothing to open.
+    pub(crate) fn toggle_key(&self) -> Option<RowKey> {
+        match self {
+            TreeRow::Repo { id, .. } => Some(RowKey::Repo(*id)),
+            // Only when there is something to show. A disclosure that opens on
+            // nothing reads as a broken control.
+            TreeRow::Worktree {
+                id,
+                worktree,
+                agents,
+                ..
+            } if !agents.is_empty() => Some(RowKey::WorktreeAgents(
+                *id,
+                Arc::from(worktree.path.as_path()),
+            )),
+            _ => None,
         }
     }
 }
@@ -148,12 +204,79 @@ pub(crate) struct RepoData {
     /// Already run through `branch_service::process_branches`, so a remote ref
     /// that a local branch tracks has been folded away.
     pub(crate) branches: Vec<Branch>,
+    /// Agents per checkout, keyed by the worktree's own path and gathered once
+    /// per rebuild so `build_rows` stays a pure function of its input.
+    pub(crate) agents: collections::HashMap<Arc<std::path::Path>, std::sync::Arc<[AgentEntry]>>,
+    /// Every checkout of this repository. `git worktree list` names the main
+    /// one too, so this is the whole list rather than only the linked ones --
+    /// `GitWorktree::is_main` tells them apart.
     pub(crate) worktrees: Arc<[GitWorktree]>,
-    pub(crate) stashes: Arc<[StashEntry]>,
-    /// Unlike the other fields this is not on `RepositorySnapshot`: the store
-    /// does not track tags, so the panel loads them itself the first time the
-    /// Tags section is opened, and never before.
-    pub(crate) tags: Arc<[GitTag]>,
+}
+
+/// Every checkout of a repository, the one this window is in first.
+///
+/// `RepositorySnapshot::linked_worktrees` deliberately leaves out the checkout
+/// the repository is open at (`git_store.rs`, where it filters on
+/// `wt.path != work_directory_abs_path`) -- "linked" means "other than this
+/// one" in git's own vocabulary. A panel that listed only that would show every
+/// checkout except the one you are looking at, and clicking the only card would
+/// bounce you between two one-item lists.
+///
+/// So the current one is rebuilt here from what the snapshot does carry.
+///
+/// **`is_main` is inferred, not read.** The flag rides on each entry, but the
+/// current entry never reaches us to carry it. Exactly one checkout of a
+/// repository is the main one, so if none of the others claims it, this is it.
+pub(crate) fn all_checkouts(
+    work_directory: &std::path::Path,
+    current_branch: Option<&Branch>,
+    head_sha: Option<SharedString>,
+    linked: &[GitWorktree],
+) -> Vec<GitWorktree> {
+    let here = GitWorktree {
+        path: work_directory.to_path_buf(),
+        ref_name: current_branch.map(|branch| branch.ref_name.clone()),
+        sha: head_sha.unwrap_or_default(),
+        is_main: !linked.iter().any(|worktree| worktree.is_main),
+        is_bare: false,
+    };
+
+    let mut checkouts = Vec::with_capacity(linked.len() + 1);
+    checkouts.push(here);
+    checkouts.extend(linked.iter().cloned());
+    // The main checkout first, then the rest by path.
+    //
+    // By path and not by the order git listed them, because that order is not
+    // the same from every checkout: `linked_worktrees` omits the one you are
+    // standing in, and this function puts it back at the front. Standing in the
+    // last of three therefore produced a different middle order than standing
+    // in the first -- so every card moved when you switched, which is exactly
+    // what the ordering was supposed to stop. A path is the same seen from
+    // anywhere.
+    checkouts
+        .sort_by(|left, right| (!left.is_main, &left.path).cmp(&(!right.is_main, &right.path)));
+    checkouts
+}
+
+/// Applies the reader's own ordering: pinned checkouts first, then whatever
+/// order they dragged things into, then the natural order for anything they
+/// have never touched.
+///
+/// Stable throughout, so a checkout nobody has an opinion about keeps the place
+/// `all_checkouts` gave it.
+pub(crate) fn order_checkouts(
+    mut checkouts: Vec<GitWorktree>,
+    pinned: &collections::HashSet<std::path::PathBuf>,
+    manual: &[std::path::PathBuf],
+) -> Vec<GitWorktree> {
+    checkouts.sort_by_key(|checkout| {
+        let position = manual
+            .iter()
+            .position(|path| path == &checkout.path)
+            .unwrap_or(usize::MAX);
+        (!pinned.contains(&checkout.path), position)
+    });
+    checkouts
 }
 
 /// A worktree reads best by its branch; the directory name is the fallback for a
