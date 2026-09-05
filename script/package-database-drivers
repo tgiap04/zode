@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Packages the built database driver sidecars as one release asset each.
+#
+# Zode ships no drivers inside the app: each is downloaded the first time
+# someone connects to the engine it speaks for, so an install carries only the
+# drivers its user actually asked for rather than four on the chance one is
+# wanted. That only works if every release publishes them separately, and one
+# archive per driver is what makes fetching one cheap -- a single archive
+# holding all four would put the 40MB MongoDB driver in front of everyone who
+# wanted the 4MB SQLite one, which is the cost this whole change removes.
+#
+# The names here are a contract with `database::install::manifest`: the app
+# builds the URL it fetches from the target triple and the driver id, so a
+# rename on this side is a driver the app can no longer find.
+#
+#   script/package-database-drivers <target-triple> <directory holding the binaries>
+#
+# Writes to target/database-drivers/, which is what the release workflow
+# uploads.
+
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <target-triple> <binary-directory>" >&2
+    exit 1
+fi
+
+target_triple="$1"
+binary_directory="$2"
+
+cd "$(dirname "$0")/.."
+
+drivers=(sqlite postgres mysql mongodb)
+output_directory="target/database-drivers"
+
+rm -rf "${output_directory}"
+mkdir -p "${output_directory}"
+
+for driver in "${drivers[@]}"; do
+    executable="zode-db-${driver}"
+    source_path="${binary_directory}/${executable}"
+
+    if [[ ! -f "${source_path}" ]]; then
+        echo "error: ${source_path} was not built" >&2
+        exit 1
+    fi
+
+    # `-C` so the archive holds the bare executable and no directory prefix:
+    # the manifest's `entry` names it exactly, and a leading path would make
+    # every unpack miss.
+    tar -czf "${output_directory}/${executable}-${target_triple}.tar.gz" \
+        -C "$(dirname "${source_path}")" "${executable}"
+    echo "packaged ${executable}-${target_triple}.tar.gz"
+done

@@ -8,6 +8,36 @@ use url::Url;
 
 const GITHUB_API_URL: &str = "https://api.github.com";
 
+/// Hosts a GitHub release asset may actually be served from.
+///
+/// `github.com` issues the redirect; the object stores are where it lands.
+const ALLOWED_RELEASE_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// Rejects a download URL that is not HTTPS on one of the GitHub release hosts.
+///
+/// Compares the parsed host exactly rather than by prefix: `https://github.com.example/`
+/// starts with the expected text and is not GitHub. Checking the digest of what
+/// arrives is what makes the *bytes* trustworthy; this is what stops the request
+/// being made to a stranger in the first place.
+pub fn ensure_release_host_is_trusted(url: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("unparsable asset url: {url:?}"))?;
+    anyhow::ensure!(
+        parsed.scheme() == "https",
+        "release asset url is not https: {url:?}"
+    );
+    let host = parsed.host_str().unwrap_or_default();
+    anyhow::ensure!(
+        ALLOWED_RELEASE_HOSTS.contains(&host),
+        "release asset url points at {host:?}, which is not a GitHub release host. \
+         Refusing to download from an unexpected host."
+    );
+    Ok(())
+}
+
 pub struct GitHubLspBinaryVersion {
     pub name: String,
     pub url: String,
@@ -190,5 +220,45 @@ mod tests {
             zip,
             "https://github.com/microsoft/vscode-eslint/archive/refs/tags/release%2F2.3.5.zip"
         );
+    }
+}
+
+#[cfg(test)]
+mod release_host_tests {
+    use super::ensure_release_host_is_trusted;
+
+    #[test]
+    fn a_real_release_url_is_accepted() {
+        for url in [
+            "https://github.com/owner/repo/releases/download/v0.1.1/asset.tar.gz",
+            "https://objects.githubusercontent.com/anything",
+            "https://release-assets.githubusercontent.com/anything",
+        ] {
+            ensure_release_host_is_trusted(url).unwrap_or_else(|error| panic!("{url}: {error}"));
+        }
+    }
+
+    /// The reason the host is compared exactly rather than by prefix.
+    #[test]
+    fn a_host_that_merely_starts_with_github_is_refused() {
+        assert!(
+            ensure_release_host_is_trusted("https://github.com.example.test/zode.dmg").is_err()
+        );
+        assert!(
+            ensure_release_host_is_trusted(
+                "https://objects.githubusercontent.com.attacker.test/zode.dmg"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn plain_http_is_refused_even_on_an_allowed_host() {
+        assert!(ensure_release_host_is_trusted("http://github.com/owner/repo/x").is_err());
+    }
+
+    #[test]
+    fn an_unparsable_url_is_refused_rather_than_ignored() {
+        assert!(ensure_release_host_is_trusted("not a url").is_err());
     }
 }

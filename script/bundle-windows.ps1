@@ -32,8 +32,9 @@ $Architecture = if ($Architecture) {
 
 $CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
 
-# Sidecars the app starts by name from beside its own executable. Nothing links
-# against them, so they are built and shipped explicitly or not at all.
+# Sidecars the app downloads on first use rather than carrying in the installer,
+# so an install holds only the drivers its user asked for. Built here and
+# published as one release asset each -- see PackageDatabaseDrivers.
 $databaseDrivers = @("zode-db-sqlite", "zode-db-postgres", "zode-db-mysql", "zode-db-mongodb")
 
 function Get-VSArch {
@@ -175,12 +176,6 @@ function BuildZedAndItsFriends {
     # Must land in `tools`: `finalize_auto_update_on_quit` looks for it beside the app at
     # `tools\auto_update_helper.exe` and nowhere else.
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
-    # Beside Zode.exe, which is where `driver_path` looks. Unlike cli.exe these
-    # are not moved into `bin` later: they are started by the app, not typed by
-    # the user, and `bin` is on the user's PATH.
-    foreach ($driver in $databaseDrivers) {
-        Copy-Item -Path ".\$CargoOutDir\$driver.exe" -Destination "$innoDir\$driver.exe" -Force
-    }
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
@@ -268,10 +263,46 @@ function SignZedAndItsFriends {
     }
 
     $files = "$innoDir\Zode.exe,$innoDir\cli.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
-    foreach ($driver in $databaseDrivers) {
-        $files += ",$innoDir\$driver.exe"
-    }
+    # The drivers are signed where they are packaged, not here: they are no
+    # longer inside `$innoDir`, and signing has to happen before the archive is
+    # built rather than after.
     & "$innoDir\sign.ps1" $files
+}
+
+# Packages each driver as its own release asset.
+#
+# One archive per driver rather than one for all four: the whole point of
+# fetching on demand is that wanting SQLite must not mean downloading MongoDB.
+# The names are a contract with `database::install::manifest`, which builds the
+# URL it fetches from the target triple and the driver id.
+function PackageDatabaseDrivers {
+    $outputDirectory = "./target/database-drivers"
+    if (Test-Path $outputDirectory) {
+        Remove-Item -Path $outputDirectory -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+
+    if ($script:canCodeSign) {
+        $driverFiles = ($databaseDrivers | ForEach-Object { "$CargoOutDir\$_.exe" }) -join ","
+        & "$innoDir\sign.ps1" $driverFiles
+    } else {
+        Write-Output "Skipping database driver signing"
+    }
+
+    foreach ($driver in $databaseDrivers) {
+        $source = ".\$CargoOutDir\$driver.exe"
+        if (-not (Test-Path $source)) {
+            throw "$source was not built"
+        }
+        # tar.gz, the same as macOS and Linux: `tar.exe` ships with Windows,
+        # and one archive format across all three platforms means the app has
+        # one unpack path rather than a zip reader it would need for this alone.
+        tar.exe -czf "$outputDirectory/$driver-$target.tar.gz" -C "$CargoOutDir" "$driver.exe"
+        if ($LASTEXITCODE -ne 0) {
+            throw "packaging $driver failed"
+        }
+        Write-Output "packaged $driver-$target.tar.gz"
+    }
 }
 
 function DownloadAMDGpuServices {
@@ -451,6 +482,7 @@ GenerateLicenses
 BuildZedAndItsFriends
 MakeAppx
 SignZedAndItsFriends
+PackageDatabaseDrivers
 ZipZedAndItsFriendsDebug
 DownloadAMDGpuServices
 DownloadConpty

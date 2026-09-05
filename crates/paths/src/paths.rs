@@ -403,6 +403,20 @@ pub fn debug_adapters_dir() -> &'static PathBuf {
     DEBUG_ADAPTERS_DIR.get_or_init(|| data_dir().join("debug_adapters"))
 }
 
+/// Returns the path to the database drivers directory
+///
+/// This is where database driver sidecars are downloaded to. Zode ships none of
+/// them: a driver arrives when an engine is first connected to, so an install
+/// carries only the drivers its user actually asked for.
+///
+/// One directory per driver, one directory per version inside it, so an app
+/// that has been updated does not run a driver built against an older protocol
+/// simply because it was the one already on disk.
+pub fn database_drivers_dir() -> &'static PathBuf {
+    static DATABASE_DRIVERS_DIR: OnceLock<PathBuf> = OnceLock::new();
+    DATABASE_DRIVERS_DIR.get_or_init(|| data_dir().join("database_drivers"))
+}
+
 /// Returns the path to the external agents directory
 ///
 /// This is where agent servers are downloaded to

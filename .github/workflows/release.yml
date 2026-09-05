@@ -232,6 +232,12 @@ jobs:
         name: zode-linux-aarch64.tar.gz
         path: target/release/zode-linux-aarch64.tar.gz
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-aarch64-unknown-linux-gnu'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-aarch64-unknown-linux-gnu
+        path: target/database-drivers
+        if-no-files-found: error
     container:
       image: ubuntu:22.04
     timeout-minutes: 360
@@ -279,6 +285,12 @@ jobs:
         name: zode-linux-x86_64.tar.gz
         path: target/release/zode-linux-x86_64.tar.gz
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-x86_64-unknown-linux-gnu'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-x86_64-unknown-linux-gnu
+        path: target/database-drivers
+        if-no-files-found: error
     container:
       image: ubuntu:22.04
     timeout-minutes: 360
@@ -319,6 +331,12 @@ jobs:
         name: Zode-aarch64.dmg
         path: target/aarch64-apple-darwin/release/Zode-aarch64.dmg
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-aarch64-apple-darwin'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-aarch64-apple-darwin
+        path: target/database-drivers
+        if-no-files-found: error
     timeout-minutes: 360
   bundle_mac_x86_64:
     runs-on: macos-15-intel
@@ -356,6 +374,12 @@ jobs:
       with:
         name: Zode-x86_64.dmg
         path: target/x86_64-apple-darwin/release/Zode-x86_64.dmg
+        if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-x86_64-apple-darwin'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-x86_64-apple-darwin
+        path: target/database-drivers
         if-no-files-found: error
     timeout-minutes: 360
   bundle_windows_aarch64:
@@ -405,6 +429,12 @@ jobs:
         name: Zode-aarch64.exe
         path: target/Zode-aarch64.exe
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-aarch64-pc-windows-msvc'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-aarch64-pc-windows-msvc
+        path: target/database-drivers
+        if-no-files-found: error
     timeout-minutes: 360
   bundle_windows_x86_64:
     runs-on: windows-2025
@@ -453,6 +483,12 @@ jobs:
         name: Zode-x86_64.exe
         path: target/Zode-x86_64.exe
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-x86_64-pc-windows-msvc'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-x86_64-pc-windows-msvc
+        path: target/database-drivers
+        if-no-files-found: error
     timeout-minutes: 360
   upload_release_assets:
     needs:
@@ -470,6 +506,10 @@ jobs:
     permissions:
       contents: write
     steps:
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
     - name: release::download_workflow_artifacts
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
       with:
@@ -486,6 +526,14 @@ jobs:
         mv ./artifacts/zode-linux-x86_64.tar.gz/zode-linux-x86_64.tar.gz release-artifacts/zode-linux-x86_64.tar.gz
         mv ./artifacts/Zode-x86_64.exe/Zode-x86_64.exe release-artifacts/Zode-x86_64.exe
         mv ./artifacts/Zode-aarch64.exe/Zode-aarch64.exe release-artifacts/Zode-aarch64.exe
+        mv ./artifacts/database-drivers-aarch64-apple-darwin/* release-artifacts/
+        mv ./artifacts/database-drivers-x86_64-apple-darwin/* release-artifacts/
+        mv ./artifacts/database-drivers-aarch64-unknown-linux-gnu/* release-artifacts/
+        mv ./artifacts/database-drivers-x86_64-unknown-linux-gnu/* release-artifacts/
+        mv ./artifacts/database-drivers-aarch64-pc-windows-msvc/* release-artifacts/
+        mv ./artifacts/database-drivers-x86_64-pc-windows-msvc/* release-artifacts/
+    - name: release::build_driver_manifest
+      run: script/build-driver-manifest release-artifacts "${GITHUB_REF_NAME#v}"
     - name: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
       run: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
       env:
@@ -499,7 +547,7 @@ jobs:
     steps:
     - name: release::validate_release_assets
       run: |
-        EXPECTED_ASSETS='["Zode-aarch64.dmg", "Zode-x86_64.dmg", "zode-linux-aarch64.tar.gz", "zode-linux-x86_64.tar.gz", "Zode-x86_64.exe", "Zode-aarch64.exe"]'
+        EXPECTED_ASSETS='["Zode-aarch64.dmg", "Zode-x86_64.dmg", "zode-linux-aarch64.tar.gz", "zode-linux-x86_64.tar.gz", "Zode-x86_64.exe", "Zode-aarch64.exe", "zode-db-sqlite-aarch64-apple-darwin.tar.gz", "zode-db-postgres-aarch64-apple-darwin.tar.gz", "zode-db-mysql-aarch64-apple-darwin.tar.gz", "zode-db-mongodb-aarch64-apple-darwin.tar.gz", "zode-db-sqlite-x86_64-apple-darwin.tar.gz", "zode-db-postgres-x86_64-apple-darwin.tar.gz", "zode-db-mysql-x86_64-apple-darwin.tar.gz", "zode-db-mongodb-x86_64-apple-darwin.tar.gz", "zode-db-sqlite-aarch64-unknown-linux-gnu.tar.gz", "zode-db-postgres-aarch64-unknown-linux-gnu.tar.gz", "zode-db-mysql-aarch64-unknown-linux-gnu.tar.gz", "zode-db-mongodb-aarch64-unknown-linux-gnu.tar.gz", "zode-db-sqlite-x86_64-unknown-linux-gnu.tar.gz", "zode-db-postgres-x86_64-unknown-linux-gnu.tar.gz", "zode-db-mysql-x86_64-unknown-linux-gnu.tar.gz", "zode-db-mongodb-x86_64-unknown-linux-gnu.tar.gz", "zode-db-sqlite-aarch64-pc-windows-msvc.tar.gz", "zode-db-postgres-aarch64-pc-windows-msvc.tar.gz", "zode-db-mysql-aarch64-pc-windows-msvc.tar.gz", "zode-db-mongodb-aarch64-pc-windows-msvc.tar.gz", "zode-db-sqlite-x86_64-pc-windows-msvc.tar.gz", "zode-db-postgres-x86_64-pc-windows-msvc.tar.gz", "zode-db-mysql-x86_64-pc-windows-msvc.tar.gz", "zode-db-mongodb-x86_64-pc-windows-msvc.tar.gz", "zode-db-drivers-manifest.json"]'
         TAG="$GITHUB_REF_NAME"
 
         ACTUAL_ASSETS=$(gh release view "$TAG" --repo="$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')
