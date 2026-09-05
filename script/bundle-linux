@@ -75,9 +75,9 @@ else
 fi
 database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql zode-db-mongodb)
 
-# The database drivers are sidecars the app starts by name from beside its own
-# executable, so they are built and copied like `cli` -- nothing depends on them
-# at link time, and without these they would not be in the package at all.
+# The database drivers are built here but no longer packaged into the tarball:
+# they are published as release assets of their own and downloaded on first
+# use, so an install carries only the drivers its user asked for.
 cargo build --release --target "${target_triple}" --package zode --package cli \
     --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb
 
@@ -131,12 +131,11 @@ zed_dir="${temp_dir}/zed$suffix.app"
 mkdir -p "${zed_dir}/bin" "${zed_dir}/libexec"
 cp "${target_dir}/${target_triple}/release/zode" "${zed_dir}/libexec/zed-editor"
 cp "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zed"
-# `libexec`, not `bin`: `driver_path` looks beside the app's own executable, and
-# that is `libexec/zed-editor` here. In `bin` they would be both unfound and on
-# the user's `PATH`, which is neither of the two things wanted.
-for driver in "${database_drivers[@]}"; do
-    cp "${target_dir}/${target_triple}/release/${driver}" "${zed_dir}/libexec/${driver}"
-done
+
+# Packaged beside the tarball rather than inside it. `libexec` is still where a
+# driver is looked for first, so a driver put there by hand keeps working -- but
+# nothing ships one, and the download lands in the user's data directory instead.
+script/package-database-drivers "${target_triple}" "${target_dir}/${target_triple}/release"
 
 # Libs
 find_libs() {

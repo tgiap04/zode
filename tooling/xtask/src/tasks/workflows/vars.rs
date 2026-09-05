@@ -400,4 +400,57 @@ pub mod assets {
             WINDOWS_AARCH64,
         ]
     }
+
+    /// The manifest naming every driver the release published, with the
+    /// checksum of each. What `database::install::manifest` fetches first.
+    pub const DRIVER_MANIFEST: &str = "zode-db-drivers-manifest.json";
+
+    /// The engines Zode publishes a driver for.
+    ///
+    /// Must match `BUILT_IN` in `crates/database_ui/src/driver_registry.rs` and
+    /// the list in `script/package-database-drivers`: an id here that nothing
+    /// packages fails the release validation, and one packaged but missing here
+    /// uploads unvalidated.
+    pub const DRIVER_IDS: &[&str] = &["sqlite", "postgres", "mysql", "mongodb"];
+
+    /// The Rust target triples the drivers are published for.
+    ///
+    /// These are what `database::install::manifest::current_target` builds from
+    /// the running platform, so a spelling change here is a driver the app can
+    /// no longer find.
+    pub const DRIVER_TARGETS: &[&str] = &[
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-pc-windows-msvc",
+        "x86_64-pc-windows-msvc",
+    ];
+
+    /// Every driver archive one platform's bundle job produces.
+    pub fn drivers_for(target: &str) -> Vec<String> {
+        DRIVER_IDS
+            .iter()
+            .map(|id| format!("zode-db-{id}-{target}.tar.gz"))
+            .collect()
+    }
+
+    /// Every driver archive across every platform, plus the manifest.
+    ///
+    /// Zode bundles no drivers: each is downloaded the first time someone
+    /// connects to the engine it speaks for. A release missing one is an engine
+    /// nobody can reach, which is why these are validated like any other asset.
+    pub fn all_drivers() -> Vec<String> {
+        let mut assets: Vec<String> = DRIVER_TARGETS
+            .iter()
+            .flat_map(|target| drivers_for(target))
+            .collect();
+        assets.push(DRIVER_MANIFEST.to_string());
+        assets
+    }
+
+    /// The name the bundle job uploads its driver archives under.
+    pub fn drivers_artifact(target: &str) -> String {
+        format!("database-drivers-{target}")
+    }
 }

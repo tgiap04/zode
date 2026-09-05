@@ -72,9 +72,6 @@ Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ign
 ; The in-app updater hands off to tools\auto_update_helper.exe on quit, because Windows
 ; will not let the running Zode.exe be overwritten in place.
 Source: "{#ResourcesDir}\tools\*"; DestDir: "{code:GetInstallDir}\tools"; Flags: ignoreversion
-; Beside Zode.exe, which is where `driver_path` looks -- the same reasoning that puts them
-; in `libexec` next to the binary on Linux and in `Contents/MacOS` on macOS.
-Source: "{#ResourcesDir}\zode-db-*.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
 #ifexist ResourcesDir + "\amd_ags_x64.dll"
 Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion

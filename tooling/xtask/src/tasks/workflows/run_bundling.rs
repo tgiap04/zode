@@ -99,12 +99,22 @@ pub(crate) fn bundle_mac(
             .add_step(bundle_mac(arch))
             .add_step(upload_artifact(&format!(
                 "target/{arch}-apple-darwin/release/{artifact_name}"
-            ))),
+            )))
+            .add_step(upload_database_drivers(&format!("{arch}-apple-darwin"))),
     }
 }
 
 pub fn upload_artifact(path: &str) -> Step<Use> {
     let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+    upload_artifact_as(name, path)
+}
+
+/// Uploads under a name of its own rather than the path's last component.
+///
+/// The driver archives are a directory, and every platform writes it to the
+/// same place -- so six jobs would upload six artifacts called
+/// `database-drivers` and collide. The target triple is what tells them apart.
+pub fn upload_artifact_as(name: &str, path: &str) -> Step<Use> {
     Step::new(format!("@actions/upload-artifact {}", name))
         .uses(
             "actions",
@@ -116,6 +126,16 @@ pub fn upload_artifact(path: &str) -> Step<Use> {
         .add_with(("name", name))
         .add_with(("path", path))
         .add_with(("if-no-files-found", "error"))
+}
+
+/// Uploads the driver archives this platform's bundle script packaged.
+///
+/// Zode ships no drivers inside the app any more: each is published as its own
+/// release asset and downloaded the first time someone connects to the engine
+/// it speaks for. Every bundle script writes them to the same directory, so
+/// only the artifact name differs.
+pub fn upload_database_drivers(target: &str) -> Step<Use> {
+    upload_artifact_as(&assets::drivers_artifact(target), "target/database-drivers")
 }
 
 pub(crate) fn bundle_linux(
@@ -164,7 +184,10 @@ pub(crate) fn bundle_linux(
             .map(steps::install_linux_dependencies)
             .add_step(steps::script("./script/bundle-linux"))
             .add_step(check_glibc_floor(artifact_name))
-            .add_step(upload_artifact(&format!("target/release/{artifact_name}"))),
+            .add_step(upload_artifact(&format!("target/release/{artifact_name}")))
+            .add_step(upload_database_drivers(&format!(
+                "{arch}-unknown-linux-gnu"
+            ))),
     }
 }
 
@@ -199,7 +222,8 @@ pub(crate) fn bundle_windows(
             .add_step(steps::free_disk_space(platform))
             .add_step(steps::windows_enable_long_paths())
             .add_step(bundle_windows(arch))
-            .add_step(upload_artifact(&format!("target/{artifact_name}"))),
+            .add_step(upload_artifact(&format!("target/{artifact_name}")))
+            .add_step(upload_database_drivers(&format!("{arch}-pc-windows-msvc"))),
     }
 }
 

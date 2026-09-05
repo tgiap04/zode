@@ -111,7 +111,12 @@ impl ReleaseBundleJobs {
 /// not match what the release expects. `assets::all()` is the single source of truth for
 /// both this check and `prep_release_artifacts`.
 fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
-    let expected_assets: Vec<String> = assets::all().iter().map(|a| format!("\"{a}\"")).collect();
+    let expected_assets: Vec<String> = assets::all()
+        .iter()
+        .map(|asset| asset.to_string())
+        .chain(assets::all_drivers())
+        .map(|asset| format!("\"{asset}\""))
+        .collect();
     let expected_assets_json = format!("[{}]", expected_assets.join(", "));
 
     // The empty-`ACTUAL_ASSETS` guard is not defensive padding. Without it, a release this
@@ -171,7 +176,26 @@ pub(crate) fn prep_release_artifacts() -> Step<Run> {
         script_lines.push(mv_command)
     }
 
+    // The driver archives arrive as one artifact directory per platform rather
+    // than one per file: six jobs each package four drivers, and naming
+    // twenty-four separate uploads would be twenty-four more chances for a
+    // filename to drift out of step with what the release expects.
+    for target in assets::DRIVER_TARGETS {
+        let artifact = assets::drivers_artifact(target);
+        script_lines.push(format!("mv ./artifacts/{artifact}/* release-artifacts/"));
+    }
+
     named::bash!(&script_lines.join("\n"))
+}
+
+/// Writes the manifest the app reads to find its drivers.
+///
+/// Built here rather than in the six bundle jobs because it describes all of
+/// them at once, and its checksums are taken from the very bytes about to be
+/// uploaded -- a checksum that travelled separately from what it describes is
+/// one more thing that can disagree, and detecting disagreement is its job.
+pub(crate) fn build_driver_manifest() -> Step<Run> {
+    named::bash!("script/build-driver-manifest release-artifacts \"${GITHUB_REF_NAME#v}\"")
 }
 
 fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> NamedJob {
@@ -181,9 +205,14 @@ fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> Name
     named::job!(
         steps::writes_to_releases(dependant_job(&deps))
             .runs_on(runners::LINUX_MEDIUM)
+            // Checked out for `script/build-driver-manifest`. Every other step
+            // here works on downloaded artifacts alone, which is why this job
+            // had no checkout until the manifest needed one.
+            .add_step(steps::checkout_repo())
             .add_step(download_workflow_artifacts())
             .add_step(steps::script("ls -lR ./artifacts"))
             .add_step(prep_release_artifacts())
+            .add_step(build_driver_manifest())
             .add_step(
                 steps::script("gh release upload \"$GITHUB_REF_NAME\" --repo=\"$GITHUB_REPOSITORY\" release-artifacts/*")
                     .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
@@ -344,5 +373,81 @@ mod tests {
                 "upload_release_assets does not wait for {gate}, so a failed gate cannot stop it: {waits_for:?}"
             );
         }
+    }
+
+    fn repo_file(relative: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+    }
+
+    /// The driver ids live in three places that cannot see each other: the app
+    /// decides which drivers it knows, a shell script decides which get
+    /// packaged, and this workflow decides which the release is validated for.
+    ///
+    /// Drift between them fails in the least useful order. An id the app knows
+    /// but nothing packages becomes an engine whose Download button always
+    /// fails, discovered by a user. An id packaged but not listed here uploads
+    /// unvalidated. Neither shows up until after a release is cut, which is why
+    /// it is asserted here instead.
+    #[test]
+    fn the_drivers_the_release_validates_are_the_ones_the_app_knows() {
+        let registry = repo_file("crates/database_ui/src/driver_registry.rs");
+        let built_in = registry
+            .split_once("const BUILT_IN: &[(&str, &str)] = &[")
+            .expect("`BUILT_IN` must still be the app's list of shipped drivers")
+            .1
+            .split_once("];")
+            .expect("an unterminated BUILT_IN")
+            .0;
+
+        for id in assets::DRIVER_IDS {
+            assert!(
+                built_in.contains(&format!("(\"{id}\"")),
+                "the release validates `{id}`, but the app does not list it as a driver it knows"
+            );
+        }
+        let listed = built_in.matches("(\"").count();
+        assert_eq!(
+            listed,
+            assets::DRIVER_IDS.len(),
+            "the app knows {listed} drivers but the release validates {}",
+            assets::DRIVER_IDS.len()
+        );
+    }
+
+    /// The same list again, this time against what actually gets packaged. A
+    /// driver missing here is an asset the release waits for and never gets.
+    #[test]
+    fn every_validated_driver_is_one_the_bundle_scripts_package() {
+        let packager = repo_file("script/package-database-drivers");
+        let listed = packager
+            .split_once("drivers=(")
+            .expect("`drivers=(` must still be the packaging list")
+            .1
+            .split_once(')')
+            .expect("an unterminated drivers=()")
+            .0;
+
+        let packaged: Vec<&str> = listed.split_whitespace().collect();
+        assert_eq!(
+            packaged,
+            assets::DRIVER_IDS.to_vec(),
+            "script/package-database-drivers and assets::DRIVER_IDS disagree"
+        );
+    }
+
+    /// The manifest is what the app fetches first; without it every download
+    /// fails with a message about the release rather than about the packaging.
+    #[test]
+    fn the_manifest_is_validated_like_any_other_asset() {
+        assert!(assets::all_drivers().contains(&assets::DRIVER_MANIFEST.to_string()));
+        assert_eq!(
+            assets::all_drivers().len(),
+            assets::DRIVER_IDS.len() * assets::DRIVER_TARGETS.len() + 1,
+            "one archive per driver per platform, plus the manifest"
+        );
     }
 }

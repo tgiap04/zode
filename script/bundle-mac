@@ -89,10 +89,10 @@ rustup target add $target_triple
 database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql zode-db-mongodb)
 
 echo "Compiling zed binaries"
-# The database drivers are sidecars the app starts by name from beside its own
-# executable, so they have to be built and copied like `cli` -- nothing depends
-# on them at link time, and without these they simply would not be in the
-# bundle.
+# The database drivers are built here but no longer copied into the bundle:
+# they are published as release assets of their own and downloaded on first
+# use, so an install carries only the drivers its user asked for. See
+# `package_database_drivers` below and `script/package-database-drivers`.
 cargo build ${build_flag} --package zode --package cli \
     --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb \
     --target $target_triple
@@ -208,11 +208,6 @@ function sign_app_binaries() {
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
-        # Unsigned, these are killed on launch by Gatekeeper, and the only
-        # symptom is every database connection failing to start its driver.
-        for driver in "${database_drivers[@]}"; do
-            /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/${driver}" -v
-        done
         /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/zode" -v
         /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
     else
@@ -293,6 +288,50 @@ function sign_app_binaries() {
     fi
 }
 
+# Signs, notarises and packages the drivers as separate release assets.
+#
+# They no longer live inside the bundle, so the bundle's own signature says
+# nothing about them -- each is signed on its own, with the same identity. That
+# still leaves Gatekeeper: an unsigned or unnotarised binary is killed on
+# launch, and the only symptom is every database connection failing to start
+# its driver, with nothing on screen naming the cause. It is the exact failure
+# the old in-bundle codesign loop existed to prevent, and moving the drivers
+# out did not move the risk with them.
+#
+# All four are notarised in ONE submission. Notarisation registers each signed
+# binary's cdhash with Apple, so a single `notarytool submit --wait` covers
+# every binary in the zip -- and four separate submissions would add several
+# minutes of waiting to every release for nothing.
+function package_database_drivers() {
+    local binaries="target/${target_triple}/${target_dir}"
+
+    if [[ $can_code_sign = true ]]; then
+        echo "Code signing database drivers"
+        for driver in "${database_drivers[@]}"; do
+            /usr/bin/codesign --force --timestamp --options runtime --sign "$IDENTITY" "${binaries}/${driver}" -v
+        done
+
+        echo "Notarizing database drivers with Apple"
+        local notarization_bundle
+        local drivers_key_file
+        notarization_bundle="$(mktemp -d)/database-drivers.zip"
+        drivers_key_file=$(mktemp)
+        # `ditto -c -k` rather than `zip`: notarytool rejects an archive that
+        # does not preserve macOS metadata, and this is the form Apple documents.
+        (cd "${binaries}" && /usr/bin/ditto -c -k --keepParent "${database_drivers[@]}" "${notarization_bundle}") ||             /usr/bin/ditto -c -k "${binaries}" "${notarization_bundle}"
+        echo "$APPLE_NOTARIZATION_KEY" > "$drivers_key_file"
+        "$(xcode-select -p)/usr/bin/notarytool" submit --wait             --key "$drivers_key_file"             --key-id "$APPLE_NOTARIZATION_KEY_ID"             --issuer "$APPLE_NOTARIZATION_ISSUER_ID"             "${notarization_bundle}"
+        rm "$drivers_key_file"
+        # Not stapled: a staple attaches to a container, and these ship as bare
+        # executables inside a tarball. Gatekeeper checks the cdhash with Apple
+        # instead, which is what the submission above registered.
+    else
+        echo "Skipping database driver signing: no notarization credentials"
+    fi
+
+    script/package-database-drivers "${target_triple}" "${binaries}"
+}
+
 function upload_debug_symbols() {
     if [ "$local_install" = true ]; then
         echo "local install; skipping sentry upload."
@@ -329,8 +368,5 @@ upload_debug_symbols
 
 cp target/${target_triple}/${target_dir}/zode "${app_path}/Contents/MacOS/zode"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
-# Beside the app's own executable, which is where `driver_path` looks.
-for driver in "${database_drivers[@]}"; do
-    cp "target/${target_triple}/${target_dir}/${driver}" "${app_path}/Contents/MacOS/${driver}"
-done
+package_database_drivers
 sign_app_binaries
