@@ -13,8 +13,77 @@ pub struct DriverDescriptor {
     pub id: DriverId,
     /// Shown when choosing an engine for a new connection.
     pub name: String,
-    pub binary: DriverBinary,
+    pub state: DriverState,
     pub source: DriverSource,
+}
+
+impl DriverDescriptor {
+    /// How to start this driver, or `None` when it is not on the machine.
+    ///
+    /// Every spawn goes through here. That it can answer `None` is the point:
+    /// a registered driver used to be a runnable one by construction, which
+    /// made "not installed" a state nothing could represent and the UI built
+    /// for it unreachable.
+    pub fn binary(&self) -> Option<&DriverBinary> {
+        match &self.state {
+            DriverState::Installed { binary, .. } => Some(binary),
+            DriverState::NotInstalled => None,
+        }
+    }
+
+    pub fn is_installed(&self) -> bool {
+        matches!(self.state, DriverState::Installed { .. })
+    }
+
+    pub fn origin(&self) -> Option<DriverOrigin> {
+        match &self.state {
+            DriverState::Installed { origin, .. } => Some(*origin),
+            DriverState::NotInstalled => None,
+        }
+    }
+}
+
+/// Whether a driver is actually on this machine.
+#[derive(Clone, Debug)]
+pub enum DriverState {
+    Installed {
+        binary: DriverBinary,
+        origin: DriverOrigin,
+    },
+    /// Zode knows this driver by name, but it has not been downloaded.
+    NotInstalled,
+}
+
+impl DriverState {
+    /// The common case: a driver found at a path, with no arguments or
+    /// environment of its own.
+    pub fn installed(executable: PathBuf, origin: DriverOrigin) -> Self {
+        Self::Installed {
+            binary: DriverBinary {
+                executable,
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+            },
+            origin,
+        }
+    }
+}
+
+/// Where the binary being run came from.
+///
+/// Carried so that a failure can say which of the three a driver was started
+/// from. A driver misbehaving because it is a stale build beside the executable
+/// looks identical, from the error alone, to one that downloaded badly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverOrigin {
+    /// Beside the running executable: a development build, or a bundle.
+    BesideExecutable,
+    /// Downloaded, under `paths::database_drivers_dir()`.
+    Store,
+    /// A bare name left to `PATH`, put there deliberately by someone.
+    Path,
+    /// Declared by an extension, which names its own path.
+    Extension,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +114,7 @@ impl DriverRegistry {
         &mut self,
         id: impl Into<DriverId>,
         name: impl Into<String>,
-        executable: PathBuf,
+        state: DriverState,
     ) {
         let id = id.into();
         self.drivers.insert(
@@ -53,14 +122,23 @@ impl DriverRegistry {
             DriverDescriptor {
                 id,
                 name: name.into(),
-                binary: DriverBinary {
-                    executable,
-                    args: Vec::new(),
-                    env: HashMap::default().into_iter().collect(),
-                },
+                state,
                 source: DriverSource::BuiltIn,
             },
         );
+    }
+
+    /// Replaces one driver's state after it has been installed.
+    ///
+    /// Returns whether anything changed, so a caller can skip notifying every
+    /// window over a re-resolve that found what it already had.
+    pub fn set_state(&mut self, id: &str, state: DriverState) -> bool {
+        let Some(driver) = self.drivers.get_mut(id) else {
+            return false;
+        };
+        let changed = driver.is_installed() != matches!(state, DriverState::Installed { .. });
+        driver.state = state;
+        changed
     }
 
     /// Adds a driver an extension declared.
@@ -123,11 +201,7 @@ mod tests {
         DriverDescriptor {
             id: id.into(),
             name: id.to_string(),
-            binary: DriverBinary {
-                executable: PathBuf::from(id),
-                args: Vec::new(),
-                env: Default::default(),
-            },
+            state: DriverState::installed(PathBuf::from(id), DriverOrigin::Extension),
             source,
         }
     }
@@ -138,7 +212,14 @@ mod tests {
     #[test]
     fn a_built_in_driver_survives_an_extension_claiming_its_name() {
         let mut registry = DriverRegistry::new();
-        registry.register_built_in("postgres", "PostgreSQL", PathBuf::from("zode-db-postgres"));
+        registry.register_built_in(
+            "postgres",
+            "PostgreSQL",
+            DriverState::installed(
+                PathBuf::from("zode-db-postgres"),
+                DriverOrigin::BesideExecutable,
+            ),
+        );
 
         let accepted = registry.register_extension(descriptor("postgres", DriverSource::Extension));
 
@@ -146,6 +227,50 @@ mod tests {
         assert_eq!(
             registry.get("postgres").map(|driver| driver.source),
             Some(DriverSource::BuiltIn),
+        );
+    }
+
+    /// The state the whole on-demand path hangs off. Before it existed a
+    /// registered driver was a runnable one by construction, so `installed`
+    /// was true for every driver Zode had heard of and the UI written for the
+    /// other case could not be reached.
+    #[test]
+    fn a_driver_that_is_not_on_the_machine_hands_back_no_binary() {
+        let mut registry = DriverRegistry::new();
+        registry.register_built_in("mongodb", "MongoDB", DriverState::NotInstalled);
+
+        let driver = registry.get("mongodb").expect("still a driver Zode knows");
+        assert!(!driver.is_installed());
+        assert!(
+            driver.binary().is_none(),
+            "a driver that is not installed must not hand back something to spawn"
+        );
+    }
+
+    /// What the modal does the moment a download finishes: the driver it
+    /// already knew about becomes one it can start.
+    #[test]
+    fn installing_a_driver_reports_the_change() {
+        let mut registry = DriverRegistry::new();
+        registry.register_built_in("mongodb", "MongoDB", DriverState::NotInstalled);
+
+        let changed = registry.set_state(
+            "mongodb",
+            DriverState::installed(PathBuf::from("/store/zode-db-mongodb"), DriverOrigin::Store),
+        );
+
+        assert!(
+            changed,
+            "not-installed to installed is a change worth notifying over"
+        );
+        assert!(
+            registry
+                .get("mongodb")
+                .is_some_and(|driver| driver.is_installed())
+        );
+        assert_eq!(
+            registry.get("mongodb").and_then(|driver| driver.origin()),
+            Some(DriverOrigin::Store)
         );
     }
 

@@ -13,6 +13,7 @@
 use crate::connection_store::{DatabaseSettings, write_secret};
 use crate::driver_registry::{self, CatalogueEntry};
 use crate::session::driver_capabilities;
+use database::install::InstallProgress;
 use database::protocol::{ConnectionField, ConnectionForm};
 use database::registry::DriverDescriptor;
 use editor::Editor;
@@ -40,6 +41,16 @@ fn fallback_form() -> ConnectionForm {
 
 /// A stand-in engine for the URL-only path, so the second screen has a name and
 /// a driver like any other.
+/// Every engine, installed ones first.
+///
+/// Installed first, then alphabetically: an engine someone can actually reach
+/// today should not sit below one they cannot.
+fn sorted_catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
+    let mut engines = driver_registry::catalogue(cx);
+    engines.sort_by(|a, b| b.installed.cmp(&a.installed).then(a.name.cmp(&b.name)));
+    engines
+}
+
 fn imported_entry() -> CatalogueEntry {
     CatalogueEntry {
         driver: SharedString::new_static(""),
@@ -53,6 +64,16 @@ fn imported_entry() -> CatalogueEntry {
 pub(crate) enum Step {
     /// Choosing which engine.
     PickEngine,
+    /// Fetching a driver that is not on this machine yet.
+    ///
+    /// Ahead of [`Step::Asking`] because it has to be: there is nothing to ask
+    /// until there is a driver to ask. Unlike `Asking` it has a position worth
+    /// drawing and can be given up on, which is why it is a step of its own
+    /// rather than a flag on that one.
+    Downloading {
+        engine: CatalogueEntry,
+        progress: InstallProgress,
+    },
     /// Waiting for the chosen driver to say what it wants asked.
     Asking { engine: CatalogueEntry },
     Filling {
@@ -121,10 +142,7 @@ impl ConnectionModal {
         })
         .detach();
 
-        let mut engines = driver_registry::catalogue(cx);
-        // Installed first, then alphabetically: an engine someone can actually
-        // reach today should not sit below one they cannot.
-        engines.sort_by(|a, b| b.installed.cmp(&a.installed).then(a.name.cmp(&b.name)));
+        let engines = sorted_catalogue(cx);
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -189,6 +207,27 @@ impl ConnectionModal {
         }
     }
 
+    /// Re-reads which engines are reachable.
+    ///
+    /// Which of them are installed changes underneath an open dialog now: a
+    /// driver downloaded for one engine lands while the list is on screen.
+    pub(crate) fn reload_engines(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected_engine().map(|engine| engine.name.clone());
+        self.engines = sorted_catalogue(cx);
+        // Kept on the same engine rather than the same index: installing a
+        // driver moves it up the list, and following the index would silently
+        // select whatever slid into its place.
+        if let Some(selected) = selected
+            && let Some(index) = self
+                .engines
+                .iter()
+                .position(|engine| engine.name == selected)
+        {
+            self.selected = index;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn selected_engine(&self) -> Option<&CatalogueEntry> {
         self.engines.get(self.selected)
     }
@@ -199,8 +238,16 @@ impl ConnectionModal {
             return;
         };
         if !engine.installed {
-            // Said rather than silently ignored: a Continue button that does
-            // nothing is the worst answer available here.
+            if driver_registry::is_publishable(&engine.driver) {
+                // Zode publishes this one, so the honest answer is to go and
+                // get it rather than to explain why it is missing.
+                self.download_driver(engine, window, cx);
+                return;
+            }
+            // Still true for the engines Zode ships no driver for -- Oracle and
+            // SQL Server share a protocol with nothing here. Said rather than
+            // silently ignored: a Continue button that does nothing is the
+            // worst answer available.
             self.error = Some(
                 format!(
                     "No driver for {} is installed. An extension can provide one.",
@@ -225,8 +272,21 @@ impl ConnectionModal {
         self.show_form(engine, Some(fallback_form()), window, cx);
     }
 
+    /// Holds the one background task this dialog runs at a time.
+    ///
+    /// Dropping the previous one cancels it, which is what makes leaving a step
+    /// actually stop the work that step started.
+    pub(crate) fn set_task(&mut self, task: impl Into<Option<Task<()>>>) {
+        self._task = task.into();
+    }
+
     /// Starts the chosen engine's driver and asks it what to put on the form.
-    fn open(&mut self, engine: CatalogueEntry, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open(
+        &mut self,
+        engine: CatalogueEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(descriptor) = self.descriptor_for(&engine, cx) else {
             self.step = Step::Unreachable {
                 message: format!("No driver called `{}` is registered.", engine.driver).into(),
@@ -453,7 +513,8 @@ impl ConnectionModal {
 
     pub(crate) fn engine(&self) -> Option<&CatalogueEntry> {
         match &self.step {
-            Step::Asking { engine }
+            Step::Downloading { engine, .. }
+            | Step::Asking { engine }
             | Step::Filling { engine, .. }
             | Step::Unreachable { engine, .. } => Some(engine),
             Step::PickEngine => None,
@@ -614,6 +675,9 @@ impl Focusable for ConnectionModal {
 mod tests {
     use super::*;
     use crate::database_panel_tests::modal_for_test;
+    use database::install::test_support::{driver_archive, manifest_for, sha256_of};
+    use http_client::{FakeHttpClient, HttpClient};
+    use tempfile::TempDir;
 
     fn engine(installed: bool) -> CatalogueEntry {
         CatalogueEntry {
@@ -652,7 +716,7 @@ mod tests {
     /// decompose -- must still be addable, not left out of the dialog.
     #[gpui::test]
     async fn a_driver_that_declares_no_form_is_asked_for_a_url(cx: &mut gpui::TestAppContext) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres", "sqlite", "mysql", "mongodb"]).await;
 
         modal.update_in(cx, |modal, window, cx| {
             modal.show_form(engine(true), None, window, cx);
@@ -668,7 +732,7 @@ mod tests {
     /// user retype `localhost` would be asking them to do the driver's work.
     #[gpui::test]
     async fn a_declared_default_arrives_already_typed(cx: &mut gpui::TestAppContext) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres", "sqlite", "mysql", "mongodb"]).await;
 
         modal.update_in(cx, |modal, window, cx| {
             modal.show_form(engine(true), Some(server_form()), window, cx);
@@ -690,7 +754,7 @@ mod tests {
     async fn a_blank_required_field_is_refused_and_a_blank_password_is_not(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres", "sqlite", "mysql", "mongodb"]).await;
 
         modal.update_in(cx, |modal, window, cx| {
             modal.show_form(engine(true), Some(server_form()), window, cx);
@@ -721,7 +785,7 @@ mod tests {
     /// that it never travels in the field written to a settings file.
     #[gpui::test]
     async fn a_typed_password_is_kept_out_of_the_url(cx: &mut gpui::TestAppContext) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres", "sqlite", "mysql", "mongodb"]).await;
 
         modal.update_in(cx, |modal, window, cx| {
             modal.show_form(engine(true), Some(server_form()), window, cx);
@@ -741,9 +805,13 @@ mod tests {
     /// Every engine Zode knows the name of is listed, including the ones it
     /// cannot reach. An engine missing from the picker is one nobody can
     /// discover is missing.
+    ///
+    /// Zode bundles no drivers, so "reachable" is now a thing a machine either
+    /// has done or has not. One is installed here deliberately: the ordering
+    /// this asserts only means anything when both kinds are present.
     #[gpui::test]
     async fn the_picker_lists_engines_with_no_driver_and_marks_them(cx: &mut gpui::TestAppContext) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres"]).await;
 
         modal.read_with(cx, |modal, _| {
             assert!(
@@ -771,11 +839,216 @@ mod tests {
         });
     }
 
+    // ---- Downloading a driver ---------------------------------------------
+
+    const TEST_VERSION: &str = "0.0.0";
+
+    /// A release serving one driver, and nothing else.
+    fn release_serving(manifest: Vec<u8>, archive: Vec<u8>) -> std::sync::Arc<dyn HttpClient> {
+        FakeHttpClient::create(move |request| {
+            let manifest = manifest.clone();
+            let archive = archive.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                let body = if path.ends_with("zode-db-drivers-manifest.json") {
+                    manifest
+                } else if path.ends_with("zode-db-postgres.tar.gz") {
+                    archive
+                } else {
+                    return Ok(http_client::Response::builder()
+                        .status(404)
+                        .body(Default::default())?);
+                };
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(body.into())?)
+            }
+        })
+    }
+
+    /// Points the dialog at a release a test serves, into a store it owns.
+    async fn release_with(cx: &mut gpui::VisualTestContext, checksum: Checksum) -> TempDir {
+        let store = tempfile::tempdir().expect("a temporary directory");
+        let archive = driver_archive("postgres").await;
+        let published = match checksum {
+            Checksum::Correct => sha256_of(&archive),
+            Checksum::Wrong => "a".repeat(64),
+        };
+        let manifest = manifest_for("postgres", &archive, published, TEST_VERSION);
+        cx.update(|_window, cx| {
+            cx.set_http_client(release_serving(manifest, archive));
+            driver_registry::set_installer_for_test(store.path().to_path_buf(), TEST_VERSION, cx);
+        });
+        store
+    }
+
+    /// Waits for the download to finish, whichever way it ends.
+    ///
+    /// `run_until_parked` alone is not enough: the install reads and writes
+    /// real files, so the task parks on the IO reactor and the test would look
+    /// at a bar that has not moved yet. Bounded rather than unbounded so a
+    /// download that never finishes fails the test instead of hanging CI.
+    async fn until_the_download_ends(
+        modal: &Entity<ConnectionModal>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        for _ in 0..500 {
+            cx.run_until_parked();
+            let still_going = modal.read_with(cx, |modal, _| {
+                matches!(modal.step, Step::Downloading { .. })
+            });
+            if !still_going {
+                return;
+            }
+            cx.executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        panic!("the download never finished");
+    }
+
+    enum Checksum {
+        Correct,
+        Wrong,
+    }
+
+    fn select_engine(modal: &mut ConnectionModal, driver: &str, cx: &mut Context<ConnectionModal>) {
+        let index = modal
+            .engines
+            .iter()
+            .position(|engine| engine.driver == driver)
+            .unwrap_or_else(|| panic!("`{driver}` must be listed"));
+        modal.select(index, cx);
+    }
+
+    /// The defect this whole path exists for: Zode bundles no drivers, so the
+    /// ordinary state of an engine nobody has used is "absent" -- and Continue
+    /// used to answer that by suggesting an extension that was never the
+    /// answer for an engine Zode publishes a driver for itself.
+    #[gpui::test]
+    async fn downloading_a_driver_makes_it_one_the_dialog_can_open(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let _store = release_with(cx, Checksum::Correct).await;
+
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+            assert!(
+                matches!(modal.step, Step::Downloading { .. }),
+                "Continue on an absent driver must fetch it, not explain itself"
+            );
+        });
+        until_the_download_ends(&modal, cx).await;
+
+        cx.update(|_window, cx| {
+            let registry = driver_registry::global(cx);
+            let registry = registry.read(cx);
+            assert!(
+                registry
+                    .get("postgres")
+                    .is_some_and(|driver| driver.is_installed()),
+                "the registry every other path reads must be updated before anything acts on it"
+            );
+        });
+        modal.read_with(cx, |modal, _| {
+            assert!(
+                !matches!(modal.step, Step::Downloading { .. }),
+                "a finished download must carry on rather than sit on the bar"
+            );
+            assert!(
+                modal
+                    .engines
+                    .iter()
+                    .any(|engine| engine.driver == "postgres" && engine.installed),
+                "the list must stop calling it absent"
+            );
+        });
+    }
+
+    /// An unverifiable binary is one that gets executed, so the download is
+    /// refused -- and refusing has to leave a way forward, not a dead dialog.
+    #[gpui::test]
+    async fn a_download_that_fails_its_checksum_says_so_and_offers_another_go(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let _store = release_with(cx, Checksum::Wrong).await;
+
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+        });
+        until_the_download_ends(&modal, cx).await;
+
+        modal.read_with(cx, |modal, _| {
+            let Step::Unreachable { engine, message } = &modal.step else {
+                panic!("a refused download must say so");
+            };
+            assert_eq!(engine.driver, "postgres");
+            assert!(message.contains("checksum"), "{message}");
+            assert!(
+                !engine.installed,
+                "nothing may be installed from a download that failed its checksum"
+            );
+        });
+
+        // And the failure must not be cached: Retry has to try, not replay.
+        modal.update_in(cx, |modal, window, cx| {
+            modal.retry_download(window, cx);
+            assert!(matches!(modal.step, Step::Downloading { .. }));
+        });
+    }
+
+    #[gpui::test]
+    async fn cancelling_a_download_returns_to_the_engine_list(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let store = release_with(cx, Checksum::Correct).await;
+
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+            modal.cancel_download(cx);
+            assert!(matches!(modal.step, Step::PickEngine));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            database::install::store::installed_path_in(store.path(), "postgres", TEST_VERSION),
+            None,
+            "giving up must leave the store as it was"
+        );
+    }
+
+    /// Oracle and SQL Server share a wire protocol with nothing Zode ships, so
+    /// there is no driver to go and get. Offering to download one would be a
+    /// button that can only fail.
+    #[gpui::test]
+    async fn an_engine_zode_publishes_no_driver_for_is_not_offered_a_download(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "oracle", cx);
+            modal.advance(window, cx);
+
+            assert!(
+                matches!(modal.step, Step::PickEngine),
+                "there is nothing to download, so nothing may be started"
+            );
+            let error = modal.error.clone().expect("it must still say why");
+            assert!(error.contains("extension"), "{error}");
+        });
+    }
+
     /// Continue on an engine with no driver must say why rather than doing
     /// nothing, which is the worst answer a button can give.
     #[gpui::test]
     async fn continuing_on_an_uninstalled_engine_explains_itself(cx: &mut gpui::TestAppContext) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres", "sqlite", "mysql", "mongodb"]).await;
 
         modal.update_in(cx, |modal, window, cx| {
             let index = modal
@@ -799,7 +1072,7 @@ mod tests {
     /// what the engine *is*, which is the whole reason the descriptions exist.
     #[gpui::test]
     async fn the_search_matches_descriptions_as_well_as_names(cx: &mut gpui::TestAppContext) {
-        let (modal, cx) = modal_for_test(cx).await;
+        let (modal, cx) = modal_for_test(cx, &["postgres", "sqlite", "mysql", "mongodb"]).await;
 
         modal.update_in(cx, |modal, window, cx| {
             modal

@@ -17,6 +17,8 @@
 //! - `client` turns those calls into typed methods and enforces the version
 //!   handshake and the request timeout.
 //! - `registry` says which drivers exist, shipped or from an extension.
+//! - `install` puts one on the machine: no driver is bundled, each arrives when
+//!   the engine it speaks for is first connected to.
 //!
 //! The last three sit behind the default `client` feature. A driver binary
 //! takes this crate with `default-features = false` and gets [`protocol`] and
@@ -31,6 +33,8 @@ pub mod server;
 
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "install")]
+pub mod install;
 #[cfg(feature = "client")]
 pub mod registry;
 #[cfg(feature = "client")]
@@ -54,6 +58,8 @@ pub use server::{Driver, serve, typed};
 #[cfg(feature = "client")]
 pub use client::{DEFAULT_REQUEST_TIMEOUT, DriverClient, DriverError};
 #[cfg(feature = "client")]
-pub use registry::{DriverDescriptor, DriverId, DriverRegistry, DriverSource};
+pub use registry::{
+    DriverDescriptor, DriverId, DriverOrigin, DriverRegistry, DriverSource, DriverState,
+};
 #[cfg(feature = "client")]
 pub use transport::{DriverBinary, Transport};
