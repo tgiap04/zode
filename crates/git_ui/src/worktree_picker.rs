@@ -648,11 +648,14 @@ impl PickerDelegate for WorktreePickerDelegate {
                 from_branch,
                 disabled_reason: None,
             } => {
-                let branch_target = match from_branch {
-                    Some(branch) => NewWorktreeBranchTarget::ExistingBranch {
-                        name: branch.clone(),
-                    },
-                    None => NewWorktreeBranchTarget::CurrentBranch,
+                // A name the person typed becomes a branch of that name, the
+                // way the branch panel's form has always treated it. It used to
+                // become a detached checkout instead -- the worktree appeared,
+                // looked right, and had nowhere to commit, which is precisely
+                // the state parallel feature work cannot use.
+                let branch_target = NewWorktreeBranchTarget::NewBranch {
+                    name: name.clone(),
+                    base: from_branch.clone(),
                 };
                 if let Some(workspace) = self.workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {

@@ -77,7 +77,8 @@ pub fn classify_worktrees(
 /// existing one. `None` means HEAD.
 pub fn resolve_worktree_branch_target(branch_target: &NewWorktreeBranchTarget) -> Option<String> {
     match branch_target {
-        NewWorktreeBranchTarget::CurrentBranch | NewWorktreeBranchTarget::NewBranch { .. } => None,
+        NewWorktreeBranchTarget::CurrentBranch => None,
+        NewWorktreeBranchTarget::NewBranch { base, .. } => base.clone(),
         NewWorktreeBranchTarget::ExistingBranch { name } => Some(name.clone()),
     }
 }
@@ -85,7 +86,7 @@ pub fn resolve_worktree_branch_target(branch_target: &NewWorktreeBranchTarget) -
 /// The branch a new worktree should create for itself, if any.
 pub fn new_branch_for_worktree(branch_target: &NewWorktreeBranchTarget) -> Option<String> {
     match branch_target {
-        NewWorktreeBranchTarget::NewBranch { name } => Some(name.clone()),
+        NewWorktreeBranchTarget::NewBranch { name, .. } => Some(name.clone()),
         NewWorktreeBranchTarget::CurrentBranch | NewWorktreeBranchTarget::ExistingBranch { .. } => {
             None
         }
@@ -120,11 +121,29 @@ fn start_worktree_creations(
     let mut creation_infos = Vec::new();
     let mut path_remapping = Vec::new();
 
-    let worktree_name = worktree_name.unwrap_or_else(|| {
-        let existing_refs: Vec<&str> = existing_worktree_names.iter().map(|s| s.as_str()).collect();
-        worktree_names::generate_worktree_name(&existing_refs, rng)
-            .unwrap_or_else(|| "worktree".to_string())
-    });
+    let worktree_name = match worktree_name {
+        // Checked before anything is created, because the name is joined into
+        // the path the worktree is made at: one that escapes that directory
+        // would be created somewhere nobody asked for.
+        Some(name) => {
+            worktree_names::validate_worktree_name(&name)
+                .map_err(|reason| anyhow::anyhow!("{reason}: {name:?}"))?;
+            name
+        }
+        None => {
+            let existing_refs: Vec<&str> =
+                existing_worktree_names.iter().map(|s| s.as_str()).collect();
+            worktree_names::generate_worktree_name(&existing_refs, rng)
+                .unwrap_or_else(|| "worktree".to_string())
+        }
+    };
+
+    // The branch is a second name with its own rules, and it does not have to
+    // match the worktree's -- `CreateWorktree` carries them separately.
+    if let Some(branch_name) = new_branch.as_deref() {
+        worktree_names::validate_worktree_name(branch_name)
+            .map_err(|reason| anyhow::anyhow!("{reason}: {branch_name:?}"))?;
+    }
 
     for repo in git_repos {
         let (work_dir, new_path, receiver) = repo.update(cx, |repo, _cx| {
@@ -174,36 +193,38 @@ pub async fn await_and_rollback_on_failure(
     fs: Arc<dyn Fs>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    let mut created_paths: Vec<PathBuf> = Vec::new();
-    let mut repos_and_paths: Vec<(Entity<Repository>, PathBuf)> = Vec::new();
-    let mut first_error: Option<anyhow::Error> = None;
-
+    // Only the worktrees that were actually created. A path whose
+    // `git worktree add` failed was never this code's to remove, and rolling
+    // one back is not harmless: `remove_worktree(force)` deletes the directory
+    // outright before it asks git anything (see `Repository::remove_worktree`).
+    //
+    // That is how a name colliding with a directory already on disk became data
+    // loss. `git worktree add` refuses a non-empty directory, so creation
+    // failed; rollback then recursively deleted that directory and everything
+    // in it -- work the user had there, which git had just declined to touch.
+    //
+    // The cost of the narrower list is an orphaned admin entry when git fails
+    // *after* registering the worktree. `git worktree prune` clears that, and a
+    // stale entry is a far smaller harm than deleting a directory this process
+    // did not create.
+    let mut outcomes = Vec::new();
     for (repo, new_path, receiver) in creation_infos {
-        repos_and_paths.push((repo.clone(), new_path.clone()));
-        match receiver.await {
-            Ok(Ok(())) => {
-                created_paths.push(new_path);
-            }
-            Ok(Err(err)) => {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
-            }
-            Err(_canceled) => {
-                if first_error.is_none() {
-                    first_error = Some(anyhow!("Worktree creation was canceled"));
-                }
-            }
-        }
+        let outcome = match receiver.await {
+            Ok(result) => result,
+            Err(_canceled) => Err(anyhow!("Worktree creation was canceled")),
+        };
+        outcomes.push((repo, new_path, outcome));
     }
+    let (created, first_error) = partition_creations(outcomes);
 
     let Some(err) = first_error else {
-        return Ok(created_paths);
+        return Ok(created.into_iter().map(|(_repo, path)| path).collect());
     };
 
-    // Rollback all attempted worktrees
+    // All-or-nothing: a creation that failed for one repository undoes the ones
+    // that succeeded, so the project is not left half-migrated.
     let mut rollback_futures = Vec::new();
-    for (rollback_repo, rollback_path) in &repos_and_paths {
+    for (rollback_repo, rollback_path) in &created {
         let receiver = cx
             .update(|_, cx| {
                 rollback_repo.update(cx, |repo, _cx| {
@@ -268,6 +289,30 @@ pub async fn await_and_rollback_on_failure(
         error_message.push_str(&rollback_failures.join(", "));
     }
     Err(anyhow!(error_message))
+}
+
+/// Splits creation outcomes into the worktrees that exist and the first failure.
+///
+/// Its own function because the difference between "attempted" and "created" is
+/// the whole of a data-loss bug: the rollback below deletes each path it is
+/// given, recursively and before git is consulted, so a path whose creation
+/// failed must never reach it.
+fn partition_creations<T>(
+    outcomes: impl IntoIterator<Item = (T, PathBuf, anyhow::Result<()>)>,
+) -> (Vec<(T, PathBuf)>, Option<anyhow::Error>) {
+    let mut created = Vec::new();
+    let mut first_error = None;
+    for (owner, path, outcome) in outcomes {
+        match outcome {
+            Ok(()) => created.push((owner, path)),
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+    }
+    (created, first_error)
 }
 
 /// Propagates worktree trust from the source workspace to the new workspace.
@@ -891,6 +936,82 @@ async fn open_worktree_workspace(
 }
 
 #[cfg(test)]
+mod rollback_tests {
+    use super::partition_creations;
+    use anyhow::anyhow;
+    use std::path::PathBuf;
+
+    fn path(name: &str) -> PathBuf {
+        PathBuf::from(format!("/worktrees/{name}/project"))
+    }
+
+    /// The defect this exists for. Rolling back a creation deletes each path it
+    /// is handed -- recursively, and before git is asked whether the path is a
+    /// worktree at all. A path whose `git worktree add` failed was never this
+    /// code's to delete: `git worktree add` refuses a directory that already
+    /// has files in it, so the most likely reason a creation failed is that
+    /// somebody's work is sitting there.
+    #[test]
+    fn a_worktree_that_failed_to_be_created_is_not_rolled_back() {
+        let (created, error) = partition_creations(vec![
+            ("repo-a", path("ok"), Ok(())),
+            ("repo-b", path("collided"), Err(anyhow!("already exists"))),
+        ]);
+
+        assert!(error.is_some(), "the failure must still be reported");
+        assert_eq!(
+            created,
+            vec![("repo-a", path("ok"))],
+            "only the worktree that was actually created may be rolled back"
+        );
+        assert!(
+            !created.iter().any(|(_, p)| *p == path("collided")),
+            "the path git refused to touch must not be handed to a recursive delete"
+        );
+    }
+
+    /// All-or-nothing is still the intent: a failure elsewhere undoes the ones
+    /// that did succeed, so the project is not left half-migrated.
+    #[test]
+    fn worktrees_that_were_created_are_still_rolled_back() {
+        let (created, error) = partition_creations(vec![
+            ("repo-a", path("one"), Ok(())),
+            ("repo-b", path("two"), Ok(())),
+            ("repo-c", path("three"), Err(anyhow!("no"))),
+        ]);
+
+        assert!(error.is_some());
+        assert_eq!(
+            created,
+            vec![("repo-a", path("one")), ("repo-b", path("two"))]
+        );
+    }
+
+    #[test]
+    fn nothing_is_rolled_back_when_every_creation_succeeded() {
+        let (created, error) = partition_creations(vec![
+            ("repo-a", path("one"), Ok(())),
+            ("repo-b", path("two"), Ok(())),
+        ]);
+
+        assert!(error.is_none(), "no failure means no rollback at all");
+        assert_eq!(created.len(), 2);
+    }
+
+    /// The first failure is what the person is told about; later ones would
+    /// only bury it.
+    #[test]
+    fn the_first_failure_is_the_one_reported() {
+        let (_created, error) = partition_creations(vec![
+            ("repo-a", path("one"), Err(anyhow!("first"))),
+            ("repo-b", path("two"), Err(anyhow!("second"))),
+        ]);
+
+        assert_eq!(error.expect("a failure").to_string(), "first");
+    }
+}
+
+#[cfg(test)]
 mod branch_target_tests {
     use super::{new_branch_for_worktree, resolve_worktree_branch_target};
     use zed_actions::NewWorktreeBranchTarget;
@@ -902,12 +1023,35 @@ mod branch_target_tests {
     fn a_new_branch_is_based_on_head_and_names_itself() {
         let target = NewWorktreeBranchTarget::NewBranch {
             name: "feat.parser".into(),
+            base: None,
         };
 
         assert_eq!(resolve_worktree_branch_target(&target), None);
         assert_eq!(
             new_branch_for_worktree(&target),
             Some("feat.parser".to_string())
+        );
+    }
+
+    /// The reason `base` exists. "Create `x` based on `develop`" used to be
+    /// expressible only by giving up the branch and checking `develop` out
+    /// detached -- a worktree that looks right and has nowhere to commit.
+    #[test]
+    fn a_new_branch_can_start_from_something_other_than_head() {
+        let target = NewWorktreeBranchTarget::NewBranch {
+            name: "feat.parser".into(),
+            base: Some("develop".into()),
+        };
+
+        assert_eq!(
+            new_branch_for_worktree(&target),
+            Some("feat.parser".to_string()),
+            "it must still create the branch that was named"
+        );
+        assert_eq!(
+            resolve_worktree_branch_target(&target),
+            Some("develop".to_string()),
+            "and start it from the branch that was picked"
         );
     }
 

@@ -274,8 +274,19 @@ pub enum NewWorktreeBranchTarget {
     CurrentBranch,
     /// Create a detached worktree at the tip of an existing branch.
     ExistingBranch { name: String },
-    /// Create a new branch off the current HEAD and check it out.
-    NewBranch { name: String },
+    /// Create a new branch and check it out.
+    ///
+    /// `base` is the commit or ref it starts from; `None` means the current
+    /// HEAD. It exists because the git layer has always taken a base
+    /// (`CreateWorktreeTarget::NewBranch::base_sha`) and this enum used to drop
+    /// it -- so "create `x` based on `develop`" could only be expressed by
+    /// giving up the branch and checking out `develop` detached, which is a
+    /// worktree with nowhere to commit.
+    NewBranch {
+        name: String,
+        #[serde(default)]
+        base: Option<String>,
+    },
 }
 
 /// Creates a new git worktree and switches the workspace to it.
