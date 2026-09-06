@@ -384,8 +384,16 @@ pub fn handle_create_worktree(
         return;
     }
 
-    // Guard against concurrent creation
-    if workspace.active_worktree_creation().label.is_some() {
+    // One at a time: both flows move the window to another workspace, and two
+    // of those racing would leave the second acting on state the first had
+    // already replaced.
+    //
+    // The refusal is logged. The title bar does show what is in flight, so this
+    // is not silent to the user -- but a dropped click left nothing behind to
+    // read afterwards, and "switching feels unresponsive" was reported long
+    // before anyone could tell it was this.
+    if let Some(in_flight) = workspace.active_worktree_creation().label.clone() {
+        log::info!("ignoring worktree request: `{in_flight}` is still in flight");
         return;
     }
 
@@ -484,8 +492,16 @@ pub fn handle_switch_worktree(
         return;
     }
 
-    // Guard against concurrent creation
-    if workspace.active_worktree_creation().label.is_some() {
+    // One at a time: both flows move the window to another workspace, and two
+    // of those racing would leave the second acting on state the first had
+    // already replaced.
+    //
+    // The refusal is logged. The title bar does show what is in flight, so this
+    // is not silent to the user -- but a dropped click left nothing behind to
+    // read afterwards, and "switching feels unresponsive" was reported long
+    // before anyone could tell it was this.
+    if let Some(in_flight) = workspace.active_worktree_creation().label.clone() {
+        log::info!("ignoring worktree request: `{in_flight}` is still in flight");
         return;
     }
 
@@ -695,6 +711,16 @@ async fn do_switch_worktree(
     .await
 }
 
+/// How long a worktree switch may take before it is worth saying so.
+///
+/// Logged rather than measured behind `ZED_MEASUREMENTS`: this is a latency
+/// nobody could put a number on until it was instrumented -- the report that
+/// prompted it was "switching feels laggy", which is not something a bug
+/// report can act on. A line in the log when a switch runs long turns the next
+/// such report into a measurement. Well under the threshold nothing is printed,
+/// so it costs one `Instant::now()` on a path that already spawns tasks.
+const SLOW_WORKTREE_SWITCH: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Core workspace opening logic shared by both create and switch flows.
 async fn open_worktree_workspace(
     all_paths: Vec<PathBuf>,
@@ -709,6 +735,7 @@ async fn open_worktree_workspace(
     agent: Option<String>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
+    let started_at = std::time::Instant::now();
     let window_handle = window_handle
         .ok_or_else(|| anyhow!("No window handle available for workspace creation"))?;
 
@@ -779,6 +806,10 @@ async fn open_worktree_workspace(
         })?;
 
     let result = workspace_task.await;
+    // Split out because the two halves fail differently: reaching the workspace
+    // is a find or a full open, and everything after it is work done on a
+    // workspace already in hand. A total alone cannot tell those apart.
+    let reached_workspace_at = started_at.elapsed();
     remote_connection::dismiss_connection_modal(&modal_workspace, cx);
     let new_workspace = result?;
 
@@ -788,29 +819,57 @@ async fn open_worktree_workspace(
         task.await.log_err();
     }
 
-    new_workspace
-        .update(cx, |workspace, cx| {
-            workspace.project().read(cx).wait_for_initial_scan(cx)
-        })
-        .await;
+    // Both of these serve the *create* path and nothing else, which is why
+    // they are behind this branch rather than run for every switch.
+    //
+    // Creating a worktree makes a checkout that nothing has looked at yet: the
+    // remapping below turns the previously-open file paths into paths under it
+    // and opens them, and neither can work until the project has scanned and
+    // the repository's own view has caught up with the `git worktree add` that
+    // just ran.
+    //
+    // Switching has neither problem. The target workspace is already open, so
+    // its scan finished long ago -- and `barrier` is not a cheap check that
+    // notices this. It appends an empty job to each repository's *serial* queue
+    // and waits for it, so it waits for every git job already queued: on the
+    // switch path, a status refresh that activating the project had itself just
+    // triggered. Nothing below consumed the result. It was latency in front of
+    // every switch, buying nothing.
+    //
+    // The delay was worse than its own length. `handle_switch_worktree` refuses
+    // to start while a switch is in flight, and the in-flight flag is only
+    // cleared after these awaits -- so a second switch during the wait did
+    // nothing at all, which is what made bouncing between two worktrees feel
+    // unresponsive rather than merely slow.
+    if is_creating_new_worktree {
+        new_workspace
+            .update(cx, |workspace, cx| {
+                workspace.project().read(cx).wait_for_initial_scan(cx)
+            })
+            .await;
 
-    new_workspace
-        .update(cx, |workspace, cx| {
-            let repos = workspace
-                .project()
-                .read(cx)
-                .repositories(cx)
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
+        new_workspace
+            .update(cx, |workspace, cx| {
+                let repos = workspace
+                    .project()
+                    .read(cx)
+                    .repositories(cx)
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
 
-            let tasks = repos
-                .into_iter()
-                .map(|repo| repo.update(cx, |repo, _| repo.barrier()));
-            futures::future::join_all(tasks)
-        })
-        .await;
+                let tasks = repos
+                    .into_iter()
+                    .map(|repo| repo.update(cx, |repo, _| repo.barrier()));
+                futures::future::join_all(tasks)
+            })
+            .await;
+    }
 
+    // Runs for both, and after the waits above rather than before: it resolves
+    // each path to a worktree, which for a freshly created checkout only exists
+    // once the scan has registered it. A switch's worktrees were registered when
+    // the workspace was opened.
     maybe_propagate_worktree_trust(&workspace, &new_workspace, &all_paths, cx);
 
     if is_creating_new_worktree {
@@ -901,6 +960,18 @@ async fn open_worktree_workspace(
                 }
             });
         })?;
+    }
+
+    let elapsed = started_at.elapsed();
+    if elapsed > SLOW_WORKTREE_SWITCH {
+        log::info!(
+            "worktree {} took {elapsed:?} ({reached_workspace_at:?} of it reaching the workspace)",
+            if is_creating_new_worktree {
+                "create"
+            } else {
+                "switch"
+            },
+        );
     }
 
     // Clear the creation status on the SOURCE workspace so its title bar
