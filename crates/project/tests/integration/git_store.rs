@@ -1336,6 +1336,48 @@ mod git_worktrees {
         assert_eq!(worktree_2.sha.as_ref(), "fake-sha");
     }
 
+    /// An empty branch name is carried over the wire as an empty `name`, which
+    /// the remote handler reads as "no branch" and turns into a detached
+    /// worktree. Locally git would refuse it. Refusing it here keeps one
+    /// request from meaning two different things depending on where the
+    /// repository lives.
+    #[gpui::test]
+    async fn test_create_worktree_refuses_an_empty_branch_name(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(path!("/root"), json!({ ".git": {}, "src": {} }))
+            .await;
+        fs.set_head_and_index_for_repo(path!("/root/.git").as_ref(), &[]);
+
+        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        let repository = project.update(cx, |project, cx| {
+            project.repositories(cx).values().next().unwrap().clone()
+        });
+
+        let result = cx
+            .update(|cx| {
+                repository.update(cx, |repository, _| {
+                    repository.create_worktree(
+                        git::repository::CreateWorktreeTarget::NewBranch {
+                            branch_name: String::new(),
+                            base_sha: None,
+                        },
+                        PathBuf::from(path!("/root/empty-name")),
+                    )
+                })
+            })
+            .await
+            .expect("the refusal must arrive, not hang");
+
+        let error = result.expect_err("an empty branch name must be refused");
+        assert!(
+            error.to_string().contains("cannot be empty"),
+            "the refusal must say why: {error}"
+        );
+    }
+
     #[gpui::test]
     async fn test_remove_worktree_removes_managed_parent_directories(cx: &mut TestAppContext) {
         init_test(cx);

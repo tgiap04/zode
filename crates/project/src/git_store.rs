@@ -6252,6 +6252,20 @@ impl Repository {
         path: PathBuf,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        // An empty branch name is refused here rather than sent. Locally git
+        // would reject it; over the wire it is carried as an empty `name`,
+        // which the handler reads as "no branch" and turns into a detached
+        // worktree -- the same request quietly meaning two different things
+        // depending on where the repository lives.
+        if let Some(branch_name) = target.branch_name()
+            && branch_name.trim().is_empty()
+        {
+            let (sender, receiver) = oneshot::channel();
+            sender
+                .send(Err(anyhow!("a worktree branch name cannot be empty")))
+                .ok();
+            return receiver;
+        }
         let job_description = match target.branch_name() {
             Some(branch_name) => format!("git worktree add: {branch_name}"),
             None => "git worktree add (detached)".to_string(),
@@ -6463,6 +6477,17 @@ impl Repository {
         })
     }
 
+    /// Removes a linked worktree.
+    ///
+    /// **`force` deletes `path` recursively before git is consulted**, so it
+    /// must only ever be given a path this process created. It does not check
+    /// that `path` is a worktree, and `git worktree remove` refusing one is not
+    /// a safety net -- the directory is already gone by then. Rolling back a
+    /// creation that *failed* used to pass a path git had declined to touch,
+    /// which deleted whatever was already there.
+    ///
+    /// `force: false` leaves the directory to git, which refuses to remove a
+    /// dirty one. That is the safe default for anything user-initiated.
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         let original_repo_abs_path = self.snapshot.original_repo_abs_path.clone();
