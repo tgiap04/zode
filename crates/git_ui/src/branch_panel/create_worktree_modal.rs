@@ -73,6 +73,9 @@ pub(crate) fn chosen_target(
             let name = typed.trim();
             (!name.is_empty()).then(|| NewWorktreeBranchTarget::NewBranch {
                 name: name.to_string(),
+                // The Name tab offers no base to pick, so HEAD it is -- which
+                // is what this tab has always done.
+                base: None,
             })
         }
         // The typed text filters the list here; it does not name anything. A
@@ -243,7 +246,7 @@ impl CreateWorktreeModal {
         };
         let location = self.location.clone();
         let worktree_name = match &branch_target {
-            NewWorktreeBranchTarget::NewBranch { name } => Some(name.clone()),
+            NewWorktreeBranchTarget::NewBranch { name, .. } => Some(name.clone()),
             _ => None,
         };
 
@@ -666,9 +669,25 @@ mod tests {
         assert_eq!(
             chosen_target(NameMode::Name, "feat.parser", None),
             Some(NewWorktreeBranchTarget::NewBranch {
-                name: "feat.parser".into()
+                name: "feat.parser".into(),
+                base: None
             })
         );
+    }
+
+    /// The Name tab and the worktree picker are two ways into one feature and
+    /// used to disagree: the form created a branch, the picker created a
+    /// detached checkout from the same typed text. Whichever one someone
+    /// reaches for, a name means a branch.
+    #[test]
+    fn a_typed_name_means_the_same_thing_as_it_does_in_the_picker() {
+        let from_form = chosen_target(NameMode::Name, "feat.parser", None);
+        let from_picker = Some(NewWorktreeBranchTarget::NewBranch {
+            name: "feat.parser".into(),
+            base: None,
+        });
+
+        assert_eq!(from_form, from_picker);
     }
 
     #[test]
@@ -676,7 +695,8 @@ mod tests {
         assert_eq!(
             chosen_target(NameMode::Name, "  feat.parser  ", None),
             Some(NewWorktreeBranchTarget::NewBranch {
-                name: "feat.parser".into()
+                name: "feat.parser".into(),
+                base: None
             })
         );
     }
