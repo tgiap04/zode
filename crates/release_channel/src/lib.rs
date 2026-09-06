@@ -24,6 +24,14 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
         _ => panic!("invalid release channel {}", *RELEASE_CHANNEL_NAME),
     });
 
+/// The GitHub repository this build's releases are published to.
+///
+/// One spelling, because more than one thing now downloads from it: the
+/// in-app updater fetches the app, and the database panel fetches driver
+/// sidecars, which are published as assets of the very same release. Two
+/// copies of this string would be two things to change and one to forget.
+pub const RELEASE_REPO: &str = "tgiap04/zode";
+
 /// The app identifier for the current release channel, Windows only.
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {

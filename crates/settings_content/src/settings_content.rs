@@ -108,6 +108,8 @@ pub struct SettingsContent {
 
     pub git_panel: Option<GitPanelSettingsContent>,
 
+    pub branch_panel: Option<BranchPanelSettingsContent>,
+
     pub tabs: Option<ItemSettingsContent>,
     pub tab_bar: Option<TabBarSettingsContent>,
     pub status_bar: Option<StatusBarSettingsContent>,
@@ -626,6 +628,31 @@ pub struct GitPanelSettingsContent {
     pub show_count_badge: Option<bool>,
 
     /// Whether the git panel should open on startup.
+    ///
+    /// Default: false
+    pub starts_open: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct BranchPanelSettingsContent {
+    /// Whether to show the branch panel button in the rail.
+    ///
+    /// Default: true
+    pub button: Option<bool>,
+
+    /// Where to dock the branch panel.
+    ///
+    /// Default: left
+    pub dock: Option<DockPosition>,
+
+    /// Default width of the branch panel in pixels.
+    ///
+    /// Default: 280
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub default_width: Option<f32>,
+
+    /// Whether the branch panel should open on startup.
     ///
     /// Default: false
     pub starts_open: Option<bool>,

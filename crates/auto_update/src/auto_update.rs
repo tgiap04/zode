@@ -4,8 +4,9 @@ use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, Global, Task, Window,
     actions,
 };
+use http_client::github::ensure_release_host_is_trusted;
 use http_client::{HttpClient, HttpRequestExt as _, RedirectPolicy, Request};
-use release_channel::ReleaseChannel;
+use release_channel::{RELEASE_REPO, ReleaseChannel};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -25,11 +26,6 @@ use util::command::new_command;
 use workspace::Workspace;
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
-
-/// The repository releases are read from. `github.repository` is not available to a
-/// running app the way it is to a workflow, so this is the one place the fork's identity
-/// is written down.
-const RELEASE_REPO: &str = "tgiap04/zode";
 
 // Only Linux reports a missing dependency this way -- it is the one platform where the
 // installer shells out to a tool (`rsync`) that may simply not be present.
@@ -186,37 +182,6 @@ struct LatestReleaseAsset {
     /// uploaded before GitHub began reporting digests carry `null` -- which is why the
     /// absent case has to be a decision rather than a default. See `require_sha256`.
     digest: Option<String>,
-}
-
-/// The hosts a release asset may legitimately be downloaded from.
-///
-/// Checked before the request goes out, not after: the URL arrives inside a JSON body, so
-/// without this the app would connect to whatever host that body named. The digest check
-/// in `download_release` is what makes the *bytes* trustworthy; this is what stops the
-/// request being made to a stranger in the first place.
-const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
-    "github.com",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-];
-
-/// Rejects a download URL that is not HTTPS on one of [`ALLOWED_DOWNLOAD_HOSTS`].
-///
-/// Compares the parsed host exactly rather than by prefix: `https://github.com.example/`
-/// starts with the expected text and is not GitHub.
-fn ensure_download_host_is_trusted(url: &str) -> Result<()> {
-    let parsed = url::Url::parse(url).with_context(|| format!("unparsable asset url: {url:?}"))?;
-    anyhow::ensure!(
-        parsed.scheme() == "https",
-        "release asset url is not https: {url:?}"
-    );
-    let host = parsed.host_str().unwrap_or_default();
-    anyhow::ensure!(
-        ALLOWED_DOWNLOAD_HOSTS.contains(&host),
-        "release asset url points at {host:?}, which is not a GitHub release host. \
-         Refusing to download an update from an unexpected host."
-    );
-    Ok(())
 }
 
 /// Pulls the lowercase hex SHA-256 out of GitHub's `"sha256:<hex>"` digest field.
@@ -582,7 +547,7 @@ impl AutoUpdater {
         // Both checks happen here, before anything is downloaded: an update that could
         // only be rejected after pulling a few hundred megabytes should never be offered
         // as available in the first place.
-        ensure_download_host_is_trusted(&asset.browser_download_url)?;
+        ensure_release_host_is_trusted(&asset.browser_download_url)?;
         let sha256 = require_sha256(&asset.name, asset.digest.as_deref())?;
 
         Ok(ReleaseAsset {
@@ -826,7 +791,7 @@ async fn download_release(
     release: ReleaseAsset,
     client: Arc<dyn HttpClient>,
 ) -> Result<()> {
-    ensure_download_host_is_trusted(&release.url)?;
+    ensure_release_host_is_trusted(&release.url)?;
 
     let parent = target_path
         .parent()
@@ -1320,7 +1285,7 @@ mod tests {
             "not a url",
         ] {
             assert!(
-                ensure_download_host_is_trusted(bad).is_err(),
+                ensure_release_host_is_trusted(bad).is_err(),
                 "should have rejected {bad:?}"
             );
         }
@@ -1330,7 +1295,7 @@ mod tests {
             "https://objects.githubusercontent.com/anything",
             "https://release-assets.githubusercontent.com/anything",
         ] {
-            ensure_download_host_is_trusted(good)
+            ensure_release_host_is_trusted(good)
                 .unwrap_or_else(|error| panic!("should have accepted {good:?}: {error}"));
         }
     }

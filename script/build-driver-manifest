@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Writes the driver manifest for a release, from the driver assets already
+# gathered for upload.
+#
+# The manifest is what the app reads to learn which drivers a release published
+# and what each one should hash to. One small JSON asset rather than the GitHub
+# API: discovering the same thing through the API would take a token, a page of
+# release metadata, and a guess at asset naming.
+#
+# Checksums are computed here, from the very bytes about to be uploaded, rather
+# than carried alongside each archive from the job that built it. A checksum
+# that travels separately from what it describes is one more thing that can
+# disagree, and the point of it is to detect disagreement.
+#
+#   script/build-driver-manifest <directory of release assets> <version>
+#
+# Reads `zode-db-<id>-<target>.tar.gz` and writes
+# `zode-db-drivers-manifest.json` beside them. The shapes here are a contract
+# with `database::install::manifest`.
+
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <asset-directory> <version>" >&2
+    exit 1
+fi
+
+asset_directory="$1"
+version="$2"
+manifest="${asset_directory}/zode-db-drivers-manifest.json"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+entries=()
+for asset_path in "${asset_directory}"/zode-db-*-*.tar.gz; do
+    [[ -f "${asset_path}" ]] || continue
+    asset=$(basename "${asset_path}")
+
+    # `zode-db-<id>-<target>.<ext>`: the id has no dash, the target has several,
+    # so the id is what sits between the fixed prefix and the first dash after it.
+    remainder="${asset#zode-db-}"
+    remainder="${remainder%.tar.gz}"
+    id="${remainder%%-*}"
+    target="${remainder#*-}"
+
+    # The executable inside the archive, which is what the app looks for once
+    # it has unpacked.
+    entry="zode-db-${id}"
+    [[ "${target}" == *windows* ]] && entry="${entry}.exe"
+
+    size=$(wc -c < "${asset_path}" | tr -d ' ')
+    checksum=$(sha256_of "${asset_path}")
+
+    entries+=("$(printf '{"id":"%s","target":"%s","asset":"%s","entry":"%s","sha256":"%s","size":%s}' \
+        "${id}" "${target}" "${asset}" "${entry}" "${checksum}" "${size}")")
+    echo "manifest: ${id} ${target} ${checksum}"
+done
+
+if [[ ${#entries[@]} -eq 0 ]]; then
+    # Loud rather than an empty manifest. An empty one uploads cleanly and then
+    # every download fails with "this release publishes no such driver", which
+    # points at the app rather than at the packaging step that went wrong.
+    echo "error: no driver assets found in ${asset_directory}" >&2
+    exit 1
+fi
+
+printf '{"version":"%s","drivers":[%s]}\n' "${version}" "$(IFS=,; echo "${entries[*]}")" > "${manifest}"
+
+if command -v jq >/dev/null 2>&1; then
+    jq . "${manifest}" > "${manifest}.pretty" && mv "${manifest}.pretty" "${manifest}"
+fi
+
+echo "wrote ${manifest} with ${#entries[@]} drivers"

@@ -75,11 +75,14 @@ async fn the_panel_draws_its_rows(cx: &mut TestAppContext) {
 
     // Sessions from this project, plus one from somewhere else that must not show.
     panel.update(cx, |panel, cx| {
-        panel.sessions = vec![
+        let sessions = vec![
             session("one", "/root", "Newest here", 300),
             session("two", "/root", "Older here", 200),
             session("elsewhere", "/other", "Another project", 100),
         ];
+        panel
+            .store
+            .update(cx, |store, cx| store.set_index_for_test(sessions, cx));
         cx.notify();
     });
     cx.run_until_parked();
@@ -159,7 +162,10 @@ async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestA
     });
     cx.run_until_parked();
     panel.update(cx, |panel, cx| {
-        panel.sessions = vec![session("one", "/root", "Newest here", 300)];
+        let sessions = vec![session("one", "/root", "Newest here", 300)];
+        panel
+            .store
+            .update(cx, |store, cx| store.set_index_for_test(sessions, cx));
         cx.notify();
     });
     cx.run_until_parked();
@@ -209,7 +215,10 @@ async fn a_workspace_with_no_worktree_lists_nothing(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     panel.update(cx, |panel, cx| {
-        panel.sessions = vec![session("elsewhere", "/other", "Another project", 100)];
+        let sessions = vec![session("elsewhere", "/other", "Another project", 100)];
+        panel
+            .store
+            .update(cx, |store, cx| store.set_index_for_test(sessions, cx));
         cx.notify();
     });
     cx.run_until_parked();

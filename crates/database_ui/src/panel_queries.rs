@@ -103,18 +103,15 @@ impl DatabasePanel {
         cx: &mut Context<Self>,
     ) {
         self.set_active(index, window, cx);
-        // Quoted by the driver's own rule, not by a rule this crate picked:
-        // engines disagree about the quote character, and getting it wrong
-        // turns every click on a table into a syntax error.
+        // Built by the driver's own rule, not by a rule this crate picked.
+        // Engines disagree about the quote character -- and about whether a
+        // read is a `SELECT` at all: a document store was handed one here and
+        // could only refuse it, so every click on a collection was a failed
+        // query. Both the quoting and the shape now come from `Capabilities`.
         let Some((_, session)) = self.active_session() else {
             return;
         };
-        let quote = &session.capabilities;
-        let sql = format!(
-            "SELECT * FROM {}.{}",
-            quote.quote_identifier(schema),
-            quote.quote_identifier(table)
-        );
+        let sql = session.capabilities.read_table_statement(schema, table);
         let limit = DatabaseSettings::get_global(cx).page_size;
         self.run_page(sql, 0, limit, window, cx);
     }

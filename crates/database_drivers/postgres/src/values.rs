@@ -64,7 +64,7 @@ pub fn cell(value: Option<&str>, kind: Option<&Type>) -> Cell {
 
 /// PostgreSQL's errors, sorted into the few kinds the UI reacts to differently.
 pub fn error(error: postgres::Error) -> ResponseError {
-    let detail = error.to_string();
+    let detail = database::protocol::error_chain(&error);
     let code = error
         .as_db_error()
         .map(|db| match db.code() {
@@ -89,9 +89,81 @@ pub fn error(error: postgres::Error) -> ResponseError {
     ResponseError::new(code, message).with_detail(detail)
 }
 
+/// Where a `Config` says it was going to connect, in one line.
+///
+/// Read back off the parsed config rather than off the URL, so a password can
+/// never ride along into a message the UI shows and a log keeps. A connection
+/// failure that names no address leaves the reader to go and look up which
+/// server this connection meant -- which, with several configured, is the whole
+/// question.
+pub fn server_address(config: &postgres::Config) -> String {
+    let ports = config.get_ports();
+    config
+        .get_hosts()
+        .iter()
+        .enumerate()
+        .map(|(index, host)| match host {
+            postgres::config::Host::Tcp(host) => {
+                // One port serves every host when only one was given, which is
+                // the rule libpq itself follows.
+                match ports.get(index).or_else(|| ports.first()) {
+                    Some(port) => format!("{host}:{port}"),
+                    None => host.clone(),
+                }
+            }
+            // Gated because the variant is: `Host::Unix` is declared
+            // `#[cfg(unix)]` in tokio-postgres, so naming it at all fails to
+            // compile on Windows. With it gone the match is still exhaustive
+            // there -- `Tcp` is the only variant the enum has.
+            #[cfg(unix)]
+            postgres::config::Host::Unix(path) => path.display().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr as _;
+
+    /// The defect this pins. `postgres::Error`'s own `Display` for a connect
+    /// failure is the fixed sentence "error connecting to server"; the
+    /// `io::Error` that says *why* -- refused, unreachable, unresolved -- is
+    /// reachable only through `source()`. Reported with `to_string()`, the one
+    /// fact worth having never left this function, and a connection failed on
+    /// screen for no stated reason.
+    ///
+    /// Hermetic: port 1 is reserved and never listening, so this needs no
+    /// server and asserts on the shape of the chain rather than on any one
+    /// platform's wording for a refusal.
+    #[test]
+    fn a_connect_failure_carries_the_reason_underneath_it() {
+        let config = postgres::Config::from_str("postgres://someone@127.0.0.1:1/nothing")
+            .expect("a well-formed URL");
+        let Err(failure) = config.connect(postgres::NoTls) else {
+            panic!("nothing listens on port 1, so the connect must fail");
+        };
+
+        let mapped = error(failure);
+        let detail = mapped.detail.expect("a mapped error always carries detail");
+        assert!(
+            detail.starts_with("error connecting to server: "),
+            "the cause below the fixed sentence must survive, got {detail:?}"
+        );
+    }
+
+    /// A failure that names no server leaves the reader to work out which of
+    /// their connections it was -- and the address must come off the parsed
+    /// config, never the URL, so no password can ride along into a message.
+    #[test]
+    fn the_address_is_named_without_the_password() {
+        let config = postgres::Config::from_str("postgres://someone:hunter2@db.example:5433/app")
+            .expect("a well-formed URL");
+        let address = server_address(&config);
+        assert_eq!(address, "db.example:5433");
+        assert!(!address.contains("hunter2"), "{address}");
+    }
 
     #[test]
     fn null_is_never_the_empty_string() {

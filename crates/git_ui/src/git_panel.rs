@@ -4,7 +4,7 @@ use crate::commit_tooltip::CommitTooltip;
 use crate::commit_view::CommitView;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::project_diff::{self, BranchDiff, Diff, ProjectDiff};
-use crate::remote_output::{self, RemoteAction, SuccessMessage};
+use crate::remote_output::{self, RemoteAction};
 use crate::{branch_picker, picker_prompt, render_remote_button};
 use crate::{
     file_history_view::FileHistoryView, git_panel_settings::GitPanelSettings, git_status_icon,
@@ -3840,48 +3840,7 @@ impl GitPanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-
-        workspace.update(cx, |workspace, cx| {
-            let SuccessMessage { message, style } = remote_output::format_output(&action, info);
-            let workspace_weak = cx.weak_entity();
-            let operation = action.name();
-
-            let status_toast = StatusToast::new(message, cx, move |this, _cx| {
-                use remote_output::SuccessStyle::*;
-                match style {
-                    Toast => this.icon(
-                        Icon::new(IconName::GitBranch)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    ),
-                    ToastWithLog { output } => this
-                        .icon(
-                            Icon::new(IconName::GitBranch)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .action("View Log", move |window, cx| {
-                            let output = output.clone();
-                            let output =
-                                format!("stdout:\n{}\nstderr:\n{}", output.stdout, output.stderr);
-                            workspace_weak
-                                .update(cx, move |workspace, cx| {
-                                    open_output(operation, workspace, &output, window, cx)
-                                })
-                                .ok();
-                        }),
-                    PushPrLink { text, link } => this
-                        .icon(
-                            Icon::new(IconName::GitBranch)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .action(text, move |_, cx| cx.open_url(&link)),
-                }
-                .dismiss_button(true)
-            });
-            workspace.toggle_status_toast(status_toast, cx)
-        });
+        remote_output::show_remote_output(workspace, action, info, cx);
     }
 
     pub fn can_commit(&self) -> bool {
@@ -5155,7 +5114,7 @@ impl Component for RepositoryRow {
     }
 }
 
-fn open_output(
+pub(crate) fn open_output(
     operation: impl Into<SharedString>,
     workspace: &mut Workspace,
     output: &str,

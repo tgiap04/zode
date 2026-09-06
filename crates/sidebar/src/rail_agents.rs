@@ -3,8 +3,8 @@ use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE};
 use agent_ui::AgentView;
 use gpui::{AnyElement, App, Context, Window};
 use project::AgentId;
-use ui::{Tooltip, prelude::*};
-use zed_actions::agent::{AgentViewMode, OpenAgent, ToggleAgent};
+use ui::{ContextMenu, ContextMenuEntry, Tooltip, prelude::*, right_click_menu};
+use zed_actions::agent::{NewAgent, ToggleAgent};
 
 /// The agents the rail draws a button for.
 ///
@@ -54,58 +54,83 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let buttons = RAIL_AGENTS.iter().map(|(agent, icon, label)| {
-            // One click reopens the agent the way it was last used — the mode is a
-            // choice someone already made, and asking them to make it again every
-            // time is the same as not having asked. The terminal stays one
-            // right-click away for the times the answer is "not that, this once".
-            // A toggle, not an open: pressing a lit button has to put the
-            // column away, and `OpenAgent` has no such branch. The mode is
-            // still remembered -- the toggle's open path reopens the way it was
-            // last used, which is the choice someone already made.
-            let remembered = ToggleAgent {
-                agent: (*agent).to_string(),
-            };
-            let terminal = OpenAgent {
-                agent: (*agent).to_string(),
-                mode: Some(AgentViewMode::Terminal),
-            };
+        let buttons = RAIL_AGENTS
+            .iter()
+            .enumerate()
+            .map(|(ix, (agent, icon, label))| {
+                // One click reopens the agent the way it was last used — the mode is a
+                // choice someone already made, and asking them to make it again every
+                // time is the same as not having asked.
+                // A toggle, not an open: pressing a lit button has to put the
+                // column away, and `OpenAgent` has no such branch. The mode is
+                // still remembered -- the toggle's open path reopens the way it was
+                // last used, which is the choice someone already made.
+                let remembered = ToggleAgent {
+                    agent: (*agent).to_string(),
+                };
+                // A second session rather than a second look at the first.
+                // Behind the menu on purpose: `NewAgent` spends another CLI
+                // process, and its own doc says only a deliberate choice
+                // should. A left-click that sometimes started a process and
+                // sometimes did not would be the opposite of deliberate.
+                let new_session = NewAgent {
+                    agent: (*agent).to_string(),
+                    mode: None,
+                };
 
-            // Lit whether or not its tab is the active one, and whichever pane it
-            // sits in: two agents can be open at once, so there is no single "the
-            // active one" to point at.
-            // `AgentId::new(*agent)` rather than `.to_string()`: these ids are
-            // `&'static str`, so a `SharedString` borrows them outright, while
-            // going through `String` allocated once per button per frame.
-            let is_active = self.agent_is_open(&AgentId::new(*agent), cx);
+                // Lit whether or not its tab is the active one, and whichever pane it
+                // sits in: two agents can be open at once, so there is no single "the
+                // active one" to point at.
+                // `AgentId::new(*agent)` rather than `.to_string()`: these ids are
+                // `&'static str`, so a `SharedString` borrows them outright, while
+                // going through `String` allocated once per button per frame.
+                let is_active = self.agent_is_open(&AgentId::new(*agent), cx);
 
-            IconButton::new(*agent, *icon)
-                .icon_size(RAIL_ICON_SIZE)
-                .toggle_state(is_active)
-                // A right-click is the only way to open straight into the terminal,
-                // and a gesture with nothing naming it is a gesture nobody finds.
-                .tooltip({
-                    let remembered = remembered.clone();
-                    move |_window, cx| {
-                        Tooltip::with_meta(
-                            *label,
-                            Some(&remembered),
-                            "Right-click to open its terminal",
-                            cx,
-                        )
-                    }
-                })
-                // Dispatch rather than opening the view directly: this body runs
-                // inside `Sidebar::update`, and opening a pane reaches back into
-                // the workspace. Same reasoning as `render_rail_footer`.
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(Box::new(remembered.clone()), cx)
-                })
-                .on_right_click(move |_, window, cx| {
-                    let terminal = terminal.clone();
-                    window.dispatch_action(Box::new(terminal), cx);
-                })
-        });
+                // A menu rather than one hidden action: right-click used to go
+                // straight to the terminal, which left nowhere to put anything
+                // else and no way to discover what the gesture did.
+                right_click_menu(("rail-agent-menu", ix))
+                    .menu(move |window, cx| {
+                        let new_session = new_session.clone();
+                        ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                            menu.item(
+                                ContextMenuEntry::new("New Session")
+                                    .icon(IconName::Plus)
+                                    .icon_position(IconPosition::Start)
+                                    .handler(move |window, cx| {
+                                        window.dispatch_action(Box::new(new_session.clone()), cx);
+                                    }),
+                            )
+                        })
+                    })
+                    // Built inside the trigger rather than outside: `IconButton`
+                    // is not `Clone`, and the trigger is called on every draw of
+                    // the menu's open and closed states alike.
+                    .trigger(move |_is_open, _window, _cx| {
+                        let remembered = remembered.clone();
+                        IconButton::new(*agent, *icon)
+                            .icon_size(RAIL_ICON_SIZE)
+                            .toggle_state(is_active)
+                            .tooltip({
+                                let remembered = remembered.clone();
+                                move |_window, cx| {
+                                    Tooltip::with_meta(
+                                        *label,
+                                        Some(&remembered),
+                                        "Right-click for a new session",
+                                        cx,
+                                    )
+                                }
+                            })
+                            // Dispatch rather than opening the view directly: this body
+                            // runs inside `Sidebar::update`, and opening a pane reaches
+                            // back into the workspace. Same reasoning as
+                            // `render_rail_footer`.
+                            .on_click(move |_, window, cx| {
+                                window.dispatch_action(Box::new(remembered.clone()), cx)
+                            })
+                    })
+            });
 
         v_flex()
             .flex_shrink_0()
@@ -187,6 +212,74 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// The menu answers the right button, and only that.
+    ///
+    /// Both halves matter. A left click has to stay the toggle -- that is the
+    /// rail's primary action, and a menu that also opened on the left button
+    /// would take it away. And the entry has to actually be on screen: it is
+    /// the only thing behind this gesture, so a menu that fails to draw leaves
+    /// the right button doing nothing at all.
+    ///
+    /// The bounds check guards the layout trap `rail_item` already paid for:
+    /// `right_click_menu` requests `Style::default()` and shrink-wraps its
+    /// child, which cost that row its centring. State assertions see none of
+    /// that.
+    #[gpui::test]
+    async fn the_rail_button_answers_the_right_button_and_not_the_left(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            let mw_entity = cx.entity();
+            let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+            mw.register_sidebar(sidebar, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let button = cx
+            .debug_bounds("ICON-AiClaude")
+            .expect("the rail must draw a button for Claude Code");
+        assert!(
+            button.size.width > gpui::px(0.),
+            "a shrink-wrapped button with no width is one nobody can click: {button:?}"
+        );
+
+        // Left first: whatever else it does, it must not be this.
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New Session").is_none(),
+            "a left click must stay the toggle, not open a menu"
+        );
+
+        cx.simulate_event(MouseDownEvent {
+            position: button.center(),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Right,
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: button.center(),
+            modifiers: Modifiers::default(),
+            button: MouseButton::Right,
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New Session").is_some(),
+            "the menu must carry the one entry it exists for"
+        );
     }
 
     /// Every rail button must name an agent the store actually knows about, or the

@@ -55,6 +55,12 @@ jobs:
         name: zode-linux-aarch64.tar.gz
         path: target/release/zode-linux-aarch64.tar.gz
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-aarch64-unknown-linux-gnu'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-aarch64-unknown-linux-gnu
+        path: target/database-drivers
+        if-no-files-found: error
     container:
       image: ubuntu:22.04
     timeout-minutes: 360
@@ -103,6 +109,12 @@ jobs:
         name: zode-linux-x86_64.tar.gz
         path: target/release/zode-linux-x86_64.tar.gz
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-x86_64-unknown-linux-gnu'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-x86_64-unknown-linux-gnu
+        path: target/database-drivers
+        if-no-files-found: error
     container:
       image: ubuntu:22.04
     timeout-minutes: 360
@@ -144,6 +156,12 @@ jobs:
         name: Zode-aarch64.dmg
         path: target/aarch64-apple-darwin/release/Zode-aarch64.dmg
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-aarch64-apple-darwin'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-aarch64-apple-darwin
+        path: target/database-drivers
+        if-no-files-found: error
     timeout-minutes: 360
   bundle_mac_x86_64:
     if: |-
@@ -182,6 +200,12 @@ jobs:
       with:
         name: Zode-x86_64.dmg
         path: target/x86_64-apple-darwin/release/Zode-x86_64.dmg
+        if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-x86_64-apple-darwin'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-x86_64-apple-darwin
+        path: target/database-drivers
         if-no-files-found: error
     timeout-minutes: 360
   bundle_windows_aarch64:
@@ -230,6 +254,12 @@ jobs:
         name: Zode-aarch64.exe
         path: target/Zode-aarch64.exe
         if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-aarch64-pc-windows-msvc'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-aarch64-pc-windows-msvc
+        path: target/database-drivers
+        if-no-files-found: error
     timeout-minutes: 360
   bundle_windows_x86_64:
     if: |-
@@ -276,6 +306,12 @@ jobs:
       with:
         name: Zode-x86_64.exe
         path: target/Zode-x86_64.exe
+        if-no-files-found: error
+    - name: '@actions/upload-artifact database-drivers-x86_64-pc-windows-msvc'
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+      with:
+        name: database-drivers-x86_64-pc-windows-msvc
+        path: target/database-drivers
         if-no-files-found: error
     timeout-minutes: 360
 concurrency:

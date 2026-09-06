@@ -1015,6 +1015,19 @@
     // Default: true
     "diff_stats": true,
   },
+  // The branch panel: repositories, branches, worktrees, stashes and tags of
+  // the current project, as a collapsible tree.
+  "branch_panel": {
+    // Whether to show the branch panel button in the rail.
+    "button": true,
+    // Where to dock the branch panel. Can be 'left' or 'right'. Defaults to the
+    // rail's own side so its button appears in the rail rather than the status bar.
+    "dock": "left",
+    // Default width of the branch panel.
+    "default_width": 280,
+    // Whether the branch panel should open on startup.
+    "starts_open": false,
+  },
   // Whether to use language servers to provide code intelligence.
   "enable_language_server": true,
   // Whether to perform linked edits of associated ranges, if the language server supports it.

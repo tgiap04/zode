@@ -16,8 +16,8 @@ This is on by default:
 ## What holds it
 
 An agent tab whose CLI is **still running**. Not an agent tab that is merely
-open — a finished session keeps its tab so you can read the transcript, and that
-tab holds nothing.
+open — once the CLI ends, whether the tab then shows a shell or keeps the
+terminal the agent failed in, it holds nothing.
 
 Subagents need no special handling. A subagent runs inside the agent's own
 process, so while it works the CLI has not exited and the hold stands.

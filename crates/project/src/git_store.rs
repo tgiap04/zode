@@ -36,7 +36,7 @@ use git::{
         Branch, CommitDetails, CommitDiff, CommitFile, CommitOptions, CreateWorktreeTarget,
         DiffType, FetchOptions, GitCommitTemplate, GitRepository, GitRepositoryCheckpoint,
         GraphCommitData, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, UpstreamTrackingStatus,
+        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, Tag, UpstreamTrackingStatus,
         Worktree as GitWorktree,
     },
     stash::{GitStash, StashEntry},
@@ -543,6 +543,8 @@ impl GitStore {
     pub fn init(client: &AnyProtoClient) {
         client.add_entity_request_handler(Self::handle_get_remotes);
         client.add_entity_request_handler(Self::handle_get_branches);
+        client.add_entity_request_handler(Self::handle_get_tags);
+        client.add_entity_request_handler(Self::handle_checkout_tag);
         client.add_entity_request_handler(Self::handle_get_default_branch);
         client.add_entity_request_handler(Self::handle_change_branch);
         client.add_entity_request_handler(Self::handle_create_branch);
@@ -2600,6 +2602,40 @@ impl GitStore {
                 .collect::<Vec<_>>(),
         })
     }
+    async fn handle_get_tags(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitGetTags>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GitTagsResponse> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        let tags = repository_handle
+            .update(&mut cx, |repository_handle, _| repository_handle.tags())
+            .await??;
+
+        Ok(proto::GitTagsResponse {
+            tags: tags.iter().map(tag_to_proto).collect(),
+        })
+    }
+
+    async fn handle_checkout_tag(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitCheckoutTag>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+
+        repository_handle
+            .update(&mut cx, |repository_handle, _| {
+                repository_handle.checkout_tag(envelope.payload.name)
+            })
+            .await??;
+
+        Ok(proto::Ack {})
+    }
+
     async fn handle_get_default_branch(
         this: Entity<Self>,
         envelope: TypedEnvelope<proto::GetDefaultBranch>,
@@ -6094,6 +6130,53 @@ impl Repository {
         })
     }
 
+    pub fn tags(&mut self) -> oneshot::Receiver<Result<Vec<Tag>>> {
+        let id = self.id;
+        self.send_job(None, move |repo, _| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.tags().await
+                }
+                RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                    let response = client
+                        .request(proto::GitGetTags {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                        })
+                        .await?;
+
+                    Ok(response.tags.iter().map(proto_to_tag).collect())
+                }
+            }
+        })
+    }
+
+    /// Checks out a tag, leaving the repository in detached HEAD. The caller is
+    /// expected to have told the user that first.
+    pub fn checkout_tag(&mut self, name: String) -> oneshot::Receiver<Result<()>> {
+        let id = self.id;
+        self.send_job(
+            Some(format!("git checkout tags/{name}").into()),
+            move |repo, _| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.checkout_tag(name).await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        client
+                            .request(proto::GitCheckoutTag {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                name,
+                            })
+                            .await?;
+                        Ok(())
+                    }
+                }
+            },
+        )
+    }
+
     /// If this is a linked worktree (*NOT* the main checkout of a repository),
     /// returns the pathed for the linked worktree.
     ///
@@ -6112,10 +6195,27 @@ impl Repository {
         worktree_directory_setting: &str,
     ) -> Result<PathBuf> {
         let original_repo = self.original_repo_abs_path.clone();
-        let project_name = original_repo
+        let directory = worktrees_directory_for_repo(&original_repo, worktree_directory_setting)?;
+        self.path_for_new_linked_worktree_in(&directory, branch_name)
+    }
+
+    /// The same path, under a directory the caller chose outright rather than
+    /// one resolved from the setting.
+    ///
+    /// The setting is deliberately confined to the repository and its parent;
+    /// a directory picked from the file system is not, because `git worktree
+    /// add` has never cared and a picker that refuses most of the disk is not
+    /// a picker. The `<branch>/<project>` tail is kept either way, so pointing
+    /// two projects at one folder still keeps their checkouts apart.
+    pub fn path_for_new_linked_worktree_in(
+        &self,
+        directory: &Path,
+        branch_name: &str,
+    ) -> Result<PathBuf> {
+        let project_name = self
+            .original_repo_abs_path
             .file_name()
             .ok_or_else(|| anyhow!("git repo must have a directory name"))?;
-        let directory = worktrees_directory_for_repo(&original_repo, worktree_directory_setting)?;
         Ok(directory.join(branch_name).join(project_name))
     }
 
@@ -6152,6 +6252,20 @@ impl Repository {
         path: PathBuf,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        // An empty branch name is refused here rather than sent. Locally git
+        // would reject it; over the wire it is carried as an empty `name`,
+        // which the handler reads as "no branch" and turns into a detached
+        // worktree -- the same request quietly meaning two different things
+        // depending on where the repository lives.
+        if let Some(branch_name) = target.branch_name()
+            && branch_name.trim().is_empty()
+        {
+            let (sender, receiver) = oneshot::channel();
+            sender
+                .send(Err(anyhow!("a worktree branch name cannot be empty")))
+                .ok();
+            return receiver;
+        }
         let job_description = match target.branch_name() {
             Some(branch_name) => format!("git worktree add: {branch_name}"),
             None => "git worktree add (detached)".to_string(),
@@ -6363,6 +6477,17 @@ impl Repository {
         })
     }
 
+    /// Removes a linked worktree.
+    ///
+    /// **`force` deletes `path` recursively before git is consulted**, so it
+    /// must only ever be given a path this process created. It does not check
+    /// that `path` is a worktree, and `git worktree remove` refusing one is not
+    /// a safety net -- the directory is already gone by then. Rolling back a
+    /// creation that *failed* used to pass a path git had declined to touch,
+    /// which deleted whatever was already there.
+    ///
+    /// `force: false` leaves the directory to git, which refuses to remove a
+    /// dirty one. That is the safe default for anything user-initiated.
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         let original_repo_abs_path = self.snapshot.original_repo_abs_path.clone();
@@ -7639,6 +7764,23 @@ fn deserialize_blame_buffer_response(
         .collect::<HashMap<_, _>>();
 
     Some(Blame { entries, messages })
+}
+fn tag_to_proto(tag: &Tag) -> proto::GitTag {
+    proto::GitTag {
+        name: tag.name.to_string(),
+        sha: tag.sha.to_string(),
+        is_annotated: tag.is_annotated,
+        message: tag.message.as_ref().map(|message| message.to_string()),
+    }
+}
+
+fn proto_to_tag(tag: &proto::GitTag) -> Tag {
+    Tag {
+        name: tag.name.clone().into(),
+        sha: tag.sha.clone().into(),
+        is_annotated: tag.is_annotated,
+        message: tag.message.clone().map(Into::into),
+    }
 }
 
 fn branch_to_proto(branch: &git::repository::Branch) -> proto::Branch {

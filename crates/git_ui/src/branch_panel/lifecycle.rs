@@ -1,0 +1,283 @@
+//! Constructing the panel and keeping its rows current.
+//!
+//! Split out of `panel.rs` so the `Panel` trait implementation there stays
+//! readable next to the struct it describes.
+
+use collections::HashSet;
+use gpui::{
+    AppContext as _, AsyncWindowContext, Context, Entity, ListAlignment, ListState, Task,
+    WeakEntity, Window, px,
+};
+use workspace::Workspace;
+
+use crate::branch_panel::panel::BranchPanel;
+use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
+use crate::branch_panel::tree::{AgentActivity, RowKey, TreeRow, build_rows};
+
+/// How often the panel redraws while an agent is live.
+///
+/// Fast enough that the mark keeps up with an answer starting and finishing,
+/// slow enough that it is a rounding error next to drawing the frame it asks
+/// for.
+const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl BranchPanel {
+    pub fn new(
+        workspace: &mut Workspace,
+        _window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
+        let workspace_handle = workspace.weak_handle();
+        let workspace_entity = cx.entity();
+        cx.new(|cx| {
+            let mut subscriptions = Vec::new();
+
+            let mut panel = Self {
+                workspace: workspace_handle,
+                focus_handle: cx.focus_handle(),
+                pinned: Default::default(),
+                manual_order: Vec::new(),
+                list_state: ListState::new(0, ListAlignment::Top, px(256.)),
+                session_store: None,
+                _session_subscription: None,
+                row_kinds: Vec::new(),
+                is_active: false,
+                stale: true,
+                rebuild_count: 0,
+                repos: Vec::new(),
+                rows: Vec::new(),
+                expanded: HashSet::default(),
+                stored_expanded: HashSet::default(),
+                running_remote_ops: HashSet::default(),
+                context_menu: None,
+                pending_serialization: Task::ready(None),
+                _activity_tick: None,
+                _subscriptions: Vec::new(),
+            };
+
+            // The git store is taken from the `workspace` we were handed, not
+            // read back through `panel.workspace`. This body runs inside
+            // `Workspace::update`, and reading the workspace entity from in
+            // there panics -- the same re-entrancy trap the project rail's
+            // panel toggle hit once before.
+            let store = workspace.project().read(cx).git_store().clone();
+            subscriptions.push(Self::observe_git_store(cx, &store));
+            // Registering a subscription does not read the entity, so this is
+            // safe where a `read` inside this closure would panic.
+            subscriptions.push(Self::observe_agent_tabs(cx, &workspace_entity));
+            // Registering a subscription does not read the entity, so this is
+            // safe where a `read` inside this closure would panic.
+            panel._subscriptions = subscriptions;
+            panel
+        })
+    }
+
+    pub async fn load(
+        workspace: WeakEntity<Workspace>,
+        mut cx: AsyncWindowContext,
+    ) -> anyhow::Result<Entity<Self>> {
+        let serialized = SerializedBranchPanel::load(&workspace, &mut cx).await;
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = BranchPanel::new(workspace, window, cx);
+            if let Some(serialized) = serialized {
+                panel.update(cx, |panel, _| {
+                    panel.stored_expanded = serialized.expanded;
+                    panel.pinned = serialized
+                        .pinned
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    panel.manual_order = serialized
+                        .order
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                });
+            }
+            panel
+        })
+    }
+
+    /// Marks the tree for a rebuild. Rebuilding happens in `render`, so a burst
+    /// of git events collapses into one rebuild, and a hidden panel does none.
+    pub(crate) fn mark_stale(&mut self, cx: &mut Context<Self>) {
+        self.stale = true;
+        if self.is_active {
+            cx.notify();
+        }
+    }
+
+    /// Rebuilds `repos` and `rows` if anything changed. Called from `render`.
+    pub(crate) fn refresh_if_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.stale {
+            return;
+        }
+        self.stale = false;
+        self.rebuild_count += 1;
+        self.repos = self.collect_repos(cx);
+        self.adopt_stored_expansion();
+
+        let expanded = &self.expanded;
+        // No filter from the panel: the header carries one button, and the row
+        // builder's filter stays for whatever exposes one next.
+        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
+        self.sync_list_state();
+    }
+
+    /// Keeps the panel redrawing while a live agent is listed, and stops when
+    /// none is.
+    ///
+    /// An agent's mark is the one thing here that changes without an event to
+    /// hang a redraw on: no git command ran, no row was rebuilt, the CLI simply
+    /// started or stopped writing. So it is polled. The tick exists only while
+    /// there is something whose mark could change -- a panel showing nothing
+    /// but finished transcripts costs nothing, which is the same rule the
+    /// rebuild follows.
+    pub(crate) fn track_agent_activity(&mut self, cx: &mut Context<Self>) {
+        let live = self.rows.iter().any(|row| match row {
+            TreeRow::Worktree { agents, .. } => agents
+                .iter()
+                .any(|agent| agent.activity(cx) != AgentActivity::Gone),
+            _ => false,
+        });
+
+        if !live {
+            self._activity_tick = None;
+            return;
+        }
+        if self._activity_tick.is_some() {
+            return;
+        }
+
+        self._activity_tick = Some(cx.spawn(async move |panel, cx| {
+            loop {
+                cx.background_executor().timer(ACTIVITY_TICK).await;
+                // The panel owns this task, so a failed update means the panel
+                // is gone and so is the task about to be dropped with it.
+                if panel.update(cx, |_, cx| cx.notify()).is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Tells `ListState` which rows changed.
+    ///
+    /// `reset` would be the easy call, but it discards the scroll position, and
+    /// expanding a section near the bottom of a long list would then throw the
+    /// user back to the top -- the row they just clicked scrolled out of sight,
+    /// which reads as the toggle having done nothing at all.
+    ///
+    /// A row's measured height depends only on its variant (a branch card is
+    /// two lines, a section header one), never on its contents, so comparing
+    /// variants is enough to find the slice that actually moved. `splice`
+    /// re-anchors the scroll offset around it.
+    fn sync_list_state(&mut self) {
+        let new_kinds: Vec<_> = self.rows.iter().map(std::mem::discriminant).collect();
+
+        // Defensive: the two are kept in step by this function alone, but a
+        // silent disagreement would corrupt every splice after it.
+        if self.list_state.item_count() != self.row_kinds.len() {
+            self.list_state.reset(new_kinds.len());
+            self.row_kinds = new_kinds;
+            return;
+        }
+
+        if let Some((old_range, new_count)) = ui::utils::changed_range(&self.row_kinds, &new_kinds)
+        {
+            self.list_state.splice(old_range, new_count);
+            self.row_kinds = new_kinds;
+        }
+    }
+
+    /// Turns the paths restored from disk into live row keys, once the
+    /// repositories they name have actually turned up.
+    ///
+    /// An adopted entry is *consumed*. Leaving it in place would re-insert the
+    /// key on every rebuild, and since collapsing a row rebuilds the tree, any
+    /// section that happened to be open when the panel was last saved could
+    /// never be closed again.
+    fn adopt_stored_expansion(&mut self) {
+        if self.stored_expanded.is_empty() {
+            return;
+        }
+
+        let mut adopted = Vec::new();
+        for repo in &self.repos {
+            let path = repo.path.to_string_lossy().to_string();
+            for stored in self.stored_expanded.iter() {
+                if let Some(key) = stored.to_row_key(repo.id, &path) {
+                    adopted.push((stored.clone(), key));
+                }
+            }
+        }
+
+        for (stored, key) in adopted {
+            self.stored_expanded.remove(&stored);
+            self.expanded.insert(key);
+        }
+    }
+
+    pub(crate) fn toggle_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
+        self.stale = true;
+        self.serialize(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
+        let mut stored = HashSet::default();
+        for repo in &self.repos {
+            let path = repo.path.to_string_lossy().to_string();
+            for key in &self.expanded {
+                if key.repository_id() == repo.id {
+                    stored.insert(StoredKey::from_row_key(key, &path));
+                }
+            }
+        }
+
+        let state = SerializedBranchPanel {
+            expanded: stored,
+            pinned: self
+                .pinned
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+            order: self
+                .manual_order
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+        };
+        let workspace = self.workspace.clone();
+        self.pending_serialization = cx.spawn(async move |_, cx| state.write(workspace, cx).await);
+    }
+
+    /// Creates the shared session store the first time the panel is drawn, and
+    /// asks it for its one sweep.
+    ///
+    /// Not at construction: reading the agents' histories opens every
+    /// transcript on disk. `AgentHistoryPanel` already carries the rule that
+    /// none of that belongs on the startup path, and a panel nobody opens must
+    /// not pay for it either.
+    pub(crate) fn ensure_session_store(&mut self, cx: &mut Context<Self>) {
+        if self.session_store.is_some() {
+            return;
+        }
+        let store = agent_ui::SessionStore::global(cx);
+        // The sweep lands on the store, so the panel has to be told when it
+        // does. Held in a field, never detached: a detached observe outlives
+        // the panel and fires into a dropped handle.
+        self._session_subscription = Some(cx.observe(&store, |panel, _, cx| {
+            panel.mark_stale(cx);
+        }));
+        store.update(cx, |store, cx| store.refresh(cx));
+        self.session_store = Some(store);
+    }
+}
+
+#[cfg(test)]
+mod tests;

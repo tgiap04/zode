@@ -63,19 +63,30 @@ impl DatabasePanel {
         // Looked up before the node is borrowed again: the registry is a
         // separate entity, and reading it needs the same `cx` the node is
         // reached through.
-        let Some(descriptor) = self.registry.read(cx).get(&config.driver).cloned() else {
+        // Two different failures that used to read as one. A driver Zode has
+        // never heard of is a settings or extension problem; a driver Zode
+        // ships but has not downloaded yet is a click away from working. The
+        // second said in the words of the first sends people looking for an
+        // extension that was never the answer.
+        let descriptor = self.registry.read(cx).get(&config.driver).cloned();
+        let failure = match &descriptor {
+            None => Some(format!(
+                "no database driver called `{}` -- is the extension that provides it installed?",
+                config.driver
+            )),
+            Some(descriptor) if !descriptor.is_installed() => {
+                Some(crate::session::not_installed(&config.driver))
+            }
+            Some(_) => None,
+        };
+        if let Some(message) = failure {
             if let Some(node) = self.connections.get_mut(index) {
-                node.state = NodeState::Failed(
-                    format!(
-                        "no database driver called `{}` -- is the extension that provides it installed?",
-                        config.driver
-                    )
-                    .into(),
-                );
+                node.state = NodeState::Failed(message.into());
             }
             cx.notify();
             return;
-        };
+        }
+        let descriptor = descriptor.expect("checked just above");
 
         if let Some(node) = self.connections.get_mut(index) {
             node.state = NodeState::Connecting;
@@ -362,6 +373,15 @@ impl DatabasePanel {
         self.connections
             .get(index)
             .is_some_and(|node| matches!(node.state, NodeState::Connecting))
+    }
+
+    /// Why a connection failed, for a test that cares which failure it was.
+    #[cfg(test)]
+    pub(crate) fn failure(&self, index: usize) -> Option<String> {
+        match self.connections.get(index).map(|node| &node.state) {
+            Some(NodeState::Failed(error)) => Some(error.to_string()),
+            _ => None,
+        }
     }
 
     /// Whether a connection is open, which is what decides the menu entry and

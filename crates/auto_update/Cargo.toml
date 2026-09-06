@@ -27,7 +27,6 @@ sha2.workspace = true
 settings.workspace = true
 smol.workspace = true
 tempfile.workspace = true
-url.workspace = true
 util.workspace = true
 workspace.workspace = true
 

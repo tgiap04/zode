@@ -13,12 +13,30 @@
 //! to have a daemon up. A test whose result depends on what is installed and
 //! running is a report about the machine, not about this crate.
 //!
-//! The first pass at this ignored three and missed two. The two it missed were
-//! the ones whose own doc comments said the backend "answers" when the engine is
-//! absent -- true only where the CLI is absent too, and silent about the case
-//! where the CLI is present and the daemon is not. They stayed green until a
-//! Windows run found exactly that. What decides is whether a test calls an
-//! engine, not whether it has been caught hanging yet.
+//! Three passes, and the first two both missed some. The first ignored three;
+//! the second caught two more; a Windows run then timed out on a third that
+//! both had walked past -- one whose own doc comment already said it "joins the
+//! other engine tests", written by the pass that did not add the attribute.
+//!
+//! So the rule is not a judgement call, and it is not "whatever has been caught
+//! hanging". A test belongs behind `--run-ignored all` when it drives an engine:
+//! it builds a real `DockerBackend` or `KubernetesBackend` **and** awaits a call
+//! that spawns the CLI. Both halves matter. Building a backend and asking it
+//! `supported_kinds`, `logs_command` or `exec_command` spawns nothing, and
+//! awaiting a refusal -- `act` on a kind the backend does not hold -- returns
+//! before any process starts. Those stay, and must: a refusal that shelled out
+//! first would be a refusal that already did damage, and ignoring them would
+//! retire the guard that says so.
+//!
+//! Applying it by hand is what kept missing cases, so apply it mechanically:
+//!
+//! ```text
+//! # every test that constructs a real backend and awaits something
+//! rg -U '#\[test\][\s\S]{0,4000}?^\s*\}' --multiline crates/container/src/tests.rs
+//! ```
+//!
+//! or simply read every `block_on` in this file and ask which of them can reach
+//! a `Command`.
 //!
 //! Run them deliberately, on a machine with an engine:
 //!
@@ -579,7 +597,11 @@ mod kubernetes {
 ///
 /// The point is the pair: a suite that only ever ran against one engine would
 /// pass while the trait quietly meant two different things.
+///
+/// It drives both engines to do that, so it is an engine test by the rule
+/// above -- the third one the earlier passes wrote around rather than caught.
 #[test]
+#[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
 fn the_suite_means_the_same_thing_to_both_backends() {
     use crate::kubernetes_backend::KubernetesBackend;
     let docker = DockerBackend::docker();
@@ -963,7 +985,12 @@ mod podman {
     /// Podman is not installed on the machine this was written on, so this is the
     /// state a developer here actually sees. It must be "not installed", not a
     /// generic failure.
+    ///
+    /// Which is exactly why it cannot run everywhere: `list` spawns `podman`,
+    /// and a machine that HAS the CLI without a running service does not get
+    /// this answer -- it waits. Ignored on the rule, before it is caught.
     #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn an_absent_podman_says_so_plainly() {
         let podman = DockerBackend::podman();
         match block_on(podman.list(ResourceKind::Container)) {

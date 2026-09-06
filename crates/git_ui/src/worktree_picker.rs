@@ -573,6 +573,8 @@ impl PickerDelegate for WorktreePickerDelegate {
                             &CreateWorktree {
                                 worktree_name: None,
                                 branch_target: NewWorktreeBranchTarget::CurrentBranch,
+                                agent: None,
+                                location: None,
                             },
                             window,
                             self.focused_dock,
@@ -596,6 +598,8 @@ impl PickerDelegate for WorktreePickerDelegate {
                                 branch_target: NewWorktreeBranchTarget::ExistingBranch {
                                     name: default_branch_name.clone(),
                                 },
+                                agent: None,
+                                location: None,
                             },
                             window,
                             self.focused_dock,
@@ -628,6 +632,7 @@ impl PickerDelegate for WorktreePickerDelegate {
                                     &SwitchWorktree {
                                         path: worktree.path.clone(),
                                         display_name: worktree.directory_name(main_worktree_path),
+                                        agent: None,
                                     },
                                     window,
                                     self.focused_dock,
@@ -643,11 +648,14 @@ impl PickerDelegate for WorktreePickerDelegate {
                 from_branch,
                 disabled_reason: None,
             } => {
-                let branch_target = match from_branch {
-                    Some(branch) => NewWorktreeBranchTarget::ExistingBranch {
-                        name: branch.clone(),
-                    },
-                    None => NewWorktreeBranchTarget::CurrentBranch,
+                // A name the person typed becomes a branch of that name, the
+                // way the branch panel's form has always treated it. It used to
+                // become a detached checkout instead -- the worktree appeared,
+                // looked right, and had nowhere to commit, which is precisely
+                // the state parallel feature work cannot use.
+                let branch_target = NewWorktreeBranchTarget::NewBranch {
+                    name: name.clone(),
+                    base: from_branch.clone(),
                 };
                 if let Some(workspace) = self.workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
@@ -656,6 +664,8 @@ impl PickerDelegate for WorktreePickerDelegate {
                             &CreateWorktree {
                                 worktree_name: Some(name.clone()),
                                 branch_target,
+                                agent: None,
+                                location: None,
                             },
                             window,
                             self.focused_dock,

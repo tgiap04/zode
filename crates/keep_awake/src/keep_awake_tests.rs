@@ -4,10 +4,14 @@
 //! rules being checked are worth reading on their own, and they outnumber the
 //! code that implements them.
 //!
-//! Everything here drives `Holds` directly. That is not a shortcut -- a
-//! `Terminal` cannot be built in a test without spawning a real process, which
-//! the deterministic scheduler reports as non-determinism. What is left
-//! uncovered is named on `KeepAwake::settled` and in the module docs.
+//! Most of it drives `Holds` directly, which proves the bookkeeping and not the
+//! question feeding it. `a_real_tab` closes the half of that gap a test can
+//! reach: a tab open with no CLI behind it, through a real workspace.
+//!
+//! The other half is still open, and honestly so. Proving that a *live* CLI
+//! sitting at its prompt holds nothing needs a real process in the test, and
+//! the pty tests in this tree are flaky enough already. `grace` covers the rule
+//! that decides it; nothing covers the wiring that asks.
 
 use super::*;
 use gpui::{TestAppContext, UpdateGlobal as _};
@@ -45,7 +49,7 @@ fn the_lock_is_taken_when_the_first_agent_starts(cx: &mut TestAppContext) {
 
     cx.update(|cx| assert!(holds.set(claude, "Claude Code".into(), cx)));
 
-    assert_eq!(cx.display_wake_reasons(), vec!["Claude Code is running"]);
+    assert_eq!(cx.display_wake_reasons(), vec!["Claude Code is answering"]);
 }
 
 #[gpui::test]
@@ -482,8 +486,126 @@ fn the_reason_names_one_agent_and_counts_several(cx: &mut TestAppContext) {
     let mut holds = Holds::default();
 
     cx.update(|cx| holds.set(claude, "Claude Code".into(), cx));
-    assert_eq!(holds.reason(), "Claude Code is running");
+    assert_eq!(holds.reason(), "Claude Code is answering");
 
     cx.update(|cx| holds.set(codex, "Codex".into(), cx));
-    assert_eq!(holds.reason(), "2 agents are running");
+    assert_eq!(holds.reason(), "2 agents are answering");
+}
+
+/// The grace that keeps one answer from flapping the lock.
+///
+/// An agent reading a file or waiting on a model writes nothing for seconds at
+/// a time. Without the grace the lock would be taken and dropped through a
+/// single answer, and each acquisition can cost a foreground stall.
+mod grace {
+    use super::*;
+
+    #[gpui::test]
+    fn a_tab_that_has_never_answered_holds_nothing(_cx: &mut TestAppContext) {
+        assert!(!still_answering(None, Instant::now()));
+    }
+
+    #[gpui::test]
+    fn a_pause_inside_an_answer_still_counts(_cx: &mut TestAppContext) {
+        let now = Instant::now();
+        let mid_answer = now - (RESPONDING_GRACE / 2);
+        assert!(
+            still_answering(Some(mid_answer), now),
+            "a quiet stretch inside one answer must not release the display"
+        );
+    }
+
+    #[gpui::test]
+    fn an_answer_that_finished_lets_the_display_sleep(_cx: &mut TestAppContext) {
+        let now = Instant::now();
+        let finished = now - (RESPONDING_GRACE + Duration::from_secs(1));
+        assert!(
+            !still_answering(Some(finished), now),
+            "walking away from an idle agent must not pin the display on"
+        );
+    }
+}
+
+/// The one rule this module exists to get right, end to end.
+///
+/// Every test above drives `Holds` directly, which proves the bookkeeping and
+/// not the question feeding it. This one goes through a real workspace and a
+/// real agent tab, because the two ways to get this wrong both live in that
+/// path: a tab open after its CLI exited, and a CLI alive at its prompt with
+/// nothing to say. Neither may hold the display.
+mod a_real_tab {
+    use super::*;
+    use gpui::VisualTestContext;
+
+    async fn workspace_with_keep_awake(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<KeepAwake>,
+        gpui::Entity<workspace::Workspace>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            KeepDisplayAwakeSetting::register(cx);
+            project::DisableAiSettings::register(cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi.read_with(cx, |multi, _| multi.workspace().clone());
+
+        let keep_awake = workspace.update(cx, |workspace, cx| {
+            let handle = cx.entity();
+            cx.new(|cx| KeepAwake::new(workspace, &handle, cx))
+        });
+        (keep_awake, workspace, cx)
+    }
+
+    /// A tab with no CLI behind it. There is no agent binary in a test, so the
+    /// tab lands on its install screen: open, and running nothing.
+    #[gpui::test]
+    async fn a_tab_that_runs_nothing_holds_nothing(cx: &mut TestAppContext) {
+        let (keep_awake, workspace, cx) = workspace_with_keep_awake(cx).await;
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open(workspace, project::CLAUDE_CODE_AGENT_ID, None, window, cx);
+        });
+        cx.run_until_parked();
+
+        let tabs = workspace.read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<AgentView>(cx).count()
+        });
+        assert_eq!(tabs, 1, "the tab has to exist for this to mean anything");
+
+        keep_awake.read_with(cx, |keep_awake, _| {
+            assert!(
+                !keep_awake.is_holding(),
+                "an open tab is not an agent answering"
+            );
+        });
+        assert!(
+            cx.display_wake_reasons().is_empty(),
+            "and nothing may reach the platform for it"
+        );
+    }
+
+    /// The status has to say so too, or the indicator explains a hold that is
+    /// not happening.
+    #[gpui::test]
+    async fn the_status_reads_idle_for_an_open_tab(cx: &mut TestAppContext) {
+        let (keep_awake, workspace, cx) = workspace_with_keep_awake(cx).await;
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open(workspace, project::CLAUDE_CODE_AGENT_ID, None, window, cx);
+        });
+        cx.run_until_parked();
+
+        keep_awake.read_with(cx, |keep_awake, cx| {
+            assert_eq!(keep_awake.status(cx), Status::Idle);
+        });
+    }
 }

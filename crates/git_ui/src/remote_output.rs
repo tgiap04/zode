@@ -1,9 +1,12 @@
 use anyhow::Context as _;
 
 use git::repository::{Remote, RemoteCommandOutput};
+use gpui::{Context, Entity};
 use linkify::{LinkFinder, LinkKind};
-use ui::SharedString;
+use notifications::status_toast::StatusToast;
+use ui::{Color, Icon, IconName, IconSize, SharedString};
 use util::ResultExt as _;
+use workspace::Workspace;
 
 #[derive(Clone)]
 pub enum RemoteAction {
@@ -306,4 +309,62 @@ mod tests {
             panic!("Expected ToastWithLog variant");
         }
     }
+}
+
+/// Raises the status toast that reports what a fetch, pull or push actually
+/// did. Shared by the git panel and the branch panel so the two never disagree
+/// about how a push result reads.
+pub(crate) fn show_remote_output<T: 'static>(
+    workspace: Entity<Workspace>,
+    action: RemoteAction,
+    info: RemoteCommandOutput,
+    cx: &mut Context<T>,
+) {
+    workspace.update(cx, |workspace, cx| {
+        let SuccessMessage { message, style } = format_output(&action, info);
+        let workspace_weak = cx.weak_entity();
+        let operation = action.name();
+
+        let status_toast = StatusToast::new(
+            message,
+            cx,
+            move |this: StatusToast, _cx: &mut Context<StatusToast>| -> StatusToast {
+                use SuccessStyle::*;
+                match style {
+                    Toast => this.icon(
+                        Icon::new(IconName::GitBranch)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
+                    ToastWithLog { output } => this
+                        .icon(
+                            Icon::new(IconName::GitBranch)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .action("View Log", move |window, cx| {
+                            let output = output.clone();
+                            let output =
+                                format!("stdout:\n{}\nstderr:\n{}", output.stdout, output.stderr);
+                            workspace_weak
+                                .update(cx, move |workspace, cx| {
+                                    crate::git_panel::open_output(
+                                        operation, workspace, &output, window, cx,
+                                    )
+                                })
+                                .ok();
+                        }),
+                    PushPrLink { text, link } => this
+                        .icon(
+                            Icon::new(IconName::GitBranch)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .action(text, move |_, cx: &mut gpui::App| cx.open_url(&link)),
+                }
+                .dismiss_button(true)
+            },
+        );
+        workspace.toggle_status_toast(status_toast, cx)
+    });
 }

@@ -352,13 +352,25 @@ async fn the_table_list_edge_is_dragged_sideways(cx: &mut TestAppContext) {
 /// Built through the workspace like the real one is: it takes the project's
 /// `Fs` from there, and a modal handed a dangling workspace would pass tests the
 /// shipped one could not.
-pub(crate) async fn modal_for_test(
-    cx: &mut TestAppContext,
+/// Builds the add-connection modal, with `installed` standing in for drivers
+/// that have been downloaded.
+///
+/// Zode bundles no drivers and a test runs beside a test binary, so by default
+/// nothing resolves and every engine is correctly listed as absent. A test
+/// about what happens once a driver is present has to say which.
+pub(crate) async fn modal_for_test<'a>(
+    cx: &'a mut TestAppContext,
+    installed: &[&str],
 ) -> (
     gpui::Entity<crate::connection_modal::ConnectionModal>,
-    &mut gpui::VisualTestContext,
+    &'a mut gpui::VisualTestContext,
 ) {
     init_test(cx);
+    cx.update(|cx| {
+        for id in installed {
+            crate::driver_registry::install_for_test(id, cx);
+        }
+    });
     let fs = FakeFs::new(cx.executor());
     let project = Project::test(fs, [], cx).await;
     let (multi_workspace, cx) =
@@ -487,6 +499,10 @@ async fn a_closed_connection_offers_to_open_again(cx: &mut TestAppContext) {
 
     let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     set_connections(cx, &[("a", "/tmp/a.sqlite")]);
+    // Zode bundles no drivers and a test runs beside a test binary, so nothing
+    // resolves and `reconnect` would refuse before it ever reached the driver.
+    // What this test is about is the button, so the driver is put there.
+    cx.update(|_window, cx| crate::driver_registry::install_for_test("sqlite", cx));
 
     panel.update_in(cx, |panel, window, cx| {
         assert!(!panel.is_connected(0), "nothing opens by being configured");
@@ -497,6 +513,39 @@ async fn a_closed_connection_offers_to_open_again(cx: &mut TestAppContext) {
         assert!(
             panel.is_reaching_for_a_driver(0),
             "connecting again must actually start, not quietly do nothing"
+        );
+    });
+}
+
+/// Two failures that used to be one sentence.
+///
+/// A driver Zode has never heard of is a settings or extension problem. A
+/// driver Zode ships but has not downloaded yet is a click away from working.
+/// Saying the second in the words of the first sent people looking for an
+/// extension that was never the answer -- and now that Zode bundles no drivers
+/// at all, that is the common case rather than the rare one.
+#[gpui::test]
+async fn a_driver_that_is_merely_undownloaded_does_not_blame_a_missing_extension(
+    cx: &mut TestAppContext,
+) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("a", "/tmp/a.sqlite")]);
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.reconnect(0, window, cx);
+
+        let failure = panel.failure(0).expect("connecting must fail, and say why");
+        assert!(
+            failure.contains("not installed") && failure.contains("connection dialog"),
+            "a driver that has yet to be downloaded must offer the download: {failure}"
+        );
+        assert!(
+            !failure.contains("extension"),
+            "`sqlite` is a driver Zode ships; nothing about an extension is true here: {failure}"
+        );
+        assert!(
+            !panel.is_reaching_for_a_driver(0),
+            "nothing may be started for a driver that is not on the machine"
         );
     });
 }

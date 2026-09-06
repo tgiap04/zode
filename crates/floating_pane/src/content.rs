@@ -39,6 +39,7 @@ impl FloatingPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
+        let this = cx.weak_entity();
         cx.new(|cx| {
             let mut pane = Pane::new(
                 workspace.clone(),
@@ -58,6 +59,19 @@ impl FloatingPane {
             // shift every tab under the pointer at the moment of the click.
             pane.set_should_display_tab_bar(|_, _| true);
             pane.set_zoom_out_on_close(false);
+            // The pane's own `+` offers New File, New Terminal and the agents
+            // as workspace actions, which resolve against the editor's active
+            // pane -- this pane is not one of those, so every entry opened
+            // behind the window. Replaced with the window's own list, the way
+            // the terminal panel replaces it for the same reason.
+            pane.set_render_tab_bar_buttons(cx, move |_pane, _window, _cx| {
+                (None, Some(crate::render::tab_bar_menu(this.clone())))
+            });
+            // The pane's own `+` offers New File, New Terminal and the agents
+            // as workspace actions, which resolve against the editor's active
+            // pane -- this pane is not one of those, so every entry opened
+            // behind the window. Replaced with the window's own list, the way
+            // the terminal panel replaces it for the same reason.
             pane
         })
     }

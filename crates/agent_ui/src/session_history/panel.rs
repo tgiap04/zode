@@ -35,10 +35,11 @@ pub struct AgentHistoryPanel {
     workspace: WeakEntity<Workspace>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) providers: Vec<Arc<dyn SessionProvider>>,
-    /// Everything both stores can see, unfiltered. Filtering is a view over this,
-    /// recomputed per render — 45 summaries on the author's machine, so the cost
-    /// of a filter is nothing next to the cost of keeping two lists in step.
-    pub(crate) sessions: Vec<SessionSummary>,
+    /// The one sweep of both stores, shared with every other surface that needs
+    /// it. Held rather than copied into a field of this panel: a second copy is
+    /// a second thing to keep in step, and a second sweep to fill it. Filtering
+    /// is a view over the index, recomputed per render.
+    pub(crate) store: Entity<crate::SessionStore>,
     pub(crate) counts: HashMap<Arc<str>, CountState>,
     /// The real editor behind the search box. Its text is the filter — read on
     /// render rather than mirrored into a field, so the two cannot disagree.
@@ -66,6 +67,7 @@ pub struct AgentHistoryPanel {
 
 impl AgentHistoryPanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let store = crate::SessionStore::global(cx);
         let filter_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Search sessions", window, cx);
@@ -81,6 +83,12 @@ impl AgentHistoryPanel {
                     cx.notify();
                 }
             }),
+            // The sweep finishes on the store, not here. Without this the panel
+            // would show an empty list until something else happened to notify it.
+            cx.observe(&store, |this, _, cx| {
+                this.loading = false;
+                cx.notify();
+            }),
         ];
         Self {
             filter_editor,
@@ -88,7 +96,7 @@ impl AgentHistoryPanel {
             workspace: workspace.weak_handle(),
             focus_handle: cx.focus_handle(),
             providers: agent_sessions::default_providers(),
-            sessions: Vec::new(),
+            store,
             counts: HashMap::default(),
             collapsed_agents: Default::default(),
             collapsed_groups: Default::default(),
@@ -127,26 +135,21 @@ impl AgentHistoryPanel {
             .collect()
     }
 
-    /// Read both stores on the background executor and keep the result.
+    /// Asks the shared store for a fresh sweep. The result arrives through the
+    /// observe registered in `new`, not through a task owned here -- two panels
+    /// asking at once must still cost one sweep.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
         self.loading = true;
         self.counts.clear();
-        let providers = self.providers.clone();
-        cx.spawn(async move |this, cx| {
-            let sessions = cx
-                .background_spawn(async move { agent_sessions::list_all(&providers) })
-                .await;
-            this.update(cx, |this, cx| {
-                this.sessions = sessions;
-                this.loading = false;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.store.update(cx, |store, cx| store.refresh(cx));
+    }
+
+    /// Every session both stores can see, unfiltered.
+    pub(crate) fn sessions<'a>(&self, cx: &'a App) -> &'a [agent_sessions::SessionSummary] {
+        self.store.read(cx).index().sessions()
     }
 
     /// Fetch the counts for one session, once.

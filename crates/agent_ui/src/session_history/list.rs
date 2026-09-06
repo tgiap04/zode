@@ -164,7 +164,7 @@ impl Render for AgentHistoryPanel {
         let roots = self.project_roots(cx);
         let query = self.query(cx);
         let rows = rows(
-            &self.sessions,
+            self.sessions(cx),
             &roots,
             &query,
             &self.collapsed_agents,

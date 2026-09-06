@@ -1,0 +1,47 @@
+[package]
+name = "zode_sync"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[lib]
+path = "src/zode_sync.rs"
+doctest = false
+
+[dependencies]
+# Held to the same rule as `zode_account`: no `client`, no `workspace`, no
+# `telemetry`. `script/check-account-no-telemetry` asserts it against the
+# dependency graph rather than trusting this comment.
+anyhow.workspace = true
+base64.workspace = true
+credentials_provider.workspace = true
+futures.workspace = true
+gpui.workspace = true
+http_client.workspace = true
+imara-diff.workspace = true
+log.workspace = true
+paths.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zode_account.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+credentials_provider.workspace = true
+base64.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+zode_account = { workspace = true, features = ["test-support"] }
+zode_sync = { path = ".", features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

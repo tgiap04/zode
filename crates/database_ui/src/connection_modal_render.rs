@@ -5,10 +5,10 @@
 //! none of that decision is here.
 
 use crate::connection_modal::{ConnectionModal, Step, TestState};
-use crate::driver_registry::CatalogueEntry;
+use crate::driver_registry::{self, CatalogueEntry};
 use editor::Editor;
 use gpui::{Entity, Render, Window};
-use ui::{Tooltip, prelude::*};
+use ui::{ProgressBar, Tooltip, prelude::*};
 
 /// Wide enough for a description to sit on one line beside its name, which is
 /// the whole reason the descriptions are there.
@@ -198,11 +198,15 @@ impl ConnectionModal {
                     ),
             )
             .when(!installed, |element| {
-                element.child(
-                    Label::new("Not Installed")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
+                // Zode bundles no drivers, so "not installed" is the ordinary
+                // state of an engine nobody has used yet -- and for the ones
+                // Zode publishes it is one button away from being untrue.
+                let (text, color) = if driver_registry::is_publishable(&engine.driver) {
+                    ("Not Downloaded", Color::Muted)
+                } else {
+                    ("No Driver", Color::Muted)
+                };
+                element.child(Label::new(text).size(LabelSize::Small).color(color))
             })
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -218,9 +222,19 @@ impl ConnectionModal {
     }
 
     fn render_picker_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_continue = self
-            .selected_engine()
-            .is_some_and(|engine| engine.installed);
+        let selected = self.selected_engine();
+        let installed = selected.is_some_and(|engine| engine.installed);
+        // A driver Zode publishes is one it can go and get, so the button says
+        // what pressing it will do rather than refusing to be pressed.
+        let downloadable = selected.is_some_and(|engine| {
+            !engine.installed && driver_registry::is_publishable(&engine.driver)
+        });
+        let can_continue = installed || downloadable;
+        let (label, icon) = if downloadable {
+            ("Download Driver", Some(IconName::Download))
+        } else {
+            ("Continue", None)
+        };
 
         v_flex()
             .border_t_1()
@@ -255,8 +269,11 @@ impl ConnectionModal {
                                 ),
                             )
                             .child(
-                                Button::new("database-picker-continue", "Continue")
+                                Button::new("database-picker-continue", label)
                                     .style(ButtonStyle::Filled)
+                                    .when_some(icon, |button, icon| {
+                                        button.start_icon(Icon::new(icon))
+                                    })
                                     .disabled(!can_continue)
                                     .on_click(cx.listener(|this, _event, window, cx| {
                                         this.advance(window, cx);
@@ -355,21 +372,71 @@ impl ConnectionModal {
                     .color(Color::Muted)
                     .into_any_element(),
             ],
-            Step::Unreachable { message, .. } => vec![
-                v_flex()
-                    .gap_1()
-                    .child(
-                        Label::new("That driver did not answer.")
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
-                    )
-                    .child(
-                        Label::new(message.clone())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .into_any_element(),
-            ],
+            Step::Downloading { engine, progress } => {
+                let (status, fraction) = ConnectionModal::download_status(progress);
+                vec![
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            Label::new(format!("Getting the {} driver", engine.name))
+                                .size(LabelSize::Small),
+                        )
+                        .children(Self::render_progress_bar(fraction, cx))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    Label::new(status)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(Button::new("database-download-cancel", "Cancel").on_click(
+                                    cx.listener(|this, _event, _window, cx| {
+                                        this.cancel_download(cx)
+                                    }),
+                                )),
+                        )
+                        .into_any_element(),
+                ]
+            }
+            Step::Unreachable { engine, message } => {
+                // A driver that failed to *download* and one that failed to
+                // *start* are different failures with different remedies, and
+                // only the first is worth offering to try again.
+                let retryable =
+                    !engine.installed && driver_registry::is_publishable(&engine.driver);
+                let heading = if retryable {
+                    "That driver could not be downloaded."
+                } else {
+                    "That driver did not answer."
+                };
+                vec![
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            Label::new(heading)
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            Label::new(message.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .when(retryable, |element| {
+                            element.child(
+                                Button::new("database-download-retry", "Try Again")
+                                    .start_icon(Icon::new(IconName::RotateCw))
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.retry_download(window, cx)
+                                    })),
+                            )
+                        })
+                        .into_any_element(),
+                ]
+            }
             Step::Filling { form, inputs, .. } => {
                 let mut groups: Vec<(Option<SharedString>, Vec<(&str, Entity<Editor>)>)> =
                     Vec::new();
@@ -388,6 +455,16 @@ impl ConnectionModal {
             }
             Step::PickEngine => Vec::new(),
         }
+    }
+
+    /// Nothing, rather than a bar that invents a position.
+    ///
+    /// `ProgressBar` documents itself as not for indeterminate progress, and a
+    /// bar sitting at zero while bytes are plainly arriving reads as stuck. The
+    /// status line beside it still says how much has come.
+    fn render_progress_bar(fraction: Option<f32>, cx: &App) -> Option<AnyElement> {
+        let fraction = fraction?;
+        Some(ProgressBar::new("database-download-progress", fraction, 1., cx).into_any_element())
     }
 
     /// One headed block of label-and-field rows.

@@ -267,6 +267,21 @@ pub fn keymap_backup_file() -> &'static PathBuf {
     KEYMAP_FILE.get_or_init(|| config_dir().join("keymap_backup.json"))
 }
 
+/// Returns the path to the `sync_state.json` file.
+///
+/// Records, per synced artifact, the revision last seen on the server and a
+/// hash of the local file at that moment. Without it there is no way to tell
+/// "this file is exactly what was pulled" from "this file has been edited
+/// since", and every push would have to either interrogate the user or
+/// silently overwrite.
+///
+/// Holds hashes and revisions only — never file contents — so it is not
+/// encrypted and carries nothing worth reading.
+pub fn sync_state_file() -> &'static PathBuf {
+    static SYNC_STATE_FILE: OnceLock<PathBuf> = OnceLock::new();
+    SYNC_STATE_FILE.get_or_init(|| config_dir().join("sync_state.json"))
+}
+
 /// Returns the path to the `tasks.json` file.
 pub fn tasks_file() -> &'static PathBuf {
     static TASKS_FILE: OnceLock<PathBuf> = OnceLock::new();
@@ -386,6 +401,20 @@ pub fn languages_dir() -> &'static PathBuf {
 pub fn debug_adapters_dir() -> &'static PathBuf {
     static DEBUG_ADAPTERS_DIR: OnceLock<PathBuf> = OnceLock::new();
     DEBUG_ADAPTERS_DIR.get_or_init(|| data_dir().join("debug_adapters"))
+}
+
+/// Returns the path to the database drivers directory
+///
+/// This is where database driver sidecars are downloaded to. Zode ships none of
+/// them: a driver arrives when an engine is first connected to, so an install
+/// carries only the drivers its user actually asked for.
+///
+/// One directory per driver, one directory per version inside it, so an app
+/// that has been updated does not run a driver built against an older protocol
+/// simply because it was the one already on disk.
+pub fn database_drivers_dir() -> &'static PathBuf {
+    static DATABASE_DRIVERS_DIR: OnceLock<PathBuf> = OnceLock::new();
+    DATABASE_DRIVERS_DIR.get_or_init(|| data_dir().join("database_drivers"))
 }
 
 /// Returns the path to the external agents directory

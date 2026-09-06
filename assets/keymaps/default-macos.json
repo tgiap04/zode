@@ -544,6 +544,8 @@
       "cmd-r": "workspace::ToggleRightDock",
       "cmd-j": "workspace::ToggleBottomDock",
       "cmd-alt-j": "multi_workspace::ToggleWorkspaceSidebar",
+      "alt-`": "floating_pane::ToggleFloatingPane",
+      "alt-~": "floating_pane::CloseFloatingPane",
       "cmd-alt-;": "multi_workspace::FocusWorkspaceSidebar",
       "alt-cmd-y": "workspace::ToggleAllDocks",
       // For 0px parameter, uses UI font size value.
@@ -569,6 +571,7 @@
       "cmd-shift-e": "project_panel::ToggleFocus",
       "cmd-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
+      "cmd-alt-g": "branch_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
@@ -912,6 +915,13 @@
       "alt-cmd-left": "database::PreviousPage",
       "cmd-shift-c": "database::CopyResultsAsCsv",
     },
+  },
+  {
+    "context": "BranchPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "escape": "branch_panel::ToggleFocus"
+    }
   },
   {
     "context": "GitPanel",
@@ -1293,7 +1303,7 @@
       "cmd--": "image_viewer::ZoomOut",
       "cmd-0": "image_viewer::ResetZoom",
       "cmd-1": "image_viewer::ZoomToActualSize",
-      "cmd-shift-0": "image_viewer::FitToView",
+      "cmd-)": "image_viewer::FitToView",
     },
   },
   {

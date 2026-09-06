@@ -31,7 +31,9 @@ use zed_actions;
 use crate::{commit_view::CommitView, git_panel::GitPanel, text_diff_view::TextDiffView};
 
 mod askpass_modal;
+pub mod branch_panel;
 pub mod branch_picker;
+mod branch_service;
 mod commit_modal;
 pub mod commit_tooltip;
 pub mod commit_view;
@@ -65,6 +67,7 @@ pub fn init(cx: &mut App) {
         ProjectDiff::register(workspace, cx);
         CommitModal::register(workspace);
         git_panel::register(workspace);
+        branch_panel::register(workspace);
         repository_selector::register(workspace);
         git_picker::register(workspace);
 

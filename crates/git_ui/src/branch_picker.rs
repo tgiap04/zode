@@ -2,7 +2,6 @@ use anyhow::Context as _;
 use editor::Editor;
 use fuzzy_nucleo::StringMatchCandidate;
 
-use collections::HashSet;
 use git::repository::Branch;
 use gpui::http_client::Url;
 use gpui::{
@@ -22,6 +21,7 @@ use util::ResultExt;
 use workspace::notifications::DetachAndPromptErr;
 use workspace::{ModalView, Workspace};
 
+use crate::branch_service::{self, process_branches};
 use crate::{branch_picker, git_panel::show_error_toast};
 
 actions!(
@@ -407,37 +407,6 @@ enum PickerState {
     NewBranch,
 }
 
-fn process_branches(branches: &Arc<[Branch]>) -> Vec<Branch> {
-    let remote_upstreams: HashSet<_> = branches
-        .iter()
-        .filter_map(|branch| {
-            branch
-                .upstream
-                .as_ref()
-                .filter(|upstream| upstream.is_remote())
-                .map(|upstream| upstream.ref_name.clone())
-        })
-        .collect();
-
-    let mut result: Vec<Branch> = branches
-        .iter()
-        .filter(|branch| !remote_upstreams.contains(&branch.ref_name))
-        .cloned()
-        .collect();
-
-    result.sort_by_key(|branch| {
-        (
-            !branch.is_head,
-            branch
-                .most_recent_commit
-                .as_ref()
-                .map(|commit| 0 - commit.commit_timestamp),
-        )
-    });
-
-    result
-}
-
 impl BranchListDelegate {
     fn new(
         workspace: WeakEntity<Workspace>,
@@ -473,15 +442,10 @@ impl BranchListDelegate {
         let Some(repo) = self.repo.clone() else {
             return;
         };
-        let new_branch_name = new_branch_name.to_string().replace(' ', "-");
         let base_branch = from_branch.map(|b| b.to_string());
+        let new_branch_name = new_branch_name.to_string();
         cx.spawn(async move |_, cx| {
-            repo.update(cx, |repo, _| {
-                repo.create_branch(new_branch_name, base_branch)
-            })
-            .await??;
-
-            Ok(())
+            branch_service::create_branch(repo, new_branch_name, base_branch, cx).await
         })
         .detach_and_prompt_err("Failed to create branch", window, cx, |e, _, _| {
             Some(e.to_string())
@@ -500,12 +464,12 @@ impl BranchListDelegate {
             return;
         };
 
-        let receiver = repo.update(cx, |repo, _| repo.create_remote(remote_name, remote_url));
-
-        cx.background_spawn(async move { receiver.await? })
-            .detach_and_prompt_err("Failed to create remote", window, cx, |e, _, _cx| {
-                Some(e.to_string())
-            });
+        cx.spawn(async move |_, cx| {
+            branch_service::create_remote(repo, remote_name, remote_url, cx).await
+        })
+        .detach_and_prompt_err("Failed to create remote", window, cx, |e, _, _cx| {
+            Some(e.to_string())
+        });
         cx.emit(DismissEvent);
     }
 
@@ -528,10 +492,13 @@ impl BranchListDelegate {
                     }
 
                     is_remote = branch.is_remote();
-                    repo.update(cx, |repo, _| {
-                        repo.delete_branch(is_remote, branch.name().to_string())
-                    })
-                    .await?
+                    branch_service::delete_branch(
+                        repo.clone(),
+                        is_remote,
+                        branch.name().to_string(),
+                        cx,
+                    )
+                    .await
                 }
                 _ => {
                     log::error!("Failed to delete entry: wrong entry to delete");
@@ -851,10 +818,7 @@ impl PickerDelegate for BranchListDelegate {
 
                 let branch = branch.clone();
                 cx.spawn(async move |_, cx| {
-                    repo.update(cx, |repo, _| repo.change_branch(branch.name().to_string()))
-                        .await??;
-
-                    anyhow::Ok(())
+                    branch_service::checkout(repo, branch.name().to_string(), cx).await
                 })
                 .detach_and_prompt_err(
                     "Failed to change branch",

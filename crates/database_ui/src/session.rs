@@ -30,6 +30,19 @@ pub struct Session {
     pub capabilities: Capabilities,
 }
 
+/// What to say when a driver is simply not on the machine.
+///
+/// One sentence, in one place, because it is said from two: the capability
+/// probe the dialog runs and the connection the tree opens. It names the
+/// remedy for each of the two ways to be here -- an install that has not
+/// downloaded this driver yet, and a checkout that has not built one.
+pub fn not_installed(driver: &str) -> String {
+    format!(
+        "the `{driver}` driver is not installed -- download it from the connection dialog, \
+         or in a development build run `script/build-database-drivers`"
+    )
+}
+
 /// Starts a driver, asks what it can do, and stops it again.
 ///
 /// What the add-connection dialog uses to find out which fields to show. A
@@ -41,16 +54,17 @@ pub fn driver_capabilities(
     cx: &App,
 ) -> Task<Result<database::protocol::Capabilities>> {
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let transport: Arc<dyn Transport> = Arc::new(
-            StdioTransport::new(&descriptor.binary, None, cx).with_context(|| {
+        let binary = descriptor
+            .binary()
+            .with_context(|| not_installed(&descriptor.id))?;
+        let transport: Arc<dyn Transport> =
+            Arc::new(StdioTransport::new(binary, None, cx).with_context(|| {
                 format!(
-                    "could not start the `{}` driver at {} \
-                     (in a development build, run `script/build-database-drivers` first)",
+                    "could not start the `{}` driver at {}",
                     descriptor.id,
-                    descriptor.binary.executable.display()
+                    binary.executable.display()
                 )
-            })?,
-        );
+            })?);
         // Dropped at the end of this scope, which kills the process: the driver
         // has answered the only thing it was started for.
         let client = DriverClient::new(transport, DEFAULT_REQUEST_TIMEOUT, cx);
@@ -70,20 +84,21 @@ impl Session {
         secret: Option<String>,
         cx: &AsyncApp,
     ) -> Result<Self> {
-        let transport: Arc<dyn Transport> = Arc::new(
-            StdioTransport::new(&descriptor.binary, None, cx).with_context(|| {
-                // Names the path, and says the one thing that fixes it in a
-                // development build: the drivers are separate binaries that
-                // `cargo run` does not build, so a fresh checkout has none and
-                // every connection fails here with nothing to go on.
+        let binary = descriptor
+            .binary()
+            .with_context(|| not_installed(&config.driver))?;
+        let transport: Arc<dyn Transport> =
+            Arc::new(StdioTransport::new(binary, None, cx).with_context(|| {
+                // Names the path it actually tried. The driver being absent
+                // altogether is a different sentence, said above -- conflating
+                // the two is what left "never installed" looking like the
+                // driver's own error.
                 format!(
-                    "could not start the `{}` driver at {} \
-                     (in a development build, run `script/build-database-drivers` first)",
+                    "could not start the `{}` driver at {}",
                     config.driver,
-                    descriptor.binary.executable.display()
+                    binary.executable.display()
                 )
-            })?,
-        );
+            })?);
         let client = Arc::new(DriverClient::new(transport, DEFAULT_REQUEST_TIMEOUT, cx));
 
         // Before anything else is asked of it: a driver speaking a different

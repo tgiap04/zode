@@ -54,6 +54,60 @@ const NOUNS: &[&str] = &[
     "vole", "walrus", "warbler", "willow", "wolf", "wren", "yew", "zenith",
 ];
 
+/// Rejects a worktree name that would not stay inside the directory it is
+/// joined to.
+///
+/// The name becomes a path component -- `directory.join(name).join(project)` --
+/// and `Path::join` does not confine anything: an absolute name *replaces* the
+/// directory outright (`join("/etc")` is `/etc`), and `..` walks out of it. A
+/// name that escapes is bad enough on its own; a name that escapes and then
+/// fails to create is worse, because the failure path removes what it finds
+/// there.
+///
+/// Slashes are deliberately still allowed. `feat/parser` is an ordinary branch
+/// name, the same string is used as the branch, and it nests one directory
+/// deeper without leaving the tree -- refusing it would break a convention most
+/// repositories use.
+pub fn validate_worktree_name(name: &str) -> Result<(), &'static str> {
+    use std::path::{Component, Path};
+
+    if name.trim().is_empty() {
+        return Err("a worktree name cannot be empty");
+    }
+    if name != name.trim() {
+        return Err("a worktree name cannot start or end with whitespace");
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("a worktree name cannot contain control characters");
+    }
+    // Rejected on every platform, not just Windows: on unix a backslash is a
+    // legal filename character, but the same string is handed to git as a
+    // branch name and travels to remote machines that may not be unix.
+    if name.contains('\\') {
+        return Err("a worktree name cannot contain a backslash");
+    }
+
+    let path = Path::new(name);
+    if path.is_absolute() || path.has_root() {
+        return Err("a worktree name cannot be an absolute path");
+    }
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                return Err("a worktree name cannot contain `..`");
+            }
+            Component::CurDir => {
+                return Err("a worktree name cannot contain `.` as a path segment");
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("a worktree name cannot be an absolute path");
+            }
+            Component::Normal(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Generates a worktree name in `"adjective-noun"` format (e.g. `"swift-falcon"`).
 ///
 /// Tries up to 10 random combinations, skipping any name that already appears
@@ -167,5 +221,52 @@ mod tests {
                 "NOUNS entry is not all lowercase: {word:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::validate_worktree_name;
+
+    /// The convention this validation must not break.
+    #[test]
+    fn an_ordinary_branch_shaped_name_is_accepted() {
+        for name in [
+            "feature",
+            "feat/parser",
+            "fix.rollback",
+            "v2-rewrite",
+            "wt_1",
+        ] {
+            assert!(
+                validate_worktree_name(name).is_ok(),
+                "`{name}` is an ordinary name and must be allowed"
+            );
+        }
+    }
+
+    /// `Path::join` does not confine an absolute path -- it replaces the base
+    /// with it. `<worktrees>/…` joined with `/etc` is simply `/etc`.
+    #[test]
+    fn an_absolute_name_is_refused() {
+        assert!(validate_worktree_name("/etc").is_err());
+        assert!(validate_worktree_name("/tmp/anywhere").is_err());
+    }
+
+    #[test]
+    fn a_name_that_walks_out_of_the_directory_is_refused() {
+        assert!(validate_worktree_name("../escape").is_err());
+        assert!(validate_worktree_name("feat/../../escape").is_err());
+        assert!(validate_worktree_name("..").is_err());
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused() {
+        assert!(validate_worktree_name("").is_err());
+        assert!(validate_worktree_name("   ").is_err());
+        assert!(validate_worktree_name(" leading").is_err());
+        assert!(validate_worktree_name("trailing ").is_err());
+        assert!(validate_worktree_name("new\nline").is_err());
+        assert!(validate_worktree_name("back\\slash").is_err());
     }
 }

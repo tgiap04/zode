@@ -17,6 +17,7 @@ default = ["client"]
 # depend on this crate for the protocol alone -- without it, building
 # `zode-db-sqlite` would compile gpui.
 client = [
+    "install",
     "dep:async-trait",
     "dep:collections",
     "dep:futures",
@@ -24,6 +25,21 @@ client = [
     "dep:parking_lot",
     "dep:smol",
     "dep:util",
+]
+# Downloading a driver and putting it on disk. Enabled by `client`, and kept a
+# feature of its own so the split above stays honest: a driver binary takes this
+# crate with `default-features = false` and must not compile the machinery that
+# downloads drivers.
+install = [
+    "dep:async-compression",
+    "dep:async-tar",
+    "dep:collections",
+    "dep:futures",
+    "dep:http_client",
+    "dep:parking_lot",
+    "dep:paths",
+    "dep:sha2",
+    "dep:smol",
 ]
 test-support = ["client"]
 # Starting a driver binary and speaking the protocol to it. std only, so a
@@ -42,8 +58,15 @@ futures = { workspace = true, optional = true }
 gpui = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 smol = { workspace = true, optional = true }
+async-compression = { workspace = true, optional = true }
+async-tar = { workspace = true, optional = true }
+http_client = { workspace = true, optional = true }
+paths = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 util = { workspace = true, optional = true }
 
 [dev-dependencies]
 database = { path = ".", features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }

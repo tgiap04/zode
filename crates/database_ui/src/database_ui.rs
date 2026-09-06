@@ -8,6 +8,7 @@
 //! touching a line in here.
 
 mod connection_modal;
+mod connection_modal_download;
 mod connection_modal_render;
 mod connection_store;
 mod connection_tree;

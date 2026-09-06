@@ -525,6 +525,12 @@ fn main() {
         Client::set_global(client.clone(), cx);
 
         zed::init(cx);
+        // Optional sign-in. Reads the keychain and, only if it finds a saved
+        // session, the account service — a machine that has never signed in
+        // issues no request from here. See `zode_account`'s crate docs.
+        let account = zode_account::init(cx);
+        zode_sync::init(account, cx);
+        zode_account_ui::init(cx);
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
         debugger_tools::init(cx);

@@ -19,12 +19,14 @@ database = { workspace = true, features = ["client"] }
 collections.workspace = true
 editor.workspace = true
 extension.workspace = true
+futures.workspace = true
 multi_buffer.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true
 menu.workspace = true
 project.workspace = true
+release_channel.workspace = true
 settings.workspace = true
 ui.workspace = true
 workspace.workspace = true
@@ -38,6 +40,8 @@ theme.workspace = true
 theme_settings.workspace = true
 database = { workspace = true, features = ["client", "test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
