@@ -108,10 +108,24 @@ pub enum VersionCheckType {
 pub enum AutoUpdateStatus {
     Idle,
     Checking,
-    Downloading { version: VersionCheckType },
-    Installing { version: VersionCheckType },
-    Updated { version: VersionCheckType },
-    Errored { error: Arc<anyhow::Error> },
+    /// A newer release was found, and nothing has been fetched yet. The download is over a
+    /// hundred megabytes and replaces the running application, so it waits here until
+    /// someone asks for it via [`AutoUpdater::download_update`].
+    UpdateAvailable {
+        version: VersionCheckType,
+    },
+    Downloading {
+        version: VersionCheckType,
+    },
+    Installing {
+        version: VersionCheckType,
+    },
+    Updated {
+        version: VersionCheckType,
+    },
+    Errored {
+        error: Arc<anyhow::Error>,
+    },
 }
 
 impl PartialEq for AutoUpdateStatus {
@@ -119,6 +133,10 @@ impl PartialEq for AutoUpdateStatus {
         match (self, other) {
             (AutoUpdateStatus::Idle, AutoUpdateStatus::Idle) => true,
             (AutoUpdateStatus::Checking, AutoUpdateStatus::Checking) => true,
+            (
+                AutoUpdateStatus::UpdateAvailable { version: v1 },
+                AutoUpdateStatus::UpdateAvailable { version: v2 },
+            ) => v1 == v2,
             (
                 AutoUpdateStatus::Downloading { version: v1 },
                 AutoUpdateStatus::Downloading { version: v2 },
@@ -151,6 +169,18 @@ pub struct AutoUpdater {
     http_client: Arc<dyn HttpClient>,
     pending_poll: Option<Task<Option<()>>>,
     quit_subscription: Option<gpui::Subscription>,
+    /// The asset [`AutoUpdateStatus::UpdateAvailable`] is offering, held between the check
+    /// that found it and the confirmation that installs it.
+    pending_release: Option<ReleaseAsset>,
+}
+
+/// Which half of the update the spawned task runs: finding a release, or fetching and
+/// installing the one already found. They are separate so that nothing is downloaded
+/// before the person has said yes.
+#[derive(Clone, Copy)]
+enum UpdateStep {
+    Check,
+    DownloadAndInstall,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -447,10 +477,25 @@ impl AutoUpdater {
             http_client,
             pending_poll: None,
             quit_subscription,
+            pending_release: None,
         }
     }
 
+    /// Looks for a newer release. Finding one only reports it; see [`Self::download_update`].
     pub fn poll(&mut self, cx: &mut Context<Self>) {
+        self.spawn_step(UpdateStep::Check, cx);
+    }
+
+    /// Accepts the release [`Self::poll`] found and installs it. Does nothing unless a check
+    /// has actually turned one up, so a stray call cannot start a download of its own.
+    pub fn download_update(&mut self, cx: &mut Context<Self>) {
+        if self.pending_release.is_none() {
+            return;
+        }
+        self.spawn_step(UpdateStep::DownloadAndInstall, cx);
+    }
+
+    fn spawn_step(&mut self, step: UpdateStep, cx: &mut Context<Self>) {
         if self.pending_poll.is_some() {
             return;
         }
@@ -458,7 +503,12 @@ impl AutoUpdater {
         cx.notify();
 
         self.pending_poll = Some(cx.spawn(async move |this, cx| {
-            let result = Self::update(this.upgrade()?, cx).await;
+            let result = match step {
+                UpdateStep::Check => Self::check_for_update(this.upgrade()?, cx).await,
+                UpdateStep::DownloadAndInstall => {
+                    Self::download_and_install(this.upgrade()?, cx).await
+                }
+            };
             this.update(cx, |this, cx| {
                 this.pending_poll = None;
                 if let Err(error) = result {
@@ -490,6 +540,7 @@ impl AutoUpdater {
         if let AutoUpdateStatus::Idle = self.status {
             return false;
         }
+        self.pending_release = None;
         self.status = AutoUpdateStatus::Idle;
         cx.notify();
         true
@@ -582,13 +633,9 @@ impl AutoUpdater {
         Ok(release.body)
     }
 
-    async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (client, installed_version, previous_status) = this.read_with(cx, |this, _| {
-            (
-                this.http_client.clone(),
-                this.current_version.clone(),
-                this.status.clone(),
-            )
+    async fn check_for_update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
+        let (installed_version, previous_status) = this.read_with(cx, |this, _| {
+            (this.current_version.clone(), this.status.clone())
         });
 
         Self::check_dependencies()?;
@@ -620,6 +667,33 @@ impl AutoUpdater {
         };
 
         this.update(cx, |this, cx| {
+            this.pending_release = Some(fetched_release_data);
+            this.status = AutoUpdateStatus::UpdateAvailable {
+                version: newer_version,
+            };
+            cx.notify();
+        });
+        Ok(())
+    }
+
+    /// Fetches and installs the release a preceding check left in `pending_release`.
+    async fn download_and_install(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
+        let (client, release, newer_version) = this.read_with(cx, |this, _| {
+            let version = match &this.status {
+                AutoUpdateStatus::UpdateAvailable { version } => Some(version.clone()),
+                _ => None,
+            };
+            (
+                this.http_client.clone(),
+                this.pending_release.clone(),
+                version,
+            )
+        });
+        let release = release.context("no update has been found to install")?;
+        let newer_version = newer_version
+            .context("the update that was found is no longer the one being offered")?;
+
+        this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Downloading {
                 version: newer_version.clone(),
             };
@@ -630,7 +704,7 @@ impl AutoUpdater {
             .await
             .context("Failed to create installer dir")?;
         let target_path = Self::target_path(&installer_dir).await?;
-        download_release(&target_path, fetched_release_data, client)
+        download_release(&target_path, release, client)
             .await
             .with_context(|| format!("Failed to download update to {}", target_path.display()))?;
 
@@ -649,6 +723,7 @@ impl AutoUpdater {
         }
 
         this.update(cx, |this, cx| {
+            this.pending_release = None;
             this.set_should_show_update_notification(true, cx)
                 .detach_and_log_err(cx);
             this.status = AutoUpdateStatus::Updated {
@@ -1235,15 +1310,14 @@ mod tests {
                 break;
             }
         }
+        // A newer release only gets reported. Nothing is fetched until it is confirmed.
         let status = auto_updater.read_with(cx, |updater, _| updater.status());
         assert_eq!(
             status,
-            AutoUpdateStatus::Downloading {
+            AutoUpdateStatus::UpdateAvailable {
                 version: VersionCheckType::Semantic(semver::Version::new(0, 100, 1))
             }
         );
-
-        dmg_tx.send(FAKE_UPDATE_BODY.to_owned()).unwrap();
 
         let tmp_dir = Arc::new(tempdir().unwrap());
 
@@ -1256,6 +1330,18 @@ mod tests {
                 Ok(Some(dest_path))
             })));
         });
+
+        auto_updater.update(cx, |updater, cx| updater.download_update(cx));
+        loop {
+            cx.background_executor.timer(Duration::from_millis(0)).await;
+            cx.run_until_parked();
+            let status = auto_updater.read_with(cx, |updater, _| updater.status());
+            if matches!(status, AutoUpdateStatus::Downloading { .. }) {
+                break;
+            }
+        }
+
+        dmg_tx.send(FAKE_UPDATE_BODY.to_owned()).unwrap();
 
         loop {
             cx.background_executor.timer(Duration::from_millis(0)).await;
