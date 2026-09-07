@@ -75,6 +75,78 @@ async fn a_burst_of_events_costs_one_rebuild(cx: &mut TestAppContext) {
     });
 }
 
+/// Pressing reload must actually cause a rebuild, not merely schedule a git scan whose
+/// result the panel then ignores.
+///
+/// What this does NOT cover: that `git worktree list` really re-ran. That half lives in
+/// the store's keyed job queue, which is not observable from here, and the harness builds
+/// a project with no repository at all -- so `refresh_all_repositories` iterates nothing.
+/// The scan is asserted by reading `refresh_all_repositories`, not by this test; what is
+/// asserted here is the panel half, which is the half that could silently regress if
+/// someone dropped the `mark_stale` call believing the subscription would cover it.
+#[gpui::test]
+async fn reload_marks_the_tree_stale_so_the_next_frame_rebuilds(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.refresh_if_stale(cx);
+        let before = panel.rebuild_count;
+
+        panel.reload(cx);
+        panel.refresh_if_stale(cx);
+        assert_eq!(
+            panel.rebuild_count,
+            before + 1,
+            "reload must rebuild the tree, not just poke git"
+        );
+    });
+}
+
+/// The spinner must settle. A reload that finds nothing changed emits no repository event
+/// at all, so if the icon were keyed off `GitWorktreeListChanged` it would spin forever in
+/// the commonest case -- which is why `reload` awaits the scan instead. This asserts the
+/// far end of that: `reloading` goes back to false on its own.
+#[gpui::test]
+async fn the_reload_spinner_settles_when_the_scan_finishes(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.reload(cx);
+        assert!(panel.reloading, "the icon spins as soon as it is pressed");
+    });
+
+    cx.run_until_parked();
+
+    panel.update(cx, |panel, _| {
+        assert!(
+            !panel.reloading,
+            "the icon must settle once the scan is done, not spin forever"
+        );
+    });
+}
+
+/// Reload obeys the same rule as every other trigger here: a panel nobody is looking at
+/// does no work. Pressing it cannot be the one path that rebuilds a hidden panel.
+#[gpui::test]
+async fn reload_on_a_hidden_panel_still_costs_nothing(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+
+    panel.update(cx, |panel, cx| {
+        assert!(!panel.is_active, "a fresh panel starts hidden");
+        // Also the no-repository path: this project has none, so reload must be a safe
+        // no-op rather than a panic.
+        for _ in 0..5 {
+            panel.reload(cx);
+        }
+        assert_eq!(
+            panel.rebuild_count, 0,
+            "five reloads while hidden must cost zero rebuilds"
+        );
+    });
+}
+
 /// Rendering an unchanged panel repeatedly must not rebuild: the flag, not the
 /// frame, decides.
 #[gpui::test]

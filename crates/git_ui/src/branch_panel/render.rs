@@ -63,15 +63,19 @@ impl BranchPanel {
         )
     }
 
-    /// Title and one button.
+    /// Title, and only the actions that belong to the panel itself.
     ///
-    /// One button on purpose: `+` is the only thing this panel is *for* at the
-    /// top level. Fetch, pull and push act on a repository rather than on the
-    /// panel, so they live on the repository row's own menu -- putting them
-    /// here made the header look like the panel's toolbar when it was really
-    /// one repository's.
+    /// The rule here is scope, not count: `+` creates a worktree and the reload button
+    /// re-reads the list this panel exists to show, so both act on the panel. Fetch, pull
+    /// and push act on one repository, which is why they live on the repository row's own
+    /// menu -- putting them here made the header look like the panel's toolbar when it was
+    /// really one repository's.
+    ///
+    /// Both buttons are gated on there being a repository, so neither appears offering
+    /// something it cannot do.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let repo_id = self.repos.first().map(|repo| repo.id);
+        let reloading = self.reloading;
 
         h_flex()
             .w_full()
@@ -88,12 +92,36 @@ impl BranchPanel {
                     .weight(FontWeight::SEMIBOLD),
             )
             .children(repo_id.map(|id| {
-                IconButton::new("create-worktree", IconName::Plus)
-                    .icon_size(IconSize::Small)
-                    .tooltip(|_, cx| Tooltip::simple("Create Worktree", cx))
-                    .on_click(cx.listener(move |panel, _, window, cx| {
-                        panel.open_create_worktree_modal(id, window, cx);
-                    }))
+                h_flex()
+                    .gap_1()
+                    .child(
+                        IconButton::new("reload-worktrees", IconName::RotateCw)
+                            .icon_size(IconSize::Small)
+                            .loading(reloading)
+                            .tooltip(move |_, cx| {
+                                Tooltip::simple(
+                                    if reloading {
+                                        "Reloading Worktrees…"
+                                    } else {
+                                        "Reload Worktrees"
+                                    },
+                                    cx,
+                                )
+                            })
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.reload(cx);
+                            })),
+                    )
+                    // `+` stays rightmost: it was the only button here, and moving it
+                    // would relocate a control people already reach for.
+                    .child(
+                        IconButton::new("create-worktree", IconName::Plus)
+                            .icon_size(IconSize::Small)
+                            .tooltip(|_, cx| Tooltip::simple("Create Worktree", cx))
+                            .on_click(cx.listener(move |panel, _, window, cx| {
+                                panel.open_create_worktree_modal(id, window, cx);
+                            })),
+                    )
             }))
             .into_any_element()
     }
