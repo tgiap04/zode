@@ -721,6 +721,24 @@ impl ActivityIndicator {
                         tooltip_message: None,
                     });
                 }
+                AutoUpdateStatus::UpdateAvailable { version } => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::Download)
+                                .size(IconSize::Small)
+                                .into_any_element(),
+                        ),
+                        message: format!("Zode {} available", describe(&version)),
+                        on_click: Some(Arc::new(|_, _, cx| {
+                            if let Some(updater) = AutoUpdater::get(cx) {
+                                updater.update(cx, |updater, cx| {
+                                    updater.download_update(cx);
+                                });
+                            }
+                        })),
+                        tooltip_message: Some("Click to download and install".to_string()),
+                    });
+                }
                 AutoUpdateStatus::Downloading { version } => {
                     return Some(Content {
                         icon: Some(

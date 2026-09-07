@@ -49,6 +49,8 @@ impl BranchPanel {
                 expanded: HashSet::default(),
                 stored_expanded: HashSet::default(),
                 running_remote_ops: HashSet::default(),
+                reloading: false,
+                _reload_task: None,
                 context_menu: None,
                 pending_serialization: Task::ready(None),
                 _activity_tick: None,
@@ -97,6 +99,51 @@ impl BranchPanel {
             }
             panel
         })
+    }
+
+    /// Re-reads git, rather than only rebuilding from what the store already holds.
+    ///
+    /// `mark_stale` on its own would rebuild the tree out of the same cached
+    /// `RepositorySnapshot` and produce identical rows -- useless as a reload. So this
+    /// also schedules each repository's scan, which re-runs `git worktree list` inside
+    /// `compute_snapshot`, keeping this module a reader rather than something that shells
+    /// out to git itself.
+    ///
+    /// Two things then bring the result in, and both are needed. A scan that finds the list
+    /// changed emits `GitWorktreeListChanged`, which the panel's existing subscription turns
+    /// into a rebuild. A scan that finds nothing changed emits **nothing at all** -- so the
+    /// completion below is what settles the spinner, and it is why this waits on the scan
+    /// rather than on an event.
+    ///
+    /// The scan is a keyed job (`ReloadGitState`), and the queue drops a keyed job when a
+    /// newer one with the same key is already waiting -- so leaning on the button
+    /// coalesces instead of queueing one scan per press.
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        // The agent rows come from the workspace, not from git, so they are refreshed by
+        // the rebuild itself rather than by any scan.
+        self.mark_stale(cx);
+
+        let Some(git_store) = self.git_store(cx) else {
+            return;
+        };
+        let scans = git_store.update(cx, |git_store, cx| {
+            git_store.refresh_all_repositories_and_wait(cx)
+        });
+
+        self.reloading = true;
+        self._reload_task = Some(cx.spawn(async move |panel, cx| {
+            scans.await;
+            panel
+                .update(cx, |panel, cx| {
+                    panel.reloading = false;
+                    // The scan may have changed nothing, in which case no repository event
+                    // fired and this is the only thing that redraws the settled icon.
+                    panel.mark_stale(cx);
+                    cx.notify();
+                })
+                // A failed update means the panel is gone, and so is this task.
+                .ok();
+        }));
     }
 
     /// Marks the tree for a rebuild. Rebuilding happens in `render`, so a burst

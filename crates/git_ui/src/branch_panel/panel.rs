@@ -86,6 +86,12 @@ pub struct BranchPanel {
     /// Network operations currently in flight, one slot per kind. Leaning on
     /// the fetch button must not spawn a queue of git processes.
     pub(crate) running_remote_ops: HashSet<crate::branch_panel::remote::RemoteOp>,
+    /// Whether a reload the user asked for is still running, which is what turns the
+    /// header's reload icon into a spinner.
+    pub(crate) reloading: bool,
+    /// Held so the reload stops when the panel is dropped, and so a second press replaces
+    /// the first wait rather than stacking another one behind it.
+    pub(crate) _reload_task: Option<Task<()>>,
     /// The open right-click menu, its anchor, and the subscription that clears
     /// it on dismiss. Dropping the tuple drops all three together.
     pub(crate) context_menu: Option<(Entity<ui::ContextMenu>, gpui::Point<Pixels>, Subscription)>,

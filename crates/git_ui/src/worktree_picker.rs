@@ -6,17 +6,18 @@ use collections::HashSet;
 use fuzzy::StringMatchCandidate;
 use git::repository::Worktree as GitWorktree;
 use gpui::{
-    Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task, WeakEntity,
-    Window, actions, rems,
+    Action, AnyElement, App, Context, DismissEvent, Div, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task,
+    WeakEntity, Window, actions, rems,
 };
 use picker::{Picker, PickerDelegate, PickerEditorPosition};
 use project::Project;
-use project::git_store::RepositoryEvent;
+use project::git_store::{Repository, RepositoryEvent};
 use ui::{
     Button, Divider, HighlightedLabel, IconButton, KeyBinding, ListItem, ListItemSpacing, Tooltip,
     prelude::*,
 };
+use ui_input::ErasedEditor;
 use util::ResultExt as _;
 use util::paths::PathExt;
 use workspace::{
@@ -83,10 +84,6 @@ impl WorktreePicker {
                 .map(|branch| branch.name().to_string())
         });
 
-        let all_worktrees_request = repository
-            .clone()
-            .map(|repository| repository.update(cx, |repository, _| repository.worktrees()));
-
         let default_branch_request = repository.clone().map(|repository| {
             repository.update(cx, |repository, _| repository.default_branch(false))
         });
@@ -106,6 +103,7 @@ impl WorktreePicker {
             has_multiple_repositories,
             focus_handle: cx.focus_handle(),
             show_footer,
+            reload_task: None,
         };
 
         let picker = cx.new(|cx| {
@@ -123,33 +121,19 @@ impl WorktreePicker {
 
         let mut subscriptions = Vec::new();
 
+        picker.update(cx, |picker, cx| {
+            WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+        });
+
         {
             let picker_handle = picker.downgrade();
             cx.spawn_in(window, async move |_this, cx| {
-                let all_worktrees: Vec<_> = match all_worktrees_request {
-                    Some(req) => match req.await {
-                        Ok(Ok(worktrees)) => {
-                            worktrees.into_iter().filter(|wt| !wt.is_bare).collect()
-                        }
-                        Ok(Err(err)) => {
-                            log::warn!("WorktreePicker: git worktree list failed: {err}");
-                            return anyhow::Ok(());
-                        }
-                        Err(_) => {
-                            log::warn!("WorktreePicker: worktree request was cancelled");
-                            return anyhow::Ok(());
-                        }
-                    },
-                    None => Vec::new(),
-                };
-
                 let default_branch = match default_branch_request {
                     Some(req) => req.await.ok().and_then(Result::ok).flatten(),
                     None => None,
                 };
 
                 picker_handle.update_in(cx, |picker, window, cx| {
-                    picker.delegate.all_worktrees = all_worktrees;
                     picker.delegate.default_branch_name =
                         default_branch.map(|branch| branch.to_string());
                     picker.refresh(window, cx);
@@ -166,22 +150,16 @@ impl WorktreePicker {
                 repo,
                 window,
                 move |_this, repo, event: &RepositoryEvent, window, cx| {
-                    if matches!(event, RepositoryEvent::GitWorktreeListChanged) {
-                        let worktrees_request = repo.update(cx, |repo, _| repo.worktrees());
-                        let picker = picker_entity.clone();
-                        cx.spawn_in(window, async move |_, cx| {
-                            let all_worktrees: Vec<_> = worktrees_request
-                                .await??
-                                .into_iter()
-                                .filter(|wt| !wt.is_bare)
-                                .collect();
-                            picker.update_in(cx, |picker, window, cx| {
-                                picker.delegate.all_worktrees = all_worktrees;
-                                picker.refresh(window, cx);
-                            })?;
-                            anyhow::Ok(())
-                        })
-                        .detach_and_log_err(cx);
+                    if matches!(event, RepositoryEvent::GitWorktreeListChanged)
+                        && let Some(picker) = picker_entity.upgrade()
+                    {
+                        // Deliberately the repository this subscription was registered on, not
+                        // whatever is active now: the rest of the delegate's state was built from
+                        // this one, so reloading a different repo's worktrees would mismatch it.
+                        let repo = repo.clone();
+                        picker.update(cx, |picker, cx| {
+                            WorktreePickerDelegate::reload_worktrees_for(picker, &repo, window, cx);
+                        });
                     }
                 },
             ));
@@ -258,6 +236,7 @@ struct WorktreePickerDelegate {
     has_multiple_repositories: bool,
     focus_handle: FocusHandle,
     show_footer: bool,
+    reload_task: Option<Task<()>>,
 }
 
 impl WorktreePickerDelegate {
@@ -285,6 +264,62 @@ impl WorktreePickerDelegate {
 
     fn all_repo_worktrees(&self) -> &[GitWorktree] {
         &self.all_worktrees
+    }
+
+    /// Re-runs `git worktree list` against whichever repository is active now.
+    ///
+    /// For a caller that already holds the repository it cares about, use
+    /// [`Self::reload_worktrees_for`] instead -- re-resolving would hand it a different repo.
+    fn reload_worktrees(
+        picker: &mut Picker<Self>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        let Some(repository) = picker.delegate.project.read(cx).active_repository(cx) else {
+            // Drop any fetch still in flight: with no repository to resolve, a late response
+            // would repopulate a list this picker can no longer claim to be showing.
+            picker.delegate.reload_task = None;
+            return;
+        };
+        Self::reload_worktrees_for(picker, &repository, window, cx);
+    }
+
+    /// Re-runs `git worktree list` on `repository` and hands the result to the picker.
+    ///
+    /// Associated rather than a `&self` method because every caller reaches it through
+    /// `cx.listener` or `Entity::update`, both of which hand out `&mut Picker<Self>` -- and the
+    /// task has to be stored back on the delegate.
+    fn reload_worktrees_for(
+        picker: &mut Picker<Self>,
+        repository: &Entity<Repository>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        let request = repository.update(cx, |repository, _| repository.worktrees());
+
+        // Assigning over the previous task cancels it, so a slower earlier response can never
+        // land on top of a newer list.
+        picker.delegate.reload_task = Some(cx.spawn_in(window, async move |picker, cx| {
+            let worktrees = match request.await {
+                Ok(Ok(worktrees)) => worktrees,
+                Ok(Err(err)) => {
+                    log::warn!("WorktreePicker: git worktree list failed: {err}");
+                    return;
+                }
+                Err(_) => {
+                    log::warn!("WorktreePicker: worktree request was cancelled");
+                    return;
+                }
+            };
+
+            picker
+                .update_in(cx, |picker, window, cx| {
+                    picker.delegate.all_worktrees =
+                        worktrees.into_iter().filter(|wt| !wt.is_bare).collect();
+                    picker.refresh(window, cx);
+                })
+                .log_err();
+        }));
     }
 
     fn creation_blocked_reason(&self, cx: &App) -> Option<SharedString> {
@@ -908,6 +943,46 @@ impl PickerDelegate for WorktreePickerDelegate {
         }
     }
 
+    fn render_editor(
+        &self,
+        editor: &Arc<dyn ErasedEditor>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Div {
+        let editor_position = self.editor_position();
+        v_flex()
+            .when(editor_position == PickerEditorPosition::End, |this| {
+                this.child(Divider::horizontal())
+            })
+            .child(
+                h_flex()
+                    .overflow_hidden()
+                    .flex_none()
+                    .h_9()
+                    .pl_2p5()
+                    .pr_1()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(editor.render(window, cx)),
+                    )
+                    .child(
+                        IconButton::new("worktree-reload", IconName::RotateCw)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Reload the worktree list"))
+                            .on_click(cx.listener(|picker, _, window, cx| {
+                                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+                            })),
+                    ),
+            )
+            .when(editor_position == PickerEditorPosition::Start, |this| {
+                this.child(Divider::horizontal())
+            })
+    }
+
     fn render_footer(&self, _: &mut Window, cx: &mut Context<Picker<Self>>) -> Option<AnyElement> {
         if !self.show_footer {
             return None;
@@ -1142,4 +1217,206 @@ pub async fn open_remote_worktree(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use project::FakeFs;
+    use serde_json::json;
+    use settings::SettingsStore;
+    use util::path;
+    use workspace::MultiWorkspace;
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+    }
+
+    /// A `FakeFs`-backed repo with one main worktree, plus an open modal worktree picker.
+    async fn init_picker_test(
+        cx: &mut TestAppContext,
+    ) -> (
+        Arc<FakeFs>,
+        Entity<Project>,
+        Entity<WorktreePicker>,
+        VisualTestContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({
+                ".git": {},
+                "file.txt": "contents",
+            }),
+        )
+        .await;
+        fs.set_head_for_repo(
+            path!("/dir/.git").as_ref(),
+            &[("file.txt", "contents".to_string())],
+            "deadbeef",
+        );
+
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let mut visual_cx = VisualTestContext::from_window(*multi_workspace, cx);
+        let workspace = multi_workspace
+            .update(&mut visual_cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+
+        let worktree_picker = workspace.update_in(&mut visual_cx, |workspace, window, cx| {
+            let weak_workspace = workspace.weak_handle();
+            cx.new(|cx| {
+                WorktreePicker::new_modal(project.clone(), weak_workspace, None, window, cx)
+            })
+        });
+        visual_cx.run_until_parked();
+
+        (fs, project, worktree_picker, visual_cx)
+    }
+
+    /// Writes the admin entry `git worktree add` would leave behind, which is all
+    /// `FakeGitRepository::worktrees` reads to report a worktree.
+    async fn add_worktree_admin_entry(fs: &Arc<FakeFs>, name: &str) {
+        fs.insert_tree(
+            format!("{}/{name}", path!("/dir/.git/worktrees")),
+            json!({
+                "HEAD": format!("ref: refs/heads/{name}"),
+                "gitdir": format!("{}/{name}/.git", path!("/wt")),
+            }),
+        )
+        .await;
+    }
+
+    fn worktree_ref_names(
+        worktree_picker: &Entity<WorktreePicker>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<String> {
+        worktree_picker.read_with(cx, |worktree_picker, cx| {
+            worktree_picker
+                .picker
+                .read(cx)
+                .delegate
+                .all_worktrees
+                .iter()
+                .map(|worktree| worktree.ref_name.as_ref().map(ToString::to_string))
+                .map(|ref_name| ref_name.unwrap_or_default())
+                .collect()
+        })
+    }
+
+    /// Exercises the whole shared reload path -- the repository resolved from `self.project`, the
+    /// real `git worktree list` job, the `is_bare` filter and the assignment -- by adding a
+    /// worktree that did not exist when the picker opened. `FakeGitRepository::worktrees` reads
+    /// `.git/worktrees/*` on every call, so the second reload genuinely sees a different repo.
+    #[gpui::test]
+    async fn test_reload_picks_up_a_worktree_added_since_the_picker_opened(
+        cx: &mut TestAppContext,
+    ) {
+        let (fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+
+        assert_eq!(
+            worktree_ref_names(&worktree_picker, cx),
+            vec!["refs/heads/main"],
+            "only the main worktree exists yet"
+        );
+
+        add_worktree_admin_entry(&fs, "wt-a").await;
+
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            worktree_ref_names(&worktree_picker, cx),
+            vec!["refs/heads/main", "refs/heads/wt-a"],
+            "the reload should have picked up wt-a"
+        );
+    }
+
+    /// The subscription goes through the same shared fetch as the button, but keeps the repository
+    /// it subscribed to. This is the "a worktree created elsewhere shows up in an open picker"
+    /// behaviour.
+    #[gpui::test]
+    async fn test_a_worktree_list_change_event_reloads_an_open_picker(cx: &mut TestAppContext) {
+        let (fs, project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+
+        add_worktree_admin_entry(&fs, "wt-b").await;
+
+        let repository = project
+            .read_with(cx, |project, cx| project.active_repository(cx))
+            .expect("the fake project has a repository");
+        repository.update(cx, |_, cx| {
+            cx.emit(RepositoryEvent::GitWorktreeListChanged);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            worktree_ref_names(&worktree_picker, cx),
+            vec!["refs/heads/main", "refs/heads/wt-b"],
+            "the change event should have reloaded the picker"
+        );
+    }
+
+    /// A project with no git repository at all: the reload has nothing to resolve and must simply
+    /// do nothing. Guards the early return that also drops any in-flight fetch.
+    #[gpui::test]
+    async fn test_reload_is_a_no_op_without_a_repository(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/dir"), json!({ "file.txt": "contents" }))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let cx = &mut VisualTestContext::from_window(*multi_workspace, cx);
+        let workspace = multi_workspace
+            .update(cx, |multi_workspace, _, _| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+
+        let worktree_picker = workspace.update_in(cx, |workspace, window, cx| {
+            let weak_workspace = workspace.weak_handle();
+            cx.new(|cx| {
+                WorktreePicker::new_modal(project.clone(), weak_workspace, None, window, cx)
+            })
+        });
+        cx.run_until_parked();
+
+        assert!(
+            project
+                .read_with(cx, |project, cx| project.active_repository(cx))
+                .is_none(),
+            "this project is meant to have no repository"
+        );
+
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            worktree_ref_names(&worktree_picker, cx).is_empty(),
+            "nothing to list without a repository"
+        );
+    }
 }
