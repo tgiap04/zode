@@ -75,6 +75,7 @@ The fault is a classic split-brain: **a value produced by one tool, guessed by a
 The bundler produces a volume label; the installer guesses a directory name. Both humans writing Rust: neither would catch this in a review because the label and the name look like independent decisions.
 
 This exact shape is visible three places in the codebase now:
+
 - Windows: `APP_EXE` hardcoded, bundler writes `Zode.exe` (fixed before)
 - macOS: volume label hardcoded to read, bundler writes from the label (this fix)
 - Linux: both bundler and binary read from a shared env var written to a file (no bug)

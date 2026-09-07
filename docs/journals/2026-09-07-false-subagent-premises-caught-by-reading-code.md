@@ -11,7 +11,7 @@ A small feature shipped: add a reload button to the worktree picker. It went thr
 
 Two subagents — the `planner` and later the `project-manager` — made confident, specific, checkable assertions. Three of them were **false**, and all three were caught before landing by opening the relevant source files and reading them. No implementation subagent was involved: the code was written directly in the main thread, so the false premises were inherited into that code by trusting them, not delegated away.
 
-A `reviewer` then found a real regression. It matters that the plan had recorded that very behavior change as an *intentional improvement* — the planner wrote it that way, and it was then implemented without challenge. The false premise was the planner's; the decision to build on it was not.
+A `reviewer` then found a real regression. It matters that the plan had recorded that very behavior change as an _intentional improvement_ — the planner wrote it that way, and it was then implemented without challenge. The false premise was the planner's; the decision to build on it was not.
 
 ## The Brutal Truth
 
@@ -28,6 +28,7 @@ A `reviewer` then found a real regression. It matters that the plan had recorded
 **Planner's claim:** The worktree picker does not customize `editor_position()`, so it uses the base implementation from `Picker`.
 
 **Reality:** `worktree_picker.rs:408` overrides it explicitly:
+
 ```rust
 fn editor_position(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Point<Pixels>> {
     // custom logic here
@@ -72,6 +73,7 @@ But now `reload_worktrees` resolved `active_repository`, which might be **differ
 The plan had listed this refactor as an "intentional improvement — cleaner code, repository resolves inside the fetch." It was a defect dressed as a simplification, and it reached the reviewer because nobody between the plan and the code asked whether the weaker guarantee was actually better.
 
 **Fix:** Split into two functions:
+
 - `reload_worktrees_for(repository: Entity<Repository>)` — takes the repo explicitly, fetches
 - `reload_worktrees(cx)` — resolves active repo, calls the explicit version
 - The subscription passes its captured repo: `this.reload_worktrees_for(repository, cx)`
@@ -106,6 +108,7 @@ All three were caught by the **discipline of reading the actual code** rather th
 1. **Every claim from a subagent that talks about what code does is checkable, and worth checking.** "Does not override," "has no test," "the count is X" — grep, search, collate. Plausible-sounding is not the same as true.
 
 2. **After accepting a subagent plan, read the code against it.** Spot-check the key assertions, especially:
+
    - "This component already does X" (verify with grep)
    - "This is not tested" (search for existing test patterns)
    - "The refactor simplifies because X" (reason through side effects)

@@ -1241,7 +1241,12 @@ mod tests {
     /// A `FakeFs`-backed repo with one main worktree, plus an open modal worktree picker.
     async fn init_picker_test(
         cx: &mut TestAppContext,
-    ) -> (Arc<FakeFs>, Entity<Project>, Entity<WorktreePicker>, VisualTestContext) {
+    ) -> (
+        Arc<FakeFs>,
+        Entity<Project>,
+        Entity<WorktreePicker>,
+        VisualTestContext,
+    ) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -1271,7 +1276,9 @@ mod tests {
 
         let worktree_picker = workspace.update_in(&mut visual_cx, |workspace, window, cx| {
             let weak_workspace = workspace.weak_handle();
-            cx.new(|cx| WorktreePicker::new_modal(project.clone(), weak_workspace, None, window, cx))
+            cx.new(|cx| {
+                WorktreePicker::new_modal(project.clone(), weak_workspace, None, window, cx)
+            })
         });
         visual_cx.run_until_parked();
 
@@ -1313,7 +1320,9 @@ mod tests {
     /// worktree that did not exist when the picker opened. `FakeGitRepository::worktrees` reads
     /// `.git/worktrees/*` on every call, so the second reload genuinely sees a different repo.
     #[gpui::test]
-    async fn test_reload_picks_up_a_worktree_added_since_the_picker_opened(cx: &mut TestAppContext) {
+    async fn test_reload_picks_up_a_worktree_added_since_the_picker_opened(
+        cx: &mut TestAppContext,
+    ) {
         let (fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
         let cx = &mut cx;
 
@@ -1385,7 +1394,9 @@ mod tests {
 
         let worktree_picker = workspace.update_in(cx, |workspace, window, cx| {
             let weak_workspace = workspace.weak_handle();
-            cx.new(|cx| WorktreePicker::new_modal(project.clone(), weak_workspace, None, window, cx))
+            cx.new(|cx| {
+                WorktreePicker::new_modal(project.clone(), weak_workspace, None, window, cx)
+            })
         });
         cx.run_until_parked();
 

@@ -226,9 +226,13 @@ impl RenderOnce for IconButton {
             Color::Custom(base_color.opacity(self.alpha.unwrap_or(1.0)))
         };
 
-        let icon_element = Icon::new(if self.loading { IconName::LoadCircle } else { icon })
-            .size(self.icon_size)
-            .color(icon_color);
+        let icon_element = Icon::new(if self.loading {
+            IconName::LoadCircle
+        } else {
+            icon
+        })
+        .size(self.icon_size)
+        .color(icon_color);
 
         self.base
             .map(|this| match self.shape {
