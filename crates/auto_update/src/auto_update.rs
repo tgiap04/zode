@@ -11,7 +11,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use smol::fs::File;
-use smol::{fs, io::AsyncReadExt};
+use smol::{fs, io::AsyncReadExt, stream::StreamExt as _};
 use std::mem;
 use std::{
     env::{
@@ -838,6 +838,27 @@ async fn download_release(
     Ok(())
 }
 
+/// The entries of `dir`, for error messages about a path that was expected inside it.
+///
+/// A missing directory inside an archive or a mounted image is the failure mode that
+/// hurts most here: the message alone cannot be acted on, and the person seeing it cannot
+/// look inside a temporary directory that was already cleaned up. Saying what *was* there
+/// turns a support thread into a one-line diagnosis.
+async fn describe_directory_contents(dir: &Path) -> String {
+    let Ok(mut entries) = fs::read_dir(dir).await else {
+        return "could not be read".to_string();
+    };
+    let mut names = Vec::new();
+    while let Some(Ok(entry)) = entries.next().await {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    if names.is_empty() {
+        "is empty".to_string()
+    } else {
+        format!("holds {}", names.join(", "))
+    }
+}
+
 async fn install_release_linux(
     temp_dir: &InstallerDir,
     downloaded_tar_gz: &Path,
@@ -878,6 +899,14 @@ async fn install_release_linux(
     let app_folder_name = format!("zed{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
+    anyhow::ensure!(
+        fs::metadata(&from).await.is_ok(),
+        "the {} update does not contain {app_folder_name}: {:?} {}. \
+         The archive layout and this installer disagree about the name.",
+        channel,
+        extracted,
+        describe_directory_contents(&extracted).await,
+    );
     let mut to = home_dir.join(".local");
 
     let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
@@ -907,6 +936,26 @@ async fn install_release_linux(
     Ok(Some(to.join(expected_suffix)))
 }
 
+/// The one `.app` bundle directly inside `dir`, when there is exactly one.
+///
+/// `None` when there are none or several, because picking between candidates would be a
+/// guess -- and guessing which bundle to install over the running app is the failure this
+/// whole path exists to avoid.
+async fn sole_app_bundle(dir: &Path) -> Option<PathBuf> {
+    let mut entries = fs::read_dir(dir).await.ok()?;
+    let mut found = None;
+    while let Some(Ok(entry)) = entries.next().await {
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "app") {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(path);
+        }
+    }
+    found
+}
+
 async fn install_release_macos(
     temp_dir: &InstallerDir,
     downloaded_dmg: &Path,
@@ -915,17 +964,20 @@ async fn install_release_macos(
     let running_app_path = cx.update(|cx| cx.app_path())?;
     let running_app_filename = running_app_path
         .file_name()
-        .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
+        .with_context(|| format!("invalid running app path {running_app_path:?}"))?
+        .to_owned();
 
-    let mount_path = temp_dir.path().join("Zed");
-    let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
-
-    mounted_app_path.push("/");
+    // `-mountpoint` rather than `-mountroot`: with a mount root, hdiutil picks the
+    // directory name itself from the image's volume label, and this end of the code then has
+    // to guess that label. It guessed "Zed", the label is "Zode" (see `script/bundle-mac`),
+    // and every macOS update failed at the rsync below with a path that did not exist.
+    // Naming the mount point outright removes the guess.
+    let mount_path = temp_dir.path().join("mount");
     let mut cmd = new_command("hdiutil");
     cmd.args(["attach", "-nobrowse"])
         .arg(&downloaded_dmg)
-        .arg("-mountroot")
-        .arg(temp_dir.path());
+        .arg("-mountpoint")
+        .arg(&mount_path);
     let output = cmd
         .output()
         .await
@@ -942,6 +994,36 @@ async fn install_release_macos(
         mount_path: mount_path.clone(),
         background_executor: cx.background_executor(),
     };
+
+    // The bundle inside the image is normally named exactly like the running one, and that
+    // is the case to prefer -- but the two names come from different places (the running
+    // one from wherever the app was installed and possibly renamed, the other from
+    // `cargo bundle`), so a mismatch must not be a dead end. The trailing slash below
+    // copies the *contents* of the source bundle, which means the running app keeps its own
+    // name whichever bundle is used as the source.
+    let expected_bundle = mount_path.join(&running_app_filename);
+    let source_bundle = if fs::metadata(&expected_bundle).await.is_ok() {
+        expected_bundle
+    } else {
+        match sole_app_bundle(&mount_path).await {
+            Some(bundle) => {
+                log::warn!(
+                    "the update contains {:?} rather than {running_app_filename:?}; \
+                     updating the running app in place from it",
+                    bundle.file_name().unwrap_or(bundle.as_os_str()),
+                );
+                bundle
+            }
+            None => anyhow::bail!(
+                "the mounted update contains neither {running_app_filename:?} nor a single \
+                 .app bundle to update from: {mount_path:?} {}",
+                describe_directory_contents(&mount_path).await,
+            ),
+        }
+    };
+
+    let mut mounted_app_path: OsString = source_bundle.into();
+    mounted_app_path.push("/");
 
     let mut cmd = new_command("rsync");
     cmd.args(["-av", "--delete", "--exclude", "Icon?"])
