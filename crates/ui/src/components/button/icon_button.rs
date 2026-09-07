@@ -1,6 +1,7 @@
 use gpui::{AnyView, DefiniteLength, Hsla};
 
 use super::button_like::{ButtonCommon, ButtonLike, ButtonSize, ButtonStyle};
+use crate::traits::animation_ext::CommonAnimationExt;
 use crate::{
     ElevationIndex, Icon, IconWithIndicator, Indicator, SelectableButton, TintColor, prelude::*,
 };
@@ -26,6 +27,7 @@ pub struct IconButton {
     indicator: Option<Indicator>,
     indicator_border_color: Option<Hsla>,
     alpha: Option<f32>,
+    loading: bool,
 }
 
 impl IconButton {
@@ -42,6 +44,7 @@ impl IconButton {
             indicator: None,
             indicator_border_color: None,
             alpha: None,
+            loading: false,
         };
         this.base.base = this.base.base.debug_selector(|| format!("ICON-{:?}", icon));
         this
@@ -59,6 +62,17 @@ impl IconButton {
 
     pub fn icon_color(mut self, icon_color: Color) -> Self {
         self.icon_color = icon_color;
+        self
+    }
+
+    /// Replaces the icon with a spinner while some work the button started is still running.
+    ///
+    /// Same treatment [`super::Button`] already gives its own `loading` state, so the two read
+    /// as one control in two shapes rather than two conventions. The button stays clickable:
+    /// whether a second press is meaningful depends on the work, and that is the caller's
+    /// judgment, not this component's.
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
         self
     }
 
@@ -212,7 +226,9 @@ impl RenderOnce for IconButton {
             Color::Custom(base_color.opacity(self.alpha.unwrap_or(1.0)))
         };
 
-        let icon_element = Icon::new(icon).size(self.icon_size).color(icon_color);
+        let icon_element = Icon::new(if self.loading { IconName::LoadCircle } else { icon })
+            .size(self.icon_size)
+            .color(icon_color);
 
         self.base
             .map(|this| match self.shape {
@@ -222,11 +238,12 @@ impl RenderOnce for IconButton {
                 }
                 IconButtonShape::Wide => this,
             })
-            .child(match self.indicator {
-                Some(indicator) => IconWithIndicator::new(icon_element, Some(indicator))
+            .child(match (self.indicator, self.loading) {
+                (_, true) => icon_element.with_rotate_animation(2).into_any_element(),
+                (Some(indicator), false) => IconWithIndicator::new(icon_element, Some(indicator))
                     .indicator_border_color(self.indicator_border_color)
                     .into_any_element(),
-                None => icon_element.into_any_element(),
+                (None, false) => icon_element.into_any_element(),
             })
     }
 }
