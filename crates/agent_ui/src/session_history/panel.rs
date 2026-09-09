@@ -54,6 +54,20 @@ pub struct AgentHistoryPanel {
     pub(crate) collapsed_groups: collections::HashSet<(AgentKind, PathBuf)>,
     pub(crate) expanded_rows: collections::HashSet<Arc<str>>,
     pub(crate) loading: bool,
+    /// A bulk delete is in flight.
+    ///
+    /// Guards the header's Trash button against a second click while a sweep of
+    /// several hundred transcripts is still running -- which would raise a
+    /// second confirmation over a list already being emptied, and re-trash
+    /// paths the first sweep has taken.
+    ///
+    /// Per panel, so the same project open in two windows can still run two
+    /// sweeps at once. Left that way deliberately: both halves are idempotent --
+    /// `forget_many` ignores ids the index no longer holds, and a second
+    /// `fs.trash` of a path already taken fails into `.log_err()` -- so the
+    /// worst case is a wasted attempt, not a corrupt index. A cross-window lock
+    /// would need shared state in the store for a race nobody has hit.
+    pub(crate) deleting: bool,
     /// Set once the panel has been visible, so a closed panel never touches the
     /// disk: nothing about the history belongs on the startup path.
     loaded_once: bool,
@@ -102,6 +116,7 @@ impl AgentHistoryPanel {
             collapsed_groups: Default::default(),
             expanded_rows: Default::default(),
             loading: false,
+            deleting: false,
             loaded_once: false,
             width: None,
             list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(400.)),

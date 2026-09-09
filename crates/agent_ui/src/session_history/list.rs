@@ -162,6 +162,14 @@ impl Render for AgentHistoryPanel {
             (colors.panel_background, colors.border)
         };
         let roots = self.project_roots(cx);
+        // Memory only. `paths_to_trash` reaches the filesystem for two of the
+        // three providers, and this runs every frame -- deriving the button's
+        // state from a real delete plan would put a canonicalize syscall per
+        // session into the render path.
+        let has_project_sessions =
+            crate::session_history::actions::sessions_in_project(self.sessions(cx), &roots)
+                .next()
+                .is_some();
         let query = self.query(cx);
         let rows = rows(
             self.sessions(cx),
@@ -180,7 +188,7 @@ impl Render for AgentHistoryPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(background)
-            .child(self.render_search(cx))
+            .child(self.render_search(has_project_sessions, cx))
             .child(Divider::horizontal().color(DividerColor::Border))
             .child(if rows.is_empty() {
                 self.render_empty(&roots, &query, cx).into_any_element()
@@ -206,7 +214,11 @@ impl Render for AgentHistoryPanel {
 }
 
 impl AgentHistoryPanel {
-    fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_search(
+        &self,
+        has_project_sessions: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = cx.theme().colors();
         h_flex()
             .flex_none()
@@ -231,6 +243,28 @@ impl AgentHistoryPanel {
                     .tooltip(|_window, cx| Tooltip::simple("Refresh", cx))
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh(cx)))
             }))
+            .child(
+                // Wrapped because `IconButton` carries no `debug_selector` of
+                // its own, and a control that deletes everything should be
+                // reachable from a test.
+                div()
+                    .debug_selector(|| "agent-history-delete-all".into())
+                    .child(
+                        IconButton::new("agent-history-delete-all", IconName::Trash)
+                            .icon_size(IconSize::Small)
+                            // Disabled rather than hidden: a control that
+                            // vanishes sends people hunting for a feature they
+                            // used yesterday.
+                            .disabled(self.loading || self.deleting || !has_project_sessions)
+                            .loading(self.deleting)
+                            .tooltip(|_window, cx| {
+                                Tooltip::simple("Delete all sessions for this project", cx)
+                            })
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.delete_all(window, cx)),
+                            ),
+                    ),
+            )
             .bg(colors.panel_background)
     }
 

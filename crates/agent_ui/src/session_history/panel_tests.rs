@@ -312,3 +312,390 @@ async fn the_toggle_action_shows_the_panel_without_aborting(cx: &mut TestAppCont
         "the history must have taken the column, not joined the other panel in it"
     );
 }
+
+/// A provider the test owns outright.
+///
+/// The other tests in this file *clear* `panel.providers` so nothing reads the
+/// developer's real `~/.claude`. A delete has to resolve a provider to learn what
+/// to trash, so these replace it instead: `paths_to_trash` hands back exactly the
+/// paths the test put into `FakeFs`, and nothing else here touches a disk.
+struct TestProvider {
+    paths: collections::HashMap<Arc<str>, Vec<PathBuf>>,
+}
+
+impl agent_sessions::SessionProvider for TestProvider {
+    fn agent(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+
+    fn availability(&self) -> agent_sessions::Availability {
+        agent_sessions::Availability::Ready
+    }
+
+    fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
+        Ok(Vec::new())
+    }
+
+    fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
+        Ok(None)
+    }
+
+    fn new_session_command(
+        &self,
+        _id: &str,
+        _cwd: &std::path::Path,
+    ) -> Option<agent_sessions::ResumeCommand> {
+        None
+    }
+
+    fn counts(&self, _session: &SessionSummary) -> anyhow::Result<agent_sessions::SessionCounts> {
+        Ok(agent_sessions::SessionCounts::default())
+    }
+
+    fn resume_command(
+        &self,
+        _session: &SessionSummary,
+        _fork: agent_sessions::Fork,
+    ) -> Option<agent_sessions::ResumeCommand> {
+        None
+    }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        self.paths.get(&session.id).cloned().unwrap_or_default()
+    }
+}
+
+/// Opens a workspace with the history panel docked, focused and drawn.
+///
+/// `roots` empty models a window with no folder open. `trash_paths` becomes the
+/// test provider's answer to `paths_to_trash`.
+async fn panel_with(
+    roots: &[&str],
+    sessions: Vec<SessionSummary>,
+    trash_paths: Vec<(&str, Vec<PathBuf>)>,
+    fs: Arc<FakeFs>,
+    cx: &mut TestAppContext,
+) -> (Entity<AgentHistoryPanel>, VisualTestContext) {
+    let root_refs: Vec<&std::path::Path> = roots.iter().map(std::path::Path::new).collect();
+    let project = Project::test(fs.clone(), root_refs, cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+
+    let panel: Entity<AgentHistoryPanel> = workspace.update_in(&mut cx, |workspace, window, cx| {
+        cx.new(|cx| AgentHistoryPanel::new(workspace, window, cx))
+    });
+    panel.update(&mut cx, |panel, _| {
+        panel.providers = vec![Arc::new(TestProvider {
+            paths: trash_paths
+                .into_iter()
+                .map(|(id, paths)| (Arc::from(id), paths))
+                .collect(),
+        })];
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+        workspace.toggle_panel_focus::<AgentHistoryPanel>(window, cx);
+    });
+    cx.run_until_parked();
+
+    panel.update(&mut cx, |panel, cx| {
+        panel
+            .store
+            .update(cx, |store, cx| store.set_index_for_test(sessions, cx));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    (panel, cx)
+}
+
+fn click_delete_all(cx: &mut VisualTestContext) {
+    let button = cx
+        .debug_bounds("agent-history-delete-all")
+        .expect("the delete-all button must be drawn in the header");
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+}
+
+fn remaining_ids(panel: &Entity<AgentHistoryPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+    panel.read_with(cx, |panel, cx| {
+        panel
+            .store
+            .read(cx)
+            .index()
+            .sessions()
+            .iter()
+            .map(|session| session.id.to_string())
+            .collect()
+    })
+}
+
+fn trashed_names(fs: &Arc<FakeFs>) -> Vec<String> {
+    let mut names: Vec<String> = fs
+        .trash_entries()
+        .into_iter()
+        .map(|entry| entry.name.to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The scope test. Every session of this project goes; another project's stays.
+#[gpui::test]
+async fn deleting_all_takes_this_projects_sessions_and_no_others(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/logs",
+        json!({ "one.jsonl": "", "two.jsonl": "", "elsewhere.jsonl": "" }),
+    )
+    .await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![
+            session("one", "/root", "First", 300),
+            session("two", "/root", "Second", 200),
+            session("elsewhere", "/other", "Another project", 100),
+        ],
+        vec![
+            ("one", vec![PathBuf::from("/logs/one.jsonl")]),
+            ("two", vec![PathBuf::from("/logs/two.jsonl")]),
+            ("elsewhere", vec![PathBuf::from("/logs/elsewhere.jsonl")]),
+        ],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+
+    let prompt = cx.pending_prompt().expect("a delete must confirm first");
+    assert_eq!(prompt.0, "Delete all history for this project?");
+    assert!(
+        prompt.1.contains("2 sessions"),
+        "the count must exclude the other project's session, got: {}",
+        prompt.1
+    );
+
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert_eq!(
+        trashed_names(&fs),
+        vec!["one.jsonl".to_string(), "two.jsonl".to_string()],
+        "only this project's transcripts may be taken"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["elsewhere".to_string()],
+        "the other project's session must survive in the shared index"
+    );
+}
+
+/// The second scope test: a filter narrows the list, never the delete.
+#[gpui::test]
+async fn the_search_filter_does_not_narrow_the_delete(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/logs",
+        json!({ "a.jsonl": "", "b.jsonl": "", "c.jsonl": "" }),
+    )
+    .await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![
+            session("a", "/root", "Keeper", 300),
+            session("b", "/root", "Something else", 200),
+            session("c", "/root", "Third thing", 100),
+        ],
+        vec![
+            ("a", vec![PathBuf::from("/logs/a.jsonl")]),
+            ("b", vec![PathBuf::from("/logs/b.jsonl")]),
+            ("c", vec![PathBuf::from("/logs/c.jsonl")]),
+        ],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    // A query that leaves only one row on screen.
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.filter_editor.update(cx, |editor, cx| {
+            editor.set_text("Keeper", window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    // The filter has to have really bitten, or the assertion below proves
+    // nothing: row 0 is the agent header, row 1 the project header, row 2 the
+    // single match, and there must be no row 3.
+    assert!(
+        cx.debug_bounds("agent-history-row:2").is_some(),
+        "the matching session must still be drawn"
+    );
+    assert!(
+        cx.debug_bounds("agent-history-row:3").is_none(),
+        "the filter must have narrowed the list to one session"
+    );
+
+    click_delete_all(&mut cx);
+    let prompt = cx.pending_prompt().expect("a delete must confirm first");
+    assert!(
+        prompt.1.contains("3 sessions"),
+        "the filter shows one row but all three belong to the project, got: {}",
+        prompt.1
+    );
+
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert_eq!(trashed_names(&fs).len(), 3);
+    assert!(
+        remaining_ids(&panel, &mut cx).is_empty(),
+        "every session of the project goes, whatever the search box says"
+    );
+}
+
+#[gpui::test]
+async fn cancelling_changes_nothing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "one.jsonl": "" })).await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![session("one", "/root", "First", 300)],
+        vec![("one", vec![PathBuf::from("/logs/one.jsonl")])],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+
+    assert!(
+        fs.trash_entries().is_empty(),
+        "cancelling must not touch the disk"
+    );
+    assert_eq!(remaining_ids(&panel, &mut cx), vec!["one".to_string()]);
+}
+
+/// With no folder open there is no project, so the control cannot act. Disabled
+/// is not observable from bounds alone -- that a click raises no prompt is the
+/// behaviour that actually matters.
+#[gpui::test]
+async fn with_no_project_open_the_button_cannot_prompt(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "elsewhere.jsonl": "" }))
+        .await;
+
+    let (_panel, mut cx) = panel_with(
+        &[],
+        vec![session("elsewhere", "/other", "Another project", 100)],
+        vec![("elsewhere", vec![PathBuf::from("/logs/elsewhere.jsonl")])],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+
+    assert!(
+        !cx.has_pending_prompt(),
+        "a window with no folder open has no project to delete the history of"
+    );
+    assert!(fs.trash_entries().is_empty());
+}
+
+/// The *other* empty rule, and the one the render gate cannot cover.
+///
+/// The project has sessions, so the button is enabled and `delete_all` really
+/// runs -- but no provider offers a path for any of them, so there is nothing to
+/// take. It must return without asking. `with_no_project_open_the_button_cannot_prompt`
+/// proves nothing here: a disabled `IconButton` drops its `on_click` entirely,
+/// so that test never enters the method at all.
+#[gpui::test]
+async fn a_project_whose_sessions_own_no_files_cannot_prompt(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![
+            session("one", "/root", "First", 300),
+            session("two", "/root", "Second", 200),
+        ],
+        // Enabled by the render gate -- the project has sessions -- but the
+        // provider hands back nothing to trash for either of them.
+        vec![("one", Vec::new()), ("two", Vec::new())],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+
+    assert!(
+        !cx.has_pending_prompt(),
+        "there is nothing on disk to take, so there is nothing to ask about"
+    );
+    assert!(fs.trash_entries().is_empty());
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["one".to_string(), "two".to_string()],
+        "and nothing may be forgotten either"
+    );
+}
+
+/// The partial-failure rule. `FakeFs::trash` errors on a path it never held, so
+/// the second session fails without any injection machinery.
+#[gpui::test]
+async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "good.jsonl": "" })).await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![
+            session("good", "/root", "Trashes cleanly", 300),
+            session("bad", "/root", "Never existed on disk", 200),
+        ],
+        vec![
+            ("good", vec![PathBuf::from("/logs/good.jsonl")]),
+            ("bad", vec![PathBuf::from("/logs/missing.jsonl")]),
+        ],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert_eq!(trashed_names(&fs), vec!["good.jsonl".to_string()]);
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["bad".to_string()],
+        "a session whose files did not all reach the trash must keep describing the disk"
+    );
+}
