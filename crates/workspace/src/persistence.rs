@@ -5295,6 +5295,138 @@ mod tests {
         );
     }
 
+    /// Removing the *last* project must leave the rail empty and the window on
+    /// an empty workspace (the welcome screen), not paint the project that was
+    /// just removed.
+    ///
+    /// The stored list is checked as well as the displayed one: the regression
+    /// this pins was `store_displayed_projects` writing the mid-removal
+    /// synthesis back into `project_groups`, which also persisted it, so the
+    /// project returned on the next launch.
+    #[gpui::test]
+    async fn test_removing_last_project_group_leaves_an_empty_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let dir = unique_test_dir(&fs, "only-group").await;
+        let project = Project::test(fs.clone(), [dir.as_path()], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
+        cx.run_until_parked();
+
+        let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+        // The window's own project is synthesized onto the rail, so it is there
+        // to be removed even though nothing registered it.
+        let displayed = multi_workspace.read_with(cx, |mw, cx| mw.project_groups(cx));
+        assert_eq!(displayed.len(), 1, "the only project should be on the rail");
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.remove_project_group(&key, window, cx)
+                .detach_and_log_err(cx);
+        });
+        cx.run_until_parked();
+
+        let displayed = multi_workspace.read_with(cx, |mw, cx| mw.project_groups(cx));
+        assert!(
+            displayed.is_empty(),
+            "the rail should be empty after the last project is removed, got {:?}",
+            displayed
+                .iter()
+                .map(|group| group.key.path_list().paths().to_vec())
+                .collect::<Vec<_>>()
+        );
+
+        let stored = multi_workspace.read_with(cx, |mw, _cx| mw.project_group_keys());
+        assert!(
+            stored.is_empty(),
+            "nothing should be written back into the stored list, got {stored:?}"
+        );
+
+        let has_worktrees = multi_workspace.read_with(cx, |mw, cx| {
+            mw.workspace()
+                .read(cx)
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .is_some()
+        });
+        assert!(
+            !has_worktrees,
+            "the window should land on an empty workspace, which is what draws the welcome page"
+        );
+    }
+
+    /// The same removal, on a window whose own workspace was never retained.
+    ///
+    /// `workspaces_for_project_group` only reads `retained_workspaces`, and the
+    /// window's own workspace lands there only once the sidebar panel opens or
+    /// the user switches away. Before that, removing the project found nothing
+    /// to close and did nothing at all -- the rail kept the project and the
+    /// window stayed on it.
+    #[gpui::test]
+    async fn test_removing_last_project_group_works_before_anything_is_retained(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let dir = unique_test_dir(&fs, "unretained-group").await;
+        let project = Project::test(fs.clone(), [dir.as_path()], cx).await;
+
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        cx.run_until_parked();
+
+        // Deliberately no `test_enable_background_retention` and no sidebar:
+        // this is the state a freshly opened window is actually in.
+        let retained = multi_workspace.read_with(cx, |mw, _cx| mw.retained_workspaces().len());
+        assert_eq!(retained, 0, "the window's own workspace starts unretained");
+
+        let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+        let removed = multi_workspace
+            .update_in(cx, |mw, window, cx| {
+                mw.remove_project_group(&key, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            removed,
+            "removing the window's own project should report that it was removed"
+        );
+
+        let displayed = multi_workspace.read_with(cx, |mw, cx| mw.project_groups(cx));
+        assert!(
+            displayed.is_empty(),
+            "the rail should be empty, got {:?}",
+            displayed
+                .iter()
+                .map(|group| group.key.path_list().paths().to_vec())
+                .collect::<Vec<_>>()
+        );
+
+        let has_worktrees = multi_workspace.read_with(cx, |mw, cx| {
+            mw.workspace()
+                .read(cx)
+                .project()
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .is_some()
+        });
+        assert!(
+            !has_worktrees,
+            "the window should land on an empty workspace"
+        );
+    }
+
     #[gpui::test]
     async fn test_remove_project_group_falls_back_to_neighbor(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
@@ -5395,6 +5527,16 @@ mod tests {
         assert!(
             active_paths.is_empty(),
             "After removing the only remaining group, should have an empty workspace"
+        );
+
+        let displayed = multi_workspace.read_with(cx, |mw, cx| mw.project_groups(cx));
+        assert!(
+            displayed.is_empty(),
+            "After removing the only remaining group, the rail should be empty, got {:?}",
+            displayed
+                .iter()
+                .map(|group| group.key.path_list().paths().to_vec())
+                .collect::<Vec<_>>()
         );
     }
 

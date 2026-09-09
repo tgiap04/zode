@@ -11666,6 +11666,96 @@ mod tests {
         );
     }
 
+    /// Backing out of the save prompt has to put the group back.
+    ///
+    /// `remove_project_group` splices the group out of the stored list before
+    /// it awaits the close, so a cancelled close has to undo that. It used to
+    /// be undone by accident -- `derived_project_groups` synthesized the still
+    /// active group back onto the rail -- which lost its initials and colour
+    /// and wrote nothing down. The synthesis is now suppressed while a removal
+    /// is in flight, so the undo has to be real.
+    #[gpui::test]
+    async fn test_cancelled_project_group_removal_restores_the_group(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/group-a", json!({ "one": "" })).await;
+        fs.insert_tree("/group-b", json!({ "two": "" })).await;
+
+        let project_a = Project::test(fs.clone(), ["/group-a".as_ref()], cx).await;
+        let project_b = Project::test(fs.clone(), ["/group-b".as_ref()], cx).await;
+        let multi_workspace_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+        cx.run_until_parked();
+
+        multi_workspace_handle
+            .update(cx, |mw, _window, cx| {
+                mw.test_enable_background_retention(cx)
+            })
+            .unwrap();
+
+        let workspace_b = multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.test_add_workspace(project_b.clone(), window, cx)
+            })
+            .unwrap();
+        let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+        multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.activate(workspace_b.clone(), None, window, cx);
+                mw.set_project_initials(&key_b, "BB", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let position_before = multi_workspace_handle
+            .read_with(cx, |mw, _| {
+                mw.project_group_keys().iter().position(|key| *key == key_b)
+            })
+            .unwrap();
+        assert!(position_before.is_some(), "group B should be stored");
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
+
+        let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+        workspace_b.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx)
+        });
+
+        let removal = multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.remove_project_group(&key_b, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        let removed = removal.await.unwrap();
+        assert!(!removed, "a cancelled close removes nothing");
+
+        multi_workspace_handle
+            .read_with(cx, |mw, cx| {
+                assert_eq!(
+                    mw.project_group_keys().iter().position(|key| *key == key_b),
+                    position_before,
+                    "group B should go back where it stood"
+                );
+                assert_eq!(
+                    mw.project_presentation(&key_b).0.map(|i| i.to_string()),
+                    Some("BB".to_string()),
+                    "the restored group should keep its initials"
+                );
+                assert!(
+                    mw.project_groups(cx).iter().any(|group| group.key == key_b),
+                    "group B should be back on the rail"
+                );
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     async fn test_remove_workspace_prompts_for_unsaved_changes(cx: &mut TestAppContext) {
         init_test(cx);
