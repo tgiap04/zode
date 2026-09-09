@@ -10,7 +10,7 @@
 //! window-free by design, so the entity that owns an index and refreshes it in
 //! the background lives in the UI layer instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -134,10 +134,30 @@ impl SessionIndex {
     /// after a delete has already touched the disk -- the rebuild is not the
     /// expensive half of that operation.
     pub fn without(&self, id: &str) -> Self {
+        self.retaining(|session| session.id.as_ref() != id)
+    }
+
+    /// Drops every session named in `ids`, in one pass.
+    ///
+    /// Not a loop over [`Self::without`], and the difference is not cosmetic:
+    /// each `without` clones every surviving session and rebuilds both maps, so
+    /// removing `N` of `S` that way costs `O(N * S)`. A bulk delete is exactly
+    /// the case where `N` grows with `S`, which turns the whole operation
+    /// quadratic. One pass keeps it `O(S)` whatever the set holds.
+    pub fn without_all(&self, ids: &HashSet<Arc<str>>) -> Self {
+        self.retaining(|session| !ids.contains(&session.id))
+    }
+
+    /// The clone-and-rebuild both removals share.
+    ///
+    /// One body rather than two so the rule about rebuilding *both* maps -- not
+    /// just `by_cwd` -- cannot be honoured in one place and forgotten in the
+    /// other.
+    fn retaining(&self, keep: impl Fn(&SessionSummary) -> bool) -> Self {
         let kept: Vec<SessionSummary> = self
             .sessions
             .iter()
-            .filter(|session| session.id.as_ref() != id)
+            .filter(|session| keep(session))
             .cloned()
             .collect();
         Self::new(kept)
@@ -245,6 +265,89 @@ mod tests {
 
         assert_eq!(ids(&after, "/repo/main"), vec!["b"]);
         assert_eq!(after.len(), 1);
+    }
+
+    /// Both maps have to come back, not just `by_cwd`: a branch lookup that
+    /// still answers with a deleted session would offer to resume a transcript
+    /// that is in the trash.
+    #[test]
+    fn without_all_drops_every_listed_session() {
+        let index = SessionIndex::new(vec![
+            on_branch("a", "/repo/main", "main"),
+            on_branch("b", "/repo/main", "main"),
+            on_branch("c", "/repo/main", "feature"),
+            on_branch("d", "/repo/other", "main"),
+            on_branch("e", "/repo/other", "main"),
+        ]);
+
+        let dropped: HashSet<Arc<str>> = ["a", "c", "e"].into_iter().map(Arc::from).collect();
+        let index = index.without_all(&dropped);
+
+        assert_eq!(index.len(), 2);
+        assert_eq!(ids(&index, "/repo/main"), vec!["b"]);
+        assert_eq!(ids(&index, "/repo/other"), vec!["d"]);
+        assert_eq!(
+            index
+                .sessions_on_branch(Path::new("/repo"), "main")
+                .map(|session| session.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["b", "d"],
+            "the branch map must be rebuilt too, not only by_cwd"
+        );
+        assert_eq!(
+            index
+                .sessions_on_branch(Path::new("/repo"), "feature")
+                .count(),
+            0,
+            "the only session on that branch was deleted"
+        );
+    }
+
+    #[test]
+    fn without_all_ignores_ids_it_does_not_hold() {
+        let index = SessionIndex::new(vec![
+            session("a", "/repo/main", 2),
+            session("b", "/repo/main", 1),
+        ]);
+
+        let unknown: HashSet<Arc<str>> = ["nobody"].into_iter().map(Arc::from).collect();
+        assert_eq!(index.without_all(&unknown).len(), 2);
+
+        assert_eq!(index.without_all(&HashSet::new()).len(), 2);
+    }
+
+    /// The bulk path only earns its existence at scale, so it is checked at
+    /// scale: the survivors must still answer exactly, with no index leaking
+    /// onto a neighbouring directory after the rebuild.
+    #[test]
+    fn without_all_of_five_thousand_stays_correct() {
+        let sessions: Vec<SessionSummary> = (0..10_000)
+            .map(|n| session(&format!("s{n}"), &format!("/repo/dir{}", n % 100), n as u64))
+            .collect();
+        let index = SessionIndex::new(sessions);
+
+        // Dropped by a criterion independent of the directory: `dir` is
+        // `n % 100`, so anything keyed on the parity of `n` would empty every
+        // even directory and leave every odd one whole, testing nothing about
+        // the rebuild.
+        let dropped: HashSet<Arc<str>> = (0..5_000)
+            .map(|n| Arc::from(format!("s{n}").as_str()))
+            .collect();
+        let index = index.without_all(&dropped);
+
+        assert_eq!(index.len(), 5_000);
+        for directory in 0..100 {
+            let found = ids(&index, &format!("/repo/dir{directory}"));
+            assert_eq!(found.len(), 50, "each directory keeps its surviving half");
+            assert!(
+                found.iter().all(|id| {
+                    id.trim_start_matches('s')
+                        .parse::<usize>()
+                        .is_ok_and(|n| n >= 5_000 && n % 100 == directory)
+                }),
+                "directory {directory} answered with a session that is not its own"
+            );
+        }
     }
 
     #[test]
