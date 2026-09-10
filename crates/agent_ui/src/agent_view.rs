@@ -2196,6 +2196,12 @@ mod tests {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
+            // Its own in-memory database, per test. Without it every test in this
+            // binary shares `TEST_APP_DATABASE`, the process-wide `LazyLock`
+            // fallback in `db`, and the ones that write `agent_views` in parallel
+            // intermittently lose the table lock ("database table is locked").
+            // Precedent: `workspace::tests::init_test`.
+            cx.set_global(db::AppDatabase::test_new());
         });
     }
 
@@ -2586,6 +2592,12 @@ mod tests {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
+            // Its own in-memory database, per test. Without it every test in this
+            // binary shares `TEST_APP_DATABASE`, the process-wide `LazyLock`
+            // fallback in `db`, and the ones that write `agent_views` in parallel
+            // intermittently lose the table lock ("database table is locked").
+            // Precedent: `workspace::tests::init_test`.
+            cx.set_global(db::AppDatabase::test_new());
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             crate::init(cx);
             // Without this `open_path` has nothing to build a file into, and the
