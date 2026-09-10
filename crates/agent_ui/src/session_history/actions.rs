@@ -49,8 +49,12 @@ pub fn resume_session(
         Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
         Fork::New => SessionIntent::Untracked,
     };
+    // `Fork::New` is already `Untracked`, and `SessionOrigin::new` drops the
+    // title for an untracked tab -- so a fork does not inherit the name of the
+    // conversation it branched from without a second branch here.
+    let origin = crate::SessionOrigin::new(intent, Some(session.title.as_str()));
     workspace.update(cx, |workspace, cx| {
-        AgentView::open_tracked(workspace, agent, intent, window, cx);
+        AgentView::open_tracked(workspace, agent, origin, window, cx);
     });
 }
 

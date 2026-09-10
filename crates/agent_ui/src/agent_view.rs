@@ -79,8 +79,9 @@ const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 const RESPONDING_WRITES: usize = 8;
 
 pub struct AgentView {
-    /// Which session this tab belongs to. See [`SessionIntent`].
-    intent: SessionIntent,
+    /// Which session this tab belongs to, and what that session was called when
+    /// the tab opened onto it. See [`SessionOrigin`].
+    origin: SessionOrigin,
     agent: AgentId,
     display_name: SharedString,
     /// What the user called this session, if they named it. Two Claude Code tabs
@@ -179,7 +180,7 @@ impl AgentView {
     /// `None` for an untracked tab -- an agent without `--session-id` writes a
     /// transcript this editor cannot name, so nothing can be matched to it.
     pub fn session_id(&self) -> Option<&str> {
-        match &self.intent {
+        match &self.origin.intent {
             SessionIntent::Untracked => None,
             SessionIntent::Tracked(id) => Some(id),
         }
@@ -307,14 +308,16 @@ impl AgentView {
                         return;
                     }
 
-                    let intent = intent_for_new_tab(&agent_id);
+                    // Tracked, but with no name to inherit: a fresh tab has no
+                    // transcript behind it yet, so it stays called after its agent.
+                    let origin = SessionOrigin::new(intent_for_new_tab(&agent_id), None);
                     let view = cx.new(|cx| {
                         Self::new(
                             agent_id,
                             mode,
                             project,
                             workspace.weak_handle(),
-                            intent,
+                            origin,
                             window,
                             cx,
                         )
@@ -431,12 +434,12 @@ impl AgentView {
         mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
-        intent: SessionIntent,
+        origin: SessionOrigin,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
-            intent,
+            origin,
             display_name: display_name(&agent),
             agent,
             custom_name: None,
@@ -468,7 +471,7 @@ impl AgentView {
     pub fn open_tracked(
         workspace: &mut Workspace,
         agent: &str,
-        intent: SessionIntent,
+        origin: SessionOrigin,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -487,7 +490,7 @@ impl AgentView {
                             AgentViewMode::Terminal,
                             project,
                             weak_workspace,
-                            intent,
+                            origin,
                             window,
                             cx,
                         )
@@ -518,11 +521,11 @@ impl AgentView {
         mode: AgentViewMode,
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
-        intent: SessionIntent,
+        origin: SessionOrigin,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            intent,
+            origin,
             display_name: display_name(&agent),
             agent,
             custom_name: None,
@@ -617,6 +620,20 @@ impl AgentView {
     pub fn tab_label(&self) -> SharedString {
         self.custom_name
             .clone()
+            .unwrap_or_else(|| self.inherited_label())
+    }
+
+    /// What this tab would be called if the user had never renamed it.
+    ///
+    /// The session's own title when it opened onto one, the agent's name
+    /// otherwise. Split out because `finish_renaming` has to compare against
+    /// exactly this: "the same as what it already says" is what makes a typed
+    /// name a no-op, and before a tab could inherit a title that test was
+    /// `display_name` by coincidence rather than by meaning.
+    fn inherited_label(&self) -> SharedString {
+        self.origin
+            .title
+            .clone()
             .unwrap_or_else(|| self.display_name.clone())
     }
 
@@ -666,10 +683,11 @@ impl AgentView {
         self._rename_subscription = None;
         if save {
             let typed = editor.read(cx).text(cx).trim().to_string();
-            // Blank, or unchanged from the agent's own name, means "no name of its
-            // own" rather than a name that happens to match — so clearing the box
-            // is how a session goes back to being called Claude Code.
-            self.custom_name = (!typed.is_empty() && typed != self.display_name.as_ref())
+            // Blank, or unchanged from what the tab would say anyway, means "no
+            // name of its own" rather than a name that happens to match -- so
+            // clearing the box is how a tab goes back to its session's title, or
+            // to the agent's name when it has none.
+            self.custom_name = (!typed.is_empty() && typed != self.inherited_label().as_ref())
                 .then(|| SharedString::from(typed));
             cx.emit(AgentViewEvent::UpdateTab);
         }
@@ -877,7 +895,7 @@ impl AgentView {
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
-        let intent = self.intent.clone();
+        let intent = self.origin.intent.clone();
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
@@ -1063,6 +1081,47 @@ pub enum SessionIntent {
     /// assigned to a tab nobody has typed in yet has no session on disk, and that
     /// is a normal state rather than an error.
     Tracked(SharedString),
+}
+
+/// What a tab knows about the session it is opening onto.
+///
+/// One struct rather than two arguments because they are one fact -- a tab
+/// either owns a session and inherits its name, or owns neither. Keeping them
+/// together is also what makes dropping an identity safe: `SessionGone`'s "Start
+/// a New Session" assigns `SessionOrigin::default()` and the name cannot be left
+/// behind, where two loose fields would make that a two-line invariant somebody
+/// eventually half-writes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionOrigin {
+    intent: SessionIntent,
+    /// The session's title as it read the moment this tab opened onto it.
+    ///
+    /// A snapshot, deliberately. The index re-summarises a transcript as it
+    /// grows, and a tab that re-titled itself under the reader would move the
+    /// label they were aiming at.
+    title: Option<SharedString>,
+}
+
+impl SessionOrigin {
+    /// The only way to build one, so both rules hold everywhere: a tab with no
+    /// session identity inherits no name, and a blank title is no title.
+    ///
+    /// The fields are private to make that a fact the compiler keeps rather than
+    /// a sentence in a doc comment -- a struct literal would slip a whitespace
+    /// title straight past the filter and onto a tab.
+    pub fn new(intent: SessionIntent, title: Option<&str>) -> Self {
+        let title = match &intent {
+            SessionIntent::Untracked => None,
+            SessionIntent::Tracked(_) => title
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                // `SharedString: From<T: Into<ArcCow<'static, str>>>`, so a
+                // borrowed non-'static `&str` will not convert -- the
+                // allocation is required rather than careless.
+                .map(|title| SharedString::from(title.to_string())),
+        };
+        Self { intent, title }
+    }
 }
 
 /// The intent a stored `session_id` column stands for.
@@ -1415,7 +1474,10 @@ impl workspace::item::SerializableItem for AgentView {
         window.spawn(cx, async move |cx| {
             let row = db.get_agent(item_id, workspace_id)?;
             let mode = mode_from_name(&row.mode);
-            let intent = intent_from_stored(row.session_id.as_deref());
+            let origin = SessionOrigin::new(
+                intent_from_stored(row.session_id.as_deref()),
+                row.session_title.as_deref(),
+            );
 
             cx.update(|window, cx| {
                 Ok(cx.new(|cx| {
@@ -1427,7 +1489,7 @@ impl workspace::item::SerializableItem for AgentView {
                         mode,
                         project,
                         workspace,
-                        intent,
+                        origin,
                         window,
                         cx,
                     );
@@ -1454,10 +1516,11 @@ impl workspace::item::SerializableItem for AgentView {
             agent: self.agent.to_string(),
             mode: mode_name(self.mode).to_string(),
             name: self.custom_name.as_ref().map(|name| name.to_string()),
-            session_id: match &self.intent {
+            session_id: match &self.origin.intent {
                 SessionIntent::Untracked => None,
                 SessionIntent::Tracked(id) => Some(id.to_string()),
             },
+            session_title: self.origin.title.as_ref().map(|title| title.to_string()),
         };
 
         let db = persistence::AgentViewDb::global(cx);
@@ -1516,7 +1579,10 @@ impl Render for AgentView {
                                     // cannot recreate it, so holding the id would
                                     // only put the tab back here on the next
                                     // restart.
-                                    this.intent = SessionIntent::Untracked;
+                                    // The whole origin, not just the id: the name
+                                    // belonged to the session that is gone, and a
+                                    // fresh conversation must not wear it.
+                                    this.origin = SessionOrigin::default();
                                     this.state = State::Starting;
                                     this.start(window, cx);
                                     cx.emit(AgentViewEvent::UpdateTab);
@@ -1833,7 +1899,7 @@ mod tests {
         // Built empty and filled below: the terminal needs a window, and this is
         // the call that makes one.
         let (agent_view, cx) = cx.add_window_view(|_window, cx| AgentView {
-            intent: SessionIntent::Untracked,
+            origin: SessionOrigin::default(),
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
             custom_name: None,
@@ -2061,14 +2127,26 @@ mod tests {
         db.save_agent(
             1,
             workspace_id,
-            row("claude-acp", "terminal", Some("auth refactor"), Some(first)),
+            row(
+                "claude-acp",
+                "terminal",
+                Some("auth refactor"),
+                Some(first),
+                None,
+            ),
         )
         .await
         .unwrap();
         db.save_agent(
             2,
             workspace_id,
-            row("claude-acp", "terminal", Some("ui font"), Some(second)),
+            row(
+                "claude-acp",
+                "terminal",
+                Some("ui font"),
+                Some(second),
+                None,
+            ),
         )
         .await
         .unwrap();
@@ -2105,7 +2183,7 @@ mod tests {
         db.save_agent(
             7,
             workspace_id,
-            row("claude-acp", "terminal", None, Some(id)),
+            row("claude-acp", "terminal", None, Some(id), None),
         )
         .await
         .unwrap();
@@ -2116,9 +2194,13 @@ mod tests {
 
         // An untracked tab writes NULL, which is what every row saved before this
         // column existed also reads as — a different answer from "".
-        db.save_agent(8, workspace_id, row("codex-acp", "terminal", None, None))
-            .await
-            .unwrap();
+        db.save_agent(
+            8,
+            workspace_id,
+            row("codex-acp", "terminal", None, None, None),
+        )
+        .await
+        .unwrap();
         let untracked = db.get_agent(8, workspace_id).unwrap();
         assert_eq!(untracked.session_id, None);
         assert_eq!(
@@ -2183,12 +2265,14 @@ mod tests {
         mode: &str,
         name: Option<&str>,
         session_id: Option<&str>,
+        session_title: Option<&str>,
     ) -> persistence::AgentViewRow {
         persistence::AgentViewRow {
             agent: agent.to_string(),
             mode: mode.to_string(),
             name: name.map(str::to_string),
             session_id: session_id.map(str::to_string),
+            session_title: session_title.map(str::to_string),
         }
     }
 
@@ -2249,7 +2333,7 @@ mod tests {
         });
 
         let agent_view = cx.new_window_entity(|_window, cx| AgentView {
-            intent: SessionIntent::Untracked,
+            origin: SessionOrigin::default(),
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
             custom_name: None,
@@ -2352,25 +2436,29 @@ mod tests {
             "an item nobody recorded must not resolve to a tab"
         );
 
-        db.save_agent(1, workspace_id, row("claude-acp", "terminal", None, None))
-            .await
-            .unwrap();
+        db.save_agent(
+            1,
+            workspace_id,
+            row("claude-acp", "terminal", None, None, None),
+        )
+        .await
+        .unwrap();
         db.save_agent(
             2,
             workspace_id,
-            row("codex-acp", "chat", Some("refactor"), None),
+            row("codex-acp", "chat", Some("refactor"), None, None),
         )
         .await
         .unwrap();
 
         assert_eq!(
             db.get_agent(1, workspace_id).unwrap(),
-            row("claude-acp", "terminal", None, None),
+            row("claude-acp", "terminal", None, None, None),
             "a tab never renamed must come back without a name, not with a blank one"
         );
         assert_eq!(
             db.get_agent(2, workspace_id).unwrap(),
-            row("codex-acp", "chat", Some("refactor"), None),
+            row("codex-acp", "chat", Some("refactor"), None, None),
             "the name a session was given is the whole reason two Claude tabs \
              can be told apart"
         );
@@ -2379,7 +2467,7 @@ mod tests {
         db.save_agent(
             2,
             workspace_id,
-            row("codex-acp", "chat", Some("review"), None),
+            row("codex-acp", "chat", Some("review"), None, None),
         )
         .await
         .unwrap();
@@ -2502,6 +2590,151 @@ mod tests {
         });
     }
 
+    /// The claim the new column exists for: a resumed tab comes back named, with
+    /// no rename involved.
+    ///
+    /// Kept apart from the rename round trip above so each keeps one claim. The
+    /// interesting half here is the *absence* of a `custom_name` — that test
+    /// always has one, so it cannot see this.
+    #[gpui::test]
+    async fn a_resumed_tabs_title_survives_being_written_down_and_brought_back(
+        cx: &mut TestAppContext,
+    ) {
+        use workspace::item::SerializableItem as _;
+
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let workspaces = cx.update(|_, cx| workspace::WorkspaceDb::global(cx));
+        let workspace_id = workspaces.next_id().await.unwrap();
+        workspace.update(cx, |workspace, _| {
+            workspace.set_database_id(workspace_id);
+        });
+
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(
+                SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+                Some("implement phase 3"),
+            ),
+            cx,
+        );
+
+        let item_id: workspace::ItemId = 8765;
+        let write = workspace
+            .update_in(cx, |workspace, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.serialize(workspace, item_id, false, window, cx)
+                })
+            })
+            .expect("a workspace with a database id must produce a write");
+        write.await.unwrap();
+
+        let restored = cx
+            .update(|window, cx| {
+                AgentView::deserialize(
+                    project.clone(),
+                    workspace.downgrade(),
+                    workspace_id,
+                    item_id,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the row was just written, so it must deserialize");
+        cx.run_until_parked();
+        restored.read_with(cx, |restored, _| {
+            assert_eq!(
+                restored.tab_label(),
+                "implement phase 3",
+                "a restart must not take the session's name off the tab"
+            );
+            assert!(
+                restored.custom_name.is_none(),
+                "and it must come back as an inherited title, not as a rename"
+            );
+        });
+
+        // A rename on top still outranks it after the round trip, so the priority
+        // survives the database and not merely the struct.
+        rename_to(&view, "review", cx);
+        let write = workspace
+            .update_in(cx, |workspace, window, cx| {
+                view.update(cx, |view, cx| {
+                    view.serialize(workspace, item_id, false, window, cx)
+                })
+            })
+            .expect("a workspace with a database id must produce a write");
+        write.await.unwrap();
+
+        let restored = cx
+            .update(|window, cx| {
+                AgentView::deserialize(
+                    project,
+                    workspace.downgrade(),
+                    workspace_id,
+                    item_id,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("the row was just rewritten");
+        cx.run_until_parked();
+        restored.read_with(cx, |restored, _| {
+            assert_eq!(
+                restored.tab_label(),
+                "review",
+                "the user's own name outranks the inherited one, on disk as in memory"
+            );
+        });
+    }
+
+    /// A row written before the column existed has no title, and `NULL` must come
+    /// back as "no title" rather than as an empty one.
+    #[gpui::test]
+    async fn a_row_from_before_the_column_existed_restores_without_a_title() {
+        // Its own database: this test takes no `cx`, so it cannot set the per-App
+        // one the others get from `init_test`. Opened under a single name, and
+        // workspaces first, for the foreign-key reason
+        // `each_agent_remembers_its_own_mode` gives above.
+        let workspaces = workspace::WorkspaceDb::open_test_db(
+            "a_row_from_before_the_column_existed_restores_without_a_title",
+        )
+        .await;
+        let db = persistence::AgentViewDb::open_test_db(
+            "a_row_from_before_the_column_existed_restores_without_a_title",
+        )
+        .await;
+        let workspace_id = workspaces.next_id().await.unwrap();
+
+        db.save_agent(
+            11,
+            workspace_id,
+            row("claude-acp", "terminal", None, None, None),
+        )
+        .await
+        .unwrap();
+        let stored = db.get_agent(11, workspace_id).unwrap();
+        assert_eq!(stored.session_title, None);
+
+        db.save_agent(
+            12,
+            workspace_id,
+            row(
+                "claude-acp",
+                "terminal",
+                None,
+                Some("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01"),
+                Some("implement phase 3"),
+            ),
+        )
+        .await
+        .unwrap();
+        let stored = db.get_agent(12, workspace_id).unwrap();
+        assert_eq!(stored.session_title.as_deref(), Some("implement phase 3"));
+    }
+
     /// A rename has to be written down, and only `should_serialize` opens that door.
     ///
     /// The previous life of this impl answered `false`, so nothing but the
@@ -2527,7 +2760,7 @@ mod tests {
                     AgentViewMode::Terminal,
                     project.clone(),
                     workspace.downgrade(),
-                    SessionIntent::Untracked,
+                    SessionOrigin::default(),
                     window,
                     cx,
                 )
@@ -2540,6 +2773,226 @@ mod tests {
                 view.should_serialize(&AgentViewEvent::UpdateTab),
                 "a rename arrives as `UpdateTab`, and it belongs in the row"
             );
+        });
+    }
+
+    /// `SessionOrigin::new` is the only constructor, so both naming rules are
+    /// enforced in one place: a tab with no session identity inherits no name,
+    /// and a blank title is no title.
+    #[gpui::test]
+    async fn a_session_origin_only_carries_a_name_it_can_honour(_cx: &mut TestAppContext) {
+        let tracked =
+            || SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01"));
+
+        assert_eq!(
+            SessionOrigin::new(SessionIntent::Untracked, Some("implement phase 3")).title,
+            None,
+            "a tab with no identity must not wear a session's name"
+        );
+        assert_eq!(SessionOrigin::new(tracked(), None).title, None);
+        assert_eq!(
+            SessionOrigin::new(tracked(), Some("")).title,
+            None,
+            "the agent has not titled the transcript yet"
+        );
+        assert_eq!(
+            SessionOrigin::new(tracked(), Some("   \t ")).title,
+            None,
+            "an all-space label would be an unclickable tab"
+        );
+        assert_eq!(
+            SessionOrigin::new(tracked(), Some("  implement phase 3  ")).title,
+            Some(SharedString::from("implement phase 3")),
+            "trimmed, not rejected"
+        );
+    }
+
+    /// The bug this all exists for: resuming a session used to relabel the tab
+    /// "Claude Code" and, through `tab_label()`, the branch panel's row with it.
+    #[gpui::test]
+    async fn a_resumed_tab_is_called_what_the_session_was_called(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::new(
+                        SessionIntent::Tracked(SharedString::from(
+                            "0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01",
+                        )),
+                        Some("implement phase 3"),
+                    ),
+                    cx,
+                )
+            })
+        });
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.tab_label(), "implement phase 3");
+        });
+    }
+
+    /// The other half of the rule: a tab that inherited nothing is still called
+    /// after its agent. Both an untracked tab and a *tracked* one with no title --
+    /// `intent_for_new_tab` mints a real id for Claude, so a brand-new tab is
+    /// `Tracked`, and the guard is the `None` the call site passes.
+    #[gpui::test]
+    async fn a_tab_with_nothing_to_inherit_is_called_after_its_agent(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+
+        for origin in [
+            SessionOrigin::default(),
+            SessionOrigin::new(
+                SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+                None,
+            ),
+        ] {
+            let view = workspace.update_in(cx, |workspace, _window, cx| {
+                let handle = workspace.weak_handle();
+                let project = project.clone();
+                cx.new(|cx| {
+                    AgentView::test_new(
+                        AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                        AgentViewMode::Terminal,
+                        project,
+                        handle,
+                        origin,
+                        cx,
+                    )
+                })
+            });
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.tab_label(), "Claude Code");
+            });
+        }
+    }
+
+    /// Puts a tab carrying `origin` into the workspace and hands it back.
+    fn resumed_tab(
+        workspace: &Entity<Workspace>,
+        project: &Entity<project::Project>,
+        origin: SessionOrigin,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Entity<AgentView> {
+        let project = project.clone();
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let handle = workspace.weak_handle();
+            let view = cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project,
+                    handle,
+                    origin,
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            view
+        });
+        cx.run_until_parked();
+        view
+    }
+
+    /// Renames the way a user does -- dispatch, type, Enter -- so the rule under
+    /// test is the one a real rename goes through.
+    fn rename_to(view: &Entity<AgentView>, typed: &str, cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| {
+            view.read(cx)
+                .focus_handle(cx)
+                .dispatch_action(&crate::RenameAgent, window, cx);
+        });
+        cx.run_until_parked();
+        let editor = view
+            .read_with(cx, |view, _| view.rename_editor().cloned())
+            .expect("Rename must open the editor");
+        editor.update_in(cx, |editor, window, cx| {
+            editor.set_text(typed, window, cx);
+        });
+        cx.update(|window, cx| {
+            editor
+                .read(cx)
+                .focus_handle(cx)
+                .dispatch_action(&menu::Confirm, window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// Clearing a rename must land on the session's title, not on "Claude Code".
+    ///
+    /// This is the whole point of keeping the inherited title in its own field
+    /// rather than writing it into `custom_name`: the two are different facts, and
+    /// undoing the user's one has to reveal the other.
+    #[gpui::test]
+    async fn clearing_a_rename_falls_back_to_the_session_title(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(
+                SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+                Some("implement phase 3"),
+            ),
+            cx,
+        );
+
+        rename_to(&view, "review", cx);
+        view.read_with(cx, |view, _| assert_eq!(view.tab_label(), "review"));
+
+        rename_to(&view, "", cx);
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.custom_name.is_none(),
+                "blanking the box must clear the rename"
+            );
+            assert_eq!(
+                view.tab_label(),
+                "implement phase 3",
+                "and reveal the session's own title, never the agent's name"
+            );
+        });
+    }
+
+    /// Typing what the tab already says is not a rename.
+    ///
+    /// The old rule compared the typed text against `display_name`, which was the
+    /// inherited label only by coincidence. Both halves are asserted because the
+    /// coincidence still has to hold where it always did.
+    #[gpui::test]
+    async fn typing_the_label_a_tab_already_shows_is_not_a_rename(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+
+        let titled = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(
+                SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+                Some("implement phase 3"),
+            ),
+            cx,
+        );
+        rename_to(&titled, "implement phase 3", cx);
+        titled.read_with(cx, |view, _| {
+            assert!(
+                view.custom_name.is_none(),
+                "typing the inherited title back is a no-op, not a rename"
+            );
+            assert_eq!(view.tab_label(), "implement phase 3");
+        });
+
+        let untitled = resumed_tab(&workspace, &project, SessionOrigin::default(), cx);
+        rename_to(&untitled, "Claude Code", cx);
+        untitled.read_with(cx, |view, _| {
+            assert!(
+                view.custom_name.is_none(),
+                "where the inherited label IS the agent name, the old rule still holds"
+            );
+            assert_eq!(view.tab_label(), "Claude Code");
         });
     }
 
@@ -2914,7 +3367,7 @@ mod tests {
                         AgentViewMode::Terminal,
                         project,
                         handle,
-                        SessionIntent::Untracked,
+                        SessionOrigin::default(),
                         cx,
                     )
                 });
@@ -3132,6 +3585,10 @@ mod persistence {
         /// `None` for a tab with no session identity, and for every row written
         /// before the column existed.
         pub session_id: Option<String>,
+        /// What that session was called when the tab opened onto it. `None` for a
+        /// tab with no session identity, for a session that had no title yet, and
+        /// for every row written before the column existed.
+        pub session_title: Option<String>,
     }
 
     pub struct AgentViewDb(ThreadSafeConnection);
@@ -3198,6 +3655,22 @@ mod persistence {
             sql!(
                 ALTER TABLE agent_views ADD COLUMN session_id TEXT;
             ),
+            // What the session was called when a tab opened onto it.
+            //
+            // Stored rather than looked up, unlike the resume arguments argued
+            // about above, and the distinction is the point: those are a function
+            // of *code* and go stale when a CLI's flags change. This is a function
+            // of *time*. The index re-summarises a transcript as it grows, so
+            // asking again after a restart answers a different question -- "what
+            // is it called now" -- and the tab would rename itself under the
+            // reader. Once the next message lands, this column holds the only
+            // copy of what the tab was called.
+            //
+            // Nullable and read as such: every row written before this column
+            // existed has no title, and NULL is a different answer from "".
+            sql!(
+                ALTER TABLE agent_views ADD COLUMN session_title TEXT;
+            ),
         ];
     }
 
@@ -3248,14 +3721,15 @@ mod persistence {
         ) -> anyhow::Result<()> {
             self.write(move |connection| {
                 let sql_stmt = sql!(
-                    INSERT OR REPLACE INTO agent_views(item_id, workspace_id, agent, mode, name, session_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO agent_views(item_id, workspace_id, agent, mode, name, session_id, session_title)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 );
                 let mut query = connection.exec_bound::<(
                     ItemId,
                     WorkspaceId,
                     String,
                     String,
+                    Option<String>,
                     Option<String>,
                     Option<String>,
                 )>(sql_stmt)?;
@@ -3266,6 +3740,7 @@ mod persistence {
                     row.mode,
                     row.name,
                     row.session_id,
+                    row.session_title,
                 ))
                 .context(format!(
                     "exec_bound failed to execute or parse for: {}",
@@ -3282,11 +3757,12 @@ mod persistence {
             workspace_id: WorkspaceId,
         ) -> anyhow::Result<AgentViewRow> {
             let sql_stmt = sql!(
-                SELECT agent, mode, name, session_id FROM agent_views WHERE item_id = ? AND workspace_id = ?
+                SELECT agent, mode, name, session_id, session_title FROM agent_views WHERE item_id = ? AND workspace_id = ?
             );
             let row = self.select_row_bound::<(ItemId, WorkspaceId), (
                 String,
                 String,
+                Option<String>,
                 Option<String>,
                 Option<String>,
             )>(sql_stmt)?((item_id, workspace_id))?
@@ -3296,6 +3772,7 @@ mod persistence {
                 mode: row.1,
                 name: row.2,
                 session_id: row.3,
+                session_title: row.4,
             })
         }
 
