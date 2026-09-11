@@ -77,6 +77,7 @@ pub fn delete_session(
     let provider = agent_sessions::provider_for(session.agent);
     let paths = provider.paths_to_trash(session);
     if paths.is_empty() {
+        offer_to_drop_the_row(session, window, cx);
         return;
     }
     let fs = workspace.read(cx).project().read(cx).fs().clone();
@@ -227,6 +228,46 @@ pub(crate) fn delete_all_detail(count: usize, total_bytes: u64) -> String {
     )
 }
 
+/// What to do when a session owns nothing a delete could take.
+///
+/// Returning quietly is what this used to do, and from the outside it is
+/// indistinguishable from a broken button: the user presses Delete and the row
+/// sits there. Every route into it is a real state -- a transcript deleted
+/// outside the editor, a store that keeps its own record of a session whose
+/// files are gone -- so it is worth saying which one they are in.
+///
+/// The row can still go, and that is all that is on offer here: the agents'
+/// stores belong to the agents, and this editor does not write to them. Said
+/// plainly, because a row that reappears on the next sweep with no explanation
+/// is the second half of the same confusion.
+fn offer_to_drop_the_row(session: &SessionSummary, window: &mut Window, cx: &mut App) {
+    let agent = session.agent.label();
+    let detail = format!(
+        "{}\n\nNothing this session owns is still on disk, so there is nothing to \
+         move to the trash.\n\nRemoving it here only takes it off this list. It does \
+         not touch {agent}'s own store, so the row comes back if {agent} still lists \
+         the session.",
+        session.title
+    );
+    let prompt = window.prompt(
+        gpui::PromptLevel::Info,
+        "Nothing left to delete",
+        Some(&detail),
+        &["Remove From List", "Cancel"],
+        cx,
+    );
+
+    let store = crate::SessionStore::global(cx);
+    let id = session.id.clone();
+    cx.spawn(async move |cx| {
+        if prompt.await.ok() != Some(0) {
+            return;
+        }
+        store.update(cx, |store, cx| store.forget(&id, cx));
+    })
+    .detach();
+}
+
 impl AgentHistoryPanel {
     /// Continue a session, or branch a new one off it.
     pub(crate) fn resume(
@@ -346,7 +387,27 @@ impl AgentHistoryPanel {
         // when this project has no sessions, but "has sessions" and "has files
         // to take" are different questions, and only this one has been to the
         // providers.
+        //
+        // Said rather than swallowed, for the reason `offer_to_drop_the_row`
+        // gives: a button that does nothing and explains nothing reads as
+        // broken. Nothing is offered here, though -- dropping a whole project's
+        // rows for sessions whose files are already gone is a larger promise
+        // than this button made, and each row can still be taken on its own.
         if plan.is_empty() {
+            let answer = window.prompt(
+                gpui::PromptLevel::Info,
+                "Nothing left to delete",
+                Some(
+                    "None of this project's sessions still has anything on disk, so \
+                     there is nothing to move to the trash.",
+                ),
+                &["OK"],
+                cx,
+            );
+            cx.spawn(async move |_, _| {
+                answer.await.ok();
+            })
+            .detach();
             return;
         }
 

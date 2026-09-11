@@ -626,12 +626,14 @@ async fn with_no_project_open_the_button_cannot_prompt(cx: &mut TestAppContext) 
 /// The *other* empty rule, and the one the render gate cannot cover.
 ///
 /// The project has sessions, so the button is enabled and `delete_all` really
-/// runs -- but no provider offers a path for any of them, so there is nothing to
-/// take. It must return without asking. `with_no_project_open_the_button_cannot_prompt`
-/// proves nothing here: a disabled `IconButton` drops its `on_click` entirely,
-/// so that test never enters the method at all.
+/// runs -- but no provider offers a path for any of them, so there is nothing
+/// to take. It must say so rather than do nothing: a button that neither acts
+/// nor explains reads as broken, which is exactly how this was reported.
+/// `with_no_project_open_the_button_cannot_prompt` proves nothing here: a
+/// disabled `IconButton` drops its `on_click` entirely, so that test never
+/// enters the method at all.
 #[gpui::test]
-async fn a_project_whose_sessions_own_no_files_cannot_prompt(cx: &mut TestAppContext) {
+async fn a_project_whose_sessions_own_no_files_says_so(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root", json!({ "a.txt": "" })).await;
@@ -652,15 +654,92 @@ async fn a_project_whose_sessions_own_no_files_cannot_prompt(cx: &mut TestAppCon
 
     click_delete_all(&mut cx);
 
+    let prompt = cx
+        .pending_prompt()
+        .expect("an empty delete must explain itself, not fall silent");
+    assert_eq!(prompt.0, "Nothing left to delete");
     assert!(
-        !cx.has_pending_prompt(),
-        "there is nothing on disk to take, so there is nothing to ask about"
+        !prompt.1.contains("will move to the trash"),
+        "it must not read like a delete about to happen, got: {}",
+        prompt.1
     );
+    cx.simulate_prompt_answer("Ok");
+    cx.run_until_parked();
+
     assert!(fs.trash_entries().is_empty());
     assert_eq!(
         remaining_ids(&panel, &mut cx),
         vec!["one".to_string(), "two".to_string()],
-        "and nothing may be forgotten either"
+        "saying there is nothing to take must not take anything"
+    );
+}
+
+/// A single session with nothing left on disk offers the one thing still on
+/// the table: taking the row off the list.
+///
+/// This is the reported bug's own shape. A Copilot session written by the VS
+/// Code extension used to reach here and get silence; now the store can name
+/// its directory, so the route is reserved for a session whose files really
+/// are gone -- and that route has to answer.
+#[gpui::test]
+async fn a_session_with_nothing_on_disk_offers_to_drop_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    // `delete_session` resolves the *real* provider, not the panel's test one:
+    // it is a free function so the sidebar can call it without a panel. So the
+    // session is shaped to make the real provider come back empty -- Claude
+    // builds both of its paths from `log_path`, and this one has none, which
+    // is precisely the state a transcript deleted outside the editor leaves.
+    let gone = SessionSummary {
+        log_path: None,
+        log_bytes: 0,
+        ..session("gone", "/root", "Nothing left of this one", 300)
+    };
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![gone, session("kept", "/root", "Still here", 200)],
+        Vec::new(),
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    let target = panel.read_with(&mut cx, |panel, cx| {
+        panel
+            .sessions(cx)
+            .iter()
+            .find(|session| session.id.as_ref() == "gone")
+            .expect("the session is in the index")
+            .clone()
+    });
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&target, window, cx);
+    });
+    cx.run_until_parked();
+
+    let prompt = cx
+        .pending_prompt()
+        .expect("a delete with nothing to take must still answer");
+    assert_eq!(prompt.0, "Nothing left to delete");
+    assert!(
+        prompt.1.contains("own store"),
+        "it must say the agent's own store is untouched, got: {}",
+        prompt.1
+    );
+
+    cx.simulate_prompt_answer("Remove From List");
+    cx.run_until_parked();
+
+    assert!(
+        fs.trash_entries().is_empty(),
+        "dropping a row must never reach the disk"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["kept".to_string()],
+        "and the row the user asked about is the only one that goes"
     );
 }
 
