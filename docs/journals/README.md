@@ -21,5 +21,7 @@
 - [2026-08-27-status-bar-item-toggles.md](2026-08-27-status-bar-item-toggles.md) — 2026 08 27 status bar item toggles
 - [2026-09-07-false-subagent-premises-caught-by-reading-code.md](2026-09-07-false-subagent-premises-caught-by-reading-code.md) — 2026 09 07 false subagent premises caught by reading code
 - [2026-09-07-macos-dmg-mount-path-was-guessed-not-set.md](2026-09-07-macos-dmg-mount-path-was-guessed-not-set.md) — 2026 09 07 macos dmg mount path was guessed not set
+- [2026-09-11-a-settings-file-is-not-a-panel-impl.md](2026-09-11-a-settings-file-is-not-a-panel-impl.md) — 2026 09 11 a settings file is not a panel impl
+- [2026-09-11-dock-state-read-from-the-wrong-owner.md](2026-09-11-dock-state-read-from-the-wrong-owner.md) — 2026 09 11 dock state read from the wrong owner
 
 <!-- end-generated -->
