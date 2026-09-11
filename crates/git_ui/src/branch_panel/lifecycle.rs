@@ -48,7 +48,9 @@ impl BranchPanel {
                 repos: Vec::new(),
                 rows: Vec::new(),
                 expanded: HashSet::default(),
+                collapsed: HashSet::default(),
                 stored_expanded: HashSet::default(),
+                stored_collapsed: HashSet::default(),
                 running_remote_ops: HashSet::default(),
                 reloading: false,
                 _reload_task: None,
@@ -86,6 +88,7 @@ impl BranchPanel {
             if let Some(serialized) = serialized {
                 panel.update(cx, |panel, _| {
                     panel.stored_expanded = serialized.expanded;
+                    panel.stored_collapsed = serialized.collapsed;
                     panel.pinned = serialized
                         .pinned
                         .into_iter()
@@ -166,10 +169,10 @@ impl BranchPanel {
         self.repos = self.collect_repos(cx);
         self.adopt_stored_expansion();
 
-        let expanded = &self.expanded;
         // No filter from the panel: the header carries one button, and the row
         // builder's filter stays for whatever exposes one next.
-        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
+        let rows = build_rows(&self.repos, &|key| self.row_is_open(key), "");
+        self.rows = rows;
         self.sync_list_state();
         self.track_agent_tab_names(cx);
     }
@@ -290,49 +293,83 @@ impl BranchPanel {
     /// key on every rebuild, and since collapsing a row rebuilds the tree, any
     /// section that happened to be open when the panel was last saved could
     /// never be closed again.
+    /// Whether a row is drawn open.
+    ///
+    /// The builder asks one question and the two sets answer it from opposite
+    /// directions: a repository is open until somebody closes it, every other
+    /// row closed until somebody opens it. See `BranchPanel::collapsed` for
+    /// why the repository goes that way round.
+    pub(crate) fn row_is_open(&self, key: &RowKey) -> bool {
+        match key {
+            RowKey::Repo(_) => !self.collapsed.contains(key),
+            RowKey::WorktreeAgents(..) => self.expanded.contains(key),
+        }
+    }
+
     fn adopt_stored_expansion(&mut self) {
-        if self.stored_expanded.is_empty() {
+        Self::adopt(&self.repos, &mut self.stored_expanded, &mut self.expanded);
+        Self::adopt(&self.repos, &mut self.stored_collapsed, &mut self.collapsed);
+    }
+
+    fn adopt(
+        repos: &[crate::branch_panel::tree::RepoData],
+        stored: &mut HashSet<StoredKey>,
+        live: &mut HashSet<RowKey>,
+    ) {
+        if stored.is_empty() {
             return;
         }
 
         let mut adopted = Vec::new();
-        for repo in &self.repos {
+        for repo in repos {
             let path = repo.path.to_string_lossy().to_string();
-            for stored in self.stored_expanded.iter() {
-                if let Some(key) = stored.to_row_key(repo.id, &path) {
-                    adopted.push((stored.clone(), key));
+            for entry in stored.iter() {
+                if let Some(key) = entry.to_row_key(repo.id, &path) {
+                    adopted.push((entry.clone(), key));
                 }
             }
         }
 
-        for (stored, key) in adopted {
-            self.stored_expanded.remove(&stored);
-            self.expanded.insert(key);
+        for (entry, key) in adopted {
+            stored.remove(&entry);
+            live.insert(key);
         }
     }
 
     pub(crate) fn toggle_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
-        if !self.expanded.remove(&key) {
-            self.expanded.insert(key);
+        // One gesture, two sets, opposite polarity -- a repository records
+        // that it was closed, everything else that it was opened.
+        let set = match key {
+            RowKey::Repo(_) => &mut self.collapsed,
+            RowKey::WorktreeAgents(..) => &mut self.expanded,
+        };
+        if !set.remove(&key) {
+            set.insert(key);
         }
         self.stale = true;
         self.serialize(cx);
         cx.notify();
     }
 
-    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
+    /// Turns live row keys back into the path-based form that survives a
+    /// restart, for whichever of the two sets is being written.
+    fn stored_keys(&self, keys: &HashSet<RowKey>) -> HashSet<StoredKey> {
         let mut stored = HashSet::default();
         for repo in &self.repos {
             let path = repo.path.to_string_lossy().to_string();
-            for key in &self.expanded {
+            for key in keys {
                 if key.repository_id() == repo.id {
                     stored.insert(StoredKey::from_row_key(key, &path));
                 }
             }
         }
+        stored
+    }
 
+    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
         let state = SerializedBranchPanel {
-            expanded: stored,
+            expanded: self.stored_keys(&self.expanded),
+            collapsed: self.stored_keys(&self.collapsed),
             pinned: self
                 .pinned
                 .iter()

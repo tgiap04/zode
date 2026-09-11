@@ -86,10 +86,20 @@ pub struct BranchPanel {
     pub(crate) repos: Vec<RepoData>,
     pub(crate) rows: Vec<TreeRow>,
     pub(crate) expanded: HashSet<RowKey>,
+    /// Repositories the reader has closed.
+    ///
+    /// The opposite way round from `expanded`, and deliberately so: closing a
+    /// repository hides every checkout under it, so a repository has to be
+    /// open until somebody says otherwise. Membership-means-open would have a
+    /// checkout the reader has never opened before -- a new worktree, a new
+    /// project, a new machine -- arrive at a panel listing nothing.
+    pub(crate) collapsed: HashSet<RowKey>,
     /// Restored from disk before the repositories are known. Row keys carry a
     /// session-local `RepositoryId`, so what was stored is matched back by path
     /// the first time each repository is seen.
     pub(crate) stored_expanded: HashSet<StoredKey>,
+    /// `collapsed`'s half of the same restore. See `stored_expanded`.
+    pub(crate) stored_collapsed: HashSet<StoredKey>,
     /// Network operations currently in flight, one slot per kind. Leaning on
     /// the fetch button must not spawn a queue of git processes.
     pub(crate) running_remote_ops: HashSet<crate::branch_panel::remote::RemoteOp>,

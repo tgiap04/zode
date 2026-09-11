@@ -335,6 +335,72 @@ mod restoring_expansion {
         }
     }
 
+    /// A repository nobody has closed is open, and a checkout's agents stay
+    /// shut until somebody asks for them.
+    ///
+    /// The two rows go opposite ways round on purpose. Closing a repository
+    /// hides every checkout under it, so "closed unless recorded otherwise"
+    /// meant a worktree you had just made, a project you had just opened, or a
+    /// fresh machine all arrived at a panel listing nothing at all.
+    #[gpui::test]
+    async fn a_repository_nobody_has_closed_is_open(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        let checkout = std::sync::Arc::from(std::path::Path::new("/repos/zode/wt"));
+
+        panel.update(cx, |panel, _| {
+            panel.repos = vec![repo_data(id)];
+
+            assert!(
+                panel.row_is_open(&RowKey::Repo(id)),
+                "a repository with nothing recorded against it must draw open"
+            );
+            assert!(
+                !panel.row_is_open(&RowKey::WorktreeAgents(id, checkout)),
+                "a checkout's agents must still stay shut until asked for"
+            );
+        });
+    }
+
+    /// Closing a repository is remembered, and survives the restore.
+    #[gpui::test]
+    async fn a_repository_the_reader_closed_stays_closed(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        let key = RowKey::Repo(id);
+
+        panel.update(cx, |panel, cx| {
+            panel.repos = vec![repo_data(id)];
+
+            panel.toggle_row(key.clone(), cx);
+            assert!(
+                !panel.row_is_open(&key),
+                "the gesture has to close a repository that was open"
+            );
+
+            panel.toggle_row(key.clone(), cx);
+            assert!(
+                panel.row_is_open(&key),
+                "and open it again, rather than the set filling up one way"
+            );
+        });
+
+        // What a restart hands back: the closure recorded by path, with no
+        // live repository id yet.
+        panel.update(cx, |panel, _| {
+            panel.collapsed.clear();
+            panel
+                .stored_collapsed
+                .insert(StoredKey::Repo(REPO_PATH.to_string()));
+
+            panel.adopt_stored_expansion();
+            assert!(
+                !panel.row_is_open(&key),
+                "a repository the reader closed must come back closed"
+            );
+        });
+    }
+
     #[gpui::test]
     async fn a_collapsed_section_stays_collapsed(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
