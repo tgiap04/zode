@@ -307,14 +307,30 @@ impl BranchPanel {
     }
 
     fn adopt_stored_expansion(&mut self) {
-        Self::adopt(&self.repos, &mut self.stored_expanded, &mut self.expanded);
-        Self::adopt(&self.repos, &mut self.stored_collapsed, &mut self.collapsed);
+        // Each set takes only the rows it governs. A blob written before
+        // repositories recorded their closure lists the ones that were *open*,
+        // and those entries mean nothing here any more -- adopted without this
+        // filter they would sit in `expanded` unread, and be written back out
+        // on every save for the life of the workspace.
+        Self::adopt(
+            &self.repos,
+            &mut self.stored_expanded,
+            &mut self.expanded,
+            |key| matches!(key, RowKey::WorktreeAgents(..)),
+        );
+        Self::adopt(
+            &self.repos,
+            &mut self.stored_collapsed,
+            &mut self.collapsed,
+            |key| matches!(key, RowKey::Repo(_)),
+        );
     }
 
     fn adopt(
         repos: &[crate::branch_panel::tree::RepoData],
         stored: &mut HashSet<StoredKey>,
         live: &mut HashSet<RowKey>,
+        governs: impl Fn(&RowKey) -> bool,
     ) {
         if stored.is_empty() {
             return;
@@ -330,9 +346,14 @@ impl BranchPanel {
             }
         }
 
+        // Consumed whether or not it is kept: an entry left in place would be
+        // re-adopted on the next rebuild, and since closing a row rebuilds the
+        // tree, a row restored open could never be closed again.
         for (entry, key) in adopted {
             stored.remove(&entry);
-            live.insert(key);
+            if governs(&key) {
+                live.insert(key);
+            }
         }
     }
 

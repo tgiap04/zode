@@ -26,6 +26,32 @@ fn init_test(cx: &mut TestAppContext) -> std::sync::Arc<AppState> {
     })
 }
 
+/// A panel over a project that really holds a repository, so `collect_repos`
+/// has something to find.
+///
+/// The plain `panel` helper opens an empty project, which leaves the rebuild
+/// with no repositories and nothing to say about how a repository is drawn.
+async fn panel_over_a_repo(
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<BranchPanel>, &mut VisualTestContext) {
+    init_test(cx);
+    let fs = fs::FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/repos/zode",
+        serde_json::json!({
+            ".git": {},
+            "src": { "main.rs": "fn main() {}" },
+        }),
+    )
+    .await;
+    let project = Project::test(fs.clone(), ["/repos/zode".as_ref()], cx).await;
+    let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        BranchPanel::new(workspace, window, cx)
+    });
+    (panel, cx)
+}
+
 async fn panel(cx: &mut TestAppContext) -> (gpui::Entity<BranchPanel>, &mut VisualTestContext) {
     let app_state = init_test(cx);
     let project = Project::test(app_state.fs.clone(), [], cx).await;
@@ -362,6 +388,38 @@ mod restoring_expansion {
         });
     }
 
+    /// A blob from before repositories recorded their closure lists the ones
+    /// that were open. Those entries govern nothing now and must be dropped on
+    /// the way in, not parked in a set nobody reads and rewritten on every
+    /// save for the life of the workspace.
+    #[gpui::test]
+    async fn a_repository_entry_from_the_old_format_is_not_kept(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+
+        panel.update(cx, |panel, _| {
+            panel.repos = vec![repo_data(id)];
+            panel
+                .stored_expanded
+                .insert(StoredKey::Repo(REPO_PATH.to_string()));
+
+            panel.adopt_stored_expansion();
+
+            assert!(
+                !panel.expanded.contains(&RowKey::Repo(id)),
+                "a repository entry has no meaning in the opened set and must be dropped"
+            );
+            assert!(
+                panel.stored_expanded.is_empty(),
+                "and it must still be consumed, or the next rebuild re-adopts it"
+            );
+            assert!(
+                panel.row_is_open(&RowKey::Repo(id)),
+                "dropping it leaves the repository at its default, which is open"
+            );
+        });
+    }
+
     /// Closing a repository is remembered, and survives the restore.
     #[gpui::test]
     async fn a_repository_the_reader_closed_stays_closed(cx: &mut TestAppContext) {
@@ -553,5 +611,43 @@ async fn renaming_an_agent_tab_redraws_the_panel(cx: &mut TestAppContext) {
     assert!(
         redraws.load(std::sync::atomic::Ordering::SeqCst) > 0,
         "a renamed tab must wake the panel that names it"
+    );
+}
+
+/// The complaint itself, end to end: a workspace with nothing recorded against
+/// it draws its repository open, so the checkouts under it are on screen.
+///
+/// The tests above pin `row_is_open` and the restore in isolation. This one
+/// goes through the real rebuild -- `collect_repos` off the git store, then
+/// `build_rows` -- which is where the bug actually lived.
+#[gpui::test]
+async fn a_workspace_with_nothing_recorded_lists_its_checkouts(cx: &mut TestAppContext) {
+    use crate::branch_panel::tree::TreeRow;
+
+    let (panel, cx) = panel_over_a_repo(cx).await;
+    cx.run_until_parked();
+
+    let repo_rows = panel.update(cx, |panel, cx| {
+        panel.stale = true;
+        panel.refresh_if_stale(cx);
+        panel
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                TreeRow::Repo { expanded, .. } => Some(*expanded),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // Guards against the test passing by finding nothing to check: an empty
+    // row list would satisfy "no closed repository" without proving anything.
+    assert!(
+        !repo_rows.is_empty(),
+        "the harness must give the rebuild a repository to draw, or this proves nothing"
+    );
+    assert!(
+        repo_rows.iter().all(|expanded| *expanded),
+        "a repository nobody has closed must be drawn open, so its checkouts show"
     );
 }

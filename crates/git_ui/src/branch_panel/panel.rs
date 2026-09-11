@@ -85,6 +85,8 @@ pub struct BranchPanel {
     pub(crate) rebuild_count: usize,
     pub(crate) repos: Vec<RepoData>,
     pub(crate) rows: Vec<TreeRow>,
+    /// Rows the reader has opened. Only the agent rows inside a checkout --
+    /// a repository goes the other way round, in `collapsed` below.
     pub(crate) expanded: HashSet<RowKey>,
     /// Repositories the reader has closed.
     ///
