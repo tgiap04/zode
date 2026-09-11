@@ -1,6 +1,8 @@
 use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
 use agent_sessions::{Fork, SessionProvider, SessionSummary};
 use gpui::{App, ClipboardItem, Context, Entity, Window};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use util::ResultExt as _;
 
@@ -47,8 +49,12 @@ pub fn resume_session(
         Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
         Fork::New => SessionIntent::Untracked,
     };
+    // `Fork::New` is already `Untracked`, and `SessionOrigin::new` drops the
+    // title for an untracked tab -- so a fork does not inherit the name of the
+    // conversation it branched from without a second branch here.
+    let origin = crate::SessionOrigin::new(intent, Some(session.title.as_str()));
     workspace.update(cx, |workspace, cx| {
-        AgentView::open_tracked(workspace, agent, intent, window, cx);
+        AgentView::open_tracked(workspace, agent, origin, window, cx);
     });
 }
 
@@ -71,6 +77,7 @@ pub fn delete_session(
     let provider = agent_sessions::provider_for(session.agent);
     let paths = provider.paths_to_trash(session);
     if paths.is_empty() {
+        offer_to_drop_the_row(session, window, cx);
         return;
     }
     let fs = workspace.read(cx).project().read(cx).fs().clone();
@@ -116,6 +123,146 @@ pub fn delete_session(
         // Drop the entry rather than re-sweeping: the delete already knows
         // exactly what it removed, and a sweep would open every other
         // transcript on disk to learn one fact it was told.
+        store.update(cx, |store, cx| store.forget(&id, cx));
+    })
+    .detach();
+}
+
+/// One session's worth of a bulk delete: the id to forget, and the files that
+/// have to reach the trash before it may be forgotten.
+pub(crate) struct DeleteTarget {
+    pub(crate) id: Arc<str>,
+    pub(crate) paths: Vec<PathBuf>,
+}
+
+/// Everything a "delete all" will take, decided before anything is asked or
+/// touched.
+///
+/// Built as plain data so the count and the size in the confirmation are the
+/// same numbers the sweep then acts on -- a prompt that says "12 sessions" and
+/// a sweep that takes 14 is the kind of disagreement nobody notices until it
+/// has already happened.
+pub(crate) struct DeleteAll {
+    pub(crate) targets: Vec<DeleteTarget>,
+    pub(crate) total_bytes: u64,
+}
+
+impl DeleteAll {
+    pub(crate) fn count(&self) -> usize {
+        self.targets.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+}
+
+/// The sessions a bulk delete may take: every one that ran inside this
+/// workspace's roots.
+///
+/// **It takes no query, and that is the point.** The panel's list is narrowed
+/// twice -- by project, then by whatever is typed in the search box -- and only
+/// the first narrowing belongs to a delete. A button that took "everything you
+/// can currently see" would quietly mean something different depending on a
+/// half-typed filter. Adding a `query` parameter here is how that regression
+/// would arrive, so there is nowhere to put one.
+pub(crate) fn sessions_in_project<'a>(
+    sessions: &'a [SessionSummary],
+    roots: &'a [PathBuf],
+) -> impl Iterator<Item = &'a SessionSummary> {
+    sessions
+        .iter()
+        .filter(move |session| session.is_within(roots))
+}
+
+/// Turns the in-scope sessions and their paths into the plan to act on.
+///
+/// A session whose provider offers no paths is dropped rather than carried: it
+/// has nothing on disk to take, so counting it would inflate the number in the
+/// prompt and forgetting it would drop a row describing a file that is still
+/// there.
+pub(crate) fn plan_delete_all<'a>(
+    scoped: impl IntoIterator<Item = (&'a SessionSummary, Vec<PathBuf>)>,
+) -> DeleteAll {
+    let mut targets = Vec::new();
+    let mut total_bytes = 0;
+    for (session, paths) in scoped {
+        if paths.is_empty() {
+            continue;
+        }
+        total_bytes += session.log_bytes;
+        targets.push(DeleteTarget {
+            id: session.id.clone(),
+            paths,
+        });
+    }
+    DeleteAll {
+        targets,
+        total_bytes,
+    }
+}
+
+/// The body of the confirmation.
+///
+/// Two numbers and one clarification. The paths are deliberately left out --
+/// two hundred lines of `~/.claude/projects/...` is a wall, not a confirmation,
+/// and the count and the size are the two facts that change the answer. The
+/// second paragraph exists because the panel is filtered: someone looking at
+/// three rows needs telling that this takes all forty.
+pub(crate) fn delete_all_detail(count: usize, total_bytes: u64) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    // `concat!` rather than one wrapped literal: a trailing-backslash
+    // continuation only strips the next line's indentation while it survives
+    // the formatter, and when it does not the spaces land *inside* the string.
+    // Four of them after a blank line is an indented code block in CommonMark,
+    // which would render the safety sentence as monospaced output.
+    format!(
+        concat!(
+            "{count} session{plural} will move to the trash ({bytes}).\n\n",
+            "Every session for this project goes, not just the ones the search ",
+            "shows. They move to the OS trash and can be recovered from there.",
+        ),
+        count = count,
+        plural = plural,
+        bytes = format_bytes(total_bytes),
+    )
+}
+
+/// What to do when a session owns nothing a delete could take.
+///
+/// Returning quietly is what this used to do, and from the outside it is
+/// indistinguishable from a broken button: the user presses Delete and the row
+/// sits there. Every route into it is a real state -- a transcript deleted
+/// outside the editor, a store that keeps its own record of a session whose
+/// files are gone -- so it is worth saying which one they are in.
+///
+/// The row can still go, and that is all that is on offer here: the agents'
+/// stores belong to the agents, and this editor does not write to them. Said
+/// plainly, because a row that reappears on the next sweep with no explanation
+/// is the second half of the same confusion.
+fn offer_to_drop_the_row(session: &SessionSummary, window: &mut Window, cx: &mut App) {
+    let agent = session.agent.label();
+    let detail = format!(
+        "{}\n\nNothing this session owns is still on disk, so there is nothing to \
+         move to the trash.\n\nRemoving it here only takes it off this list. It does \
+         not touch {agent}'s own store, so the row comes back if {agent} still lists \
+         the session.",
+        session.title
+    );
+    let prompt = window.prompt(
+        gpui::PromptLevel::Info,
+        "Nothing left to delete",
+        Some(&detail),
+        &["Remove From List", "Cancel"],
+        cx,
+    );
+
+    let store = crate::SessionStore::global(cx);
+    let id = session.id.clone();
+    cx.spawn(async move |cx| {
+        if prompt.await.ok() != Some(0) {
+            return;
+        }
         store.update(cx, |store, cx| store.forget(&id, cx));
     })
     .detach();
@@ -203,6 +350,130 @@ impl AgentHistoryPanel {
         delete_session(&workspace, session, window, cx);
     }
 
+    /// Move every session of this project to the OS trash, after asking once.
+    ///
+    /// A method rather than a free function, unlike [`delete_session`]: nothing
+    /// but the panel header offers this, and the sweep needs a handle back to
+    /// the panel to clear its cached counts. It resolves providers through
+    /// [`Self::provider_for`] rather than the free `provider_for` so N sessions
+    /// cost one provider rather than N -- two of the three call
+    /// `std::fs::canonicalize` on construction -- and so the tests that replace
+    /// `self.providers` never read the developer's real history.
+    pub(crate) fn delete_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A sweep of a few hundred transcripts is not instant, and a second
+        // click during it would raise a second prompt over a list already being
+        // emptied.
+        if self.deleting {
+            return;
+        }
+        let Some(workspace) = self.workspace().upgrade() else {
+            return;
+        };
+
+        let roots = self.project_roots(cx);
+        let scoped: Vec<(&SessionSummary, Vec<PathBuf>)> =
+            sessions_in_project(self.sessions(cx), &roots)
+                .map(|session| {
+                    let paths = self
+                        .provider_for(session)
+                        .map(|provider| provider.paths_to_trash(session))
+                        .unwrap_or_default();
+                    (session, paths)
+                })
+                .collect();
+        let plan = plan_delete_all(scoped);
+
+        // The truthful half of the empty rule. The button is already disabled
+        // when this project has no sessions, but "has sessions" and "has files
+        // to take" are different questions, and only this one has been to the
+        // providers.
+        //
+        // Said rather than swallowed, for the reason `offer_to_drop_the_row`
+        // gives: a button that does nothing and explains nothing reads as
+        // broken. Nothing is offered here, though -- dropping a whole project's
+        // rows for sessions whose files are already gone is a larger promise
+        // than this button made, and each row can still be taken on its own.
+        if plan.is_empty() {
+            let answer = window.prompt(
+                gpui::PromptLevel::Info,
+                "Nothing left to delete",
+                Some(
+                    "None of this project's sessions still has anything on disk, so \
+                     there is nothing to move to the trash.",
+                ),
+                &["OK"],
+                cx,
+            );
+            cx.spawn(async move |_, _| {
+                answer.await.ok();
+            })
+            .detach();
+            return;
+        }
+
+        let prompt = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Delete all history for this project?",
+            Some(&delete_all_detail(plan.count(), plan.total_bytes)),
+            &["Move to Trash", "Cancel"],
+            cx,
+        );
+
+        let fs = workspace.read(cx).project().read(cx).fs().clone();
+        let store = crate::SessionStore::global(cx);
+        let targets = plan.targets;
+
+        cx.spawn(async move |this, cx| {
+            if prompt.await.ok() != Some(0) {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.deleting = true;
+                cx.notify();
+            })
+            .ok();
+
+            let mut forget: HashSet<Arc<str>> = HashSet::default();
+            for target in targets {
+                // The unit of success is the session, not the path: a session is
+                // forgotten only once everything it owns is really gone, so a
+                // half-deleted session stays listed and keeps describing the
+                // disk. The sweep never aborts early either -- one unreadable
+                // transcript must not strand the two hundred behind it.
+                let mut every_path_gone = true;
+                for path in &target.paths {
+                    let trashed = fs
+                        .trash(
+                            path,
+                            fs::RemoveOptions {
+                                recursive: true,
+                                ignore_if_not_exists: true,
+                            },
+                        )
+                        .await
+                        .log_err();
+                    if trashed.is_none() {
+                        every_path_gone = false;
+                    }
+                }
+                if every_path_gone {
+                    forget.insert(target.id);
+                }
+            }
+
+            // Through the store handle, not the panel: a window closed mid-sweep
+            // must still leave the shared index agreeing with the disk.
+            store.update(cx, |store, cx| store.forget_many(&forget, cx));
+            this.update(cx, |this, cx| {
+                this.counts.clear();
+                this.deleting = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Whether a fork is on offer for this session's agent. Claude has
     /// `--fork-session`; Codex has nothing equivalent, so the control is disabled
     /// rather than drawn as if it worked.
@@ -230,7 +501,31 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use super::*;
+    use agent_sessions::AgentKind;
+    use std::time::SystemTime;
+
+    fn session(id: &str, cwd: &str, log_bytes: u64) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from(cwd),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: None,
+            log_bytes,
+        }
+    }
+
+    fn selected(sessions: &[SessionSummary], roots: &[PathBuf]) -> Vec<String> {
+        sessions_in_project(sessions, roots)
+            .map(|session| session.id.to_string())
+            .collect()
+    }
 
     #[test]
     fn sizes_read_the_way_a_person_would_say_them() {
@@ -238,5 +533,124 @@ mod tests {
         assert_eq!(format_bytes(900), "900 B");
         assert_eq!(format_bytes(2048), "2 KB");
         assert_eq!(format_bytes(13 * 1024 * 1024), "13.0 MB");
+    }
+
+    #[test]
+    fn only_this_projects_sessions_are_selected() {
+        let sessions = vec![
+            session("a", "/root", 0),
+            session("b", "/root", 0),
+            session("c", "/other", 0),
+            session("d", "/root", 0),
+        ];
+        assert_eq!(
+            selected(&sessions, &[PathBuf::from("/root")]),
+            vec!["a", "b", "d"]
+        );
+    }
+
+    /// A window with no folder open has no project, so a delete scoped to "this
+    /// project" must take nothing at all -- not fall through to everything.
+    #[test]
+    fn a_workspace_with_no_roots_selects_nothing() {
+        let sessions = vec![session("a", "/root", 0), session("b", "/other", 0)];
+        assert!(selected(&sessions, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_session_in_a_subdirectory_of_a_root_counts() {
+        let sessions = vec![session("deep", "/root/crates/ui", 0)];
+        assert_eq!(selected(&sessions, &[PathBuf::from("/root")]), vec!["deep"]);
+    }
+
+    /// The scope-drift guard. `sessions_in_project` has no query parameter, so a
+    /// session the search box would hide is still selected. If someone ever adds
+    /// one, this stops compiling or stops passing.
+    #[test]
+    fn the_search_filter_cannot_narrow_the_selection() {
+        let sessions = vec![
+            SessionSummary {
+                title: "nothing anyone would type".to_string(),
+                ..session("hidden", "/root", 0)
+            },
+            session("visible", "/root", 0),
+        ];
+        assert_eq!(
+            selected(&sessions, &[PathBuf::from("/root")]),
+            vec!["hidden", "visible"],
+            "selection is by project alone; the filter has no say in it"
+        );
+    }
+
+    #[test]
+    fn sessions_with_nothing_on_disk_are_not_planned() {
+        let with_files = session("keeps", "/root", 100);
+        let without = session("empty", "/root", 8_000);
+        let plan = plan_delete_all(vec![
+            (&with_files, vec![PathBuf::from("/logs/keeps.jsonl")]),
+            (&without, Vec::new()),
+        ]);
+
+        assert_eq!(plan.count(), 1);
+        assert_eq!(plan.targets[0].id.as_ref(), "keeps");
+        assert_eq!(
+            plan.total_bytes, 100,
+            "a session with no files owns no bytes to take"
+        );
+    }
+
+    #[test]
+    fn the_plan_tallies_only_what_it_will_take() {
+        let first = session("first", "/root", 1024);
+        let second = session("second", "/root", 1024);
+        let huge_but_pathless = session("huge", "/root", 8 * 1024 * 1024);
+        let plan = plan_delete_all(vec![
+            (&first, vec![PathBuf::from("/logs/first")]),
+            (&second, vec![PathBuf::from("/logs/second")]),
+            (&huge_but_pathless, Vec::new()),
+        ]);
+
+        assert_eq!(plan.count(), 2);
+        assert_eq!(plan.total_bytes, 2048);
+        assert!(!plan.is_empty());
+    }
+
+    /// The detail is rendered as markdown, and CommonMark turns any line
+    /// indented four spaces or more after a blank line into a code block. A
+    /// wrapped string literal is exactly how those spaces get in -- the safety
+    /// sentence would then be shown monospaced, reading like output rather than
+    /// like a warning. `contains` assertions cannot see this, so the shape of
+    /// every line is checked directly.
+    #[test]
+    fn the_prompt_is_prose_not_an_accidental_code_block() {
+        let detail = delete_all_detail(3, 4096);
+        for line in detail.lines() {
+            assert!(
+                !line.starts_with("    "),
+                "a line indented four spaces renders as a code block: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prompt_names_the_count_and_the_size() {
+        let one = delete_all_detail(1, 1024);
+        assert!(one.contains("1 session will"), "singular, got: {one}");
+        assert!(one.contains("1 KB"), "got: {one}");
+
+        let many = delete_all_detail(42, 13 * 1024 * 1024);
+        assert!(many.contains("42 sessions will"), "plural, got: {many}");
+        assert!(many.contains("13.0 MB"), "got: {many}");
+
+        for detail in [&one, &many] {
+            assert!(
+                detail.contains("not just the ones the search shows"),
+                "the prompt must say the filter is ignored, got: {detail}"
+            );
+            assert!(
+                detail.contains("recovered"),
+                "the prompt must say the files are recoverable, got: {detail}"
+            );
+        }
     }
 }

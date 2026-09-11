@@ -37,6 +37,13 @@ pub(crate) enum StoredKey {
 #[derive(Serialize, Debug, Default)]
 pub(crate) struct SerializedBranchPanel {
     pub(crate) expanded: HashSet<StoredKey>,
+    /// Repositories the reader closed. The opposite polarity to `expanded`,
+    /// and a separate field rather than a flipped meaning for the same one:
+    /// a blob written before this existed lists the repositories that were
+    /// open, and reading those as closed would shut the panel on exactly the
+    /// people who had it open.
+    #[serde(default)]
+    pub(crate) collapsed: HashSet<StoredKey>,
     /// Checkouts pinned to the top, by absolute path.
     #[serde(default)]
     pub(crate) pinned: Vec<String>,
@@ -58,6 +65,8 @@ struct RawSerializedBranchPanel {
     #[serde(default)]
     expanded: Vec<serde_json::Value>,
     #[serde(default)]
+    collapsed: Vec<serde_json::Value>,
+    #[serde(default)]
     pinned: Vec<String>,
     #[serde(default)]
     order: Vec<String>,
@@ -68,6 +77,11 @@ impl From<RawSerializedBranchPanel> for SerializedBranchPanel {
         Self {
             expanded: raw
                 .expanded
+                .into_iter()
+                .filter_map(|entry| serde_json::from_value::<StoredKey>(entry).ok())
+                .collect(),
+            collapsed: raw
+                .collapsed
                 .into_iter()
                 .filter_map(|entry| serde_json::from_value::<StoredKey>(entry).ok())
                 .collect(),
@@ -205,8 +219,11 @@ mod tests {
             "/repos/zode".into(),
             "/wt/feature".into(),
         ));
+        let mut collapsed = collections::HashSet::default();
+        collapsed.insert(StoredKey::Repo("/repos/zode".into()));
         let written = serde_json::to_string(&SerializedBranchPanel {
             expanded,
+            collapsed,
             pinned: vec!["/wt/feature".into()],
             order: vec!["/wt/feature".into(), "/repos/zode".into()],
         })
@@ -218,6 +235,11 @@ mod tests {
                 .into();
 
         assert_eq!(parsed.expanded.len(), 1);
+        assert_eq!(
+            parsed.collapsed.len(),
+            1,
+            "a repository the reader closed has to survive the restart too"
+        );
         assert_eq!(parsed.pinned, vec!["/wt/feature".to_string()]);
         assert_eq!(parsed.order.len(), 2);
     }
@@ -234,5 +256,11 @@ mod tests {
 
         assert!(parsed.pinned.is_empty());
         assert!(parsed.order.is_empty());
+        assert!(
+            parsed.collapsed.is_empty(),
+            "a blob from before repositories could be closed must read as none \
+             closed -- reading its `expanded` list the other way round would \
+             shut the panel on whoever had it open"
+        );
     }
 }

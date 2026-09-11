@@ -1,9 +1,9 @@
 # Agent Sessions Across Restarts
 
 Close Zode with agent tabs open and reopen it, and the tabs come back: the same
-agents, in the same panes, with the names you gave them. What this page is about
-is the part underneath — whether a tab comes back on the **conversation** it was
-in, or on an empty one.
+agents, in the same panes, named the same way. What this page is about is the
+part underneath — whether a tab comes back on the **conversation** it was in,
+or on an empty one.
 
 ## What is remembered
 
@@ -12,7 +12,12 @@ Per tab, per project:
 - which agent it runs
 - its mode
 - the name you gave it, if you renamed it
-- the session it belongs to
+- the session it belongs to, and that session's own title as it read the moment
+  the tab opened onto it. This is a snapshot, not a live link — it is what the
+  tab is called when you have never renamed it, or after you clear a rename, but
+  it will not follow the session's title if the transcript gets re-summarized
+  later. A tab that started its own session is still called after its agent,
+  even once that session's transcript is titled.
 
 The conversation itself is never stored by Zode. It belongs to the agent's own
 CLI, in the agent's own directory, and reconstructing it here would mean

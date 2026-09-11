@@ -89,7 +89,7 @@ impl BranchPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let activity = entry.activity(cx);
-        let label = entry.label().clone();
+        let label = entry.label(cx);
         let tooltip = label.clone();
         let age = entry.updated_at().map(compact_age);
         let agent = entry.agent().clone();

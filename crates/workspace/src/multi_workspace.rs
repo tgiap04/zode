@@ -363,6 +363,22 @@ pub struct MultiWorkspace {
     window_id: WindowId,
     retained_workspaces: Vec<Entity<Workspace>>,
     project_groups: Vec<ProjectGroupState>,
+    /// Groups whose removal is in flight.
+    ///
+    /// `remove_project_group` takes the group out of `project_groups` and only
+    /// then closes its workspaces, so between those two moments the project
+    /// being removed is still the *active* one. Everything that keeps the
+    /// stored list in step with the displayed one -- the synthesis in
+    /// `derived_project_groups`, and `ensure_project_group_state` beneath
+    /// `store_displayed_projects` and `retain_workspace` -- would read that as
+    /// "the active project is missing from the list" and put it straight back.
+    /// Removing the last group is where this bit: the stored list is then empty,
+    /// which is precisely the condition `store_displayed_projects` waits for, so
+    /// the final project came back onto the rail and stayed there.
+    ///
+    /// A `Vec` rather than a set: it holds one key in practice and is scanned
+    /// only on the group-state paths.
+    removing_group_keys: Vec<ProjectGroupKey>,
     active_workspace: Entity<Workspace>,
     sidebar: Option<Box<dyn SidebarHandle>>,
     sidebar_open: bool,
@@ -529,6 +545,7 @@ impl MultiWorkspace {
             window_id: window.window_handle().window_id(),
             retained_workspaces: Vec::new(),
             project_groups: Vec::new(),
+            removing_group_keys: Vec::new(),
             active_workspace: workspace,
             sidebar: None,
             sidebar_open: false,
@@ -840,8 +857,17 @@ impl MultiWorkspace {
     }
 
     /// Ensures a project group exists for `key`, creating one if needed.
+    ///
+    /// The single door onto creating group state, which is why the
+    /// removal-in-flight check sits here rather than at each caller: a group
+    /// being removed must not be recreated by whichever bookkeeping path
+    /// happens to run first (see `removing_group_keys`).
     fn ensure_project_group_state(&mut self, key: ProjectGroupKey) {
         if key.path_list().paths().is_empty() {
+            return;
+        }
+
+        if self.removing_group_keys.contains(&key) {
             return;
         }
 
@@ -1346,8 +1372,15 @@ impl MultiWorkspace {
         // does it on read rather than on open: the paths arrive asynchronously,
         // so a write would have to pick a moment, and picking the wrong one is
         // how this went missing in the first place.
+        // A group whose removal is in flight is deliberately left out. It is
+        // still the active workspace until the close lifecycle finishes, so
+        // synthesizing it would keep the project the user just removed on the
+        // rail for the whole of that wait -- and hand `store_displayed_projects`
+        // a displayed entry to write back into the stored list.
         let active_key = self.active_workspace.read(cx).project_group_key(cx);
-        if !active_key.path_list().paths().is_empty() {
+        if !active_key.path_list().paths().is_empty()
+            && !self.removing_group_keys.contains(&active_key)
+        {
             match groups.iter_mut().find(|group| group.key == active_key) {
                 Some(group) if !group.workspaces.contains(&self.active_workspace) => {
                     group.workspaces.insert(0, self.active_workspace.clone());
@@ -1520,6 +1553,14 @@ impl MultiWorkspace {
         )
     }
 
+    /// Takes a project group off this window, closing its workspaces.
+    ///
+    /// The returned `Task` must be awaited or detached, never dropped. The
+    /// group is marked as removal-in-flight synchronously (see
+    /// `removing_group_keys`) and the task is what clears that mark, so a
+    /// dropped task leaves the mark standing and the project can never be put
+    /// back on the rail. `Task` is `#[must_use]`, which makes that a warning
+    /// rather than an error -- hence the note.
     pub fn remove_project_group(
         &mut self,
         group_key: &ProjectGroupKey,
@@ -1530,9 +1571,20 @@ impl MultiWorkspace {
             .project_groups
             .iter()
             .position(|group| group.key == *group_key);
-        let workspaces = self
+        let mut workspaces = self
             .workspaces_for_project_group(group_key, cx)
             .unwrap_or_default();
+        // `workspaces_for_project_group` reads `retained_workspaces`, and the
+        // window's own workspace is not there until something retains it. So
+        // removing the project a window was opened on, before the sidebar panel
+        // has ever been opened, found nothing to close: the group came off the
+        // stored list, `remove` reported "nothing removed", and the synthesis in
+        // `derived_project_groups` put the project straight back on the rail.
+        if self.active_workspace.read(cx).project_group_key(cx) == *group_key
+            && !workspaces.contains(&self.active_workspace)
+        {
+            workspaces.push(self.active_workspace.clone());
+        }
 
         // Compute the neighbor while the group is still in the list.
         let neighbor_key = pos.and_then(|pos| {
@@ -1542,12 +1594,22 @@ impl MultiWorkspace {
                 .map(|group| group.key.clone())
         });
 
-        // Now remove the group.
-        self.project_groups.retain(|group| group.key != *group_key);
+        // Now remove the group. Taken by position rather than filtered out, so
+        // the state -- initials, colour, place in the order -- survives to be
+        // put back if the close is cancelled below.
+        let removed_state = pos.map(|pos| self.project_groups.remove(pos));
+        // Only a close that will actually run needs guarding and undoing: with
+        // no workspaces there is no lifecycle to cancel, and `remove` reports
+        // `false` for that too.
+        let closing = !workspaces.is_empty();
+        if closing {
+            self.removing_group_keys.push(group_key.clone());
+        }
         cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
 
+        let closed_workspaces = workspaces.clone();
         let excluded_workspaces = workspaces.clone();
-        self.remove(
+        let remove_task = self.remove(
             workspaces,
             move |this, window, cx| {
                 if let Some(neighbor_key) = neighbor_key {
@@ -1580,7 +1642,60 @@ impl MultiWorkspace {
             },
             window,
             cx,
-        )
+        );
+
+        if !closing {
+            return remove_task;
+        }
+
+        let group_key = group_key.clone();
+        cx.spawn(async move |this, cx| {
+            let result = remove_task.await;
+            let removed = matches!(result, Ok(true));
+            this.update(cx, |this, cx| {
+                // One entry, not every match: a second removal of the same key
+                // while this one is still in flight pushes its own, and clearing
+                // both here would lift the guard while that one is still running.
+                if let Some(at) = this
+                    .removing_group_keys
+                    .iter()
+                    .position(|key| *key == group_key)
+                {
+                    this.removing_group_keys.remove(at);
+                }
+
+                // A close the user backed out of leaves the workspaces open, so
+                // the group goes back where it stood -- carrying its initials
+                // and colour, which the entry the synthesis used to resurrect
+                // never had.
+                //
+                // Only when the workspaces really are still here. `remove` also
+                // reports `false` when something else detached them first, and
+                // putting the group back then would leave a row on the rail
+                // with no workspace behind it.
+                let workspaces_survived = closed_workspaces.iter().any(|workspace| {
+                    this.is_workspace_retained(workspace) || this.workspace() == workspace
+                });
+                if !removed
+                    && workspaces_survived
+                    && let Some(state) = removed_state
+                {
+                    let at = pos
+                        .unwrap_or(this.project_groups.len())
+                        .min(this.project_groups.len());
+                    this.project_groups.insert(at, state);
+                    // The group was spliced out synchronously, before the await.
+                    // Anything that serialized during that window wrote a record
+                    // without it, and nothing else will correct that -- `remove`
+                    // returns before its own serialize on this path.
+                    this.serialize(cx);
+                }
+                cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+                cx.notify();
+            })
+            .ok();
+            result
+        })
     }
 
     /// Goes through sqlite: serialize -> close -> open new window
@@ -2862,6 +2977,7 @@ impl MultiWorkspace {
 
         let removing_active = workspaces.iter().any(|ws| ws == self.workspace());
         let original_active = self.workspace().clone();
+        let replaced_active = removing_active.then(|| original_active.clone());
 
         let fallback_task = removing_active.then(|| fallback_workspace(self, window, cx));
 
@@ -2898,7 +3014,7 @@ impl MultiWorkspace {
             } else {
                 this.update_in(cx, |this, window, cx| {
                     if *this.workspace() != original_active {
-                        this.activate(original_active, None, window, cx);
+                        this.activate(original_active.clone(), None, window, cx);
                     }
                 })?;
             }
@@ -2911,6 +3027,19 @@ impl MultiWorkspace {
                     let was_retained = this.is_workspace_retained(workspace);
                     if was_retained {
                         this.detach_workspace(workspace, cx);
+                        removed_any = true;
+                    } else if replaced_active.as_ref() == Some(workspace) {
+                        // The window's own workspace only reaches
+                        // `retained_workspaces` once something puts it there --
+                        // the sidebar panel opening, or switching away from it
+                        // -- so there is nothing to detach. It was still
+                        // removed: the fallback is the active workspace now,
+                        // and `active_workspace` was the last strong handle to
+                        // this one. Reporting `false` told
+                        // `remove_project_group` its project was still on the
+                        // window, which is how removing the project a window
+                        // was opened on, with the panel never opened, did
+                        // nothing at all.
                         removed_any = true;
                     }
                 }

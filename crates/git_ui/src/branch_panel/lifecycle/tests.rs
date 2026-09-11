@@ -26,6 +26,32 @@ fn init_test(cx: &mut TestAppContext) -> std::sync::Arc<AppState> {
     })
 }
 
+/// A panel over a project that really holds a repository, so `collect_repos`
+/// has something to find.
+///
+/// The plain `panel` helper opens an empty project, which leaves the rebuild
+/// with no repositories and nothing to say about how a repository is drawn.
+async fn panel_over_a_repo(
+    cx: &mut TestAppContext,
+) -> (gpui::Entity<BranchPanel>, &mut VisualTestContext) {
+    init_test(cx);
+    let fs = fs::FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/repos/zode",
+        serde_json::json!({
+            ".git": {},
+            "src": { "main.rs": "fn main() {}" },
+        }),
+    )
+    .await;
+    let project = Project::test(fs.clone(), ["/repos/zode".as_ref()], cx).await;
+    let (workspace, cx) = cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        BranchPanel::new(workspace, window, cx)
+    });
+    (panel, cx)
+}
+
 async fn panel(cx: &mut TestAppContext) -> (gpui::Entity<BranchPanel>, &mut VisualTestContext) {
     let app_state = init_test(cx);
     let project = Project::test(app_state.fs.clone(), [], cx).await;
@@ -335,6 +361,104 @@ mod restoring_expansion {
         }
     }
 
+    /// A repository nobody has closed is open, and a checkout's agents stay
+    /// shut until somebody asks for them.
+    ///
+    /// The two rows go opposite ways round on purpose. Closing a repository
+    /// hides every checkout under it, so "closed unless recorded otherwise"
+    /// meant a worktree you had just made, a project you had just opened, or a
+    /// fresh machine all arrived at a panel listing nothing at all.
+    #[gpui::test]
+    async fn a_repository_nobody_has_closed_is_open(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        let checkout = std::sync::Arc::from(std::path::Path::new("/repos/zode/wt"));
+
+        panel.update(cx, |panel, _| {
+            panel.repos = vec![repo_data(id)];
+
+            assert!(
+                panel.row_is_open(&RowKey::Repo(id)),
+                "a repository with nothing recorded against it must draw open"
+            );
+            assert!(
+                !panel.row_is_open(&RowKey::WorktreeAgents(id, checkout)),
+                "a checkout's agents must still stay shut until asked for"
+            );
+        });
+    }
+
+    /// A blob from before repositories recorded their closure lists the ones
+    /// that were open. Those entries govern nothing now and must be dropped on
+    /// the way in, not parked in a set nobody reads and rewritten on every
+    /// save for the life of the workspace.
+    #[gpui::test]
+    async fn a_repository_entry_from_the_old_format_is_not_kept(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+
+        panel.update(cx, |panel, _| {
+            panel.repos = vec![repo_data(id)];
+            panel
+                .stored_expanded
+                .insert(StoredKey::Repo(REPO_PATH.to_string()));
+
+            panel.adopt_stored_expansion();
+
+            assert!(
+                !panel.expanded.contains(&RowKey::Repo(id)),
+                "a repository entry has no meaning in the opened set and must be dropped"
+            );
+            assert!(
+                panel.stored_expanded.is_empty(),
+                "and it must still be consumed, or the next rebuild re-adopts it"
+            );
+            assert!(
+                panel.row_is_open(&RowKey::Repo(id)),
+                "dropping it leaves the repository at its default, which is open"
+            );
+        });
+    }
+
+    /// Closing a repository is remembered, and survives the restore.
+    #[gpui::test]
+    async fn a_repository_the_reader_closed_stays_closed(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        let key = RowKey::Repo(id);
+
+        panel.update(cx, |panel, cx| {
+            panel.repos = vec![repo_data(id)];
+
+            panel.toggle_row(key.clone(), cx);
+            assert!(
+                !panel.row_is_open(&key),
+                "the gesture has to close a repository that was open"
+            );
+
+            panel.toggle_row(key.clone(), cx);
+            assert!(
+                panel.row_is_open(&key),
+                "and open it again, rather than the set filling up one way"
+            );
+        });
+
+        // What a restart hands back: the closure recorded by path, with no
+        // live repository id yet.
+        panel.update(cx, |panel, _| {
+            panel.collapsed.clear();
+            panel
+                .stored_collapsed
+                .insert(StoredKey::Repo(REPO_PATH.to_string()));
+
+            panel.adopt_stored_expansion();
+            assert!(
+                !panel.row_is_open(&key),
+                "a repository the reader closed must come back closed"
+            );
+        });
+    }
+
     #[gpui::test]
     async fn a_collapsed_section_stays_collapsed(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
@@ -363,4 +487,167 @@ mod restoring_expansion {
             );
         });
     }
+}
+
+/// An open row shows what its tab is called *now*, not what it was called when
+/// the tree was built.
+///
+/// The row stores a label at build time and a rename rebuilds nothing, so the
+/// stored copy goes stale the moment the user commits one. Built with a
+/// deliberately wrong stored label: if the accessor ever goes back to reading
+/// it, this says so immediately.
+#[gpui::test]
+async fn an_open_rows_label_follows_its_tab(cx: &mut TestAppContext) {
+    use crate::branch_panel::tree::AgentEntry;
+
+    let (panel, cx) = panel(cx).await;
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .next()
+                .expect("the agent tab just opened")
+        })
+        .unwrap();
+    let live = view.read_with(cx, |view, _| view.tab_label());
+
+    let entry = AgentEntry::Open {
+        label: "what it was called an hour ago".into(),
+        agent: project::CLAUDE_CODE_AGENT_ID.into(),
+        view: view.downgrade(),
+    };
+
+    cx.update(|_, cx| {
+        assert_eq!(
+            entry.label(cx),
+            live,
+            "the row must read the tab, not the copy taken when it was built"
+        );
+        assert_eq!(
+            entry.stored_label().as_ref(),
+            "what it was called an hour ago",
+            "and the build-time copy is still there as the fallback"
+        );
+    });
+}
+
+/// Renaming a tab has to redraw the panel even when its agent has already
+/// exited.
+///
+/// The 250ms activity tick carries the live case, but it stops as soon as no
+/// listed agent is running -- so without a listener a tab renamed after its
+/// agent finished kept its old name until something unrelated rebuilt the
+/// panel. `UpdateTab` is the event a rename emits; this raises exactly that.
+#[gpui::test]
+async fn renaming_an_agent_tab_redraws_the_panel(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Active and rebuilt: that is when the panel picks up its listeners.
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.refresh_if_stale(cx);
+    });
+    cx.run_until_parked();
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(
+            panel._agent_tab_names.len(),
+            1,
+            "the panel must be listening to the one open agent tab"
+        );
+    });
+
+    let redraws = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _watcher = cx.new(|cx| {
+        let redraws = redraws.clone();
+        vec![
+            cx.observe(&panel, move |_: &mut Vec<gpui::Subscription>, _, _| {
+                redraws.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        ]
+    });
+
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .next()
+                .expect("the agent tab is open")
+        })
+        .unwrap();
+    view.update(cx, |_, cx| {
+        cx.emit(agent_ui::AgentViewEvent::UpdateTab);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        redraws.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "a renamed tab must wake the panel that names it"
+    );
+}
+
+/// The complaint itself, end to end: a workspace with nothing recorded against
+/// it draws its repository open, so the checkouts under it are on screen.
+///
+/// The tests above pin `row_is_open` and the restore in isolation. This one
+/// goes through the real rebuild -- `collect_repos` off the git store, then
+/// `build_rows` -- which is where the bug actually lived.
+#[gpui::test]
+async fn a_workspace_with_nothing_recorded_lists_its_checkouts(cx: &mut TestAppContext) {
+    use crate::branch_panel::tree::TreeRow;
+
+    let (panel, cx) = panel_over_a_repo(cx).await;
+    cx.run_until_parked();
+
+    let repo_rows = panel.update(cx, |panel, cx| {
+        panel.stale = true;
+        panel.refresh_if_stale(cx);
+        panel
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                TreeRow::Repo { expanded, .. } => Some(*expanded),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // Guards against the test passing by finding nothing to check: an empty
+    // row list would satisfy "no closed repository" without proving anything.
+    assert!(
+        !repo_rows.is_empty(),
+        "the harness must give the rebuild a repository to draw, or this proves nothing"
+    );
+    assert!(
+        repo_rows.iter().all(|expanded| *expanded),
+        "a repository nobody has closed must be drawn open, so its checkouts show"
+    );
 }

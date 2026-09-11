@@ -307,6 +307,8 @@ Options: `"bottom"` (default), `"left"`, `"right"`
 }
 ```
 
+When the terminal is docked at the bottom, `default_height` sets the height of the whole bottom dock, not just the terminal — the dock keeps one height across every panel docked there. Switching to the debug panel doesn't move the edge; dragging while the debug panel is active resizes the terminal too.
+
 ### Terminal Button
 
 Hide the terminal button in the status bar:

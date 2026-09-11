@@ -16,6 +16,7 @@
 //! synchronous and free of `gpui`. This is the half that needs a window: the
 //! background task, the global, and the change notification.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use agent_sessions::{SessionIndex, SessionProvider};
@@ -127,6 +128,25 @@ impl SessionStore {
         cx.notify();
     }
 
+    /// Drops a whole set of sessions that have already been removed from disk.
+    ///
+    /// One index swap, one generation bump, one notify -- whatever the set
+    /// holds. Looping [`Self::forget`] instead would rebuild the index once per
+    /// session, which is `O(N * S)` for a bulk delete and re-renders every
+    /// reader N times on the way.
+    ///
+    /// An empty set returns without touching anything: a delete that trashed
+    /// nothing is not a change, and bumping the generation for it would redraw
+    /// every surface reading the store for no reason.
+    pub fn forget_many(&mut self, ids: &HashSet<Arc<str>>, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.index = Arc::new(self.index.without_all(ids));
+        self.generation += 1;
+        cx.notify();
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_index_for_test(
         &mut self,
@@ -146,6 +166,7 @@ mod tests {
         AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionSummary,
     };
     use gpui::TestAppContext;
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
@@ -279,6 +300,75 @@ mod tests {
                     .is_none()
             );
         });
+    }
+
+    /// The bulk drop must cost ONE rebuild, not one per session.
+    ///
+    /// `generation` is what makes that observable: an implementation that loops
+    /// `forget` bumps it once per id and fails this assertion, so the O(n^2)
+    /// trap cannot creep back in behind a passing suite.
+    #[gpui::test]
+    async fn forgetting_many_costs_one_rebuild_and_no_sweep(cx: &mut TestAppContext) {
+        let (store, list_calls) = store(cx);
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+        let sweeps_before = list_calls.load(Ordering::SeqCst);
+        let generation_before = store.read_with(cx, |store, _| store.generation());
+
+        let ids: HashSet<Arc<str>> = ["a", "b"].into_iter().map(Arc::from).collect();
+        store.update(cx, |store, cx| store.forget_many(&ids, cx));
+
+        assert_eq!(
+            list_calls.load(Ordering::SeqCst),
+            sweeps_before,
+            "forgetting what we just deleted must not re-read the disk"
+        );
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.index().len(), 0);
+            assert_eq!(
+                store.generation(),
+                generation_before + 1,
+                "one bulk drop is one rebuild; a loop over forget would bump this twice"
+            );
+        });
+    }
+
+    /// A delete that trashed nothing is not a change. Bumping the generation
+    /// for it would redraw every surface reading the store for no reason.
+    #[gpui::test]
+    async fn forgetting_nothing_changes_nothing(cx: &mut TestAppContext) {
+        let (store, _) = store(cx);
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+
+        // The entity IS its subscription list, so the observe stays registered
+        // for as long as `_observer` is held -- the surrounding tests drop the
+        // subscription at the end of the closure, which would silently observe
+        // nothing here.
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let _observer = cx.new(|cx| {
+            let notifications = notifications.clone();
+            vec![
+                cx.observe(&store, move |_: &mut Vec<gpui::Subscription>, _, _| {
+                    notifications.fetch_add(1, Ordering::SeqCst);
+                }),
+            ]
+        });
+        let generation_before = store.read_with(cx, |store, _| store.generation());
+        let len_before = store.read_with(cx, |store, _| store.index().len());
+
+        store.update(cx, |store, cx| store.forget_many(&HashSet::new(), cx));
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.generation(), generation_before);
+            assert_eq!(store.index().len(), len_before);
+        });
+        assert_eq!(
+            notifications.load(Ordering::SeqCst),
+            0,
+            "an empty forget must not notify"
+        );
     }
 
     /// The store outlives every panel that reads it. If it ever holds one, the

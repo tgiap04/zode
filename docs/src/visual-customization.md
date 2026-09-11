@@ -502,6 +502,8 @@ The Project Panel always docks on the right side of the window, opposite the pro
 
 ## Terminal Panel
 
+When docked at the bottom, `default_height` sets the height of the whole bottom dock, not just the terminal — switching to the debug panel does not move its edge, and dragging while the debug panel is active resizes the terminal too.
+
 ```json [settings]
   // Terminal Panel Settings
   "terminal": {
@@ -539,6 +541,8 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
 
 ### Other Panels
 
+On the left dock, `default_width` is shared: the git panel is the left dock's primary panel by default, so switching to the outline panel does not change the dock's width — dragging while the outline panel is active resizes the git panel too.
+
 ```json [settings]
   // Git Panel
   "git_panel": {
@@ -561,7 +565,7 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
   // Outline Panel
   "outline_panel": {
     "button": true,               // Show/hide status bar icon
-    "default_width": 300,         // Default width of the git panel
+    "default_width": 300,         // Default width of the outline panel
     "dock": "left",               // Where to dock: left, right
     "file_icons": true,           // Show/hide file_icons
     "folder_icons": true,         // Show file_icons (true), chevrons (false) for dirs

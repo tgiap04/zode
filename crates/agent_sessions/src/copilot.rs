@@ -151,6 +151,39 @@ impl CopilotProvider {
     ///
     /// A path that cannot be canonicalised — gone, or a dangling symlink —
     /// answers `false`: there is nothing there to trash.
+    /// The directory a session was read out of.
+    ///
+    /// Only needed for a session with no transcript to name its own directory.
+    ///
+    /// The id first, because `summary_for` says the directory name and the
+    /// session id "agree in every session seen so far" -- so this is one
+    /// `is_dir` in practice, which matters because a bulk delete asks once per
+    /// session and a scan each time would be quadratic.
+    ///
+    /// The scan is the fallback for the case that precedence rule exists for:
+    /// the id comes from the transcript or the yaml, so a store where the two
+    /// disagree would otherwise name a directory that is not there. Bounded by
+    /// one pass, and only ever reached when the cheap answer missed.
+    fn dir_of(&self, session: &SessionSummary) -> Option<PathBuf> {
+        if crate::provider::is_safe_component(&session.id) {
+            let named = self.session_state_dir.join(session.id.as_ref());
+            if named.is_dir() {
+                return Some(named);
+            }
+        }
+        let entries = std::fs::read_dir(&self.session_state_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if matches!(self.summary_for(&path), Ok(Some(found)) if found.id == session.id) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     fn contains(&self, path: &Path) -> bool {
         let Ok(root) = std::fs::canonicalize(&self.session_state_dir) else {
             return false;
@@ -252,19 +285,33 @@ impl SessionProvider for CopilotProvider {
         // The whole session directory: the transcript is only one of the files
         // Copilot writes for a session, and leaving `checkpoints/` and `files/`
         // behind would leave the session half-deleted.
-        let Some(log_path) = session.log_path.as_ref() else {
+        //
+        // The transcript names its own directory when there is one, which is
+        // the ordinary case and costs nothing. When there is not -- a session
+        // written by the VS Code extension has no `events.jsonl`, so `log_path`
+        // is `None` -- the directory is still there and still has to go, so it
+        // is looked up instead. That route used to answer "nothing to delete"
+        // and the caller, seeing no paths, returned without so much as asking.
+        //
+        // Looked up rather than joined from `session.id`: the id comes from the
+        // transcript or the yaml (see `summary_for`) and is not the directory's
+        // name, so joining it names a directory that does not exist.
+        let Some(dir) = session
+            .log_path
+            .as_ref()
+            .and_then(|log| log.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| self.dir_of(session))
+        else {
             return Vec::new();
         };
+        // `contains` alone would accept the store root itself, which would
+        // trash every session at once.
         let root = std::fs::canonicalize(&self.session_state_dir).ok();
-        log_path
-            .parent()
-            .filter(|dir| {
-                // `contains` alone would accept the store root itself, which
-                // would trash every session at once.
-                self.contains(dir) && std::fs::canonicalize(dir).ok() != root
-            })
-            .map(|dir| vec![dir.to_path_buf()])
-            .unwrap_or_default()
+        if !self.contains(&dir) || std::fs::canonicalize(&dir).ok() == root {
+            return Vec::new();
+        }
+        vec![dir]
     }
 }
 
@@ -498,8 +545,35 @@ mod tests {
         assert_eq!(sessions[0].title, "real question");
     }
 
+    /// A transcript-less session is still a directory on disk, so it must still
+    /// be deletable.
+    ///
+    /// The store names each session's directory by its id — `find` reaches it
+    /// that way and never looks at a transcript. Deriving it from
+    /// `log_path.parent()` instead made deletion depend on an `events.jsonl`
+    /// that a VS Code-written session never has, so `paths_to_trash` came back
+    /// empty and the delete bailed before it could even ask.
+    #[test]
+    fn a_session_with_no_transcript_can_still_be_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = write_session(root.path(), "3f0a6c3e", None, WORKSPACE);
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+
+        let sessions = provider.list().unwrap();
+        assert_eq!(
+            sessions[0].log_path, None,
+            "no transcript, as the store left it"
+        );
+
+        assert_eq!(
+            provider.paths_to_trash(&sessions[0]),
+            vec![dir],
+            "the session's own directory is what a delete takes, transcript or not"
+        );
+    }
+
     /// A session written by the VS Code extension has no `events.jsonl`. It must
-    /// still list — with no transcript to open and nothing to delete.
+    /// still list — with no transcript to open.
     #[test]
     fn a_session_with_no_transcript_still_lists() {
         let root = tempfile::tempdir().unwrap();
@@ -513,8 +587,11 @@ mod tests {
         assert_eq!(sessions[0].log_bytes, 0);
         assert_eq!(sessions[0].preview, "");
         assert_eq!(provider.counts(&sessions[0]).unwrap().messages, None);
-        // Nothing to trash: there is no transcript to anchor the directory to.
-        assert!(provider.paths_to_trash(&sessions[0]).is_empty());
+        // What it can still be is deleted -- see
+        // `a_session_with_no_transcript_can_still_be_deleted`. This test used to
+        // assert the opposite, which is how the defect was written down as
+        // intent: no transcript was read as nothing to delete, when the
+        // directory holding the session was there the whole time.
     }
 
     #[test]

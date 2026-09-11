@@ -128,7 +128,31 @@ pub(crate) fn activity_for(working: bool, responding: bool) -> AgentActivity {
 }
 
 impl AgentEntry {
-    pub(crate) fn label(&self) -> &SharedString {
+    /// Asked at render for an open tab, for the reason [`Self::activity`] is:
+    /// renaming a tab changes what it is called while nothing else about the
+    /// row changes, so the copy taken when the tree was built is stale the
+    /// moment the user commits the rename. A transcript's title cannot change
+    /// under us, so a past row keeps the label it was built with.
+    ///
+    /// Falls back to the stored label when the view is gone: the row still has
+    /// to say something, and what the tab was called last is the truest thing
+    /// left to say.
+    pub(crate) fn label(&self, cx: &gpui::App) -> SharedString {
+        match self {
+            AgentEntry::Open { view, .. } => view
+                .upgrade()
+                .map(|view| view.read(cx).tab_label())
+                .unwrap_or_else(|| self.stored_label().clone()),
+            AgentEntry::Past { .. } => self.stored_label().clone(),
+        }
+    }
+
+    /// The label captured when the tree was built.
+    ///
+    /// What a row should *draw* is [`Self::label`] -- this one can be stale for
+    /// an open tab. It is the fallback when the view is gone, and what the
+    /// window-free tree tests assert on.
+    pub(crate) fn stored_label(&self) -> &SharedString {
         match self {
             AgentEntry::Open { label, .. } | AgentEntry::Past { label, .. } => label,
         }

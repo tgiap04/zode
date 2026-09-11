@@ -40,6 +40,7 @@ impl BranchPanel {
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
+                _agent_tab_names: Vec::new(),
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,
@@ -47,7 +48,9 @@ impl BranchPanel {
                 repos: Vec::new(),
                 rows: Vec::new(),
                 expanded: HashSet::default(),
+                collapsed: HashSet::default(),
                 stored_expanded: HashSet::default(),
+                stored_collapsed: HashSet::default(),
                 running_remote_ops: HashSet::default(),
                 reloading: false,
                 _reload_task: None,
@@ -85,6 +88,7 @@ impl BranchPanel {
             if let Some(serialized) = serialized {
                 panel.update(cx, |panel, _| {
                     panel.stored_expanded = serialized.expanded;
+                    panel.stored_collapsed = serialized.collapsed;
                     panel.pinned = serialized
                         .pinned
                         .into_iter()
@@ -165,11 +169,55 @@ impl BranchPanel {
         self.repos = self.collect_repos(cx);
         self.adopt_stored_expansion();
 
-        let expanded = &self.expanded;
         // No filter from the panel: the header carries one button, and the row
         // builder's filter stays for whatever exposes one next.
-        self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
+        let rows = build_rows(&self.repos, &|key| self.row_is_open(key), "");
+        self.rows = rows;
         self.sync_list_state();
+        self.track_agent_tab_names(cx);
+    }
+
+    /// Listens to every open agent tab, so renaming one redraws the row that
+    /// names it.
+    ///
+    /// A rename emits `UpdateTab` on the view and touches nothing else: no git
+    /// command ran and no row was rebuilt. The activity tick below carries the
+    /// case where the agent is still alive, but it stops the moment the CLI
+    /// exits -- so a tab renamed after its agent finished sat under its old
+    /// name until something unrelated rebuilt the panel.
+    ///
+    /// A notify is all this needs and all it does. `AgentEntry::label` reads
+    /// the name through the view at render, so there is nothing to rebuild;
+    /// marking the tree stale here would re-read every repository to change one
+    /// string.
+    ///
+    /// Refreshed from the workspace rather than from the rows: the rows are
+    /// what this keeps correct, so deriving the listeners from them would mean
+    /// a tab whose row has not been built yet is the one tab nobody is
+    /// listening to.
+    pub(crate) fn track_agent_tab_names(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            self._agent_tab_names.clear();
+            return;
+        };
+        let views: Vec<_> = workspace
+            .read(cx)
+            .items_of_type::<agent_ui::AgentView>(cx)
+            .collect();
+        self._agent_tab_names = views
+            .into_iter()
+            .map(|view| {
+                cx.subscribe(&view, |panel, _, event, cx| {
+                    if matches!(event, agent_ui::AgentViewEvent::UpdateTab) {
+                        // Only when the panel is on screen. An invisible panel
+                        // rebuilds from scratch when it comes back.
+                        if panel.is_active {
+                            cx.notify();
+                        }
+                    }
+                })
+            })
+            .collect();
     }
 
     /// Keeps the panel redrawing while a live agent is listed, and stops when
@@ -245,49 +293,104 @@ impl BranchPanel {
     /// key on every rebuild, and since collapsing a row rebuilds the tree, any
     /// section that happened to be open when the panel was last saved could
     /// never be closed again.
+    /// Whether a row is drawn open.
+    ///
+    /// The builder asks one question and the two sets answer it from opposite
+    /// directions: a repository is open until somebody closes it, every other
+    /// row closed until somebody opens it. See `BranchPanel::collapsed` for
+    /// why the repository goes that way round.
+    pub(crate) fn row_is_open(&self, key: &RowKey) -> bool {
+        match key {
+            RowKey::Repo(_) => !self.collapsed.contains(key),
+            RowKey::WorktreeAgents(..) => self.expanded.contains(key),
+        }
+    }
+
     fn adopt_stored_expansion(&mut self) {
-        if self.stored_expanded.is_empty() {
+        // Each set takes only the rows it governs. A blob written before
+        // repositories recorded their closure lists the ones that were *open*,
+        // and those entries mean nothing here any more -- adopted without this
+        // filter they would sit in `expanded` unread, and be written back out
+        // on every save for the life of the workspace.
+        Self::adopt(
+            &self.repos,
+            &mut self.stored_expanded,
+            &mut self.expanded,
+            |key| matches!(key, RowKey::WorktreeAgents(..)),
+        );
+        Self::adopt(
+            &self.repos,
+            &mut self.stored_collapsed,
+            &mut self.collapsed,
+            |key| matches!(key, RowKey::Repo(_)),
+        );
+    }
+
+    fn adopt(
+        repos: &[crate::branch_panel::tree::RepoData],
+        stored: &mut HashSet<StoredKey>,
+        live: &mut HashSet<RowKey>,
+        governs: impl Fn(&RowKey) -> bool,
+    ) {
+        if stored.is_empty() {
             return;
         }
 
         let mut adopted = Vec::new();
-        for repo in &self.repos {
+        for repo in repos {
             let path = repo.path.to_string_lossy().to_string();
-            for stored in self.stored_expanded.iter() {
-                if let Some(key) = stored.to_row_key(repo.id, &path) {
-                    adopted.push((stored.clone(), key));
+            for entry in stored.iter() {
+                if let Some(key) = entry.to_row_key(repo.id, &path) {
+                    adopted.push((entry.clone(), key));
                 }
             }
         }
 
-        for (stored, key) in adopted {
-            self.stored_expanded.remove(&stored);
-            self.expanded.insert(key);
+        // Consumed whether or not it is kept: an entry left in place would be
+        // re-adopted on the next rebuild, and since closing a row rebuilds the
+        // tree, a row restored open could never be closed again.
+        for (entry, key) in adopted {
+            stored.remove(&entry);
+            if governs(&key) {
+                live.insert(key);
+            }
         }
     }
 
     pub(crate) fn toggle_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
-        if !self.expanded.remove(&key) {
-            self.expanded.insert(key);
+        // One gesture, two sets, opposite polarity -- a repository records
+        // that it was closed, everything else that it was opened.
+        let set = match key {
+            RowKey::Repo(_) => &mut self.collapsed,
+            RowKey::WorktreeAgents(..) => &mut self.expanded,
+        };
+        if !set.remove(&key) {
+            set.insert(key);
         }
         self.stale = true;
         self.serialize(cx);
         cx.notify();
     }
 
-    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
+    /// Turns live row keys back into the path-based form that survives a
+    /// restart, for whichever of the two sets is being written.
+    fn stored_keys(&self, keys: &HashSet<RowKey>) -> HashSet<StoredKey> {
         let mut stored = HashSet::default();
         for repo in &self.repos {
             let path = repo.path.to_string_lossy().to_string();
-            for key in &self.expanded {
+            for key in keys {
                 if key.repository_id() == repo.id {
                     stored.insert(StoredKey::from_row_key(key, &path));
                 }
             }
         }
+        stored
+    }
 
+    pub(crate) fn serialize(&mut self, cx: &mut Context<Self>) {
         let state = SerializedBranchPanel {
-            expanded: stored,
+            expanded: self.stored_keys(&self.expanded),
+            collapsed: self.stored_keys(&self.collapsed),
             pinned: self
                 .pinned
                 .iter()
