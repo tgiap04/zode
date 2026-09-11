@@ -3865,6 +3865,7 @@ List of `integer` column numbers
 
 - Description: Configuration for the terminal.
 - Setting: `terminal`
+- Note: when docked at the bottom, `default_height` sets the height of the whole bottom dock, not just the terminal. The dock keeps one height across every panel docked there, so switching to the debug panel does not move its edge — and dragging that edge while the debug panel is up resizes the terminal too.
 - Default:
 
 ```json [settings]
@@ -5061,6 +5062,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 
 - Description: Setting to customize the behavior of the git panel.
 - Setting: `git_panel`
+- Note: `default_width` sets the width of the whole left dock, not just this panel. The dock keeps one width across every panel docked there, so switching to the outline panel or the branch panel does not move its edge — and dragging that edge while either one is up resizes the git panel too.
 - Default:
 
 ```json [settings]

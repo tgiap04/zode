@@ -2440,32 +2440,28 @@ impl Workspace {
         panel_key: &'static str,
         cx: &App,
     ) -> Option<dock::PanelSizeState> {
-        dock::Dock::load_persisted_size_state(self, panel_key, cx)
+        dock::Dock::load_persisted_size_state(panel_key, cx)
     }
 
+    /// Records how wide -- or, at the bottom, how tall -- a dock stands.
+    ///
+    /// Written against the panel alone, with no workspace in the key: a
+    /// sidebar that changed width on the way between two checkouts of the same
+    /// repository was the same complaint as one that changed width between two
+    /// panels, and a record per workspace is what made the first of those
+    /// unavoidable. One drag, one width, everywhere.
     pub fn persist_panel_size_state(
         &self,
         panel_key: &str,
         size_state: dock::PanelSizeState,
         cx: &mut App,
     ) {
-        let Some(workspace_id) = self
-            .database_id()
-            .map(|id| i64::from(id).to_string())
-            .or(self.session_id())
-        else {
-            return;
-        };
-
         let kvp = db::kvp::KeyValueStore::global(cx);
         let panel_key = panel_key.to_string();
         cx.background_spawn(async move {
             let scope = kvp.scoped(dock::PANEL_SIZE_STATE_KEY);
             scope
-                .write(
-                    format!("{workspace_id}:{panel_key}"),
-                    serde_json::to_string(&size_state)?,
-                )
+                .write(panel_key, serde_json::to_string(&size_state)?)
                 .await
         })
         .detach_and_log_err(cx);
@@ -2705,18 +2701,28 @@ impl Workspace {
             .and_then(|column| self.dock_for_column(column))
             .unwrap_or_else(|| self.dock_at_position(dock_position));
         let any_panel = panel.to_any();
-        let persisted_size_state =
-            self.persisted_panel_size_state(T::panel_key(), cx)
-                .or_else(|| {
-                    load_legacy_panel_size(T::panel_key(), dock_position, self, cx).map(|size| {
-                        let state = dock::PanelSizeState {
-                            size: Some(size),
-                            flex: None,
-                        };
-                        self.persist_panel_size_state(T::panel_key(), state, cx);
-                        state
-                    })
-                });
+        let persisted_size_state = self
+            .persisted_panel_size_state(T::panel_key(), cx)
+            // A width this workspace recorded before widths were shared. Handed
+            // over to the shared record on the way past, so the next workspace
+            // to open reads it rather than its own.
+            .or_else(|| {
+                dock::Dock::load_workspace_scoped_size_state(self, T::panel_key(), cx).inspect(
+                    |state| {
+                        self.persist_panel_size_state(T::panel_key(), *state, cx);
+                    },
+                )
+            })
+            .or_else(|| {
+                load_legacy_panel_size(T::panel_key(), dock_position, self, cx).map(|size| {
+                    let state = dock::PanelSizeState {
+                        size: Some(size),
+                        flex: None,
+                    };
+                    self.persist_panel_size_state(T::panel_key(), state, cx);
+                    state
+                })
+            });
 
         dock.update(cx, |dock, cx| {
             let index = dock.add_panel(panel.clone(), self.weak_self.clone(), window, cx);
@@ -14005,6 +14011,254 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// A column is one column however many panels take turns in it.
+    ///
+    /// The rail's buttons switch which panel is up in the left dock, and the
+    /// dock used to take its width from whichever that was -- so a click moved
+    /// the column, by the difference between two panels' default widths.
+    #[gpui::test]
+    async fn a_dock_keeps_one_width_however_many_panels_share_it(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bounds.size.width = px(1200.);
+            let primary = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.default_size = px(240.);
+                panel
+            });
+            workspace.add_panel(primary, window, cx);
+            let second = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx);
+                panel.0.default_size = px(360.);
+                panel
+            });
+            workspace.add_panel(second, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+        });
+        cx.run_until_parked();
+
+        let before = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+        });
+        assert_eq!(
+            before,
+            Some(px(240.)),
+            "the column starts at its primary panel's width"
+        );
+
+        // What the rail's buttons actually do -- `show_panel` to bring one up
+        // and `hide_panel_by_id` to put one away, never `activate_panel`. This
+        // leaves the column showing only the panel that is NOT the one its
+        // width is read from, which is the arrangement most likely to move it.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let primary_id = workspace
+                .left_dock
+                .read(cx)
+                .panels()
+                .next()
+                .expect("the dock should still hold its primary panel")
+                .panel_id();
+            workspace.left_dock.update(cx, |dock, cx| {
+                dock.show_panel(1, window, cx);
+                dock.hide_panel_by_id(primary_id, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let after = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+        });
+        assert_eq!(
+            after, before,
+            "bringing another panel up must not move the column"
+        );
+    }
+
+    /// A drag has to move the column even when the panel under the pointer
+    /// measures the column differently from the panel that owns its extent.
+    ///
+    /// The left dock resizes every panel at once (`resize_all_panels_in_dock`
+    /// defaults to `["left"]`), and that pass skips panels whose mode differs
+    /// from the showing one's. Once the extent came from the primary panel
+    /// rather than the showing one, that skip could leave the primary out --
+    /// and a drag then wrote to entries nothing reads, moving nothing.
+    #[gpui::test]
+    async fn a_drag_reaches_the_panel_the_column_is_measured_from(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(1200.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Entry 0 owns the column's extent and measures in pixels.
+            let primary = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(primary, window, cx);
+            // The panel actually up divides the column instead of measuring it.
+            let flexible = cx.new(|cx| TestPanel::new_flexible(DockPosition::Left, 101, cx));
+            workspace.add_panel(flexible, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            workspace.left_dock.update(cx, |dock, cx| {
+                dock.activate_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_left_dock(px(420.), window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace
+                    .left_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx)
+            }),
+            Some(px(420.)),
+            "the drag must reach the entry the column's width is read back from"
+        );
+    }
+
+    /// The bottom dock stacks too, so the same rule governs its height.
+    ///
+    /// Included deliberately rather than by accident: excluding it would mean
+    /// adding a special case for one dock with nothing to justify it, and the
+    /// terminal and the debug panel swapping the dock's height between them is
+    /// the same complaint one axis over.
+    #[gpui::test]
+    async fn the_bottom_dock_keeps_one_height_too(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let primary = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Bottom, 100, cx);
+                panel.default_size = px(320.);
+                panel
+            });
+            workspace.add_panel(primary, window, cx);
+            let second = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Bottom, 101, cx);
+                panel.0.default_size = px(500.);
+                panel
+            });
+            workspace.add_panel(second, window, cx);
+            workspace.toggle_dock(DockPosition::Bottom, window, cx);
+        });
+        cx.run_until_parked();
+
+        let before = workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .bottom_dock
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+        });
+        assert_eq!(before, Some(px(320.)));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.bottom_dock.update(cx, |dock, cx| {
+                dock.activate_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace
+                    .bottom_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx)
+            }),
+            before,
+            "the bottom dock must not change height when another panel comes up"
+        );
+    }
+
+    /// A width dragged in one project is the width in the next.
+    ///
+    /// Recorded against the workspace before, which is why the sidebar changed
+    /// width on the way between two checkouts of the same repository -- each
+    /// one remembering a drag the other never saw.
+    #[gpui::test]
+    async fn a_dock_width_carries_between_projects(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        {
+            let project = Project::test(fs.clone(), [], cx).await;
+            let (multi_workspace, cx) =
+                cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+            workspace.update(cx, |workspace, _cx| {
+                workspace.set_random_database_id();
+                workspace.bounds.size.width = px(1200.);
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+                workspace.add_panel(panel, window, cx);
+                workspace.toggle_dock(DockPosition::Left, window, cx);
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.resize_left_dock(px(420.), window, cx);
+            });
+            cx.run_until_parked();
+        }
+
+        // A different project, with a database id of its own — what switching
+        // to another worktree opens.
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(1200.);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace
+                    .left_dock
+                    .read(cx)
+                    .stored_active_panel_size(window, cx)
+            }),
+            Some(px(420.)),
+            "the width dragged in the first project must be the width here"
+        );
     }
 
     #[gpui::test]

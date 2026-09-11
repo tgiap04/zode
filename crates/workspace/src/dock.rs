@@ -514,10 +514,17 @@ fn resize_panel_entry(
 ) -> (&'static str, PanelSizeState) {
     let size = size.map(|size| size.max(RESIZE_HANDLE_SIZE).round());
     let uses_flexible_width = panel_uses_flexible_width(position, entry.panel.as_ref(), window, cx);
+    // The axis not in use is cleared, not merely left alone. A record now
+    // outlives the workspace it was made in, so a pixel width written while
+    // the panel was fixed would otherwise still be sitting there the day the
+    // panel is fixed again -- in a dock that may well measure the other way.
+    // Held together the two fields describe one drag, never two.
     if uses_flexible_width {
         entry.size_state.flex = flex;
+        entry.size_state.size = None;
     } else {
         entry.size_state.size = size;
+        entry.size_state.flex = None;
     }
     entry.panel.size_state_changed(window, cx);
     (entry.panel.panel_key(), entry.size_state)
@@ -690,24 +697,26 @@ impl Dock {
     /// The entry whose stored size decides how wide -- or, at the bottom, how
     /// tall -- the dock is.
     ///
-    /// A dock that takes turns is *one column* to the eye: its header is a tab
-    /// strip and only ever one panel is drawn below it. So it holds one extent,
-    /// and taking that extent from whichever panel happens to be up is what
-    /// made the column change width every time you switched tabs -- the project
-    /// panel defaults to 240px and the agent history to 420px, and a drag on
-    /// the column's edge only ever wrote to the panel showing at the time. Two
-    /// panels, two widths, one column: the width had to move.
+    /// A dock is *one column* to the eye however it draws its panels, so it
+    /// holds one extent. Taking that extent from whichever panel happens to be
+    /// up is what made the column change width every time you switched -- the
+    /// git panel defaults to 360px and the branch panel beside it in the left
+    /// dock to 280px, and a drag on the column's edge only ever wrote to the
+    /// panel showing at the time. Two panels, two widths, one column: the
+    /// width had to move.
+    ///
+    /// This held for a dock that stacks too, which is what took a while to
+    /// see. A stack divides the column along the *other* axis -- `stack_flexes`
+    /// says how the sections share its height -- so its sections were never
+    /// describing their own width to begin with. Reading a width off the
+    /// active section was reading the wrong axis, and it moved the column for
+    /// the same reason a tab switch did.
     ///
     /// Entries are held in `activation_priority` order, so the first is the
-    /// column's primary panel. It owns the extent and the others read it. A
-    /// dock that stacks has no switcher and each section keeps its own size, so
-    /// there this stays the active entry, exactly as before.
+    /// column's primary panel. It owns the extent and every other panel reads
+    /// it.
     fn size_governing_index(&self) -> Option<usize> {
-        if self.takes_turns() {
-            (!self.panel_entries.is_empty()).then_some(0)
-        } else {
-            self.active_panel_index
-        }
+        (!self.panel_entries.is_empty()).then_some(0)
     }
 
     fn size_governing_entry(&self) -> Option<&PanelEntry> {
@@ -1542,11 +1551,19 @@ impl Dock {
             };
             panel_uses_flexible_width(self.position, active_entry.panel.as_ref(), window, cx)
         };
+        // The mode filter keeps a drag off panels that measure the other way.
+        // The governing entry is exempt from it: that is the one the column's
+        // extent is read back from, so leaving it out means a drag that moves
+        // nothing at all -- the very complaint this sizing works to remove.
+        // Including it is safe because `resize_panel_entry` picks fixed or
+        // flexible from the entry's own mode, never from the active panel's.
+        let governing_index = self.size_governing_index();
         let mut size_states_to_persist = Vec::new();
-        for entry in &mut self.panel_entries {
-            if panel_uses_flexible_width(self.position, entry.panel.as_ref(), window, cx)
-                == active_panel_uses_flexible_width
-            {
+        for (index, entry) in self.panel_entries.iter_mut().enumerate() {
+            let matches_active_mode =
+                panel_uses_flexible_width(self.position, entry.panel.as_ref(), window, cx)
+                    == active_panel_uses_flexible_width;
+            if matches_active_mode || Some(index) == governing_index {
                 size_states_to_persist.push(resize_panel_entry(
                     self.position,
                     entry,
@@ -1809,6 +1826,27 @@ impl Dock {
     }
 
     pub(crate) fn load_persisted_size_state(
+        panel_key: &'static str,
+        cx: &App,
+    ) -> Option<PanelSizeState> {
+        Self::read_size_state(panel_key, cx)
+    }
+
+    /// The width a workspace of its own recorded, from before the record was
+    /// shared.
+    ///
+    /// Only ever read as a fallback, and only until the shared record exists.
+    /// Two workspaces opening together can both find it absent and both write,
+    /// and the one that lands last is the width everybody then gets -- the
+    /// write is a background task, so this is settled by completion order
+    /// rather than by which window opened first. A one-off wrong starting
+    /// width, correctable by one drag; not worth a compare-and-swap the
+    /// key-value store does not have.
+    ///
+    /// Left in place rather than deleted, unlike `load_legacy_panel_size`: the
+    /// rows are bounded and frozen, and a build from before this change still
+    /// reads them.
+    pub(crate) fn load_workspace_scoped_size_state(
         workspace: &Workspace,
         panel_key: &'static str,
         cx: &App,
@@ -1817,10 +1855,14 @@ impl Dock {
             .database_id()
             .map(|id| i64::from(id).to_string())
             .or(workspace.session_id())?;
+        Self::read_size_state(&format!("{workspace_id}:{panel_key}"), cx)
+    }
+
+    fn read_size_state(key: &str, cx: &App) -> Option<PanelSizeState> {
         let kvp = KeyValueStore::global(cx);
         let scope = kvp.scoped(PANEL_SIZE_STATE_KEY);
         scope
-            .read(&format!("{workspace_id}:{panel_key}"))
+            .read(key)
             .log_err()
             .flatten()
             .and_then(|json| serde_json::from_str::<PanelSizeState>(&json).log_err())
