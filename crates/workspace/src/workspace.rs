@@ -1121,10 +1121,29 @@ pub struct ActiveWorktreeCreation {
     pub is_switch: bool,
 }
 
+/// What each side dock is showing, beside the one active panel a
+/// `DockStructure` records.
+///
+/// Not folded into `DockStructure`, which is a row in the workspace database
+/// while a stack is a key-value record with its own lifetime -- merging them
+/// would mean a schema migration to carry state that is already stored, and
+/// stored apart for a reason.
+#[derive(Clone, Debug, Default)]
+pub struct DockStacks {
+    pub left: Option<dock::DockStackState>,
+    pub right: Option<dock::DockStackState>,
+    pub bottom: Option<dock::DockStackState>,
+}
+
 /// Captured workspace state used when switching between worktrees.
 /// Stores the layout and open files so they can be restored in the new workspace.
 pub struct PreviousWorkspaceState {
     pub dock_structure: DockStructure,
+    /// Which panels stood together in each dock. A dock that stacks rather
+    /// than takes turns -- the left one, and the bottom -- shows more than the
+    /// single active panel `dock_structure` names, so that field alone
+    /// describes only part of what was on screen.
+    pub dock_stacks: DockStacks,
     pub open_file_paths: Vec<PathBuf>,
     pub active_file_path: Option<PathBuf>,
     pub focused_dock: Option<DockPosition>,
@@ -2265,19 +2284,47 @@ impl Workspace {
         }
     }
 
-    pub fn set_dock_structure(
+    /// What each dock is showing, in a form another workspace can be given.
+    pub fn capture_dock_stacks(&self, cx: &App) -> DockStacks {
+        DockStacks {
+            left: Some(self.left_dock.read(cx).stack_state()),
+            right: Some(self.right_dock.read(cx).stack_state()),
+            bottom: Some(self.bottom_dock.read(cx).stack_state()),
+        }
+    }
+
+    /// Puts a layout onto this workspace's docks, replacing whatever is there.
+    ///
+    /// The one way in for both layouts a workspace can be given -- the stored
+    /// one `load_workspace` reads back, and the one a worktree switch carries
+    /// over from the checkout being left. They must not drift: which of the
+    /// two lands last is exactly what decides whether a checkout keeps its own
+    /// arrangement or inherits.
+    ///
+    /// Both records go on before `restore_state` runs, because the restore
+    /// reads both: setting them in two passes would apply the structure
+    /// without the stack and leave a stacking dock showing one panel of
+    /// however many were up.
+    ///
+    /// An absent stack stays absent rather than becoming an empty one: an
+    /// install from before stacks has no record, and `restore_state` must fall
+    /// through to the single active panel for it instead of being handed an
+    /// empty stack to decline.
+    pub fn set_dock_layout(
         &self,
         docks: DockStructure,
+        stacks: DockStacks,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for (dock, data) in [
-            (&self.left_dock, docks.left),
-            (&self.bottom_dock, docks.bottom),
-            (&self.right_dock, docks.right),
+        for (dock, data, stack) in [
+            (&self.left_dock, docks.left, stacks.left),
+            (&self.bottom_dock, docks.bottom, stacks.bottom),
+            (&self.right_dock, docks.right, stacks.right),
         ] {
             dock.update(cx, |dock, cx| {
                 dock.serialized_dock = Some(data);
+                dock.serialized_stack = stack;
                 dock.restore_state(window, cx);
             });
         }
@@ -2323,6 +2370,7 @@ impl Workspace {
         cx: &App,
     ) -> PreviousWorkspaceState {
         let dock_structure = self.capture_dock_state(window, cx);
+        let dock_stacks = self.capture_dock_stacks(cx);
         let open_file_paths = self.open_item_abs_paths(cx);
         let active_file_path = self
             .active_item(cx)
@@ -2335,6 +2383,7 @@ impl Workspace {
 
         PreviousWorkspaceState {
             dock_structure,
+            dock_stacks,
             open_file_paths,
             active_file_path,
             focused_dock,
@@ -7075,31 +7124,15 @@ impl Workspace {
                     }
                 }
 
-                let docks = serialized_workspace.docks;
-
                 // Read here, where the workspace is in hand, and handed to each
                 // dock — a dock reaching back through the workspace handle from
                 // `restore_state` reads it mid-update and aborts.
-                let stacks = [
-                    workspace.load_persisted_dock_stack(DockPosition::Right.label(), cx),
-                    workspace.load_persisted_dock_stack(DockPosition::Left.label(), cx),
-                    workspace.load_persisted_dock_stack(DockPosition::Bottom.label(), cx),
-                ];
-
-                for ((dock, serialized_dock), stack) in [
-                    (&mut workspace.right_dock, docks.right),
-                    (&mut workspace.left_dock, docks.left),
-                    (&mut workspace.bottom_dock, docks.bottom),
-                ]
-                .iter_mut()
-                .zip(stacks)
-                {
-                    dock.update(cx, |dock, cx| {
-                        dock.serialized_dock = Some(serialized_dock.clone());
-                        dock.serialized_stack = stack;
-                        dock.restore_state(window, cx);
-                    });
-                }
+                let stacks = DockStacks {
+                    left: workspace.load_persisted_dock_stack(DockPosition::Left.label(), cx),
+                    right: workspace.load_persisted_dock_stack(DockPosition::Right.label(), cx),
+                    bottom: workspace.load_persisted_dock_stack(DockPosition::Bottom.label(), cx),
+                };
+                workspace.set_dock_layout(serialized_workspace.docks, stacks, window, cx);
 
                 cx.notify();
             })?;
@@ -14429,6 +14462,156 @@ mod tests {
                 );
             });
         });
+    }
+
+    /// A worktree switch hands the layout to a checkout that has none, and a
+    /// left dock stacks rather than takes turns -- so the record it is handed
+    /// has to name every panel that was up, not just the active one.
+    ///
+    /// Carrying `DockStructure` alone put one panel back and dropped the rest,
+    /// which is the whole of what "the git panel was open beside the worktree
+    /// panel and came back alone" looks like from here.
+    #[gpui::test]
+    async fn a_captured_layout_carries_every_panel_that_was_up(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+
+        let captured = {
+            let fs = FakeFs::new(cx.executor());
+            let project = Project::test(fs, [], cx).await;
+            let (multi_workspace, cx) =
+                cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+            workspace.update_in(cx, |workspace, window, cx| {
+                let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+                workspace.add_panel(first, window, cx);
+                let second =
+                    cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx));
+                workspace.add_panel(second, window, cx);
+                workspace.left_dock().update(cx, |dock, cx| {
+                    dock.show_panel(0, window, cx);
+                    dock.show_panel(1, window, cx);
+                });
+            });
+            cx.run_until_parked();
+
+            let captured = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.capture_state_for_worktree_switch(window, None, cx)
+            });
+            assert_eq!(
+                captured
+                    .dock_stacks
+                    .left
+                    .clone()
+                    .unwrap_or_default()
+                    .showing
+                    .len(),
+                2,
+                "the capture has to see both panels, or there is nothing to carry"
+            );
+            captured
+        };
+
+        // The destination, as the switch finds it: a workspace whose docks are
+        // empty, because its panels are added after `init` has run.
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_dock_layout(captured.dock_structure, captured.dock_stacks, window, cx);
+
+            // Only now, exactly as the real flow does it -- each panel's own
+            // crate adds it once the workspace exists.
+            let first = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(first, window, cx);
+            let second = cx.new(|cx| dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx));
+            workspace.add_panel(second, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (open, showing) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            (dock.is_open(), dock.visible_panels().count())
+        });
+        assert!(
+            open,
+            "the dock the reader was working in must come back open"
+        );
+        assert_eq!(
+            showing, 2,
+            "both panels that were up must come back, not the active one alone"
+        );
+    }
+
+    /// The checkout being arrived at wins whenever it has a record of its own.
+    ///
+    /// Both layouts go on through `set_dock_layout`, which is the single way
+    /// in that `load_workspace` also uses -- so this exercises the function
+    /// production runs rather than a restatement of it. What it cannot reach
+    /// is `load_workspace` itself, which needs a serialized workspace and a
+    /// database this is not otherwise standing up; what it pins is the
+    /// ordering the feature rests on. An inherited layout is a starting point
+    /// for a checkout that has none, never an override of one that does.
+    #[gpui::test]
+    async fn a_checkout_with_its_own_layout_keeps_it(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_dock_layout(
+                DockStructure {
+                    left: crate::persistence::model::DockData {
+                        visible: true,
+                        active_panel: Some("TestPanel".into()),
+                        zoom: false,
+                    },
+                    right: Default::default(),
+                    bottom: Default::default(),
+                },
+                DockStacks {
+                    left: Some(dock::DockStackState {
+                        showing: vec!["TestPanel".into()],
+                        flexes: vec![1.],
+                    }),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+
+            // What the destination had recorded: this dock, shut. Same call
+            // `load_workspace` makes, with what it would have read back.
+            workspace.set_dock_layout(
+                DockStructure {
+                    left: crate::persistence::model::DockData {
+                        visible: false,
+                        active_panel: None,
+                        zoom: false,
+                    },
+                    right: Default::default(),
+                    bottom: Default::default(),
+                },
+                DockStacks::default(),
+                window,
+                cx,
+            );
+
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open()),
+            "a dock the reader shut in this checkout must stay shut on the way back to it"
+        );
     }
 
     /// Hiding a panel while the dock is shut must not forget the rest of the stack.
