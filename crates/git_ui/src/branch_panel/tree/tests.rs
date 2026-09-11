@@ -332,9 +332,9 @@ mod agents {
         let (on_main, _) = agents_of(card(&rows, "main"));
         let (on_feature, _) = agents_of(card(&rows, "feature"));
         assert_eq!(on_main.len(), 1);
-        assert_eq!(on_main[0].label().as_ref(), "On main");
+        assert_eq!(on_main[0].stored_label().as_ref(), "On main");
         assert_eq!(on_feature.len(), 1);
-        assert_eq!(on_feature[0].label().as_ref(), "On feature");
+        assert_eq!(on_feature[0].stored_label().as_ref(), "On feature");
     }
 
     /// The row clones a refcount, never the entries. Gathering happens once per
