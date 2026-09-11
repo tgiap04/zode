@@ -40,6 +40,7 @@ impl BranchPanel {
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
+                _agent_tab_names: Vec::new(),
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,
@@ -170,6 +171,50 @@ impl BranchPanel {
         // builder's filter stays for whatever exposes one next.
         self.rows = build_rows(&self.repos, &|key| expanded.contains(key), "");
         self.sync_list_state();
+        self.track_agent_tab_names(cx);
+    }
+
+    /// Listens to every open agent tab, so renaming one redraws the row that
+    /// names it.
+    ///
+    /// A rename emits `UpdateTab` on the view and touches nothing else: no git
+    /// command ran and no row was rebuilt. The activity tick below carries the
+    /// case where the agent is still alive, but it stops the moment the CLI
+    /// exits -- so a tab renamed after its agent finished sat under its old
+    /// name until something unrelated rebuilt the panel.
+    ///
+    /// A notify is all this needs and all it does. `AgentEntry::label` reads
+    /// the name through the view at render, so there is nothing to rebuild;
+    /// marking the tree stale here would re-read every repository to change one
+    /// string.
+    ///
+    /// Refreshed from the workspace rather than from the rows: the rows are
+    /// what this keeps correct, so deriving the listeners from them would mean
+    /// a tab whose row has not been built yet is the one tab nobody is
+    /// listening to.
+    pub(crate) fn track_agent_tab_names(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            self._agent_tab_names.clear();
+            return;
+        };
+        let views: Vec<_> = workspace
+            .read(cx)
+            .items_of_type::<agent_ui::AgentView>(cx)
+            .collect();
+        self._agent_tab_names = views
+            .into_iter()
+            .map(|view| {
+                cx.subscribe(&view, |panel, _, event, cx| {
+                    if matches!(event, agent_ui::AgentViewEvent::UpdateTab) {
+                        // Only when the panel is on screen. An invisible panel
+                        // rebuilds from scratch when it comes back.
+                        if panel.is_active {
+                            cx.notify();
+                        }
+                    }
+                })
+            })
+            .collect();
     }
 
     /// Keeps the panel redrawing while a live agent is listed, and stops when

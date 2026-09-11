@@ -364,3 +364,128 @@ mod restoring_expansion {
         });
     }
 }
+
+/// An open row shows what its tab is called *now*, not what it was called when
+/// the tree was built.
+///
+/// The row stores a label at build time and a rename rebuilds nothing, so the
+/// stored copy goes stale the moment the user commits one. Built with a
+/// deliberately wrong stored label: if the accessor ever goes back to reading
+/// it, this says so immediately.
+#[gpui::test]
+async fn an_open_rows_label_follows_its_tab(cx: &mut TestAppContext) {
+    use crate::branch_panel::tree::AgentEntry;
+
+    let (panel, cx) = panel(cx).await;
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .next()
+                .expect("the agent tab just opened")
+        })
+        .unwrap();
+    let live = view.read_with(cx, |view, _| view.tab_label());
+
+    let entry = AgentEntry::Open {
+        label: "what it was called an hour ago".into(),
+        agent: project::CLAUDE_CODE_AGENT_ID.into(),
+        view: view.downgrade(),
+    };
+
+    cx.update(|_, cx| {
+        assert_eq!(
+            entry.label(cx),
+            live,
+            "the row must read the tab, not the copy taken when it was built"
+        );
+        assert_eq!(
+            entry.stored_label().as_ref(),
+            "what it was called an hour ago",
+            "and the build-time copy is still there as the fallback"
+        );
+    });
+}
+
+/// Renaming a tab has to redraw the panel even when its agent has already
+/// exited.
+///
+/// The 250ms activity tick carries the live case, but it stops as soon as no
+/// listed agent is running -- so without a listener a tab renamed after its
+/// agent finished kept its old name until something unrelated rebuilt the
+/// panel. `UpdateTab` is the event a rename emits; this raises exactly that.
+#[gpui::test]
+async fn renaming_an_agent_tab_redraws_the_panel(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Active and rebuilt: that is when the panel picks up its listeners.
+    panel.update_in(cx, |panel, window, cx| {
+        panel.set_active(true, window, cx);
+        panel.refresh_if_stale(cx);
+    });
+    cx.run_until_parked();
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(
+            panel._agent_tab_names.len(),
+            1,
+            "the panel must be listening to the one open agent tab"
+        );
+    });
+
+    let redraws = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _watcher = cx.new(|cx| {
+        let redraws = redraws.clone();
+        vec![
+            cx.observe(&panel, move |_: &mut Vec<gpui::Subscription>, _, _| {
+                redraws.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        ]
+    });
+
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .next()
+                .expect("the agent tab is open")
+        })
+        .unwrap();
+    view.update(cx, |_, cx| {
+        cx.emit(agent_ui::AgentViewEvent::UpdateTab);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        redraws.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "a renamed tab must wake the panel that names it"
+    );
+}

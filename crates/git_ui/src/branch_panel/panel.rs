@@ -58,6 +58,13 @@ pub struct BranchPanel {
     pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
     /// Dropped with the panel, so the store never notifies a dead handle.
     pub(crate) _session_subscription: Option<Subscription>,
+    /// One per open agent tab, so a rename redraws the row that names it.
+    ///
+    /// Rebuilt whenever the panel rebuilds, which is exactly when the set of
+    /// tabs can have changed. Each holds only a weak handle to its view, so a
+    /// closed tab is never kept alive by being listened to, and the listener
+    /// retires itself once the view is gone.
+    pub(crate) _agent_tab_names: Vec<Subscription>,
     /// The variant of each row as `list_state` last saw it. A row's height is
     /// decided entirely by its variant, so this is enough to work out which
     /// slice of the list actually changed and splice only that -- resetting the
