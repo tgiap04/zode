@@ -13,6 +13,7 @@ pub enum IconName {
     AiClaude,
     AiCopilot,
     AiOpenAi,
+    AiOpencode,
     AiZed,
     Archive,
     ArrowCircle,
