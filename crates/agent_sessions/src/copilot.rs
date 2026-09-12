@@ -1,6 +1,6 @@
 use crate::{
-    AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionProvider, SessionSummary,
-    Speaker, provider::is_safe_component,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+    SessionSummary, Speaker, provider::is_safe_component,
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -193,6 +193,39 @@ impl CopilotProvider {
         };
         path.starts_with(root)
     }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        // The whole session directory: the transcript is only one of the files
+        // Copilot writes for a session, and leaving `checkpoints/` and `files/`
+        // behind would leave the session half-deleted.
+        //
+        // The transcript names its own directory when there is one, which is
+        // the ordinary case and costs nothing. When there is not -- a session
+        // written by the VS Code extension has no `events.jsonl`, so `log_path`
+        // is `None` -- the directory is still there and still has to go, so it
+        // is looked up instead. That route used to answer "nothing to delete"
+        // and the caller, seeing no paths, returned without so much as asking.
+        //
+        // Looked up rather than joined from `session.id`: the id comes from the
+        // transcript or the yaml (see `summary_for`) and is not the directory's
+        // name, so joining it names a directory that does not exist.
+        let Some(dir) = session
+            .log_path
+            .as_ref()
+            .and_then(|log| log.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| self.dir_of(session))
+        else {
+            return Vec::new();
+        };
+        // `contains` alone would accept the store root itself, which would
+        // trash every session at once.
+        let root = std::fs::canonicalize(&self.session_state_dir).ok();
+        if !self.contains(&dir) || std::fs::canonicalize(&dir).ok() == root {
+            return Vec::new();
+        }
+        vec![dir]
+    }
 }
 
 impl SessionProvider for CopilotProvider {
@@ -281,37 +314,12 @@ impl SessionProvider for CopilotProvider {
         })
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        // The whole session directory: the transcript is only one of the files
-        // Copilot writes for a session, and leaving `checkpoints/` and `files/`
-        // behind would leave the session half-deleted.
-        //
-        // The transcript names its own directory when there is one, which is
-        // the ordinary case and costs nothing. When there is not -- a session
-        // written by the VS Code extension has no `events.jsonl`, so `log_path`
-        // is `None` -- the directory is still there and still has to go, so it
-        // is looked up instead. That route used to answer "nothing to delete"
-        // and the caller, seeing no paths, returned without so much as asking.
-        //
-        // Looked up rather than joined from `session.id`: the id comes from the
-        // transcript or the yaml (see `summary_for`) and is not the directory's
-        // name, so joining it names a directory that does not exist.
-        let Some(dir) = session
-            .log_path
-            .as_ref()
-            .and_then(|log| log.parent())
-            .map(Path::to_path_buf)
-            .or_else(|| self.dir_of(session))
-        else {
-            return Vec::new();
-        };
-        // `contains` alone would accept the store root itself, which would
-        // trash every session at once.
-        let root = std::fs::canonicalize(&self.session_state_dir).ok();
-        if !self.contains(&dir) || std::fs::canonicalize(&dir).ok() == root {
-            return Vec::new();
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        let paths = self.paths_to_trash(session);
+        if paths.is_empty() {
+            return Deletion::Nothing;
         }
-        vec![dir]
+        Deletion::Trash(paths)
     }
 }
 
@@ -792,6 +800,52 @@ mod tests {
             provider
                 .new_session_command("some-id", Path::new("/w/one"))
                 .is_none()
+        );
+    }
+}
+
+/// `deletion()` is new in phase 04's refactor; kept in its own module so the
+/// port of `paths_to_trash` above stays provably untouched -- `git diff` on
+/// `mod tests` is the check, and it must show nothing.
+#[cfg(test)]
+mod deletion_wrapping {
+    use super::*;
+
+    fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Copilot,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path,
+            log_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_transcript_and_no_directory_is_nothing() {
+        let provider = CopilotProvider::new(PathBuf::from("/does/not/exist"));
+        let session = bare_session("none", None);
+        assert_eq!(provider.deletion(&session), Deletion::Nothing);
+    }
+
+    #[test]
+    fn a_session_directory_inside_the_store_is_a_nonempty_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let log = session_dir.join("events.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        let session = bare_session("s1", Some(log));
+        assert_eq!(
+            provider.deletion(&session),
+            Deletion::Trash(vec![session_dir])
         );
     }
 }

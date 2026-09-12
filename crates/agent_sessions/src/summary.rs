@@ -168,6 +168,26 @@ fn shell_quote(value: &str) -> String {
     out
 }
 
+/// What a delete has to do to really remove this session.
+///
+/// Two stores, two different answers. Claude, Codex and Copilot keep their
+/// sessions as files, so a delete is the editor moving those files to the OS
+/// trash through its own `Fs` — recoverable, and visible in the confirmation.
+/// opencode keeps its sessions as rows in a database it owns and offers a
+/// subcommand for removing one, so a delete is asking the CLI. Writing into
+/// another tool's live database is not an option this editor takes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Deletion {
+    /// Nothing this session owns is still reachable.
+    Nothing,
+    /// Move these to the OS trash, outermost first. Never empty — an empty
+    /// list is [`Self::Nothing`], so the caller has one question to ask, not two.
+    Trash(Vec<PathBuf>),
+    /// Ask the agent to remove it from its own store. Not recoverable, and the
+    /// confirmation has to say so.
+    Command(AgentCommand),
+}
+
 /// Whether a store can be read at all right now.
 ///
 /// A missing store is a legitimate state, not an error: someone who has never

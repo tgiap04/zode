@@ -1,5 +1,6 @@
 use crate::{
-    AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+    SessionSummary,
 };
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -89,6 +90,19 @@ impl CodexProvider {
             return false;
         };
         path.starts_with(root)
+    }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        // Only the rollout transcript, and only while it really sits inside the
+        // Codex directory: `rollout_path` comes out of a database this editor does
+        // not own, and a doctored row must not turn into a delete somewhere else.
+        // The thread row itself stays — writing to Codex's database is not ours.
+        session
+            .log_path
+            .iter()
+            .filter(|path| self.contains(path))
+            .cloned()
+            .collect()
     }
 
     /// Runs `read` against the thread store.
@@ -225,17 +239,12 @@ impl SessionProvider for CodexProvider {
         })
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        // Only the rollout transcript, and only while it really sits inside the
-        // Codex directory: `rollout_path` comes out of a database this editor does
-        // not own, and a doctored row must not turn into a delete somewhere else.
-        // The thread row itself stays — writing to Codex's database is not ours.
-        session
-            .log_path
-            .iter()
-            .filter(|path| self.contains(path))
-            .cloned()
-            .collect()
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        let paths = self.paths_to_trash(session);
+        if paths.is_empty() {
+            return Deletion::Nothing;
+        }
+        Deletion::Trash(paths)
     }
 }
 
@@ -665,5 +674,46 @@ mod tests {
         // Nothing there at all: nothing to trash, and nothing to guess about.
         session.log_path = Some(codex.join("sessions").join("gone.jsonl"));
         assert!(provider.paths_to_trash(&session).is_empty());
+    }
+}
+
+/// `deletion()` is new in phase 04's refactor; kept in its own module so the
+/// port of `paths_to_trash` above stays provably untouched -- `git diff` on
+/// `mod tests` is the check, and it must show nothing.
+#[cfg(test)]
+mod deletion_wrapping {
+    use super::*;
+
+    fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Codex,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path,
+            log_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_rollout_path_is_nothing() {
+        let provider = CodexProvider::new(PathBuf::from("/does/not/exist"));
+        let session = bare_session("none", None);
+        assert_eq!(provider.deletion(&session), Deletion::Nothing);
+    }
+
+    #[test]
+    fn a_rollout_path_inside_the_store_is_a_nonempty_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("rollout.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let provider = CodexProvider::new(root.path().to_path_buf());
+        let session = bare_session("s", Some(log.clone()));
+        assert_eq!(provider.deletion(&session), Deletion::Trash(vec![log]));
     }
 }

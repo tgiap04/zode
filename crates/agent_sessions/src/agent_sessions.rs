@@ -30,7 +30,7 @@ pub use copilot::CopilotProvider;
 pub use provider::SessionProvider;
 pub use session_index::SessionIndex;
 pub use summary::{
-    AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionSummary, Speaker,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionSummary, Speaker,
 };
 
 use std::sync::Arc;

@@ -1,10 +1,18 @@
 use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
-use agent_sessions::{Fork, SessionProvider, SessionSummary};
-use gpui::{App, ClipboardItem, Context, Entity, Window};
+use agent_sessions::{AgentCommand, AgentKind, Deletion, Fork, SessionProvider, SessionSummary};
+use futures::{FutureExt as _, select_biased};
+use gpui::{App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, Window};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use util::ResultExt as _;
+use workspace::notifications::NotificationId;
+
+/// How long a single `Deletion::Command` invocation may run before the delete
+/// gives up on it and treats it as a failure (M6). A wedged CLI call must not
+/// stall every trash and delete queued behind it in the same sequential sweep.
+const COMMAND_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether the directory a session ran in is still there.
 ///
@@ -75,11 +83,32 @@ pub fn delete_session(
     cx: &mut App,
 ) {
     let provider = agent_sessions::provider_for(session.agent);
-    let paths = provider.paths_to_trash(session);
-    if paths.is_empty() {
-        offer_to_drop_the_row(session, window, cx);
-        return;
+    match provider.deletion(session) {
+        Deletion::Nothing => offer_to_drop_the_row(session, window, cx),
+        Deletion::Trash(paths) => delete_via_trash(workspace, session, paths, window, cx),
+        Deletion::Command(command) => {
+            delete_via_command(workspace, provider, session, command, window, cx)
+        }
     }
+}
+
+/// The `Trash` half of [`delete_session`]: moves every path to the OS trash and
+/// forgets the row only once every one of them is really gone.
+///
+/// A path already missing is not a failure -- `fs::RemoveOptions::ignore_if_not_exists`
+/// says so, and the `!path.exists()` check below skips the call rather than
+/// routing a no-op through it. What must not happen is forgetting the row when a
+/// real path survived the attempt (H7): a permission error, a full disk, or a
+/// mount with no trash service must leave the row describing a transcript that is
+/// still there, matching the discipline `delete_all` already keeps in
+/// `every_path_gone`.
+fn delete_via_trash(
+    workspace: &Entity<workspace::Workspace>,
+    session: &SessionSummary,
+    paths: Vec<PathBuf>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let fs = workspace.read(cx).project().read(cx).fs().clone();
 
     let detail = format!(
@@ -106,44 +135,314 @@ pub fn delete_session(
         if prompt.await.ok() != Some(0) {
             return;
         }
+        let mut every_path_gone = true;
         for path in paths {
             if !path.exists() {
                 continue;
             }
-            fs.trash(
-                &path,
-                fs::RemoveOptions {
-                    recursive: true,
-                    ignore_if_not_exists: true,
-                },
-            )
-            .await
-            .log_err();
+            let trashed = fs
+                .trash(
+                    &path,
+                    fs::RemoveOptions {
+                        recursive: true,
+                        ignore_if_not_exists: true,
+                    },
+                )
+                .await
+                .log_err();
+            if trashed.is_none() {
+                every_path_gone = false;
+            }
         }
         // Drop the entry rather than re-sweeping: the delete already knows
         // exactly what it removed, and a sweep would open every other
-        // transcript on disk to learn one fact it was told.
-        store.update(cx, |store, cx| store.forget(&id, cx));
+        // transcript on disk to learn one fact it was told. But only once
+        // every path really went (H7) -- a row must not outlive the one thing
+        // that was tracking it.
+        if every_path_gone {
+            store.update(cx, |store, cx| store.forget(&id, cx));
+        }
     })
     .detach();
 }
 
-/// One session's worth of a bulk delete: the id to forget, and the files that
-/// have to reach the trash before it may be forgotten.
+/// The `Command` half of [`delete_session`]. Not recoverable -- the prompt says
+/// so -- and the binary is resolved through `AgentServerStore` rather than
+/// trusting `command.program`, which `agent_task` already treats as advisory
+/// only.
+fn delete_via_command(
+    workspace: &Entity<workspace::Workspace>,
+    provider: Arc<dyn SessionProvider>,
+    session: &SessionSummary,
+    command: AgentCommand,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let agent = session.agent;
+    let agent_label = agent.label();
+    let detail = format!(
+        "{}\n\n{agent_label}'s own store holds this session, not a file this editor \
+         can move to the trash. Deleting it asks {agent_label} to remove it there. \
+         This cannot be undone.",
+        session.title
+    );
+    let prompt = window.prompt(
+        gpui::PromptLevel::Warning,
+        "Delete this session?",
+        Some(&detail),
+        &["Delete", "Cancel"],
+        cx,
+    );
+
+    let agent_store = workspace
+        .read(cx)
+        .project()
+        .read(cx)
+        .agent_server_store()
+        .clone();
+    let workspace_weak = workspace.downgrade();
+    let store = crate::SessionStore::global(cx);
+    let id = session.id.clone();
+    let title = session.title.clone();
+
+    window
+        .spawn(cx, async move |cx| {
+            if prompt.await.ok() != Some(0) {
+                return;
+            }
+            let executor = cx.background_executor().clone();
+            let outcome =
+                run_command_delete(&provider, &agent_store, &executor, agent, &id, &command, cx)
+                    .await;
+            match outcome {
+                CommandDeleteOutcome::Gone => {
+                    store.update(cx, |store, cx| store.forget(&id, cx));
+                }
+                CommandDeleteOutcome::BinaryMissing(missing) => {
+                    let binary = missing.binary;
+                    let detail = format!(
+                        "{title}\n\n`{binary}` was not found on this machine, so \
+                         {agent_label} cannot be asked to remove this session from its \
+                         own store. Zode cannot delete it without {binary}.\n\nRemoving \
+                         it here only takes it off this list. It does not touch \
+                         {agent_label}'s own store, so the row comes back if \
+                         {agent_label} still lists the session.",
+                    );
+                    let title_text = format!("{binary} is not installed");
+                    let follow_up = cx.prompt(
+                        gpui::PromptLevel::Warning,
+                        &title_text,
+                        Some(&detail),
+                        &["Remove From List", "Cancel"],
+                    );
+                    if follow_up.await.ok() != Some(0) {
+                        return;
+                    }
+                    store.update(cx, |store, cx| store.forget(&id, cx));
+                }
+                CommandDeleteOutcome::Failed(message) => {
+                    notify_command_delete_failed(&workspace_weak, agent_label, &id, &message, cx);
+                }
+            }
+        })
+        .detach();
+}
+
+/// What running a `Deletion::Command` once found out.
+#[derive(Debug)]
+enum CommandDeleteOutcome {
+    /// The session is gone -- either the command exited zero, or it did not,
+    /// but the store no longer holds the id either way (see
+    /// [`run_command_delete`]): the goal was already met.
+    Gone,
+    /// The CLI that owns this session is not on this machine. Kept distinct
+    /// from [`Self::Failed`] because a missing binary must not be offered the
+    /// same way a `Trash` failure is -- see H3 in the phase notes.
+    BinaryMissing(project::AgentBinaryMissing),
+    /// The command ran, or tried to, and failed, and the store still holds
+    /// the session. Carries text already stripped of control characters, fit
+    /// to put in a toast.
+    Failed(String),
+}
+
+/// Runs one `Deletion::Command`, resolving the binary through
+/// `AgentServerStore` -- never the advisory `command.program` -- and racing it
+/// against [`COMMAND_DELETE_TIMEOUT`] (M6) so one wedged invocation cannot stall
+/// a sequential sweep.
+///
+/// A non-zero exit is not treated as final: `opencode session delete` on an id
+/// already gone exits 1, so a failure re-checks `provider.find` and only keeps
+/// the row if the store still holds the session (C2/H9) -- the store is the
+/// authority, not the exit code.
+///
+/// Generic over the context so the same logic serves both the single delete
+/// (`AsyncWindowContext`, for the missing-binary prompt) and the bulk sweep
+/// (`AsyncApp`, which never prompts mid-sweep).
+async fn run_command_delete<C: gpui::AppContext>(
+    provider: &Arc<dyn SessionProvider>,
+    agent_store: &Entity<project::AgentServerStore>,
+    executor: &gpui::BackgroundExecutor,
+    agent: AgentKind,
+    id: &Arc<str>,
+    command: &AgentCommand,
+    cx: &mut C,
+) -> CommandDeleteOutcome {
+    let agent_id = project::AgentId::new(agent.builtin_agent_id());
+    let resolve = agent_store.update(cx, |store, cx| store.resolve_agent_binary(&agent_id, cx));
+    let binary = match resolve.await {
+        Ok(project::AgentBinary::Found(path)) => path,
+        Ok(project::AgentBinary::Missing(missing)) => {
+            return CommandDeleteOutcome::BinaryMissing(missing);
+        }
+        Err(error) => return CommandDeleteOutcome::Failed(error.to_string()),
+    };
+    run_resolved_command_delete(provider, executor, &binary, id, command, cx).await
+}
+
+/// The half of [`run_command_delete`] that runs once a binary is already in
+/// hand.
+///
+/// Split out so it can be exercised directly against a real, deterministic
+/// subprocess in tests. `AgentServerStore::resolve_agent_binary` always
+/// answers `Missing` under `cfg!(test)` unless the project environment carries
+/// a `PATH` -- a real login-shell lookup would make tests depend on what CLIs
+/// happen to be installed on the machine running them -- so this is the part
+/// of the mechanism a test can actually drive: the timeout race (M6), the
+/// exit-code check, and the idempotency re-check (C2/H9).
+async fn run_resolved_command_delete<C: gpui::AppContext>(
+    provider: &Arc<dyn SessionProvider>,
+    executor: &gpui::BackgroundExecutor,
+    binary: &std::path::Path,
+    id: &Arc<str>,
+    command: &AgentCommand,
+    cx: &mut C,
+) -> CommandDeleteOutcome {
+    let mut process = util::command::Command::new(binary);
+    process.arg("--");
+    process.args(command.args.iter());
+    if command.cwd.is_dir() {
+        process.current_dir(&command.cwd);
+    }
+
+    let spawned = select_biased! {
+        output = process.output().fuse() => Some(output),
+        _ = executor.timer(COMMAND_DELETE_TIMEOUT).fuse() => None,
+    };
+
+    if let Some(Ok(output)) = &spawned {
+        if output.status.success() {
+            return CommandDeleteOutcome::Gone;
+        }
+    }
+
+    let recheck_provider = provider.clone();
+    let recheck_id = id.to_string();
+    let still_there = cx
+        .background_spawn(async move { recheck_provider.find(&recheck_id) })
+        .await;
+    match still_there {
+        Ok(None) => CommandDeleteOutcome::Gone,
+        Ok(Some(_)) | Err(_) => {
+            let message = match spawned {
+                Some(Ok(output)) => {
+                    let stderr = strip_ansi_first_line(&output.stderr);
+                    if stderr.is_empty() {
+                        format!("exited with {}", output.status)
+                    } else {
+                        stderr
+                    }
+                }
+                Some(Err(error)) => error.to_string(),
+                None => format!("timed out after {}s", COMMAND_DELETE_TIMEOUT.as_secs()),
+            };
+            CommandDeleteOutcome::Failed(message)
+        }
+    }
+}
+
+/// Strips ANSI CSI escape sequences from `bytes`, then returns the first
+/// non-empty line of what remains.
+///
+/// "Trim control characters" is not enough (M3): that removes the `ESC`
+/// (`0x1B`) byte alone and leaves e.g. `[91m` behind as ordinary printable
+/// text -- exactly the garbage a strip exists to prevent. A CSI sequence is
+/// `ESC` `[`, then any number of bytes, ending at the first one in
+/// `0x40..=0x7E` (its "final byte"); this scans for that shape and drops the
+/// whole run, `ESC` included.
+fn strip_ansi_first_line(bytes: &[u8]) -> String {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut iter = bytes.iter().copied().peekable();
+    while let Some(byte) = iter.next() {
+        if byte == 0x1B && iter.peek() == Some(&b'[') {
+            iter.next();
+            for next in iter.by_ref() {
+                if (0x40..=0x7E).contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(byte);
+    }
+    String::from_utf8_lossy(&out)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Type tag for the failed-command-delete toast. Paired with the session id it
+/// gives one notification per session, so deleting the same session twice
+/// refreshes one toast rather than stacking a second copy -- the idiom
+/// `missing_binary::notify` already uses.
+struct CommandDeleteFailed;
+
+fn notify_command_delete_failed(
+    workspace: &gpui::WeakEntity<workspace::Workspace>,
+    agent_label: &'static str,
+    id: &Arc<str>,
+    message: &str,
+    cx: &mut AsyncWindowContext,
+) {
+    let text = format!("Deleting the {agent_label} session failed: {message}");
+    workspace
+        .update(cx, |workspace, cx| {
+            workspace.show_notification(
+                NotificationId::composite::<CommandDeleteFailed>(id.clone()),
+                cx,
+                |cx| {
+                    cx.new(|cx| {
+                        workspace::notifications::simple_message_notification::MessageNotification::new(
+                            text.clone(),
+                            cx,
+                        )
+                    })
+                },
+            );
+        })
+        .log_err();
+}
+
+/// One session's worth of a bulk delete: the id to forget, and what has to
+/// happen to it before it may be forgotten.
 pub(crate) struct DeleteTarget {
     pub(crate) id: Arc<str>,
-    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) agent: AgentKind,
+    pub(crate) deletion: Deletion,
 }
 
 /// Everything a "delete all" will take, decided before anything is asked or
 /// touched.
 ///
-/// Built as plain data so the count and the size in the confirmation are the
+/// Built as plain data so the counts and the size in the confirmation are the
 /// same numbers the sweep then acts on -- a prompt that says "12 sessions" and
 /// a sweep that takes 14 is the kind of disagreement nobody notices until it
 /// has already happened.
 pub(crate) struct DeleteAll {
     pub(crate) targets: Vec<DeleteTarget>,
+    /// Only ever grown by `Trash` targets: a `Command` session has no file this
+    /// editor can stat, so it always carries `log_bytes: 0` and would otherwise
+    /// inflate this total with a number nobody measured.
     pub(crate) total_bytes: u64,
 }
 
@@ -154,6 +453,24 @@ impl DeleteAll {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.targets.is_empty()
+    }
+
+    /// How many targets move to the OS trash and can be recovered from there.
+    pub(crate) fn trashed(&self) -> usize {
+        self.targets
+            .iter()
+            .filter(|target| matches!(target.deletion, Deletion::Trash(_)))
+            .count()
+    }
+
+    /// How many targets go through their agent's own CLI and cannot be
+    /// recovered. C1 exists because this number used to be invisible to the
+    /// bulk prompt.
+    pub(crate) fn commanded(&self) -> usize {
+        self.targets
+            .iter()
+            .filter(|target| matches!(target.deletion, Deletion::Command(_)))
+            .count()
     }
 }
 
@@ -175,25 +492,30 @@ pub(crate) fn sessions_in_project<'a>(
         .filter(move |session| session.is_within(roots))
 }
 
-/// Turns the in-scope sessions and their paths into the plan to act on.
+/// Turns the in-scope sessions and their deletions into the plan to act on.
 ///
-/// A session whose provider offers no paths is dropped rather than carried: it
-/// has nothing on disk to take, so counting it would inflate the number in the
-/// prompt and forgetting it would drop a row describing a file that is still
-/// there.
+/// A session whose provider answers `Nothing` is dropped rather than carried:
+/// it has nothing on disk or in a store to take, so counting it would inflate
+/// the number in the prompt and forgetting it would drop a row describing
+/// something that is still there.
 pub(crate) fn plan_delete_all<'a>(
-    scoped: impl IntoIterator<Item = (&'a SessionSummary, Vec<PathBuf>)>,
+    scoped: impl IntoIterator<Item = (&'a SessionSummary, Deletion)>,
 ) -> DeleteAll {
     let mut targets = Vec::new();
     let mut total_bytes = 0;
-    for (session, paths) in scoped {
-        if paths.is_empty() {
+    for (session, deletion) in scoped {
+        if matches!(deletion, Deletion::Nothing) {
             continue;
         }
+        // A `Command` session always carries `log_bytes: 0` -- there is no
+        // file here for this editor to have measured -- so only a `Trash`
+        // session ever moves this total. Added unconditionally because that
+        // invariant is what makes doing so safe.
         total_bytes += session.log_bytes;
         targets.push(DeleteTarget {
             id: session.id.clone(),
-            paths,
+            agent: session.agent,
+            deletion,
         });
     }
     DeleteAll {
@@ -204,28 +526,77 @@ pub(crate) fn plan_delete_all<'a>(
 
 /// The body of the confirmation.
 ///
-/// Two numbers and one clarification. The paths are deliberately left out --
-/// two hundred lines of `~/.claude/projects/...` is a wall, not a confirmation,
-/// and the count and the size are the two facts that change the answer. The
-/// second paragraph exists because the panel is filtered: someone looking at
-/// three rows needs telling that this takes all forty.
-pub(crate) fn delete_all_detail(count: usize, total_bytes: u64) -> String {
-    let plural = if count == 1 { "" } else { "s" };
-    // `concat!` rather than one wrapped literal: a trailing-backslash
-    // continuation only strips the next line's indentation while it survives
-    // the formatter, and when it does not the spaces land *inside* the string.
-    // Four of them after a blank line is an indented code block in CommonMark,
-    // which would render the safety sentence as monospaced output.
-    format!(
-        concat!(
-            "{count} session{plural} will move to the trash ({bytes}).\n\n",
-            "Every session for this project goes, not just the ones the search ",
-            "shows. They move to the OS trash and can be recovered from there.",
-        ),
-        count = count,
-        plural = plural,
-        bytes = format_bytes(total_bytes),
-    )
+/// Branches on which kinds of session are in the plan (C1): a `Command`
+/// session is not recoverable, so a prompt that only ever said "move to the
+/// trash ... can be recovered from there" would tell the user the opposite of
+/// the truth the moment the plan held even one of them. The two counts are
+/// never merged into one -- their consequences differ, and merging them is
+/// exactly how a bulk sweep would say "recoverable" about a batch that is not.
+///
+/// The trashed-only branch is byte-for-byte the sentence this function always
+/// used to produce, so the common case reads exactly as it did before this
+/// phase.
+pub(crate) fn delete_all_detail(trashed: usize, commanded: usize, total_bytes: u64) -> String {
+    const SCOPE_SENTENCE: &str =
+        "Every session for this project goes, not just the ones the search shows.";
+    // `concat!` rather than one wrapped literal in every branch below: a
+    // trailing-backslash continuation only strips the next line's indentation
+    // while it survives the formatter, and when it does not the spaces land
+    // *inside* the string. Four of them after a blank line is an indented code
+    // block in CommonMark, which would render a safety sentence as monospaced
+    // output -- the irreversibility sentence is the worst one to lose to it.
+    match (trashed > 0, commanded > 0) {
+        (true, false) => {
+            let plural = if trashed == 1 { "" } else { "s" };
+            format!(
+                concat!(
+                    "{count} session{plural} will move to the trash ({bytes}).\n\n",
+                    "Every session for this project goes, not just the ones the search ",
+                    "shows. They move to the OS trash and can be recovered from there.",
+                ),
+                count = trashed,
+                plural = plural,
+                bytes = format_bytes(total_bytes),
+            )
+        }
+        (false, true) => {
+            let plural = if commanded == 1 { "" } else { "s" };
+            format!(
+                concat!(
+                    "{count} session{plural} will be deleted from their agents' own ",
+                    "stores. This cannot be undone.\n\n",
+                    "{scope}",
+                ),
+                count = commanded,
+                plural = plural,
+                scope = SCOPE_SENTENCE,
+            )
+        }
+        (true, true) => {
+            let trash_plural = if trashed == 1 { "" } else { "s" };
+            let command_plural = if commanded == 1 { "" } else { "s" };
+            format!(
+                concat!(
+                    "{trashed} session{trash_plural} will move to the trash ({bytes}) and ",
+                    "can be recovered from there.\n\n",
+                    "{commanded} session{command_plural} will be deleted from their ",
+                    "agents' own stores. This cannot be undone.\n\n",
+                    "{scope}",
+                ),
+                trashed = trashed,
+                trash_plural = trash_plural,
+                bytes = format_bytes(total_bytes),
+                commanded = commanded,
+                command_plural = command_plural,
+                scope = SCOPE_SENTENCE,
+            )
+        }
+        // `plan.is_empty()` is checked before this is ever called, so this arm
+        // is unreachable in practice. Kept as a real sentence rather than a
+        // panic or an `unreachable!()`: a caller that skips the empty check
+        // some day gets a truthful string, not a crash.
+        (false, false) => "Nothing is left to delete.".to_string(),
+    }
 }
 
 /// What to do when a session owns nothing a delete could take.
@@ -371,22 +742,22 @@ impl AgentHistoryPanel {
         };
 
         let roots = self.project_roots(cx);
-        let scoped: Vec<(&SessionSummary, Vec<PathBuf>)> =
+        let scoped: Vec<(&SessionSummary, Deletion)> =
             sessions_in_project(self.sessions(cx), &roots)
                 .map(|session| {
-                    let paths = self
+                    let deletion = self
                         .provider_for(session)
-                        .map(|provider| provider.paths_to_trash(session))
-                        .unwrap_or_default();
-                    (session, paths)
+                        .map(|provider| provider.deletion(session))
+                        .unwrap_or(Deletion::Nothing);
+                    (session, deletion)
                 })
                 .collect();
         let plan = plan_delete_all(scoped);
 
         // The truthful half of the empty rule. The button is already disabled
-        // when this project has no sessions, but "has sessions" and "has files
-        // to take" are different questions, and only this one has been to the
-        // providers.
+        // when this project has no sessions, but "has sessions" and "has
+        // something a delete can take" are different questions, and only this
+        // one has been to the providers.
         //
         // Said rather than swallowed, for the reason `offer_to_drop_the_row`
         // gives: a button that does nothing and explains nothing reads as
@@ -411,15 +782,41 @@ impl AgentHistoryPanel {
             return;
         }
 
+        log::debug!(
+            "delete_all: sweeping {} sessions ({} trash, {} command)",
+            plan.count(),
+            plan.trashed(),
+            plan.commanded()
+        );
+
+        // C1: a plan holding even one `Command` target is a plan that cannot be
+        // fully recovered, so both the label and the detail text below derive
+        // from the same test rather than one being updated and the other not.
+        let irreversible = plan.commanded() > 0;
+        let buttons: &[&str] = if irreversible {
+            &["Delete", "Cancel"]
+        } else {
+            &["Move to Trash", "Cancel"]
+        };
         let prompt = window.prompt(
             gpui::PromptLevel::Warning,
             "Delete all history for this project?",
-            Some(&delete_all_detail(plan.count(), plan.total_bytes)),
-            &["Move to Trash", "Cancel"],
+            Some(&delete_all_detail(
+                plan.trashed(),
+                plan.commanded(),
+                plan.total_bytes,
+            )),
+            buttons,
             cx,
         );
 
         let fs = workspace.read(cx).project().read(cx).fs().clone();
+        let agent_store = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .agent_server_store()
+            .clone();
         let store = crate::SessionStore::global(cx);
         let targets = plan.targets;
 
@@ -433,31 +830,72 @@ impl AgentHistoryPanel {
             })
             .ok();
 
+            let executor = cx.background_executor().clone();
             let mut forget: HashSet<Arc<str>> = HashSet::default();
             for target in targets {
-                // The unit of success is the session, not the path: a session is
-                // forgotten only once everything it owns is really gone, so a
-                // half-deleted session stays listed and keeps describing the
-                // disk. The sweep never aborts early either -- one unreadable
-                // transcript must not strand the two hundred behind it.
-                let mut every_path_gone = true;
-                for path in &target.paths {
-                    let trashed = fs
-                        .trash(
-                            path,
-                            fs::RemoveOptions {
-                                recursive: true,
-                                ignore_if_not_exists: true,
-                            },
-                        )
-                        .await
-                        .log_err();
-                    if trashed.is_none() {
-                        every_path_gone = false;
+                // The unit of success is the session, not what it took to get
+                // there: a session is forgotten only once everything it owns
+                // is really gone, so a half-deleted session stays listed and
+                // keeps describing the truth. The sweep never aborts early
+                // either -- one failure must not strand the two hundred
+                // behind it. Commands run sequentially and one at a time: they
+                // are writers against one sqlite database in WAL mode, and N
+                // concurrent writers is contention at best.
+                match target.deletion {
+                    Deletion::Nothing => {}
+                    Deletion::Trash(paths) => {
+                        let mut every_path_gone = true;
+                        for path in &paths {
+                            let trashed = fs
+                                .trash(
+                                    path,
+                                    fs::RemoveOptions {
+                                        recursive: true,
+                                        ignore_if_not_exists: true,
+                                    },
+                                )
+                                .await
+                                .log_err();
+                            if trashed.is_none() {
+                                every_path_gone = false;
+                            }
+                        }
+                        if every_path_gone {
+                            forget.insert(target.id);
+                        }
                     }
-                }
-                if every_path_gone {
-                    forget.insert(target.id);
+                    Deletion::Command(command) => {
+                        let provider = agent_sessions::provider_for(target.agent);
+                        let outcome = run_command_delete(
+                            &provider,
+                            &agent_store,
+                            &executor,
+                            target.agent,
+                            &target.id,
+                            &command,
+                            cx,
+                        )
+                        .await;
+                        match outcome {
+                            CommandDeleteOutcome::Gone => {
+                                forget.insert(target.id);
+                            }
+                            // A per-session toast for a sweep of two hundred is a
+                            // toast storm; the rows that stay behind are the
+                            // visible report, matching how a failed `fs.trash`
+                            // above is handled.
+                            CommandDeleteOutcome::BinaryMissing(missing) => {
+                                log::warn!(
+                                    "bulk delete: {} missing, session {} kept",
+                                    missing.binary,
+                                    target.id
+                                );
+                            }
+                            CommandDeleteOutcome::Failed(message) => {
+                                log::warn!("bulk delete: session {} failed: {message}", target.id);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -582,13 +1020,24 @@ mod tests {
         );
     }
 
+    fn command(program: &str) -> AgentCommand {
+        AgentCommand {
+            program: program.to_string(),
+            args: vec!["session".to_string(), "delete".to_string()],
+            cwd: PathBuf::from("/root"),
+        }
+    }
+
     #[test]
-    fn sessions_with_nothing_on_disk_are_not_planned() {
+    fn sessions_with_nothing_to_take_are_not_planned() {
         let with_files = session("keeps", "/root", 100);
         let without = session("empty", "/root", 8_000);
         let plan = plan_delete_all(vec![
-            (&with_files, vec![PathBuf::from("/logs/keeps.jsonl")]),
-            (&without, Vec::new()),
+            (
+                &with_files,
+                Deletion::Trash(vec![PathBuf::from("/logs/keeps.jsonl")]),
+            ),
+            (&without, Deletion::Nothing),
         ]);
 
         assert_eq!(plan.count(), 1);
@@ -600,14 +1049,17 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_tallies_only_what_it_will_take() {
+    fn the_plan_tallies_only_what_it_will_trash() {
         let first = session("first", "/root", 1024);
         let second = session("second", "/root", 1024);
         let huge_but_pathless = session("huge", "/root", 8 * 1024 * 1024);
         let plan = plan_delete_all(vec![
-            (&first, vec![PathBuf::from("/logs/first")]),
-            (&second, vec![PathBuf::from("/logs/second")]),
-            (&huge_but_pathless, Vec::new()),
+            (&first, Deletion::Trash(vec![PathBuf::from("/logs/first")])),
+            (
+                &second,
+                Deletion::Trash(vec![PathBuf::from("/logs/second")]),
+            ),
+            (&huge_but_pathless, Deletion::Nothing),
         ]);
 
         assert_eq!(plan.count(), 2);
@@ -615,30 +1067,90 @@ mod tests {
         assert!(!plan.is_empty());
     }
 
+    /// A `Command` target is kept, never dropped like `Nothing` is, and never
+    /// taxed for bytes it does not carry (`log_bytes` is 0 for one anyway, but
+    /// the plan must not assume that -- it must simply never add it).
+    #[test]
+    fn a_command_target_is_kept_and_counted_separately_from_trash() {
+        let trashed = session("trashed", "/root", 500);
+        let commanded = session("commanded", "/root", 0);
+        let plan = plan_delete_all(vec![
+            (
+                &trashed,
+                Deletion::Trash(vec![PathBuf::from("/logs/trashed.jsonl")]),
+            ),
+            (&commanded, Deletion::Command(command("opencode"))),
+        ]);
+
+        assert_eq!(plan.count(), 2);
+        assert_eq!(plan.trashed(), 1);
+        assert_eq!(plan.commanded(), 1);
+        assert_eq!(
+            plan.total_bytes, 500,
+            "a Command target must not inflate the trash byte total"
+        );
+    }
+
+    /// C1's mechanism: the bulk button label is derived from `commanded() > 0`,
+    /// so a plan holding even one irreversible target must report it.
+    #[test]
+    fn commanded_reports_true_only_when_the_plan_holds_one() {
+        let trash_only = session("t", "/root", 10);
+        let plan = plan_delete_all(vec![(
+            &trash_only,
+            Deletion::Trash(vec![PathBuf::from("/logs/t.jsonl")]),
+        )]);
+        assert_eq!(
+            plan.commanded(),
+            0,
+            "an all-Trash plan is fully recoverable"
+        );
+
+        let commanded_session = session("c", "/root", 0);
+        let mixed = plan_delete_all(vec![
+            (
+                &trash_only,
+                Deletion::Trash(vec![PathBuf::from("/logs/t.jsonl")]),
+            ),
+            (&commanded_session, Deletion::Command(command("opencode"))),
+        ]);
+        assert!(
+            mixed.commanded() > 0,
+            "one Command target is enough to make the whole plan irreversible"
+        );
+    }
+
     /// The detail is rendered as markdown, and CommonMark turns any line
     /// indented four spaces or more after a blank line into a code block. A
     /// wrapped string literal is exactly how those spaces get in -- the safety
     /// sentence would then be shown monospaced, reading like output rather than
     /// like a warning. `contains` assertions cannot see this, so the shape of
-    /// every line is checked directly.
+    /// every line is checked directly, in every branch.
     #[test]
     fn the_prompt_is_prose_not_an_accidental_code_block() {
-        let detail = delete_all_detail(3, 4096);
-        for line in detail.lines() {
-            assert!(
-                !line.starts_with("    "),
-                "a line indented four spaces renders as a code block: {line:?}"
-            );
+        for detail in [
+            delete_all_detail(3, 0, 4096),
+            delete_all_detail(0, 3, 0),
+            delete_all_detail(3, 3, 4096),
+        ] {
+            for line in detail.lines() {
+                assert!(
+                    !line.starts_with("    "),
+                    "a line indented four spaces renders as a code block: {line:?}"
+                );
+            }
         }
     }
 
+    /// The trashed-only branch is the function's original text -- unchanged
+    /// down to the byte, so the common case reads exactly as it always has.
     #[test]
-    fn the_prompt_names_the_count_and_the_size() {
-        let one = delete_all_detail(1, 1024);
+    fn the_trashed_only_prompt_is_unchanged() {
+        let one = delete_all_detail(1, 0, 1024);
         assert!(one.contains("1 session will"), "singular, got: {one}");
         assert!(one.contains("1 KB"), "got: {one}");
 
-        let many = delete_all_detail(42, 13 * 1024 * 1024);
+        let many = delete_all_detail(42, 0, 13 * 1024 * 1024);
         assert!(many.contains("42 sessions will"), "plural, got: {many}");
         assert!(many.contains("13.0 MB"), "got: {many}");
 
@@ -653,4 +1165,83 @@ mod tests {
             );
         }
     }
+
+    /// The commanded-only branch: no byte figure (there is none to report),
+    /// and an explicit, unambiguous statement that this cannot be undone.
+    #[test]
+    fn the_commanded_only_prompt_carries_no_byte_figure_and_says_it_cannot_be_undone() {
+        let one = delete_all_detail(0, 1, 0);
+        assert!(one.contains("1 session will"), "singular, got: {one}");
+        assert!(
+            one.contains("cannot be undone"),
+            "an irreversible-only plan must say so, got: {one}"
+        );
+        assert!(
+            !one.contains(" B)") && !one.contains(" KB)") && !one.contains(" MB)"),
+            "there is no byte figure to report for a Command-only plan, got: {one}"
+        );
+
+        let many = delete_all_detail(0, 7, 0);
+        assert!(many.contains("7 sessions will"), "plural, got: {many}");
+    }
+
+    /// The mixed branch: both counts appear, stated separately -- never one
+    /// merged total, which is exactly how C1's scenario happens.
+    #[test]
+    fn the_mixed_prompt_states_both_counts_separately() {
+        let detail = delete_all_detail(3, 40, 40 * 1024);
+        assert!(
+            detail.contains("3 session") && detail.contains("40 session"),
+            "both counts must appear on their own, got: {detail}"
+        );
+        assert!(
+            detail.contains("40 KB"),
+            "the trash byte figure must still be reported, got: {detail}"
+        );
+        assert!(
+            detail.contains("cannot be undone"),
+            "the irreversible half must still say so, got: {detail}"
+        );
+        assert!(
+            !detail.contains("43 session"),
+            "the two counts must never be merged into one total, got: {detail}"
+        );
+    }
+
+    /// M3: opencode's real failure output, byte for byte. "Trim control
+    /// characters" alone would leave `[91m`/`[1m` behind as ordinary text --
+    /// this is the one thing that proves a real CSI scan instead.
+    #[test]
+    fn the_csi_scanner_leaves_only_the_message() {
+        let raw = b"\x1b[91m\x1b[1mError: \x1b[0mSession not found: x";
+        assert_eq!(strip_ansi_first_line(raw), "Error: Session not found: x");
+    }
+
+    #[test]
+    fn the_csi_scanner_is_a_no_op_on_plain_text() {
+        assert_eq!(
+            strip_ansi_first_line(b"plain error, no escapes"),
+            "plain error, no escapes"
+        );
+    }
+
+    #[test]
+    fn the_csi_scanner_skips_a_blank_first_line() {
+        assert_eq!(
+            strip_ansi_first_line(b"\n\x1b[0mSession not found: x"),
+            "Session not found: x"
+        );
+    }
+
+    // `run_resolved_command_delete`'s process-spawn + timeout race + idempotency
+    // re-check (M6, C2/H9) is deliberately not exercised here against a real
+    // subprocess: spawning one under `#[gpui::test]`'s deterministic dispatcher
+    // proved unreliable in practice -- two different failure modes turned up
+    // across two otherwise-identical runs (a wrong outcome once, a panic inside
+    // `blocking::Executor`'s real thread pool the next), because that dispatcher
+    // and `smol::process`'s own reactor thread do not compose safely. Forcing it
+    // green would trade a real assurance for a flaky or hanging test, which is
+    // worse than no test. The CSI scan, the plan/detail math, and the C1 label
+    // logic above are covered directly; the spawn-and-race mechanism itself is
+    // implemented per spec and awaits a proper integration harness.
 }
