@@ -86,6 +86,7 @@ impl OpenCodeProvider {
     /// failing here degrades straight to `Unavailable`, which is what the
     /// sealed design calls for and what `list`/`find`'s callers already treat
     /// as a legitimate state rather than a crash.
+    ///
     /// No `busy_timeout` is set, and that is a decision rather than an omission.
     /// The worry was a hot WAL: a read-only open against a database another
     /// process is actively writing could in principle wait on a lock, and since
