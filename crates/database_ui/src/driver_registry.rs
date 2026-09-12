@@ -40,8 +40,10 @@ const BUILT_IN: &[(&str, &str)] = &[
 ///    back into the bundle restores the old behaviour with no code change.
 /// 2. **The download store**, under `paths::database_drivers_dir()`, keyed by
 ///    the running app's version. This is where a driver fetched on demand lands,
-///    and where someone with no route to GitHub can put one by hand.
-/// 3. **A bare name on `PATH`**, for anyone who put a driver there deliberately.
+///    and where someone with no route to the API can put one by hand.
+/// 3. **Whatever `ZODE_DB_<ID>` names** -- a full path to a file, not a name
+///    resolved on `PATH`. See [`path_override`], which is what actually
+///    decides this and requires the value to be an existing file.
 /// 4. **Nowhere** -- [`DriverState::NotInstalled`].
 ///
 /// That fourth answer did not exist before. `driver_path` always returned a

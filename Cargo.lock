@@ -3220,6 +3220,7 @@ dependencies = [
  "sha2 0.10.9",
  "smol",
  "tempfile",
+ "url",
  "util",
 ]
 
@@ -3251,6 +3252,7 @@ dependencies = [
  "workspace",
  "zed_actions",
  "zed_credentials_provider",
+ "zode_account",
 ]
 
 [[package]]
