@@ -1,6 +1,6 @@
 //! Reading the session histories that agent CLIs leave on disk.
 //!
-//! Three agents, three unrelated stores, one trait:
+//! Four agents, four unrelated stores, one trait:
 //!
 //! - **Claude Code** appends JSONL to `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`
 //!   with a sidecar directory of subagent transcripts beside it.
@@ -9,17 +9,23 @@
 //! - **Copilot** keeps a directory per session under `~/.copilot/session-state/`,
 //!   pairing a `workspace.yaml` of flat scalars with an `events.jsonl` of typed
 //!   events.
+//! - **opencode** keeps sessions, messages and parts as rows in one sqlite
+//!   database, `~/.local/share/opencode/opencode.db`, and offers no way for
+//!   another program to write to it -- so unlike the other three, deleting an
+//!   opencode session means asking its own CLI, not moving a file to the trash.
 //!
 //! Neither format is documented and neither belongs to this editor, so the rule
 //! throughout is that a field degrades on its own: a store that has changed shape
 //! costs a column, never the panel. Nothing here is async and nothing here
 //! deletes — callers run these on a background executor, and the one destructive
-//! act goes through the app's own `Fs` in the layer that owns the confirmation.
+//! act goes through the app's own `Fs`, or the agent's own CLI, in the layer that
+//! owns the confirmation.
 
 mod claude;
 mod claude_log;
 mod codex;
 mod copilot;
+mod opencode;
 mod provider;
 mod session_index;
 mod summary;
@@ -27,6 +33,7 @@ mod summary;
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
+pub use opencode::OpenCodeProvider;
 pub use provider::SessionProvider;
 pub use session_index::SessionIndex;
 pub use summary::{
@@ -42,6 +49,7 @@ pub fn default_providers() -> Vec<Arc<dyn SessionProvider>> {
         Arc::new(ClaudeProvider::new(ClaudeProvider::default_root())),
         Arc::new(CodexProvider::new(CodexProvider::default_root())),
         Arc::new(CopilotProvider::new(CopilotProvider::default_root())),
+        Arc::new(OpenCodeProvider::new(OpenCodeProvider::default_root())),
     ]
 }
 
@@ -55,6 +63,7 @@ pub fn provider_for(agent: AgentKind) -> Arc<dyn SessionProvider> {
         AgentKind::Claude => Arc::new(ClaudeProvider::new(ClaudeProvider::default_root())),
         AgentKind::Codex => Arc::new(CodexProvider::new(CodexProvider::default_root())),
         AgentKind::Copilot => Arc::new(CopilotProvider::new(CopilotProvider::default_root())),
+        AgentKind::OpenCode => Arc::new(OpenCodeProvider::new(OpenCodeProvider::default_root())),
     }
 }
 

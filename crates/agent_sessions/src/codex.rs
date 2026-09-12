@@ -1,13 +1,13 @@
 use crate::{
     AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
-    SessionSummary,
+    SessionSummary, summary::millis_to_time,
 };
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 /// Codex's threads live in a sqlite database whose **filename carries the schema
@@ -344,13 +344,6 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn millis_to_time(millis: i64) -> SystemTime {
-    if millis <= 0 {
-        return UNIX_EPOCH;
-    }
-    UNIX_EPOCH + Duration::from_millis(millis as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +676,7 @@ mod tests {
 #[cfg(test)]
 mod deletion_wrapping {
     use super::*;
+    use std::time::SystemTime;
 
     fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
         SessionSummary {

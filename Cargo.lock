@@ -84,6 +84,7 @@ dependencies = [
  "log",
  "rusqlite",
  "serde_json",
+ "smol",
  "tempfile",
  "util",
 ]

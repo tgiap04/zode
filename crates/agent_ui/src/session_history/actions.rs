@@ -3,7 +3,8 @@ use agent_sessions::{AgentCommand, AgentKind, Deletion, Fork, SessionProvider, S
 use futures::{FutureExt as _, select_biased};
 use gpui::{App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, Window};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use util::ResultExt as _;
@@ -20,7 +21,36 @@ const COMMAND_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 /// read this. A resume into a directory that no longer exists would start the CLI
 /// in a place with none of the files the conversation is about.
 pub(crate) fn cwd_exists(session: &SessionSummary) -> bool {
-    !session.cwd.as_os_str().is_empty() && session.cwd.is_dir()
+    is_local_absolute_path(&session.cwd) && session.cwd.is_dir()
+}
+
+/// M2 -- every provider's `cwd` is untrusted data (it is read from a store this
+/// editor does not own), and it reaches an `is_dir()` call here, plus, for a
+/// `Deletion::Command`, a subprocess `current_dir` in
+/// [`run_resolved_command_delete`]. On Windows, merely stat-ing a UNC path
+/// (`\\host\share`) is itself a side effect -- it can trigger an outbound SMB
+/// authentication attempt -- so the shape has to be rejected *before* any
+/// `is_dir()` call, not after. The minimum this rejects: anything empty,
+/// relative, or -- on Windows only -- not an ordinary local drive path.
+fn is_local_absolute_path(path: &Path) -> bool {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(
+                    prefix.kind(),
+                    std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+                )
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 /// Opens a tab back on `session`, or branches a new one off it.
@@ -300,15 +330,19 @@ async fn run_command_delete<C: gpui::AppContext>(
 }
 
 /// The half of [`run_command_delete`] that runs once a binary is already in
-/// hand.
+/// hand: builds the real subprocess and races it through [`race_command_delete`].
 ///
-/// Split out so it can be exercised directly against a real, deterministic
-/// subprocess in tests. `AgentServerStore::resolve_agent_binary` always
-/// answers `Missing` under `cfg!(test)` unless the project environment carries
-/// a `PATH` -- a real login-shell lookup would make tests depend on what CLIs
-/// happen to be installed on the machine running them -- so this is the part
-/// of the mechanism a test can actually drive: the timeout race (M6), the
-/// exit-code check, and the idempotency re-check (C2/H9).
+/// No `--` argv separator is inserted here, even though an earlier draft of
+/// this mechanism called for one. Verified against opencode's real CLI (the
+/// only agent that reaches this path today): a `--` placed before its
+/// `session`/`delete` subcommand words stops them being recognised at all,
+/// falling through to opencode's default action -- which launches its
+/// interactive TUI as a detached child process. That is a strictly worse
+/// outcome than the wedged call M6's timeout exists to survive, since it
+/// would happen on *every* delete rather than an occasional stuck one. A
+/// provider whose id shape needs protecting from being read as a flag (H1)
+/// carries its own guard in its own `args`, at the position that actually
+/// works for its CLI; this spawn site trusts `command.args` verbatim.
 async fn run_resolved_command_delete<C: gpui::AppContext>(
     provider: &Arc<dyn SessionProvider>,
     executor: &gpui::BackgroundExecutor,
@@ -318,14 +352,41 @@ async fn run_resolved_command_delete<C: gpui::AppContext>(
     cx: &mut C,
 ) -> CommandDeleteOutcome {
     let mut process = util::command::Command::new(binary);
-    process.arg("--");
     process.args(command.args.iter());
-    if command.cwd.is_dir() {
+    // M2: the same shape guard `cwd_exists` applies, and for the same reason
+    // -- `command.cwd` is untrusted data reaching a subprocess `current_dir`,
+    // and on Windows merely stat-ing a UNC path is itself a network side
+    // effect, so the check has to run before `is_dir()` rather than after.
+    if is_local_absolute_path(&command.cwd) && command.cwd.is_dir() {
         process.current_dir(&command.cwd);
     }
+    race_command_delete(provider, executor, id, process.output(), cx).await
+}
 
+/// Races one command-delete attempt against [`COMMAND_DELETE_TIMEOUT`] (M6),
+/// then resolves the outcome -- checking back with `provider.find` when the
+/// attempt failed or ran out of time (C2/H9), since a wedged or non-zero exit
+/// for a session the store no longer holds means the goal was already met.
+///
+/// Generic over the future that actually produces the process's output, which
+/// is what makes this independently testable: a real `smol::process` child
+/// plus its own OS reactor thread does not compose safely with
+/// `#[gpui::test]`'s deterministic dispatcher (phase 04 hit two different
+/// failure modes -- a wrong outcome once, a panic inside `blocking::Executor`'s
+/// thread pool the next -- trying exactly that). Passing the run as a plain
+/// `Future` lets a test drive the timeout and the idempotency re-check with a
+/// value built by hand (`std::future::ready`/`std::future::pending`), with no
+/// subprocess and no reactor involved, so M6 and C2/H9 get a real test instead
+/// of staying implemented-but-unproven a second time.
+async fn race_command_delete<C: gpui::AppContext>(
+    provider: &Arc<dyn SessionProvider>,
+    executor: &gpui::BackgroundExecutor,
+    id: &Arc<str>,
+    run: impl Future<Output = std::io::Result<std::process::Output>>,
+    cx: &mut C,
+) -> CommandDeleteOutcome {
     let spawned = select_biased! {
-        output = process.output().fuse() => Some(output),
+        output = run.fuse() => Some(output),
         _ = executor.timer(COMMAND_DELETE_TIMEOUT).fuse() => None,
     };
 
@@ -1233,15 +1294,237 @@ mod tests {
         );
     }
 
-    // `run_resolved_command_delete`'s process-spawn + timeout race + idempotency
-    // re-check (M6, C2/H9) is deliberately not exercised here against a real
-    // subprocess: spawning one under `#[gpui::test]`'s deterministic dispatcher
-    // proved unreliable in practice -- two different failure modes turned up
-    // across two otherwise-identical runs (a wrong outcome once, a panic inside
-    // `blocking::Executor`'s real thread pool the next), because that dispatcher
-    // and `smol::process`'s own reactor thread do not compose safely. Forcing it
-    // green would trade a real assurance for a flaky or hanging test, which is
-    // worse than no test. The CSI scan, the plan/detail math, and the C1 label
-    // logic above are covered directly; the spawn-and-race mechanism itself is
-    // implemented per spec and awaits a proper integration harness.
+    /// A stand-in for whatever `provider.find` would answer, so the timeout
+    /// race and the idempotency re-check can be driven without a real store.
+    struct FindOnlyProvider(Option<SessionSummary>);
+
+    impl SessionProvider for FindOnlyProvider {
+        fn agent(&self) -> AgentKind {
+            AgentKind::OpenCode
+        }
+        fn availability(&self) -> agent_sessions::Availability {
+            agent_sessions::Availability::Ready
+        }
+        fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
+            Ok(Vec::new())
+        }
+        fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
+            Ok(self.0.clone())
+        }
+        fn new_session_command(&self, _id: &str, _cwd: &std::path::Path) -> Option<AgentCommand> {
+            None
+        }
+        fn counts(
+            &self,
+            _session: &SessionSummary,
+        ) -> anyhow::Result<agent_sessions::SessionCounts> {
+            Ok(agent_sessions::SessionCounts::default())
+        }
+        fn resume_command(&self, _session: &SessionSummary, _fork: Fork) -> Option<AgentCommand> {
+            None
+        }
+        fn deletion(&self, _session: &SessionSummary) -> Deletion {
+            Deletion::Nothing
+        }
+    }
+
+    fn stub_session(id: &str) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::OpenCode,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from("/w/one"),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: None,
+            log_bytes: 0,
+        }
+    }
+
+    /// A fabricated exit, with no subprocess anywhere behind it -- see
+    /// `race_command_delete`'s doc comment for why that is exactly the point.
+    #[cfg(unix)]
+    fn fake_exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        // The raw wait-status encoding: a normal exit packs the code into the
+        // high byte.
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+    #[cfg(windows)]
+    fn fake_exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    }
+
+    /// C2/H9 -- the mechanism behind a Critical finding, reachable for the
+    /// first time now that opencode is a real `Deletion::Command` producer:
+    /// a command that exits non-zero for a session the store no longer holds
+    /// must be treated as success, not failure. `opencode session delete` on
+    /// an id already gone is exactly this shape.
+    #[gpui::test]
+    async fn a_failed_exit_is_forgiven_once_the_store_no_longer_holds_the_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let provider: Arc<dyn SessionProvider> = Arc::new(FindOnlyProvider(None));
+        let id: Arc<str> = Arc::from("ses_gone");
+        let executor = cx.background_executor.clone();
+        let run = std::future::ready(Ok(std::process::Output {
+            status: fake_exit_status(1),
+            stdout: Vec::new(),
+            stderr: b"Error: Session not found: ses_gone".to_vec(),
+        }));
+
+        let outcome = cx
+            .spawn(async move |mut cx| {
+                race_command_delete(&provider, &executor, &id, run, &mut cx).await
+            })
+            .await;
+
+        assert!(
+            matches!(outcome, CommandDeleteOutcome::Gone),
+            "a non-zero exit for a session the store no longer holds must be \
+             forgiven, got {outcome:?}"
+        );
+    }
+
+    /// The other half of C2/H9: a non-zero exit for a session the store
+    /// *still* holds must not be silently forgiven -- the row has to stay,
+    /// and the failure has to be reported.
+    #[gpui::test]
+    async fn a_failed_exit_is_reported_when_the_store_still_holds_the_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let provider: Arc<dyn SessionProvider> =
+            Arc::new(FindOnlyProvider(Some(stub_session("ses_here"))));
+        let id: Arc<str> = Arc::from("ses_here");
+        let executor = cx.background_executor.clone();
+        let run = std::future::ready(Ok(std::process::Output {
+            status: fake_exit_status(1),
+            stdout: Vec::new(),
+            stderr: b"boom".to_vec(),
+        }));
+
+        let outcome = cx
+            .spawn(async move |mut cx| {
+                race_command_delete(&provider, &executor, &id, run, &mut cx).await
+            })
+            .await;
+
+        match outcome {
+            CommandDeleteOutcome::Failed(message) => assert_eq!(message, "boom"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// M6 -- a command that never returns must be abandoned by the timer
+    /// rather than blocking the caller forever. It falls through to the same
+    /// idempotency re-check a failed exit does (C2/H9), which this also
+    /// proves: the timeout path and the non-zero-exit path share one ending.
+    #[gpui::test]
+    async fn a_command_that_never_returns_is_abandoned_after_the_timeout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let provider: Arc<dyn SessionProvider> =
+            Arc::new(FindOnlyProvider(Some(stub_session("ses_stuck"))));
+        let id: Arc<str> = Arc::from("ses_stuck");
+        let executor = cx.background_executor.clone();
+
+        let task = cx.spawn(async move |mut cx| {
+            race_command_delete(
+                &provider,
+                &executor,
+                &id,
+                std::future::pending::<std::io::Result<std::process::Output>>(),
+                &mut cx,
+            )
+            .await
+        });
+
+        cx.run_until_parked();
+        cx.executor().advance_clock(COMMAND_DELETE_TIMEOUT);
+        cx.run_until_parked();
+        let outcome = task.await;
+
+        match outcome {
+            CommandDeleteOutcome::Failed(message) => {
+                assert!(message.contains("timed out"), "got: {message}");
+            }
+            other => panic!("expected Failed(timed out...), got {other:?}"),
+        }
+    }
+
+    /// Builds a real, local `AgentServerStore` with an empty project
+    /// environment -- enough for `resolve_agent_binary` to run its real
+    /// logic. `ProjectEnvironment::get_cli_environment` always answers
+    /// `Some(HashMap::default())` under `cfg!(test)`/`test-support`, which
+    /// short-circuits before any real shell would be spawned, so this never
+    /// touches a real login shell or a real filesystem.
+    fn test_agent_server_store(cx: &mut gpui::TestAppContext) -> Entity<project::AgentServerStore> {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            let fs: Arc<dyn fs::Fs> =
+                Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+            let worktree_store = cx.new(|cx| {
+                project::worktree_store::WorktreeStore::local(
+                    false,
+                    fs,
+                    project::worktree_store::WorktreeIdCounter::get(cx),
+                )
+            });
+            let project_environment = cx.new(|cx| {
+                project::ProjectEnvironment::new(None, worktree_store.downgrade(), None, false, cx)
+            });
+            cx.new(|cx| project::AgentServerStore::local(project_environment, cx))
+        })
+    }
+
+    /// H3 -- a `Command` delete with the CLI absent must show its own
+    /// message, not `offer_to_drop_the_row`'s "nothing is still on disk"
+    /// text, and must not forget the row: the session might still be real,
+    /// this machine just cannot ask its agent to remove it.
+    #[gpui::test]
+    async fn a_missing_binary_is_reported_distinctly_and_keeps_the_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let provider: Arc<dyn SessionProvider> =
+            Arc::new(FindOnlyProvider(Some(stub_session("ses_needs_opencode"))));
+        let id: Arc<str> = Arc::from("ses_needs_opencode");
+        let agent_store = test_agent_server_store(cx);
+        let executor = cx.background_executor.clone();
+        let command = AgentCommand {
+            program: "opencode".to_string(),
+            args: vec![
+                "session".to_string(),
+                "delete".to_string(),
+                "ses_needs_opencode".to_string(),
+            ],
+            cwd: PathBuf::from("/w/one"),
+        };
+
+        let outcome = cx
+            .spawn(async move |mut cx| {
+                run_command_delete(
+                    &provider,
+                    &agent_store,
+                    &executor,
+                    AgentKind::OpenCode,
+                    &id,
+                    &command,
+                    &mut cx,
+                )
+                .await
+            })
+            .await;
+
+        match outcome {
+            CommandDeleteOutcome::BinaryMissing(missing) => {
+                assert_eq!(missing.binary, "opencode");
+            }
+            other => panic!("expected BinaryMissing, got {other:?}"),
+        }
+    }
 }
