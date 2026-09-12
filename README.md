@@ -79,11 +79,16 @@ To open despite the warning — do this for the one file, and never disable Gate
 SmartScreen system-wide:
 
 - **macOS**: `xattr -dr com.apple.quarantine /Applications/Zode.app`. Recursive, and not
-  `-d`: the flag lands on 18 paths inside the bundle, six of them executables —
-  `Contents/MacOS/{cli,git,zode,zode-db-mysql,zode-db-postgres,zode-db-sqlite}`. Clearing
-  only the bundle root leaves the other seventeen flagged, and `script/bundle-mac` notes
-  what that costs: a driver Gatekeeper blocks fails silently, so every database connection
-  just fails to start one with nothing saying why.
+  `-d`, because the flag lands on every path inside the bundle, not just its root.
+  Database drivers are **not** among them: the app ships none, so `-dr` on the bundle
+  cannot cover them and does not need to. Each driver (`zode-db-postgres`,
+  `zode-db-mysql`, `zode-db-sqlite`, `zode-db-mongodb`) is downloaded on first connect,
+  from Zode's own API rather than from this bundle, into
+  `~/Library/Application Support/Zode/database_drivers/<id>/<version>/` — outside the
+  bundle's own quarantine seal entirely, so it needs no `xattr` step of its own. No
+  route to fetch one, or want to install it by hand instead? Put the binary directly at
+  that path (see `docs/src/development.md`'s "Database drivers" section for the exact
+  shape and the other two platforms' data directories).
   Control-click → *Open* is gone — Apple removed that bypass in macOS 15, so on 15 and
   newer it does nothing. The GUI route is *System Settings → Privacy & Security* → the
   blocked-app notice → *Open Anyway*. That records an approval for the app; it does not
