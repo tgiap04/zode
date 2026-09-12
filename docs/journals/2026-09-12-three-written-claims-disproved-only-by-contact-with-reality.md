@@ -17,11 +17,11 @@ opencode joined the agent rail as a fifth entry — icon, launch button, session
 
 **Reality:** During phase 06's implementation, the proposed command was tested against the real opencode 1.14.20:
 
-| Argv | Observed | Why it matters |
-|---|---|---|
-| `opencode session delete <id>` | Attempts the delete; exits 1 with `Error: Session not found` | Correct path. |
+| Argv                              | Observed                                                                    | Why it matters                                                                                               |
+| --------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `opencode session delete <id>`    | Attempts the delete; exits 1 with `Error: Session not found`                | Correct path.                                                                                                |
 | `opencode session delete -- <id>` | Prints `session delete`'s own usage; exits 1; **never attempts the delete** | yargs does not bind a positional through `--`. The separator would break **every opencode delete silently**. |
-| `opencode -- session delete <id>` | Stops subcommand matching; launches the interactive TUI as a detached child | Exactly the hang the timeout exists to survive, but now on every delete. |
+| `opencode -- session delete <id>` | Stops subcommand matching; launches the interactive TUI as a detached child | Exactly the hang the timeout exists to survive, but now on every delete.                                     |
 
 The `^ses_[A-Za-z0-9]+$` id anchor — verified against the live store on this machine, 7 of 7 sessions matched, zero exceptions — already closes the concern. A dash-prefixed id is a violation of the anchor; nothing it admits can begin with `-`. The hardening was belt-and-braces over the anchor and it cut the belt.
 
