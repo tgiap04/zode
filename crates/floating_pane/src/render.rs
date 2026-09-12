@@ -14,7 +14,6 @@ use gpui::{
 use ui::prelude::*;
 use ui::{ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip};
 
-use crate::content::AGENTS;
 use crate::host::{DraggedFloatingPane, Dragging, FloatingPane, Grab, Grip};
 
 /// The grab strip along the top of the window, and the corner handles.
@@ -38,10 +37,7 @@ enum Entry {
 static ENTRIES: LazyLock<Vec<Entry>> = LazyLock::new(|| {
     let mut entries = vec![Entry::Terminal, Entry::NewNote, Entry::OpenNote];
     entries.extend(
-        AGENTS
-            .iter()
-            .copied()
-            .map(|(agent, icon, label)| Entry::Agent(agent, icon, label)),
+        agent_ui::agent_marks().map(|(agent, icon, label)| Entry::Agent(agent, icon, label)),
     );
     entries
 });
@@ -83,7 +79,7 @@ impl Entry {
     /// The agents are a different kind of thing from the three above them, and
     /// the first of them is where the list changes subject.
     fn opens_a_group(self) -> bool {
-        matches!(self, Entry::Agent(agent, _, _) if AGENTS.first().is_some_and(|(first, _, _)| *first == agent))
+        matches!(self, Entry::Agent(agent, _, _) if agent_ui::agent_marks().next().is_some_and(|(first, _, _)| first == agent))
     }
 
     fn run(self, pane: &mut FloatingPane, window: &mut Window, cx: &mut Context<FloatingPane>) {
