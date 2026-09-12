@@ -27,7 +27,7 @@ The `^ses_[A-Za-z0-9]+$` id anchor — verified against the live store on this m
 
 **How it was caught:** Testing against the real CLI during the forge, not during the review that accepted it.
 
-**Recorded:** Three places in the code (`opencode.rs:244-264`, `277-281`, `288-294`) so no later reader "restores" the missing `--`.
+**Recorded:** Three places in the code so no later reader "restores" the missing `--` — the comment above the argv in `deletion()`, the `is_valid_session_id` doc explaining why the anchored pattern is the real control, and the test `deletion_is_a_command_with_no_dash_dash_before_the_id`, whose name states the requirement so a diff that reintroduces the separator fails with it.
 
 ---
 
