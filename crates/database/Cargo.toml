@@ -40,6 +40,7 @@ install = [
     "dep:paths",
     "dep:sha2",
     "dep:smol",
+    "dep:url",
 ]
 test-support = ["client"]
 # Starting a driver binary and speaking the protocol to it. std only, so a
@@ -63,6 +64,7 @@ async-tar = { workspace = true, optional = true }
 http_client = { workspace = true, optional = true }
 paths = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 util = { workspace = true, optional = true }
 
 [dev-dependencies]

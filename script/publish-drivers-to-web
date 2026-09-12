@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Uploads driver archives and the driver manifest to the Zode web backend,
+# replacing what used to be a `gh release upload` of the same files.
+#
+# GitHub Release infrastructure keeps binaries public with no way to gate
+# access; the driver archives now live behind a backend that can serve them
+# without login while never having been GitHub's problem to host. This
+# script is what a release job (or a human re-running a failed upload)
+# calls to hand the backend everything it needs.
+#
+#   script/publish-drivers-to-web <directory of driver archives + manifest> <version>
+#
+# Requires two things from the environment:
+#   ZODE_DRIVER_UPLOAD_TOKEN  -- bearer token the backend's upload endpoint checks
+#   ZODE_DRIVER_UPLOAD_URL    -- base API URL, e.g. https://api.zodekit.site/api
+#
+# Uploads every `zode-db-*.tar.gz` archive first, then the manifest last. The
+# backend only makes a version visible once the manifest publish succeeds, so
+# this order is what gives the release its atomicity: a job that dies partway
+# through the archive uploads leaves nothing live for the app to find.
+#
+# After publishing, re-fetches the manifest from the backend and counts its
+# `drivers` array. A publish that reports success but serves something short
+# is a bug worth catching in this job, not several days later when a user's
+# download fails.
+
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <driver-artifact-directory> <version>" >&2
+    exit 1
+fi
+
+asset_directory="$1"
+version="$2"
+
+if [[ -z "${ZODE_DRIVER_UPLOAD_TOKEN:-}" ]]; then
+    echo "error: ZODE_DRIVER_UPLOAD_TOKEN is not set" >&2
+    exit 1
+fi
+
+base_url="${ZODE_DRIVER_UPLOAD_URL:-https://api.zodekit.site/api}"
+manifest_path="${asset_directory}/zode-db-drivers-manifest.json"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# A response body that curl can't parse as JSON, paired with a 413, is the
+# fingerprint of nginx rejecting the request before it ever reaches the app --
+# nginx's own error page is HTML, not JSON. Without this check the symptom
+# that reaches a CI log is an HTML blob and a non-2xx exit, and the next
+# person spends an hour looking for the bug in NestJS instead of in nginx.
+report_413_if_nginx_blocked_it() {
+    local status="$1"
+    local body="$2"
+
+    if [[ "${status}" == "413" ]] && ! jq -e . >/dev/null 2>&1 <<<"${body}"; then
+        cat >&2 <<'EOF'
+error: upload rejected with 413 and a non-JSON body -- this is nginx
+blocking the request body before it reached the backend, not an
+application error. Add to the server's `location /api/` block:
+
+    client_max_body_size 64m;
+
+then `nginx -s reload`. See docs/deployment.md in the web repo.
+EOF
+        return 1
+    fi
+    return 0
+}
+
+# curl only appends `--write-out` once a response has actually arrived, so a
+# failure before that point -- DNS, refused connection, TLS -- leaves the
+# status empty and the generic "failed with status" line below says nothing
+# at all. The first time `ZODE_DRIVER_UPLOAD_URL` is mistyped in a repository
+# variable, this is the message that has to name the cause.
+report_transport_failure() {
+    local what="$1"
+    local status="$2"
+    local curl_exit="$3"
+
+    # `000` and not merely "empty": curl writes a three-digit `%{http_code}`
+    # of `000` when no response ever arrived, so testing for three digits
+    # alone would skip this diagnostic in exactly the case it exists for.
+    if [[ "${status}" =~ ^[0-9]{3}$ ]] && [[ "${status}" != "000" ]]; then
+        return 0
+    fi
+
+    echo "error: ${what} never received a response from ${base_url} (curl exit ${curl_exit})" >&2
+    case "${curl_exit}" in
+        6) echo "       host could not be resolved -- check ZODE_DRIVER_UPLOAD_URL" >&2 ;;
+        7) echo "       connection refused -- is the backend up and reachable?" >&2 ;;
+        28) echo "       timed out" >&2 ;;
+        35) echo "       TLS handshake failed" >&2 ;;
+    esac
+    return 1
+}
+
+upload_asset() {
+    local asset_path="$1"
+    local asset
+    asset=$(basename "${asset_path}")
+    local checksum
+    checksum=$(sha256_of "${asset_path}")
+
+    echo "uploading ${asset} (sha256 ${checksum})"
+
+    # `|| curl_exit=$?` rather than `&& ok=1 || ok=0`: the exit code itself is
+    # the thing worth keeping, and it is lost by the moment a second command
+    # runs on the same line.
+    local response status body curl_exit=0
+    response=$(curl --silent --show-error --fail-with-body --write-out '\n%{http_code}' \
+        -X POST \
+        -H "Authorization: Bearer ${ZODE_DRIVER_UPLOAD_TOKEN}" \
+        -H "X-Driver-Sha256: ${checksum}" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary "@${asset_path}" \
+        "${base_url}/drivers/${version}/${asset}") || curl_exit=$?
+
+    status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+
+    if [[ "${curl_exit}" -ne 0 ]]; then
+        report_transport_failure "uploading ${asset}" "${status}" "${curl_exit}" || exit 1
+        report_413_if_nginx_blocked_it "${status}" "${body}" || exit 1
+        echo "error: uploading ${asset} failed with status ${status}" >&2
+        echo "${body}" >&2
+        exit 1
+    fi
+}
+
+if [[ ! -f "${manifest_path}" ]]; then
+    echo "error: no manifest found at ${manifest_path}" >&2
+    exit 1
+fi
+
+archive_count=0
+for asset_path in "${asset_directory}"/zode-db-*.tar.gz; do
+    [[ -f "${asset_path}" ]] || continue
+    upload_asset "${asset_path}"
+    archive_count=$((archive_count + 1))
+done
+
+if [[ "${archive_count}" -eq 0 ]]; then
+    echo "error: no driver archives found in ${asset_directory}" >&2
+    exit 1
+fi
+
+echo "publishing manifest for version ${version}"
+publish_exit=0
+publish_response=$(curl --silent --show-error --fail-with-body --write-out '\n%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${ZODE_DRIVER_UPLOAD_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data-binary "@${manifest_path}" \
+    "${base_url}/drivers/${version}/publish") || publish_exit=$?
+
+publish_status="${publish_response##*$'\n'}"
+publish_body="${publish_response%$'\n'*}"
+
+if [[ "${publish_exit}" -ne 0 ]]; then
+    report_transport_failure "publishing the manifest" "${publish_status}" "${publish_exit}" || exit 1
+    report_413_if_nginx_blocked_it "${publish_status}" "${publish_body}" || exit 1
+    echo "error: publishing manifest failed with status ${publish_status}" >&2
+    echo "${publish_body}" >&2
+    exit 1
+fi
+
+echo "verifying published manifest is reachable"
+served_manifest=$(curl --fail --silent --show-error \
+    "${base_url}/drivers/${version}/zode-db-drivers-manifest.json")
+
+served_count=$(jq '.drivers | length' <<<"${served_manifest}")
+expected_count="${archive_count}"
+
+if [[ "${served_count}" -ne "${expected_count}" ]]; then
+    echo "error: published manifest lists ${served_count} drivers, expected ${expected_count}" >&2
+    exit 1
+fi
+
+echo "published ${archive_count} drivers for version ${version}"

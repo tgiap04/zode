@@ -16,6 +16,7 @@
 //! binaries being downloaded would grow exactly what this work exists to shrink.
 
 pub mod download;
+pub mod endpoint;
 pub mod manifest;
 pub mod store;
 mod unpack;
@@ -24,4 +25,5 @@ mod unpack;
 pub mod test_support;
 
 pub use download::{DriverInstaller, InstallProgress, InstallResult};
-pub use manifest::{DriverAsset, DriverManifest, ReleaseCoordinates};
+pub use endpoint::DriverEndpoint;
+pub use manifest::{DriverAsset, DriverManifest};

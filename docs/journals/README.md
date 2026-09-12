@@ -23,5 +23,6 @@
 - [2026-09-07-macos-dmg-mount-path-was-guessed-not-set.md](2026-09-07-macos-dmg-mount-path-was-guessed-not-set.md) — 2026 09 07 macos dmg mount path was guessed not set
 - [2026-09-11-a-settings-file-is-not-a-panel-impl.md](2026-09-11-a-settings-file-is-not-a-panel-impl.md) — 2026 09 11 a settings file is not a panel impl
 - [2026-09-11-dock-state-read-from-the-wrong-owner.md](2026-09-11-dock-state-read-from-the-wrong-owner.md) — 2026 09 11 dock state read from the wrong owner
+- [2026-09-12-cross-repo-parallel-work-proved-only-by-booting-the-real-backend.md](2026-09-12-cross-repo-parallel-work-proved-only-by-booting-the-real-backend.md) — 2026 09 12 cross repo parallel work proved only by booting the real backend
 
 <!-- end-generated -->
