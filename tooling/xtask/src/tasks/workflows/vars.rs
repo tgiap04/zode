@@ -44,11 +44,17 @@ secret!(ZED_ZIPPY_APP_PRIVATE_KEY);
 secret!(R2_ACCOUNT_ID);
 secret!(R2_ACCESS_KEY_ID);
 secret!(R2_SECRET_ACCESS_KEY);
+secret!(ZODE_DRIVER_UPLOAD_TOKEN);
 
 // todo(ci) make these secrets too...
 var!(AZURE_SIGNING_ACCOUNT_NAME);
 var!(AZURE_SIGNING_CERT_PROFILE_NAME);
 var!(AZURE_SIGNING_ENDPOINT);
+
+// A variable, not a secret: it names a URL, not a credential, and being a
+// variable lets a staging backend be targeted by editing repo config rather
+// than by changing code.
+var!(ZODE_DRIVER_UPLOAD_URL);
 
 pub fn bundle_envs(platform: Platform) -> Env {
     // The stock `[profile.release]` (debug = "limited", codegen-units = 1, lto = "thin")
@@ -401,16 +407,31 @@ pub mod assets {
         ]
     }
 
-    /// The manifest naming every driver the release published, with the
+    /// The manifest naming every driver uploaded to the web backend, with the
     /// checksum of each. What `database::install::manifest` fetches first.
+    ///
+    /// No longer a release asset: `script/publish-drivers-to-web` posts this to
+    /// the backend's `/drivers/{version}/publish` endpoint instead of `gh
+    /// release upload` attaching it to the tag.
+    ///
+    /// `#[allow(dead_code)]`: the pipeline no longer reads this constant at
+    /// build time (the upload script takes the manifest filename as a bash
+    /// literal), so the only remaining reader is
+    /// `release::tests::the_upload_list_is_one_archive_per_driver_per_platform_plus_the_manifest`,
+    /// which is exactly the cross-check this value exists to anchor.
+    #[allow(dead_code)]
     pub const DRIVER_MANIFEST: &str = "zode-db-drivers-manifest.json";
 
     /// The engines Zode publishes a driver for.
     ///
     /// Must match `BUILT_IN` in `crates/database_ui/src/driver_registry.rs` and
     /// the list in `script/package-database-drivers`: an id here that nothing
-    /// packages fails the release validation, and one packaged but missing here
-    /// uploads unvalidated.
+    /// packages fails the upload-to-web validation, and one packaged but
+    /// missing here uploads unvalidated.
+    ///
+    /// `#[allow(dead_code)]`: read only by the cross-check tests in
+    /// `release.rs` (see `DRIVER_MANIFEST` above for why that is by design).
+    #[allow(dead_code)]
     pub const DRIVER_IDS: &[&str] = &["sqlite", "postgres", "mysql", "mongodb"];
 
     /// The Rust target triples the drivers are published for.
@@ -428,6 +449,11 @@ pub mod assets {
     ];
 
     /// Every driver archive one platform's bundle job produces.
+    ///
+    /// `#[allow(dead_code)]`: only `all_drivers` below calls this in
+    /// non-test code paths, and that in turn is now read only by tests (see
+    /// `DRIVER_MANIFEST` above).
+    #[allow(dead_code)]
     pub fn drivers_for(target: &str) -> Vec<String> {
         DRIVER_IDS
             .iter()
@@ -435,11 +461,21 @@ pub mod assets {
             .collect()
     }
 
-    /// Every driver archive across every platform, plus the manifest.
+    /// Every driver archive across every platform, plus the manifest -- the
+    /// list `script/publish-drivers-to-web` uploads to the backend.
     ///
     /// Zode bundles no drivers: each is downloaded the first time someone
     /// connects to the engine it speaks for. A release missing one is an engine
-    /// nobody can reach, which is why these are validated like any other asset.
+    /// nobody can reach, which is why these are validated like any other asset
+    /// -- just no longer against the GitHub release itself. See
+    /// `all()` for what still goes there.
+    ///
+    /// `#[allow(dead_code)]`: exists to be the other half of
+    /// `no_driver_asset_reaches_the_github_release` and
+    /// `the_upload_list_is_one_archive_per_driver_per_platform_plus_the_manifest`
+    /// in `release.rs`; nothing in the generated workflow calls it directly
+    /// any more.
+    #[allow(dead_code)]
     pub fn all_drivers() -> Vec<String> {
         let mut assets: Vec<String> = DRIVER_TARGETS
             .iter()
