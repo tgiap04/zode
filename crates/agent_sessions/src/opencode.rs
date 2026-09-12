@@ -86,6 +86,19 @@ impl OpenCodeProvider {
     /// failing here degrades straight to `Unavailable`, which is what the
     /// sealed design calls for and what `list`/`find`'s callers already treat
     /// as a legitimate state rather than a crash.
+    /// No `busy_timeout` is set, and that is a decision rather than an omission.
+    /// The worry was a hot WAL: a read-only open against a database another
+    /// process is actively writing could in principle wait on a lock, and since
+    /// this path runs per keystroke a wait would freeze the UI rather than
+    /// degrade.
+    ///
+    /// Measured instead of assumed, against the real store with an `opencode`
+    /// process holding it open and appending across several write-then-read
+    /// cycles: every read returned in 1-7ms and none blocked. SQLite's default
+    /// busy-timeout is already zero, so contention surfaces as an immediate
+    /// `SQLITE_BUSY` -- an `Err`, which `Unavailable` handles -- rather than as a
+    /// wait. Setting a timeout here would only introduce the stall it was meant
+    /// to prevent.
     fn with_connection<T>(&self, read: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let path = self.database_path();
         let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -266,11 +279,20 @@ impl SessionProvider for OpenCodeProvider {
 /// exactly the value opencode's own argument parser would read as an option
 /// rather than a positional.
 ///
-/// This is a shape check and defence in depth, not an injection guard --
-/// `deletion` and `resume_command` spawn through a real argv
-/// (`util::command::Command::args`), with no shell in between, so there is
-/// nowhere for the id to be interpreted except as opencode's own CLI reads
-/// it. It is checked here, once, at the one place a [`SessionSummary`] comes
+/// This is a shape check and defence in depth, not an injection guard. For
+/// `deletion` that is because it spawns through a real argv
+/// (`util::command::Command::args`) with no shell in between, so there is
+/// nowhere for the id to be interpreted except as opencode's own CLI reads it.
+///
+/// **`resume_command` does not get that guarantee, and the difference matters
+/// to anyone loosening the pattern above.** Its output reaches `agent_task` and
+/// `SpawnInTerminal`, and for a remote workspace `project::terminals` rebuilds a
+/// joined, shell-quoted command line that a shell on the far end then runs. A
+/// shell is therefore in the path for a resume, just not for a delete. Today the
+/// anchored pattern admits no metacharacter so the distinction is academic —
+/// which is exactly why it is written down rather than discovered later.
+///
+/// It is checked here, once, at the one place a [`SessionSummary`] comes
 /// into being (H2): `resume_command` and `deletion` both build a command from
 /// `session.id` with no check of their own, and `agent_task` drops a resumed
 /// session's args straight into `SpawnInTerminal`, so validating anywhere

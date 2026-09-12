@@ -162,8 +162,9 @@ impl Render for AgentHistoryPanel {
             (colors.panel_background, colors.border)
         };
         let roots = self.project_roots(cx);
-        // Memory only. `deletion` reaches the filesystem for two of the three
-        // providers, and this runs every frame -- deriving the button's state
+        // Memory only. `deletion` reaches the filesystem for two of the four
+        // providers -- Codex and Copilot canonicalize in `contains` -- and this
+        // runs every frame, so deriving the button's state
         // from a real delete plan would put a canonicalize syscall per session
         // into the render path.
         let has_project_sessions =
