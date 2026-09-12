@@ -3,7 +3,7 @@
 **Date**: 2026-09-12
 **Severity**: Medium — feature complete and reviewed; one high finding found and fixed post-review; nothing deployed
 **Component**: `database` (`install/{endpoint,download,manifest,unpack}.rs`), `database_ui` (`driver_registry.rs`), `tooling/xtask` (`workflows/{release,vars}.rs`), `script/publish-drivers-to-web`; and in the web repo `backend/src/drivers/`
-**Status**: Resolved in code (8 commits across two repos, nothing pushed). Tag-cutting still blocked — see "What was deliberately not done".
+**Status**: Resolved in code. `zode-web#1` merged; `zode#36` open against `develop`. Tag-cutting still blocked — see "What was deliberately not done".
 
 ## What Happened
 
@@ -119,7 +119,7 @@ Two rounds on a six-line function. Review-by-reading passed it; only review-by-r
 ## When a trust boundary moves, re-examine what sits behind it
 
 The review filed unvalidated manifest `entry` and `target` as not currently exploitable — a field
-that *could* someday be used to build a path.
+that _could_ someday be used to build a path.
 
 It already was. `install/unpack.rs` does `staging.join(entry)`, and `Path::join` is not a
 containment operation: an absolute value discards the directory it is joined to, and `..` walks out
@@ -162,14 +162,14 @@ suites re-run clean afterwards.
 
 ## Verification
 
-| Gate | Result |
-|------|--------|
-| `cargo test -p database --all-features` | 69 passed |
-| `cargo test -p database_ui` | 60 passed |
-| `cargo test -p xtask` | 11 passed |
-| `cargo check -p database --no-default-features` | green — the sidecar still builds without gpui |
-| `./script/clippy`, `shellcheck` ×2 | clean |
-| web `npm run lint` / `npm test` / `npm run test:e2e` | clean / 179 / 65 |
+| Gate                                                 | Result                                        |
+| ---------------------------------------------------- | --------------------------------------------- |
+| `cargo test -p database --all-features`              | 69 passed                                     |
+| `cargo test -p database_ui`                          | 60 passed                                     |
+| `cargo test -p xtask`                                | 11 passed                                     |
+| `cargo check -p database --no-default-features`      | green — the sidecar still builds without gpui |
+| `./script/clippy`, `shellcheck` ×2                   | clean                                         |
+| web `npm run lint` / `npm test` / `npm run test:e2e` | clean / 179 / 65                              |
 
 Exit codes were captured by the script that wrote `plans/…/evidence/temper-results.json`, not typed
 by hand. `git diff --stat crates/http_client/` is empty, which is what keeps `auto_update`'s
@@ -177,7 +177,7 @@ GitHub-only host allowlist out of this change.
 
 ## What was deliberately not done
 
-Nothing is pushed, deployed, or tagged.
+The backend side is merged (`zode-web#1`); this side is still a PR. Nothing is deployed or tagged.
 
 `client_max_body_size 64m;` still has to be added by hand to nginx-ui's `location /api/` on the
 server. That config lives in neither repo. Without it every CI upload gets a 413 whose body is

@@ -208,8 +208,7 @@ pub(crate) fn prep_release_artifacts() -> Step<Run> {
 /// glob `gh release upload` uses -- a driver archive left in that directory would still
 /// reach the GitHub release despite `validate_release_assets` no longer checking for it.
 pub(crate) fn prep_upload_release_and_driver_artifacts() -> Step<Run> {
-    let mut script_lines =
-        vec!["mkdir -p release-artifacts/ driver-artifacts/\n".to_string()];
+    let mut script_lines = vec!["mkdir -p release-artifacts/ driver-artifacts/\n".to_string()];
     for asset in assets::all() {
         let mv_command = format!("mv ./artifacts/{asset}/{asset} release-artifacts/{asset}");
         script_lines.push(mv_command)
