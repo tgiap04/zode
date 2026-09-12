@@ -95,7 +95,27 @@ report_transport_failure() {
     case "${curl_exit}" in
         6) echo "       host could not be resolved -- check ZODE_DRIVER_UPLOAD_URL" >&2 ;;
         7) echo "       connection refused -- is the backend up and reachable?" >&2 ;;
-        28) echo "       timed out" >&2 ;;
+        # Two very different causes wear this same face, and guessing between
+        # them wastes an afternoon: a proxy that drops an oversized body
+        # without replying, and an uplink too slow to finish the body at all.
+        # The message refuses to pick one, because the only honest way to tell
+        # them apart is to look at how many bytes actually went out.
+        28)
+            cat >&2 <<'EOF'
+       timed out with no reply. Two things look exactly like this:
+
+         1. the proxy dropped an oversized body. nginx's default
+            `client_max_body_size` is 1m and a driver archive is far larger;
+            add `client_max_body_size 64m;` to the API host's server block and
+            reload. See docs/deployment.md in the web repo.
+         2. the upload never finished. A slow uplink produces an identical
+            timeout, and no proxy setting fixes it.
+
+       Tell them apart by re-running with `--speed-time`/`-w '%{size_upload}
+       %{speed_upload}'`: a body that uploaded fully and got no answer is (1),
+       one that stalled partway through is (2).
+EOF
+            ;;
         35) echo "       TLS handshake failed" >&2 ;;
     esac
     return 1
