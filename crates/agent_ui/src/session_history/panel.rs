@@ -62,11 +62,14 @@ pub struct AgentHistoryPanel {
     /// paths the first sweep has taken.
     ///
     /// Per panel, so the same project open in two windows can still run two
-    /// sweeps at once. Left that way deliberately: both halves are idempotent --
-    /// `forget_many` ignores ids the index no longer holds, and a second
-    /// `fs.trash` of a path already taken fails into `.log_err()` -- so the
-    /// worst case is a wasted attempt, not a corrupt index. A cross-window lock
-    /// would need shared state in the store for a race nobody has hit.
+    /// sweeps at once. Left that way deliberately: all three halves are
+    /// idempotent -- `forget_many` ignores ids the index no longer holds, a
+    /// second `fs.trash` of a path already taken fails into `.log_err()`, and a
+    /// second `Deletion::Command` re-checks `provider.find` on a non-zero exit
+    /// (an already-deleted session's CLI naturally fails a second delete, e.g.
+    /// `opencode session delete <already-gone>` exits 1) -- so the worst case
+    /// is a wasted attempt, not a corrupt index. A cross-window lock would need
+    /// shared state in the store for a race nobody has hit.
     pub(crate) deleting: bool,
     /// Set once the panel has been visible, so a closed panel never touches the
     /// disk: nothing about the history belongs on the startup path.

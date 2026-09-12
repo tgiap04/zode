@@ -1,5 +1,6 @@
 use crate::RenameAgent;
-use agent_sessions::{AgentKind, Fork, ResumeCommand};
+use crate::agent_icon;
+use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
 use gpui::{
     AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
@@ -15,44 +16,6 @@ use zed_actions::agent::AgentViewMode;
 
 use std::process::ExitStatus;
 use util::ResultExt as _;
-
-/// The rail draws hard-coded buttons for the built-in agents, and the tab has to
-/// carry the same glyph. Match arms rather than a lookup through
-/// `AgentServerStore`: `project` cannot depend on the icon crate, and another
-/// agent is a deliberate change to both places, not an accident.
-pub fn agent_icon(agent: &str) -> IconName {
-    match agent {
-        project::CLAUDE_CODE_AGENT_ID => IconName::AiClaude,
-        project::CODEX_AGENT_ID => IconName::AiOpenAi,
-        project::ANTIGRAVITY_AGENT_ID => IconName::AiAntigravity,
-        project::COPILOT_AGENT_ID => IconName::AiCopilot,
-        _ => IconName::Sparkle,
-    }
-}
-
-/// The vendor's own colour for an agent's mark.
-///
-/// A brand colour is the one case where detaching from the theme is right:
-/// Claude's orange is Claude's orange on a light theme and a dark one, and
-/// recolouring it by theme would make the mark stop being the mark. Everything
-/// else in this crate uses semantic `Color` variants.
-///
-/// Beside [`agent_icon`] for the same reason that function exists: the rail,
-/// the tab and every list draw one vendor's mark, and a second copy of the
-/// mapping is a second place to forget when an agent is added.
-pub fn agent_color(agent: &str) -> gpui::Hsla {
-    match agent {
-        // Anthropic's clay orange.
-        project::CLAUDE_CODE_AGENT_ID => gpui::rgb(0xD97757).into(),
-        // OpenAI's green.
-        project::CODEX_AGENT_ID => gpui::rgb(0x10A37F).into(),
-        project::ANTIGRAVITY_AGENT_ID => gpui::rgb(0x4285F4).into(),
-        // GitHub's mark is monochrome, so this is a chosen hue rather than a
-        // brand one -- picked to stay apart from the three above.
-        project::COPILOT_AGENT_ID => gpui::rgb(0x8957E5).into(),
-        _ => gpui::rgb(0x9A9A9A).into(),
-    }
-}
 
 /// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
 /// being produced. Split out so the threshold can be held against the two
@@ -1271,7 +1234,7 @@ enum SessionStart {
     /// untracked, or looking its session up failed in a way that should not cost
     /// the tab.
     Fresh,
-    Command(ResumeCommand),
+    Command(AgentCommand),
     /// Tracked, gone, and unrecoverable for this agent. See [`State::SessionGone`].
     Gone,
 }
@@ -1281,7 +1244,7 @@ enum SessionStart {
 ///
 /// `session` carries the arguments and the directory but **not** the program:
 /// that comes from `binary`, which `AgentServerStore` resolved against the real
-/// `PATH`. A `ResumeCommand`'s own `program` is the bare name the agent's store
+/// `PATH`. An `AgentCommand`'s own `program` is the bare name the agent's store
 /// records (`"claude"`), which is not what should be executed.
 ///
 /// Which command it is — resume this session, start one under a chosen id, or
@@ -1290,7 +1253,7 @@ enum SessionStart {
 fn agent_task(
     agent: &AgentId,
     binary: std::path::PathBuf,
-    session: Option<&ResumeCommand>,
+    session: Option<&AgentCommand>,
     project: &Project,
     cx: &App,
 ) -> SpawnInTerminal {
@@ -1966,10 +1929,10 @@ mod tests {
         let (fresh, resumed) = cx.update(|cx| {
             let project = project.read(cx);
             let fresh = super::agent_task(&agent, binary.clone(), None, project, cx);
-            // A `ResumeCommand` as the agent's own store hands one over. Its
+            // An `AgentCommand` as the agent's own store hands one over. Its
             // `program` is the bare name the store records and is deliberately
             // ignored below — the executed program is the resolved `binary`.
-            let resume = ResumeCommand {
+            let resume = AgentCommand {
                 program: "claude".into(),
                 args: vec!["--resume".into(), "abc-123".into(), "--fork-session".into()],
                 cwd: std::path::PathBuf::from("/elsewhere"),

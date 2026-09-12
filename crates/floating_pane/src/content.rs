@@ -13,25 +13,6 @@ use workspace::{Pane, Workspace};
 
 use crate::host::FloatingPane;
 
-/// The agents the menu offers, in the order the rail shows them.
-///
-/// The same four, deliberately: two lists that disagree about which agents exist
-/// is a bug nobody notices until one of them is wrong.
-pub(crate) const AGENTS: &[(&str, IconName, &str)] = &[
-    (
-        project::CLAUDE_CODE_AGENT_ID,
-        IconName::AiClaude,
-        "Claude Code",
-    ),
-    (project::CODEX_AGENT_ID, IconName::AiOpenAi, "Codex"),
-    (
-        project::ANTIGRAVITY_AGENT_ID,
-        IconName::AiAntigravity,
-        "Antigravity",
-    ),
-    (project::COPILOT_AGENT_ID, IconName::AiCopilot, "Copilot"),
-];
-
 impl FloatingPane {
     pub(crate) fn build_pane(
         workspace: &WeakEntity<Workspace>,

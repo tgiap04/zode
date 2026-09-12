@@ -45,7 +45,7 @@ use crate::{
 pub use agent_server_store::{
     ANTIGRAVITY_AGENT_ID, AgentBinary, AgentBinaryMissing, AgentId, AgentServerStore,
     AgentServersUpdated, BUILTIN_AGENTS, BuiltinAgent, CLAUDE_CODE_AGENT_ID, CODEX_AGENT_ID,
-    COPILOT_AGENT_ID, ExternalAgentSource, builtin_agent,
+    COPILOT_AGENT_ID, ExternalAgentSource, OPENCODE_AGENT_ID, builtin_agent,
 };
 pub use git_store::{
     ConflictRegion, ConflictSet, ConflictSetSnapshot, ConflictSetUpdate,

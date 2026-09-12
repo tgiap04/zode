@@ -6,27 +6,6 @@ use project::AgentId;
 use ui::{ContextMenu, ContextMenuEntry, Tooltip, prelude::*, right_click_menu};
 use zed_actions::agent::{NewAgent, ToggleAgent};
 
-/// The agents the rail draws a button for.
-///
-/// Hard-coded rather than read from `AgentServerStore`, unlike the panel buttons
-/// above: an agent's glyph is its vendor's mark, so a new entry is a deliberate
-/// choice of icon, not something to be derived. Keep in step with
-/// `agent_ui::agent_icon`, which draws the same glyph on the tab.
-const RAIL_AGENTS: &[(&str, IconName, &str)] = &[
-    (
-        project::CLAUDE_CODE_AGENT_ID,
-        IconName::AiClaude,
-        "Claude Code",
-    ),
-    (project::CODEX_AGENT_ID, IconName::AiOpenAi, "Codex"),
-    (
-        project::ANTIGRAVITY_AGENT_ID,
-        IconName::AiAntigravity,
-        "Antigravity",
-    ),
-    (project::COPILOT_AGENT_ID, IconName::AiCopilot, "Copilot"),
-];
-
 impl Sidebar {
     /// Whether a tab for this agent is open anywhere in the editor's panes.
     ///
@@ -54,8 +33,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let buttons = RAIL_AGENTS
-            .iter()
+        let buttons = agent_ui::agent_marks()
             .enumerate()
             .map(|(ix, (agent, icon, label))| {
                 // One click reopens the agent the way it was last used — the mode is a
@@ -66,7 +44,7 @@ impl Sidebar {
                 // still remembered -- the toggle's open path reopens the way it was
                 // last used, which is the choice someone already made.
                 let remembered = ToggleAgent {
-                    agent: (*agent).to_string(),
+                    agent: agent.to_string(),
                 };
                 // A second session rather than a second look at the first.
                 // Behind the menu on purpose: `NewAgent` spends another CLI
@@ -74,17 +52,17 @@ impl Sidebar {
                 // should. A left-click that sometimes started a process and
                 // sometimes did not would be the opposite of deliberate.
                 let new_session = NewAgent {
-                    agent: (*agent).to_string(),
+                    agent: agent.to_string(),
                     mode: None,
                 };
 
                 // Lit whether or not its tab is the active one, and whichever pane it
                 // sits in: two agents can be open at once, so there is no single "the
                 // active one" to point at.
-                // `AgentId::new(*agent)` rather than `.to_string()`: these ids are
+                // `AgentId::new(agent)` rather than `.to_string()`: these ids are
                 // `&'static str`, so a `SharedString` borrows them outright, while
                 // going through `String` allocated once per button per frame.
-                let is_active = self.agent_is_open(&AgentId::new(*agent), cx);
+                let is_active = self.agent_is_open(&AgentId::new(agent), cx);
 
                 // A menu rather than one hidden action: right-click used to go
                 // straight to the terminal, which left nowhere to put anything
@@ -108,14 +86,14 @@ impl Sidebar {
                     // the menu's open and closed states alike.
                     .trigger(move |_is_open, _window, _cx| {
                         let remembered = remembered.clone();
-                        IconButton::new(*agent, *icon)
+                        IconButton::new(agent, icon)
                             .icon_size(RAIL_ICON_SIZE)
                             .toggle_state(is_active)
                             .tooltip({
                                 let remembered = remembered.clone();
                                 move |_window, cx| {
                                     Tooltip::with_meta(
-                                        *label,
+                                        label,
                                         Some(&remembered),
                                         "Right-click for a new session",
                                         cx,
@@ -280,17 +258,5 @@ mod tests {
             cx.debug_bounds("MENU_ITEM-New Session").is_some(),
             "the menu must carry the one entry it exists for"
         );
-    }
-
-    /// Every rail button must name an agent the store actually knows about, or the
-    /// click resolves to nothing and the user gets a button that does nothing.
-    #[test]
-    fn every_rail_agent_is_a_registered_builtin() {
-        for (id, _, _) in super::RAIL_AGENTS {
-            assert!(
-                project::builtin_agent(id).is_some(),
-                "rail draws `{id}`, which no built-in agent claims"
-            );
-        }
     }
 }

@@ -566,34 +566,37 @@ impl CreateWorktreeModal {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
-            .child(h_flex().w_full().gap_1p5().flex_wrap().children(
-                super::agent_choices().iter().map(|(id, label)| {
-                    let selected = self.agent == Some(*id);
-                    let id = *id;
-                    div()
-                        .id(SharedString::from(*label))
-                        .child(
-                            Chip::new(*label)
-                                .icon(agent_ui::agent_icon(id))
-                                .icon_color(Color::Custom(agent_ui::agent_color(id)))
-                                .label_color(if selected {
-                                    Color::Default
-                                } else {
-                                    Color::Muted
-                                })
-                                .when(selected, |chip| {
-                                    chip.border_color(cx.theme().colors().border_focused)
-                                }),
-                        )
-                        // Choosing the same agent twice clears it: the
-                        // form must be able to say "create the worktree
-                        // and start nothing".
-                        .on_click(cx.listener(move |modal, _, _, cx| {
-                            modal.agent = (modal.agent != Some(id)).then_some(id);
-                            cx.notify();
-                        }))
-                }),
-            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .flex_wrap()
+                    .children(agent_ui::agent_marks().map(|(id, icon, label)| {
+                        let selected = self.agent == Some(id);
+                        div()
+                            .id(SharedString::from(label))
+                            .child(
+                                Chip::new(label)
+                                    .icon(icon)
+                                    .icon_color(Color::Custom(agent_ui::agent_color(id)))
+                                    .label_color(if selected {
+                                        Color::Default
+                                    } else {
+                                        Color::Muted
+                                    })
+                                    .when(selected, |chip| {
+                                        chip.border_color(cx.theme().colors().border_focused)
+                                    }),
+                            )
+                            // Choosing the same agent twice clears it: the
+                            // form must be able to say "create the worktree
+                            // and start nothing".
+                            .on_click(cx.listener(move |modal, _, _, cx| {
+                                modal.agent = (modal.agent != Some(id)).then_some(id);
+                                cx.notify();
+                            }))
+                    })),
+            )
     }
 }
 

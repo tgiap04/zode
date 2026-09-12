@@ -1,15 +1,24 @@
-use std::{path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Which CLI wrote the session.
 ///
-/// Two agents, two entirely different stores: Claude appends JSONL under
-/// `~/.claude/projects`, Codex keeps a row per thread in `~/.codex/state_*.sqlite`.
-/// Nothing about them is shared except this enum and the trait that hides them.
+/// Four agents, four unrelated stores: Claude appends JSONL under
+/// `~/.claude/projects`, Codex keeps a row per thread in
+/// `~/.codex/state_*.sqlite`, Copilot keeps a directory per session under
+/// `~/.copilot/session-state/`, and opencode keeps everything -- sessions,
+/// messages and parts -- in one sqlite database at
+/// `~/.local/share/opencode/opencode.db`. Nothing about them is shared except
+/// this enum and the trait that hides them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum AgentKind {
     Claude,
     Codex,
     Copilot,
+    OpenCode,
 }
 
 impl AgentKind {
@@ -18,6 +27,7 @@ impl AgentKind {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Copilot => "Copilot",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -28,6 +38,11 @@ impl AgentKind {
             Self::Claude => "claude-acp",
             Self::Codex => "codex-acp",
             Self::Copilot => "github-copilot-cli",
+            // Matches `project::OPENCODE_AGENT_ID`. Not a shared constant: this
+            // crate has no dependency on `project`, and the other three ids
+            // above are already duplicated the same way rather than pulling
+            // that dependency in for a handful of string literals.
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -35,14 +50,14 @@ impl AgentKind {
     /// id — an open tab knows which agent it runs but not which history store
     /// that agent keeps.
     ///
-    /// `None` for a user-configured agent: this crate reads three stores and has
-    /// nothing to say about a fourth.
+    /// `None` for a user-configured agent: this crate reads four stores and has
+    /// nothing to say about a fifth.
     ///
     /// Kept beside its inverse so the table is one thing read two ways rather
     /// than two tables that can disagree — `the_kind_bridge_round_trips` is what
     /// holds them together.
     pub fn from_builtin_agent_id(id: &str) -> Option<Self> {
-        [Self::Claude, Self::Codex, Self::Copilot]
+        [Self::Claude, Self::Codex, Self::Copilot, Self::OpenCode]
             .into_iter()
             .find(|kind| kind.builtin_agent_id() == id)
     }
@@ -116,21 +131,23 @@ pub struct SessionCounts {
 pub enum Fork {
     /// Keep writing to this session.
     Continue,
-    /// Start a new session seeded with this one's history. Claude's
-    /// `--fork-session`; Codex has no equivalent.
+    /// Start a new session seeded with this one's history. Not every agent
+    /// can do this — a provider that can't returns `None` from
+    /// [`SessionProvider::resume_command`](crate::SessionProvider::resume_command)
+    /// for this variant rather than inventing a command.
     New,
 }
 
 /// A resume, as data. This crate spawns nothing — the caller turns this into
 /// whatever its terminal wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResumeCommand {
+pub struct AgentCommand {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
 }
 
-impl ResumeCommand {
+impl AgentCommand {
     /// The line to put on the clipboard. Quoted for a POSIX shell, because that
     /// is where the user is going to paste it.
     pub fn to_shell_string(&self) -> String {
@@ -166,6 +183,26 @@ fn shell_quote(value: &str) -> String {
     out
 }
 
+/// What a delete has to do to really remove this session.
+///
+/// Two stores, two different answers. Claude, Codex and Copilot keep their
+/// sessions as files, so a delete is the editor moving those files to the OS
+/// trash through its own `Fs` — recoverable, and visible in the confirmation.
+/// opencode keeps its sessions as rows in a database it owns and offers a
+/// subcommand for removing one, so a delete is asking the CLI. Writing into
+/// another tool's live database is not an option this editor takes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Deletion {
+    /// Nothing this session owns is still reachable.
+    Nothing,
+    /// Move these to the OS trash, outermost first. Never empty — an empty
+    /// list is [`Self::Nothing`], so the caller has one question to ask, not two.
+    Trash(Vec<PathBuf>),
+    /// Ask the agent to remove it from its own store. Not recoverable, and the
+    /// confirmation has to say so.
+    Command(AgentCommand),
+}
+
 /// Whether a store can be read at all right now.
 ///
 /// A missing store is a legitimate state, not an error: someone who has never
@@ -180,6 +217,17 @@ impl Availability {
     pub fn is_ready(&self) -> bool {
         matches!(self, Self::Ready)
     }
+}
+
+/// A millisecond epoch, as both Codex's `at_ms` and opencode's `time_updated`
+/// store it. Shared here rather than duplicated in each provider: two sites
+/// reading the same six lines is the kind of divergence that only shows up the
+/// day one of them is fixed and the other is not.
+pub(crate) fn millis_to_time(millis: i64) -> SystemTime {
+    if millis <= 0 {
+        return UNIX_EPOCH;
+    }
+    UNIX_EPOCH + Duration::from_millis(millis as u64)
 }
 
 #[cfg(test)]
@@ -214,14 +262,14 @@ mod tests {
 
     #[test]
     fn a_resume_command_survives_a_path_with_spaces() {
-        let command = ResumeCommand {
+        let command = AgentCommand {
             program: "claude".into(),
             args: vec!["--resume".into(), "abc-123".into()],
             cwd: PathBuf::from("/tmp"),
         };
         assert_eq!(command.to_shell_string(), "claude --resume abc-123");
 
-        let awkward = ResumeCommand {
+        let awkward = AgentCommand {
             program: "/Users/a b/claude".into(),
             args: vec!["--resume".into(), "it's".into()],
             cwd: PathBuf::from("/tmp"),
@@ -235,7 +283,12 @@ mod tests {
     /// ways. Nothing makes them agree at compile time, so this is what does.
     #[test]
     fn the_kind_bridge_round_trips() {
-        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Copilot] {
+        for kind in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Copilot,
+            AgentKind::OpenCode,
+        ] {
             assert_eq!(
                 AgentKind::from_builtin_agent_id(kind.builtin_agent_id()),
                 Some(kind),

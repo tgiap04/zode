@@ -27,8 +27,9 @@ name = "My Agent"
 
 This build does not run one. The `agent_servers` field was removed along with the
 ACP registry it was built to feed, and nothing replaced it — agents here are the
-four built-in CLIs on the sidebar rail (`claude`, `codex`, `agy`, `copilot`), each
-run as a terminal session, plus whatever command you name yourself in the
+five built-in CLIs on the sidebar rail (`claude`, `codex`, `agy`, `copilot`,
+`opencode`), each run as a terminal session, plus whatever command you name
+yourself in the
 `agent_servers` **setting** (which is a different thing from the manifest field;
 see [Configuring Zode](./configuring-zed.md)).
 

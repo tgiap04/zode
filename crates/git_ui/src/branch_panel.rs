@@ -31,17 +31,3 @@ mod tree;
 
 pub use panel::{BranchPanel, Toggle, ToggleFocus, register};
 pub use settings::BranchPanelSettings;
-
-/// The agents the create-worktree form offers.
-///
-/// The same roster the rail draws, and for the same reason it is a list rather
-/// than a lookup: an agent's mark is its vendor's, so adding one is a decision
-/// about icons and colour, not something to derive.
-pub(crate) fn agent_choices() -> &'static [(&'static str, &'static str)] {
-    &[
-        (project::CLAUDE_CODE_AGENT_ID, "Claude"),
-        (project::CODEX_AGENT_ID, "Codex"),
-        (project::ANTIGRAVITY_AGENT_ID, "Antigravity"),
-        (project::COPILOT_AGENT_ID, "Copilot"),
-    ]
-}

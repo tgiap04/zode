@@ -137,6 +137,10 @@ pub const CODEX_AGENT_ID: &str = "codex-acp";
 /// registry entry lands on the same agent rather than a second copy of it.
 pub const ANTIGRAVITY_AGENT_ID: &str = "antigravity-acp";
 pub const COPILOT_AGENT_ID: &str = "github-copilot-cli";
+/// opencode ships an `opencode acp` subcommand, but this editor no longer speaks
+/// ACP, so matching that registry's ids like the three above would be following
+/// a constraint that no longer applies here.
+pub const OPENCODE_AGENT_ID: &str = "opencode";
 
 pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
     BuiltinAgent {
@@ -170,6 +174,17 @@ pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
         docs_url: "https://docs.github.com/copilot/how-tos/copilot-cli",
         install_unix: "curl -fsSL https://gh.io/copilot-install | bash",
         install_windows: "winget install GitHub.Copilot",
+    },
+    BuiltinAgent {
+        id: OPENCODE_AGENT_ID,
+        display_name: "opencode",
+        binary: "opencode",
+        docs_url: "https://opencode.ai/docs/",
+        install_unix: "curl -fsSL https://opencode.ai/install | bash",
+        // opencode publishes no PowerShell or winget one-liner; its docs lead
+        // Windows users to WSL and then list choco, scoop and npm. npm is the one
+        // most likely to already work on a machine running this editor.
+        install_windows: "npm install -g opencode-ai",
     },
 ];
 
@@ -1084,6 +1099,7 @@ mod tests {
         assert!(builtin_agent(CODEX_AGENT_ID).is_some());
         assert!(builtin_agent(ANTIGRAVITY_AGENT_ID).is_some());
         assert!(builtin_agent(COPILOT_AGENT_ID).is_some());
+        assert!(builtin_agent(OPENCODE_AGENT_ID).is_some());
         assert!(builtin_agent("nope").is_none());
     }
 

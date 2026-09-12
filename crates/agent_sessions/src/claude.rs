@@ -1,5 +1,6 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+    SessionSummary,
     claude_log::{self, HeadFacts, TailFacts},
     provider::is_safe_component,
 };
@@ -105,6 +106,17 @@ impl ClaudeProvider {
         let log_path = session.log_path.as_ref()?;
         Some(log_path.parent()?.join(session.id.as_ref()))
     }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(sidecar) = Self::sidecar_dir(session) {
+            paths.push(sidecar);
+        }
+        if let Some(log) = session.log_path.clone() {
+            paths.push(log);
+        }
+        paths
+    }
 }
 
 impl SessionProvider for ClaudeProvider {
@@ -195,11 +207,11 @@ impl SessionProvider for ClaudeProvider {
         Ok(None)
     }
 
-    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<AgentCommand> {
         // Verified against the installed CLI: the transcript lands at
         // `~/.claude/projects/<encoded-cwd>/<id>.jsonl` under exactly this id,
         // which is what makes `find` above able to recognise it later.
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "claude".to_string(),
             args: vec!["--session-id".to_string(), id.to_string()],
             cwd: cwd.to_path_buf(),
@@ -222,27 +234,24 @@ impl SessionProvider for ClaudeProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         let mut args = vec!["--resume".to_string(), session.id.to_string()];
         if fork == Fork::New {
             args.push("--fork-session".to_string());
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "claude".to_string(),
             args,
             cwd: session.cwd.clone(),
         })
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        if let Some(sidecar) = Self::sidecar_dir(session) {
-            paths.push(sidecar);
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        let paths = self.paths_to_trash(session);
+        if paths.is_empty() {
+            return Deletion::Nothing;
         }
-        if let Some(log) = session.log_path.clone() {
-            paths.push(log);
-        }
-        paths
+        Deletion::Trash(paths)
     }
 }
 
@@ -659,4 +668,47 @@ fn count_meta_files(dir: &Path) -> usize {
                 .is_some_and(|name| name.ends_with(".meta.json"))
         })
         .count()
+}
+
+/// `deletion()` is new in phase 04's refactor; kept in its own module so the
+/// port of `paths_to_trash` above stays provably untouched -- `git diff` on
+/// `mod tests` is the check, and it must show nothing.
+#[cfg(test)]
+mod deletion_wrapping {
+    use super::*;
+
+    fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+            log_path,
+            log_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_session_with_nothing_to_take_is_nothing() {
+        let provider = ClaudeProvider::new(PathBuf::from("/does/not/exist"));
+        let session = bare_session("none", None);
+        assert_eq!(provider.deletion(&session), Deletion::Nothing);
+    }
+
+    #[test]
+    fn a_session_with_a_log_path_is_a_nonempty_trash() {
+        let provider = ClaudeProvider::new(PathBuf::from("/does/not/exist"));
+        let log = PathBuf::from("/does/not/exist/-w-one/s.jsonl");
+        let session = bare_session("s", Some(log.clone()));
+        let sidecar = log.parent().unwrap().join("s");
+        assert_eq!(
+            provider.deletion(&session),
+            Deletion::Trash(vec![sidecar, log])
+        );
+    }
 }

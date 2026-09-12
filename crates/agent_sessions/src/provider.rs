@@ -1,6 +1,6 @@
-use crate::{Availability, Fork, ResumeCommand, SessionCounts, SessionSummary};
+use crate::{AgentCommand, Availability, Deletion, Fork, SessionCounts, SessionSummary};
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Whether `id` is safe to use as a single path component.
 ///
@@ -24,11 +24,12 @@ pub(crate) fn is_safe_component(id: &str) -> bool {
 /// background executor — keeping the trait synchronous is what lets the whole
 /// crate be tested without a window or an async runtime.
 ///
-/// Nothing here deletes anything. [`Self::paths_to_trash`] only *names* what a
-/// delete would take, and the caller moves those to the OS trash through its own
-/// `Fs`. The one destructive act in this feature therefore happens in the layer
-/// that also owns the confirmation dialog, not behind a trait method that could
-/// be called by accident.
+/// Nothing here deletes anything. [`Self::deletion`] only *builds* what a
+/// delete would take — a list of paths to trash, or a command to hand another
+/// CLI — and the caller performs it: paths through its own `Fs`, a command
+/// through a process spawn. The one destructive act in this feature therefore
+/// happens in the layer that also owns the confirmation dialog, not behind a
+/// trait method that could be called by accident.
 pub trait SessionProvider: Send + Sync {
     fn agent(&self) -> crate::AgentKind;
 
@@ -61,17 +62,16 @@ pub trait SessionProvider: Send + Sync {
     /// `None` when the agent has no way to be told: only Claude has a flag for
     /// it (`--session-id`). The caller must not invent one — an id the CLI never
     /// agreed to is an id that will not be there to resume.
-    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<ResumeCommand>;
+    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<AgentCommand>;
 
     /// The numbers that need a full scan of one transcript.
     fn counts(&self, session: &SessionSummary) -> Result<SessionCounts>;
 
-    /// `None` when this agent cannot honour the request — Codex has no
-    /// `--fork-session`, so [`Fork::New`] has no command to build. The caller
+    /// `None` when this agent cannot honour the request — Codex and Copilot have
+    /// no fork flag, so [`Fork::New`] has no command to build for them. The caller
     /// disables the control rather than inventing one.
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand>;
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand>;
 
-    /// What a delete would move to the trash, outermost first. Paths that do not
-    /// exist are still listed; the caller ignores what is already gone.
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf>;
+    /// What a delete has to do to really remove this session. See [`Deletion`].
+    fn deletion(&self, session: &SessionSummary) -> Deletion;
 }

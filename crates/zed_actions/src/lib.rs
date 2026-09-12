@@ -534,9 +534,12 @@ pub mod agent {
 
     /// Opens an agent beside the editor.
     ///
-    /// This lives here rather than in `agent_ui` so the sidebar can dispatch it
-    /// without depending on `agent_ui` — which from phase 04 onwards pulls in the
-    /// whole ACP stack, and the rail has no business linking against that.
+    /// This lives here, and not in `agent_ui`, because an action type belongs
+    /// with the other action types rather than in the crate that happens to
+    /// handle it — the same reason every other action in this crate sits apart
+    /// from its handler. `sidebar` already depends on `agent_ui` directly (it
+    /// draws `agent_ui::AgentView`), so that dependency is not what this split
+    /// avoids.
     #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
     #[action(namespace = agent)]
     #[serde(deny_unknown_fields)]

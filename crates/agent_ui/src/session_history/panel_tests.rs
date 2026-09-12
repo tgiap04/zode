@@ -1,5 +1,5 @@
 use crate::session_history::AgentHistoryPanel;
-use agent_sessions::{AgentKind, SessionSummary};
+use agent_sessions::{AgentKind, Deletion, SessionSummary};
 use fs::FakeFs;
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px};
 use project::Project;
@@ -316,11 +316,17 @@ async fn the_toggle_action_shows_the_panel_without_aborting(cx: &mut TestAppCont
 /// A provider the test owns outright.
 ///
 /// The other tests in this file *clear* `panel.providers` so nothing reads the
-/// developer's real `~/.claude`. A delete has to resolve a provider to learn what
-/// to trash, so these replace it instead: `paths_to_trash` hands back exactly the
-/// paths the test put into `FakeFs`, and nothing else here touches a disk.
+/// developer's real `~/.claude`. A delete has to resolve a provider to learn
+/// what to take, so these replace it instead: `deletion` hands back exactly
+/// what the test put into `deletions`, and nothing else here touches a disk.
+///
+/// `still_present` answers `find` -- default empty, so every id reads as
+/// "gone", which is what a `Command` delete's idempotency re-check (C2/H9)
+/// wants for the common case. A test proving the *other* half -- a real
+/// failure, where the store still holds the session -- adds its id here.
 struct TestProvider {
-    paths: collections::HashMap<Arc<str>, Vec<PathBuf>>,
+    deletions: collections::HashMap<Arc<str>, Deletion>,
+    still_present: collections::HashSet<Arc<str>>,
 }
 
 impl agent_sessions::SessionProvider for TestProvider {
@@ -336,7 +342,10 @@ impl agent_sessions::SessionProvider for TestProvider {
         Ok(Vec::new())
     }
 
-    fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
+    fn find(&self, id: &str) -> anyhow::Result<Option<SessionSummary>> {
+        if self.still_present.contains(id) {
+            return Ok(Some(session(id, "/root", "still present", 0)));
+        }
         Ok(None)
     }
 
@@ -344,7 +353,7 @@ impl agent_sessions::SessionProvider for TestProvider {
         &self,
         _id: &str,
         _cwd: &std::path::Path,
-    ) -> Option<agent_sessions::ResumeCommand> {
+    ) -> Option<agent_sessions::AgentCommand> {
         None
     }
 
@@ -356,23 +365,62 @@ impl agent_sessions::SessionProvider for TestProvider {
         &self,
         _session: &SessionSummary,
         _fork: agent_sessions::Fork,
-    ) -> Option<agent_sessions::ResumeCommand> {
+    ) -> Option<agent_sessions::AgentCommand> {
         None
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        self.paths.get(&session.id).cloned().unwrap_or_default()
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        self.deletions
+            .get(&session.id)
+            .cloned()
+            .unwrap_or(Deletion::Nothing)
     }
 }
 
 /// Opens a workspace with the history panel docked, focused and drawn.
 ///
-/// `roots` empty models a window with no folder open. `trash_paths` becomes the
-/// test provider's answer to `paths_to_trash`.
+/// `roots` empty models a window with no folder open. `trash_paths` becomes
+/// the test provider's answer to `deletion` -- a non-empty vec becomes
+/// `Deletion::Trash`, an empty one `Deletion::Nothing`, matching what
+/// `paths_to_trash` used to mean before this returned a `Deletion`.
 async fn panel_with(
     roots: &[&str],
     sessions: Vec<SessionSummary>,
     trash_paths: Vec<(&str, Vec<PathBuf>)>,
+    fs: Arc<FakeFs>,
+    cx: &mut TestAppContext,
+) -> (Entity<AgentHistoryPanel>, VisualTestContext) {
+    let deletions = trash_paths
+        .into_iter()
+        .map(|(id, paths)| {
+            let deletion = if paths.is_empty() {
+                Deletion::Nothing
+            } else {
+                Deletion::Trash(paths)
+            };
+            (Arc::from(id), deletion)
+        })
+        .collect();
+    panel_with_provider(
+        roots,
+        sessions,
+        TestProvider {
+            deletions,
+            still_present: collections::HashSet::default(),
+        },
+        fs,
+        cx,
+    )
+    .await
+}
+
+/// The general form of [`panel_with`], for a test that needs a `TestProvider`
+/// shaped by hand -- a `Deletion::Command` target, or a `find` answer other
+/// than "gone" (C2/H9's real-failure case).
+async fn panel_with_provider(
+    roots: &[&str],
+    sessions: Vec<SessionSummary>,
+    provider: TestProvider,
     fs: Arc<FakeFs>,
     cx: &mut TestAppContext,
 ) -> (Entity<AgentHistoryPanel>, VisualTestContext) {
@@ -388,12 +436,7 @@ async fn panel_with(
         cx.new(|cx| AgentHistoryPanel::new(workspace, window, cx))
     });
     panel.update(&mut cx, |panel, _| {
-        panel.providers = vec![Arc::new(TestProvider {
-            paths: trash_paths
-                .into_iter()
-                .map(|(id, paths)| (Arc::from(id), paths))
-                .collect(),
-        })];
+        panel.providers = vec![Arc::new(provider)];
     });
     workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.add_panel(panel.clone(), window, cx);
@@ -776,5 +819,156 @@ async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContex
         remaining_ids(&panel, &mut cx),
         vec!["bad".to_string()],
         "a session whose files did not all reach the trash must keep describing the disk"
+    );
+}
+
+/// H7 for the single delete: `delete_session`'s `Trash` arm must keep the same
+/// discipline the bulk sweep already had -- a row is forgotten only once
+/// everything it named is really gone, not unconditionally once the attempt
+/// is over.
+///
+/// `delete_session` resolves the *real* Claude provider (see the comment on
+/// `a_session_with_nothing_on_disk_offers_to_drop_the_row`), and its `Trash`
+/// arm checks `path.exists()` against the real OS before ever reaching the
+/// injected `Fs` -- pre-existing, and not this phase's to change. So the path
+/// this test fails to trash has to be a real file: written straight to the
+/// host's temp directory, never registered with `FakeFs`, and cleaned up
+/// after.
+#[gpui::test]
+async fn a_single_delete_whose_trash_fails_keeps_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let real_log = std::env::temp_dir().join(format!("zode-h7-test-{}.jsonl", std::process::id()));
+    std::fs::write(&real_log, "").expect("writing the real fixture file must succeed");
+
+    let target = SessionSummary {
+        log_path: Some(real_log.clone()),
+        log_bytes: 10,
+        ..session("bad", "/root", "Never reaches the trash", 300)
+    };
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![target.clone()], Vec::new(), fs.clone(), cx).await;
+
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&target, window, cx);
+    });
+    cx.run_until_parked();
+
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    // Best-effort cleanup of the real fixture file; its outcome does not bear
+    // on what this test is proving.
+    std::fs::remove_file(&real_log).ok();
+
+    assert!(
+        fs.trash_entries().is_empty(),
+        "a real file `FakeFs` never held cannot reach its trash"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["bad".to_string()],
+        "a failed trash must keep the row (H7), matching delete_all's own discipline"
+    );
+}
+
+/// C1: a bulk plan mixing a recoverable and an irreversible session must warn
+/// about both, name them separately, and offer "Delete" rather than "Move to
+/// Trash". Walked by hand once, per the phase's own success criterion.
+///
+/// The irreversible target's CLI resolves to `Missing` here -- `resolve_agent_binary`
+/// always answers that way under `cfg!(test)` unless the project environment
+/// carries a `PATH` -- which is itself a real, correct outcome for this sweep:
+/// the row must stay, not vanish, while the session is still in its own store.
+#[gpui::test]
+async fn a_mixed_bulk_plan_warns_it_is_not_fully_recoverable(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "trashed.jsonl": "" }))
+        .await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let mut deletions = collections::HashMap::default();
+    deletions.insert(
+        Arc::from("trashed"),
+        Deletion::Trash(vec![PathBuf::from("/logs/trashed.jsonl")]),
+    );
+    deletions.insert(
+        Arc::from("commanded"),
+        Deletion::Command(agent_sessions::AgentCommand {
+            program: "opencode".into(),
+            args: vec![
+                "session".to_string(),
+                "delete".to_string(),
+                "commanded".to_string(),
+            ],
+            cwd: PathBuf::from("/root"),
+        }),
+    );
+    let provider = TestProvider {
+        deletions,
+        still_present: collections::HashSet::default(),
+    };
+
+    let (panel, mut cx) = panel_with_provider(
+        &["/root"],
+        vec![
+            session("trashed", "/root", "Recoverable", 300),
+            // A real `Command` session always carries `log_bytes: 0` -- there
+            // is no file here for this editor to have measured -- so the
+            // fixture states that explicitly rather than inheriting the
+            // helper's default, which would silently inflate the trash byte
+            // total below with a number nobody measured.
+            SessionSummary {
+                log_bytes: 0,
+                ..session("commanded", "/root", "Not recoverable", 200)
+            },
+        ],
+        provider,
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+
+    let prompt = cx
+        .pending_prompt()
+        .expect("a mixed plan must confirm first");
+    assert_eq!(
+        prompt.0, "Delete all history for this project?",
+        "the dialog title is unchanged"
+    );
+    assert!(
+        prompt.1.contains("1 session") && prompt.1.contains("cannot be undone"),
+        "the irreversible half must be named on its own, got: {}",
+        prompt.1
+    );
+    assert!(
+        prompt.1.contains("1 KB"),
+        "the trash byte figure must come only from the recoverable session, got: {}",
+        prompt.1
+    );
+    assert!(
+        !prompt.1.contains("2 session"),
+        "the two counts must never be merged into one total, got: {}",
+        prompt.1
+    );
+
+    cx.simulate_prompt_answer("Delete");
+    cx.run_until_parked();
+
+    assert_eq!(
+        trashed_names(&fs),
+        vec!["trashed.jsonl".to_string()],
+        "the recoverable half still moves to the trash"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["commanded".to_string()],
+        "the irreversible session, whose CLI is not installed under test, must \
+         stay listed rather than vanish while still in its own store"
     );
 }
