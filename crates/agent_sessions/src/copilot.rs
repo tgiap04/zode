@@ -1,5 +1,5 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionProvider, SessionSummary,
     Speaker, provider::is_safe_component,
 };
 use anyhow::{Context as _, Result};
@@ -249,7 +249,7 @@ impl SessionProvider for CopilotProvider {
         self.summary_for(&dir)
     }
 
-    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
         // `--resume=<id>` takes an id the CLI already wrote; there is no flag for
         // choosing the id of a new session. See the Codex impl for why inventing
         // one would be worse than declining.
@@ -267,14 +267,14 @@ impl SessionProvider for CopilotProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         // `copilot --resume=<id>` continues a session. There is no fork flag, so
         // the caller disables that control rather than building a command that
         // would not do what its label says.
         if fork == Fork::New {
             return None;
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "copilot".to_string(),
             args: vec![format!("--resume={}", session.id)],
             cwd: session.cwd.clone(),

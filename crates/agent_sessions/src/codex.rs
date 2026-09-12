@@ -1,5 +1,5 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionProvider, SessionSummary,
 };
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -188,7 +188,7 @@ impl SessionProvider for CodexProvider {
         }
     }
 
-    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
         // `codex resume` takes an id that already exists; there is no flag to
         // start a session *under* an id of our choosing. Returning `None` is what
         // keeps the caller from assigning an id Codex will never write down —
@@ -211,14 +211,14 @@ impl SessionProvider for CodexProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         // `codex resume <id>` continues a thread. There is no fork — the CLI has
         // no flag for it — so the caller disables that control rather than
         // building a command that would not do what its label says.
         if fork == Fork::New {
             return None;
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "codex".to_string(),
             args: vec!["resume".to_string(), session.id.to_string()],
             cwd: session.cwd.clone(),

@@ -116,21 +116,23 @@ pub struct SessionCounts {
 pub enum Fork {
     /// Keep writing to this session.
     Continue,
-    /// Start a new session seeded with this one's history. Claude's
-    /// `--fork-session`; Codex has no equivalent.
+    /// Start a new session seeded with this one's history. Not every agent
+    /// can do this — a provider that can't returns `None` from
+    /// [`SessionProvider::resume_command`](crate::SessionProvider::resume_command)
+    /// for this variant rather than inventing a command.
     New,
 }
 
 /// A resume, as data. This crate spawns nothing — the caller turns this into
 /// whatever its terminal wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResumeCommand {
+pub struct AgentCommand {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
 }
 
-impl ResumeCommand {
+impl AgentCommand {
     /// The line to put on the clipboard. Quoted for a POSIX shell, because that
     /// is where the user is going to paste it.
     pub fn to_shell_string(&self) -> String {
@@ -214,14 +216,14 @@ mod tests {
 
     #[test]
     fn a_resume_command_survives_a_path_with_spaces() {
-        let command = ResumeCommand {
+        let command = AgentCommand {
             program: "claude".into(),
             args: vec!["--resume".into(), "abc-123".into()],
             cwd: PathBuf::from("/tmp"),
         };
         assert_eq!(command.to_shell_string(), "claude --resume abc-123");
 
-        let awkward = ResumeCommand {
+        let awkward = AgentCommand {
             program: "/Users/a b/claude".into(),
             args: vec!["--resume".into(), "it's".into()],
             cwd: PathBuf::from("/tmp"),

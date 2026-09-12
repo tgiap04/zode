@@ -1,5 +1,5 @@
 use crate::RenameAgent;
-use agent_sessions::{AgentKind, Fork, ResumeCommand};
+use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
 use gpui::{
     AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
@@ -1271,7 +1271,7 @@ enum SessionStart {
     /// untracked, or looking its session up failed in a way that should not cost
     /// the tab.
     Fresh,
-    Command(ResumeCommand),
+    Command(AgentCommand),
     /// Tracked, gone, and unrecoverable for this agent. See [`State::SessionGone`].
     Gone,
 }
@@ -1281,7 +1281,7 @@ enum SessionStart {
 ///
 /// `session` carries the arguments and the directory but **not** the program:
 /// that comes from `binary`, which `AgentServerStore` resolved against the real
-/// `PATH`. A `ResumeCommand`'s own `program` is the bare name the agent's store
+/// `PATH`. An `AgentCommand`'s own `program` is the bare name the agent's store
 /// records (`"claude"`), which is not what should be executed.
 ///
 /// Which command it is — resume this session, start one under a chosen id, or
@@ -1290,7 +1290,7 @@ enum SessionStart {
 fn agent_task(
     agent: &AgentId,
     binary: std::path::PathBuf,
-    session: Option<&ResumeCommand>,
+    session: Option<&AgentCommand>,
     project: &Project,
     cx: &App,
 ) -> SpawnInTerminal {
@@ -1966,10 +1966,10 @@ mod tests {
         let (fresh, resumed) = cx.update(|cx| {
             let project = project.read(cx);
             let fresh = super::agent_task(&agent, binary.clone(), None, project, cx);
-            // A `ResumeCommand` as the agent's own store hands one over. Its
+            // An `AgentCommand` as the agent's own store hands one over. Its
             // `program` is the bare name the store records and is deliberately
             // ignored below — the executed program is the resolved `binary`.
-            let resume = ResumeCommand {
+            let resume = AgentCommand {
                 program: "claude".into(),
                 args: vec!["--resume".into(), "abc-123".into(), "--fork-session".into()],
                 cwd: std::path::PathBuf::from("/elsewhere"),

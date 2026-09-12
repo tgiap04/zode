@@ -344,7 +344,7 @@ impl agent_sessions::SessionProvider for TestProvider {
         &self,
         _id: &str,
         _cwd: &std::path::Path,
-    ) -> Option<agent_sessions::ResumeCommand> {
+    ) -> Option<agent_sessions::AgentCommand> {
         None
     }
 
@@ -356,7 +356,7 @@ impl agent_sessions::SessionProvider for TestProvider {
         &self,
         _session: &SessionSummary,
         _fork: agent_sessions::Fork,
-    ) -> Option<agent_sessions::ResumeCommand> {
+    ) -> Option<agent_sessions::AgentCommand> {
         None
     }
 

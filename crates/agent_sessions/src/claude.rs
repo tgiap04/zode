@@ -1,5 +1,5 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionProvider, SessionSummary,
     claude_log::{self, HeadFacts, TailFacts},
     provider::is_safe_component,
 };
@@ -195,11 +195,11 @@ impl SessionProvider for ClaudeProvider {
         Ok(None)
     }
 
-    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<AgentCommand> {
         // Verified against the installed CLI: the transcript lands at
         // `~/.claude/projects/<encoded-cwd>/<id>.jsonl` under exactly this id,
         // which is what makes `find` above able to recognise it later.
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "claude".to_string(),
             args: vec!["--session-id".to_string(), id.to_string()],
             cwd: cwd.to_path_buf(),
@@ -222,12 +222,12 @@ impl SessionProvider for ClaudeProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         let mut args = vec!["--resume".to_string(), session.id.to_string()];
         if fork == Fork::New {
             args.push("--fork-session".to_string());
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "claude".to_string(),
             args,
             cwd: session.cwd.clone(),

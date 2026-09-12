@@ -163,7 +163,7 @@ impl SessionStore {
 mod tests {
     use super::*;
     use agent_sessions::{
-        AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionSummary,
+        AgentCommand, AgentKind, Availability, Fork, SessionCounts, SessionSummary,
     };
     use gpui::TestAppContext;
     use std::collections::HashSet;
@@ -192,13 +192,13 @@ mod tests {
         fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
             Ok(None)
         }
-        fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+        fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
             None
         }
         fn counts(&self, _session: &SessionSummary) -> anyhow::Result<SessionCounts> {
             Ok(SessionCounts::default())
         }
-        fn resume_command(&self, _s: &SessionSummary, _f: Fork) -> Option<ResumeCommand> {
+        fn resume_command(&self, _s: &SessionSummary, _f: Fork) -> Option<AgentCommand> {
             None
         }
         fn paths_to_trash(&self, _session: &SessionSummary) -> Vec<PathBuf> {

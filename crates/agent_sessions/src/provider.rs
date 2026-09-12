@@ -1,4 +1,4 @@
-use crate::{Availability, Fork, ResumeCommand, SessionCounts, SessionSummary};
+use crate::{AgentCommand, Availability, Fork, SessionCounts, SessionSummary};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -61,7 +61,7 @@ pub trait SessionProvider: Send + Sync {
     /// `None` when the agent has no way to be told: only Claude has a flag for
     /// it (`--session-id`). The caller must not invent one — an id the CLI never
     /// agreed to is an id that will not be there to resume.
-    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<ResumeCommand>;
+    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<AgentCommand>;
 
     /// The numbers that need a full scan of one transcript.
     fn counts(&self, session: &SessionSummary) -> Result<SessionCounts>;
@@ -69,7 +69,7 @@ pub trait SessionProvider: Send + Sync {
     /// `None` when this agent cannot honour the request — Codex has no
     /// `--fork-session`, so [`Fork::New`] has no command to build. The caller
     /// disables the control rather than inventing one.
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand>;
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand>;
 
     /// What a delete would move to the trash, outermost first. Paths that do not
     /// exist are still listed; the caller ignores what is already gone.
