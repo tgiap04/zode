@@ -971,7 +971,9 @@ impl Dock {
                 panel: Arc::new(panel.clone()),
                 size_state,
                 // Added put away: `restore_state` and `starts_open` below are
-                // what decide to show it, exactly as before.
+                // what decide to show it -- and a restore that already found a
+                // record now wins over `starts_open` unconditionally forcing
+                // it open.
                 visible: false,
                 _subscriptions: subscriptions,
             },
@@ -994,9 +996,22 @@ impl Dock {
         self.stack_order.insert(slot, Entity::entity_id(&panel));
         self.debug_assert_stack_order_matches_entries();
 
-        self.restore_state(window, cx);
+        // `restore_state` already reports whether it found a record; the value
+        // was being discarded, so the panel below could force itself open on
+        // top of a dock that had already restored the record's own choice.
+        let restored = self.restore_state(window, cx);
 
-        if panel.read(cx).starts_open(window, cx) {
+        // "Starts open" means "when nothing else has said otherwise" -- a dock
+        // with a record of its own has already said otherwise. Without this
+        // gate, `activate_panel`'s exclusive `visible = ix == panel_ix` (below)
+        // hides every entry a restore had just brought back, and because the
+        // left dock stacks, that collapses the whole column to this one panel
+        // rather than the one section `starts_open` is meant to open.
+        //
+        // This is a user-visible behaviour change, worth its own release note:
+        // a panel the user had closed now stays closed across restarts, where
+        // it previously reopened whenever `starts_open` was true.
+        if !restored && panel.read(cx).starts_open(window, cx) {
             self.activate_panel(index, window, cx);
             self.set_open(true, window, cx);
         }
@@ -2712,6 +2727,9 @@ pub mod test {
         /// Defaults to `None`, matching a panel that contributes no dock button.
         /// Set it when a test needs the panel to appear in an icon list.
         pub icon: Option<ui::IconName>,
+        /// Defaults to `false`, matching `Panel::starts_open`'s own default --
+        /// set it when a test needs a panel that asks to open itself on add.
+        pub starts_open: bool,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -2734,6 +2752,7 @@ pub mod test {
                     DockPosition::Bottom,
                 ],
                 icon: None,
+                starts_open: false,
             }
         }
 
@@ -2855,6 +2874,10 @@ pub mod test {
         fn activation_priority(&self) -> u32 {
             self.0.activation_priority
         }
+
+        fn starts_open(&self, window: &Window, cx: &App) -> bool {
+            Panel::starts_open(&self.0, window, cx)
+        }
     }
 
     impl Panel for TestPanel {
@@ -2937,6 +2960,10 @@ pub mod test {
 
         fn own_column(&self) -> Option<DockColumn> {
             self.own_column
+        }
+
+        fn starts_open(&self, _window: &Window, _: &App) -> bool {
+            self.starts_open
         }
     }
 

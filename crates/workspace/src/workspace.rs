@@ -14708,6 +14708,186 @@ mod tests {
         );
     }
 
+    /// "Starts open" means "when nothing else has said otherwise" -- a dock
+    /// with a record of its own has already said otherwise. `add_panel` used
+    /// to discard `restore_state`'s return value and unconditionally honour
+    /// `starts_open` afterwards, and because `activate_panel` is exclusive,
+    /// that collapsed a whole restored stack down to whichever panel asked to
+    /// open itself, on every panel that overrides `starts_open` -- which by
+    /// configuration includes `branch_panel` and `git_panel`, both on this
+    /// same stacking left dock.
+    #[gpui::test]
+    async fn a_restored_dock_is_not_collapsed_by_a_panel_that_starts_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: true,
+                    active_panel: Some("TestPanel".into()),
+                    zoom: false,
+                });
+                dock.serialized_stack = Some(dock::DockStackState {
+                    showing: vec!["TestPanel".into()],
+                    flexes: vec![1.],
+                });
+            });
+
+            let restored_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(restored_panel, window, cx);
+
+            // Added after the restore, and asking to open itself -- exactly
+            // the shape of a user who set `"branch_panel": { "starts_open":
+            // true } }` while a stack from a previous launch is on record.
+            let opens_itself = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx);
+                panel.0.starts_open = true;
+                panel
+            });
+            workspace.add_panel(opens_itself, window, cx);
+        });
+        cx.run_until_parked();
+
+        let visible_names = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .map(|panel| panel.persistent_name().to_string())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            visible_names.contains(&"TestPanel".to_string()),
+            "the restored panel should still be showing, got {visible_names:?}"
+        );
+    }
+
+    /// The counterweight to the test above: a workspace with no record of its
+    /// own must still honour `starts_open` -- that is the behaviour the flag
+    /// exists for, and the gate above must not take it away from a fresh
+    /// install.
+    #[gpui::test]
+    async fn a_workspace_with_no_record_still_opens_a_panel_that_starts_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.starts_open = true;
+                panel
+            });
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (is_open, shown) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            (dock.is_open(), dock.visible_panels().count())
+        });
+        assert!(is_open, "a fresh dock opens the panel that asked to open");
+        assert_eq!(shown, 1, "the panel that starts open should be showing");
+    }
+
+    /// A second, user-visible defect the same gate closes: today a dock the
+    /// user deliberately closed is forced back open on the next launch by any
+    /// panel added afterwards with `starts_open: true`.
+    #[gpui::test]
+    async fn a_record_that_says_a_dock_is_shut_keeps_it_shut(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: false,
+                    active_panel: None,
+                    zoom: false,
+                });
+            });
+
+            let panel = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.starts_open = true;
+                panel
+            });
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open()),
+            "a dock the record says is shut should stay shut"
+        );
+    }
+
+    /// Same gate, and it is what a `Right` (takes-turns) dock needs to keep
+    /// correct: `activate_panel` moves `active_panel_index` for every entry,
+    /// so a panel added afterwards that starts open used to steal activation
+    /// from the panel the record had just restored.
+    #[gpui::test]
+    async fn the_restored_active_panel_stays_active_after_a_starts_open_panel_is_added(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: true,
+                    active_panel: Some("TestPanel".into()),
+                    zoom: false,
+                });
+            });
+
+            let restored_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(restored_panel, window, cx);
+
+            let opens_itself = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx);
+                panel.0.starts_open = true;
+                panel
+            });
+            workspace.add_panel(opens_itself, window, cx);
+        });
+        cx.run_until_parked();
+
+        let active_name = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .left_dock()
+                .read(cx)
+                .active_panel()
+                .map(|panel| panel.persistent_name().to_string())
+        });
+        assert_eq!(
+            active_name,
+            Some("TestPanel".to_string()),
+            "the restored active panel should still be active"
+        );
+    }
+
     /// A stack has to survive a restart, and an install that never had one has
     /// to survive meeting the code that reads them.
     #[gpui::test]
