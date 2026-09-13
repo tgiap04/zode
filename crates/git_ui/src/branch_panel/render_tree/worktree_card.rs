@@ -52,7 +52,7 @@ impl BranchPanel {
         let label: SharedString = worktree_label(worktree).into();
         let path: SharedString = worktree.path.display().to_string().into();
         let is_current = self.is_current_checkout(worktree, cx);
-        let is_pinned = self.pinned.contains(&worktree.path);
+        let is_pinned = self.pinned(cx).contains(&worktree.path);
         let toggle_key = row.toggle_key();
         let switch_to = worktree.clone();
         let menu_for = worktree.clone();

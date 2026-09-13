@@ -4,29 +4,26 @@
 //! worktrees and stashes are read from the git store on every build, so a stale
 //! cache can never contradict the repository.
 
-use std::time::Duration;
-
 use anyhow::Context as _;
 use collections::HashSet;
 use db::kvp::KeyValueStore;
-use gpui::{AppContext as _, AsyncApp, AsyncWindowContext, WeakEntity};
+use gpui::{AppContext as _, AsyncWindowContext, WeakEntity};
 use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
 use workspace::Workspace;
-
-use project::git_store::RepositoryId;
 
 use crate::branch_panel::tree::RowKey;
 
 pub(crate) const BRANCH_PANEL_KEY: &str = "BranchPanel";
 
-/// Writes are coalesced behind this delay so opening five sections in a row is
-/// one database round-trip rather than five.
-const SERIALIZATION_THROTTLE: Duration = Duration::from_millis(500);
-
 /// A `RowKey` carries a `RepositoryId`, which is assigned per session and means
 /// nothing after a restart. What survives is the repository's *path* plus which
 /// section it was, so reopening the same project restores the same shape.
+///
+/// The live set is keyed this way too, not only the stored one. A session id is
+/// not the only thing a `RepositoryId` fails to survive: switching checkout
+/// builds a second `Workspace` and a second panel, and an id minted in one says
+/// nothing in the other. Paths are what both sides agree on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum StoredKey {
     Repo(String),
@@ -101,21 +98,6 @@ impl StoredKey {
             }
         }
     }
-
-    /// Turns a stored entry back into a live key, if it names this repository.
-    ///
-    /// Returns `None` for another repository's entry, and for a shape this
-    /// build no longer has -- a stored key from a future version must be
-    /// ignored, not panic.
-    pub(crate) fn to_row_key(&self, id: RepositoryId, repo_path: &str) -> Option<RowKey> {
-        match self {
-            StoredKey::Repo(path) if path == repo_path => Some(RowKey::Repo(id)),
-            StoredKey::WorktreeAgents(path, worktree) if path == repo_path => Some(
-                RowKey::WorktreeAgents(id, std::sync::Arc::from(std::path::Path::new(worktree))),
-            ),
-            _ => None,
-        }
-    }
 }
 
 impl SerializedBranchPanel {
@@ -127,6 +109,21 @@ impl SerializedBranchPanel {
             .map(|id| format!("{BRANCH_PANEL_KEY}-{id:?}"))
     }
 
+    /// Parses a stored blob, dropping only the entries this build no longer
+    /// understands. Shared with `CheckoutViewState`, which reads the same shape
+    /// from the un-scoped key.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        serde_json::from_str::<RawSerializedBranchPanel>(raw)
+            .log_err()
+            .map(Self::from)
+    }
+
+    /// Reads the legacy, workspace-scoped record -- read-only from here on.
+    /// `CheckoutViewState` is the one writer now; a per-workspace blob is only
+    /// ever offered to it as a seed (`seed_from_legacy`), never written back
+    /// to its own key. Leaving the old rows unwritten-to but still readable is
+    /// the same choice `Dock::load_workspace_scoped_size_state` made, and for
+    /// the same reason: a build from before this change still reads them.
     pub(crate) async fn load(
         workspace: &WeakEntity<Workspace>,
         cx: &mut AsyncWindowContext,
@@ -148,28 +145,6 @@ impl SerializedBranchPanel {
         serde_json::from_str::<RawSerializedBranchPanel>(&raw)
             .log_err()
             .map(Self::from)
-    }
-
-    pub(crate) async fn write(
-        self,
-        workspace: WeakEntity<Workspace>,
-        cx: &mut AsyncApp,
-    ) -> Option<()> {
-        cx.background_executor().timer(SERIALIZATION_THROTTLE).await;
-
-        let (key, kvp) = workspace
-            .read_with(cx, |workspace, cx| {
-                Self::serialization_key(workspace).map(|key| (key, KeyValueStore::global(cx)))
-            })
-            .ok()
-            .flatten()?;
-
-        let value = serde_json::to_string(&self).log_err()?;
-        cx.background_spawn(async move { kvp.write_kvp(key, value).await })
-            .await
-            .context("writing branch panel state")
-            .log_err()
-            .map(|_| ())
     }
 }
 

@@ -24,7 +24,7 @@ impl BranchPanel {
     ) -> Entity<ContextMenu> {
         let panel = cx.entity();
         let path = worktree.path.clone();
-        let pinned = self.pinned.contains(&path);
+        let pinned = self.pinned(cx).contains(&path);
         // The repository's own checkout is not something git will remove, and
         // offering it would be offering to fail.
         let can_delete = !worktree.is_main;
@@ -113,11 +113,18 @@ impl BranchPanel {
     }
 
     pub(crate) fn toggle_pinned(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        if !self.pinned.remove(path) {
-            self.pinned.insert(path.to_path_buf());
-        }
+        let path_string = path.to_string_lossy().to_string();
+        self.checkout_state.update(cx, |state, cx| {
+            let mut pinned = state.pinned().to_vec();
+            match pinned.iter().position(|pinned| pinned == &path_string) {
+                Some(index) => {
+                    pinned.remove(index);
+                }
+                None => pinned.push(path_string),
+            }
+            state.set_pinned(pinned, cx);
+        });
         self.mark_stale(cx);
-        self.serialize(cx);
         cx.notify();
     }
 
@@ -151,9 +158,13 @@ impl BranchPanel {
         };
         order.insert(to, moved);
 
-        self.manual_order = order;
+        let order = order
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        self.checkout_state
+            .update(cx, |state, cx| state.set_order(order, cx));
         self.mark_stale(cx);
-        self.serialize(cx);
         cx.notify();
     }
 
@@ -200,9 +211,16 @@ impl BranchPanel {
                 .update_in(cx, |panel, window, cx| {
                     // Whatever happened, the reader's opinions about a path
                     // that may be gone are not worth keeping.
-                    panel.pinned.remove(&path);
-                    panel.manual_order.retain(|kept| kept != &path);
-                    panel.serialize(cx);
+                    let path_string = path.to_string_lossy().to_string();
+                    panel.checkout_state.update(cx, |state, cx| {
+                        let mut pinned = state.pinned().to_vec();
+                        pinned.retain(|pinned| pinned != &path_string);
+                        state.set_pinned(pinned, cx);
+
+                        let mut order = state.order().to_vec();
+                        order.retain(|kept| kept != &path_string);
+                        state.set_order(order, cx);
+                    });
 
                     panel.report_failure(
                         gpui::Task::ready(result),
