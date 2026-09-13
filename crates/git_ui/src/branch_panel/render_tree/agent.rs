@@ -143,7 +143,9 @@ impl BranchPanel {
                         .color(Color::Disabled),
                 )
             })
-            .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+            .when(!self.menu_is_open(), |this| {
+                this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+            })
             .on_click(cx.listener({
                 let entry = entry.clone();
                 move |panel, _: &ClickEvent, window, cx| {
@@ -283,7 +285,7 @@ impl BranchPanel {
     }
 }
 
-/// How long ago, in the space a 280px panel can spare.
+/// How long ago, in the space a 360px panel can spare.
 ///
 /// `time_format::TimestampFormat::Relative` says "3 hours ago", which is right
 /// in a list with room for it and wrong at the end of a row that already

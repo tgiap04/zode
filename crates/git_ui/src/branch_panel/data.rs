@@ -242,7 +242,7 @@ fn finish(
 }
 
 /// The directory name is what the user calls the repository; the full path is
-/// too long for a 280px panel and its tail is the part that identifies it.
+/// too long for a 360px panel and its tail is the part that identifies it.
 fn repo_name(path: &std::path::Path) -> SharedString {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())

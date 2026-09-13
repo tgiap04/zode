@@ -541,7 +541,9 @@ See [Terminal settings](./reference/all-settings.md#terminal) for additional non
 
 ### Other Panels
 
-On the left dock, `default_width` is shared: the git panel is the left dock's primary panel by default, so switching to the outline panel does not change the dock's width — dragging while the outline panel is active resizes the git panel too.
+On the left dock, `default_width` is shared: the branch panel is the left dock's primary panel by default, so switching to the git or outline panel does not change the dock's width — dragging while either is active resizes the branch panel's `default_width` too.
+
+Panels stacked in the same dock (left or bottom) can be reordered by dragging a section's header above or below another — the arrangement is remembered across restarts and does not affect the dock's width. The project rail and status bar keep a fixed order and are not draggable.
 
 ```json [settings]
   // Git Panel
