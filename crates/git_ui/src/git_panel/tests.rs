@@ -2730,3 +2730,126 @@ async fn test_graph_log_source_toggles_between_branch_and_all(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(panel.update_in(cx, |panel, _, _| panel.graph_log_source_is_auto()));
 }
+
+/// The project rail draws one button per left-docked panel in `Dock::panels()`
+/// order — which is `activation_priority` order — stacked top to bottom, so the
+/// lower priority is the one that sits higher. Branches belongs above the git
+/// panel, and the only thing holding that is two integers in two different files.
+///
+/// Asserting those integers would just restate them. Asserting the order through
+/// the very iterator the rail renders from is what survives a renumber, and what
+/// catches a half-applied swap — the two priorities have to move together or the
+/// dock's own uniqueness check panics.
+#[gpui::test]
+async fn the_branch_panel_sits_above_the_git_panel_in_the_rail(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root/zed"),
+        json!({
+            ".git": {},
+            "src": { "main.rs": "fn main() {}" },
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/root/zed").as_ref()], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    cx.executor().run_until_parked();
+
+    // Added git-first, so a passing assertion cannot be insertion order wearing
+    // the costume of a priority.
+    workspace.update_in(cx, |workspace, window, cx| {
+        let git_panel = GitPanel::new(workspace, window, cx);
+        workspace.add_panel(git_panel, window, cx);
+        let branch_panel = crate::branch_panel::BranchPanel::new(workspace, window, cx);
+        workspace.add_panel(branch_panel, window, cx);
+    });
+
+    let order = workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .left_dock()
+            .read(cx)
+            .panels()
+            .map(|panel| panel.persistent_name())
+            .collect::<Vec<_>>()
+    });
+
+    let branch = order.iter().position(|name| *name == "BranchPanel");
+    let git = order.iter().position(|name| *name == "GitPanel");
+    assert!(
+        matches!((branch, git), (Some(branch), Some(git)) if branch < git),
+        "the rail draws the left dock in this order, and Branches must come before Git Panel: {order:?}"
+    );
+}
+
+/// The left dock shares one width across every panel in it, taken from
+/// `Dock::size_governing_entry` — which is `panel_entries[0]`, the lowest
+/// `activation_priority` on that edge. So the priority swap above did not only
+/// move an icon: it handed the column's width to the branch panel.
+///
+/// Worth pinning because the obvious reading is wrong. `ProjectPanel` has the
+/// lowest priority of all (1), which invites the conclusion that it governs the
+/// left dock and that reordering git and branch cannot touch the width — but
+/// `ProjectPanel::position` is hardcoded to `DockPosition::Right`, so it is never
+/// on this edge at all. That mistake was made during this change and caught only
+/// downstream; this test is what would have caught it.
+#[gpui::test]
+async fn the_left_dock_width_follows_the_branch_panel(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root/zed"),
+        json!({
+            ".git": {},
+            "src": { "main.rs": "fn main() {}" },
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), [path!("/root/zed").as_ref()], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    cx.executor().run_until_parked();
+
+    workspace.update_in(cx, |workspace, window, cx| {
+        let git_panel = GitPanel::new(workspace, window, cx);
+        workspace.add_panel(git_panel, window, cx);
+        let branch_panel = crate::branch_panel::BranchPanel::new(workspace, window, cx);
+        workspace.add_panel(branch_panel, window, cx);
+        workspace.left_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+    });
+
+    let (governing, width) = workspace.update_in(cx, |workspace, window, cx| {
+        let dock = workspace.left_dock().read(cx);
+        let governing = dock
+            .size_governing_panel()
+            .map(|panel| panel.persistent_name());
+        (governing, dock.stored_active_panel_size(window, cx))
+    });
+
+    assert_eq!(
+        governing,
+        Some("BranchPanel"),
+        "the branch panel holds the lowest priority on the left edge, so it governs the column"
+    );
+    // Both panels declare 360, so the shared column is the same width it was
+    // before the swap moved which of them decides it. Drift either apart and the
+    // column silently resizes.
+    assert_eq!(
+        width,
+        Some(px(360.)),
+        "the left column must stay 360 wide after the swap handed it to the branch panel"
+    );
+}

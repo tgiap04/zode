@@ -199,6 +199,6 @@ impl Panel for BranchPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        4
+        3
     }
 }
