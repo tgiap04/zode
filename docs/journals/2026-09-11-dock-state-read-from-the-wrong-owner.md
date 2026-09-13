@@ -84,10 +84,14 @@ So the fix **deleted** a branch rather than adding one. `size_governing_index()`
 `0`, and Left and Bottom behave as Right already did. The key dropped `workspace_id`; a migration
 fallback reads the old `{workspace_id}:{panel_key}` record once and writes it forward.
 
-Consequence worth knowing: the left dock's primary panel is **git** (`activation_priority` 3,
-lowest among git 3 / branch 4 / outline 6), so the shared width is 360 — branch and outline get
-wider and nothing gets narrower. The bottom dock's primary is the terminal (2, against the
-debugger's 7).
+Consequence worth knowing at the time of this entry: the left dock's primary panel was **git**
+(`activation_priority` 3, lowest among git 3 / branch 4 / outline 6), so the shared width was
+360 — branch and outline got wider and nothing got narrower. (As of 2026-09-12, git and branch
+swapped `activation_priority` values — branch is now 3 and git is 4 — so branch is the left
+dock's primary panel and git and outline follow it instead. Branch's `default_width` was raised
+280 → 360 in the same change, precisely so the column it now governs keeps the width it had:
+the swap was asked for as an icon reorder, and a narrower column would have been an uninvited
+second effect.) The bottom dock's primary is the terminal (2, against the debugger's 7).
 
 ### A knock-on the change forced into the open
 
