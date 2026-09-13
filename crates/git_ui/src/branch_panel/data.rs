@@ -184,6 +184,7 @@ impl BranchPanel {
                 RepoData {
                     id: repo.id,
                     path: repo.work_directory_abs_path.clone(),
+                    anchor: repo.original_repo_abs_path.clone(),
                     name: repo_name(repo.work_directory_abs_path.as_ref()),
                     current_branch: repo
                         .branch

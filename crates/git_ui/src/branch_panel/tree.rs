@@ -220,9 +220,24 @@ impl TreeRow {
 #[derive(Clone, Debug)]
 pub(crate) struct RepoData {
     pub(crate) id: RepositoryId,
-    /// Stable across sessions, unlike `id`. What the expanded set is keyed by
-    /// on disk.
+    /// Where *this workspace* has the repository open -- the checkout the
+    /// reader is standing in, which is what `work_directory_abs_path` means
+    /// (`git_store.rs`, where `linked_worktrees` is built by filtering this
+    /// path back out of `git worktree list`).
     pub(crate) path: Arc<std::path::Path>,
+    /// The repository itself, the same seen from every one of its checkouts
+    /// (`RepositorySnapshot::original_repo_abs_path`). What the persisted
+    /// record is keyed by.
+    ///
+    /// Not `path`, though `path` survives a restart just as well. A checkout
+    /// switch opens a *second* workspace at a *second* directory, so a key
+    /// built from `path` names the checkout the reader happened to be standing
+    /// in rather than the repository the row belongs to -- and every row
+    /// silently re-keys itself the moment they switch. `order_checkouts` had
+    /// already been bitten by the same asymmetry (see `all_checkouts` below,
+    /// "a path is the same seen from anywhere"); this is that lesson applied to
+    /// what goes on disk.
+    pub(crate) anchor: Arc<std::path::Path>,
     pub(crate) name: SharedString,
     pub(crate) current_branch: Option<SharedString>,
     /// Already run through `branch_service::process_branches`, so a remote ref

@@ -211,15 +211,16 @@ impl CheckoutViewState {
         cx.notify();
     }
 
-    /// Drops entries for checkouts of `repo_path` that no longer exist.
+    /// Drops entries for checkouts of `repo_anchor` that no longer exist, and
+    /// re-keys any this repository wrote under an older shape.
     ///
     /// The record is app-wide now, so without this it accumulates every
     /// worktree anyone ever opened. Scoped to the one repository whose live
     /// checkouts the caller can actually see -- a panel that cannot see another
-    /// project must never delete that project's state.
+    /// project must never delete or rewrite that project's state.
     pub(crate) fn prune(
         &mut self,
-        repo_path: &Path,
+        repo_anchor: &Path,
         live_checkouts: &[PathBuf],
         cx: &mut Context<Self>,
     ) {
@@ -229,20 +230,54 @@ impl CheckoutViewState {
         if live_checkouts.is_empty() {
             return;
         }
-        let repo_path = repo_path.to_string_lossy().to_string();
+        let repo_anchor = repo_anchor.to_string_lossy().to_string();
         let live: HashSet<String> = live_checkouts
             .iter()
             .map(|path| path.to_string_lossy().to_string())
             .collect();
 
+        let mut changed = false;
+
+        // Entries written while the record was keyed by the checkout the panel
+        // was open at, rather than by the repository. Their second component --
+        // the checkout whose agent list this is -- was always right, so they
+        // are re-keyed onto the anchor instead of dropped, and the reader keeps
+        // what they opened.
+        //
+        // Rewritten only where the namespace is a live checkout of *this*
+        // repository, so a panel still never touches another project's rows.
+        // Left alone for `collapsed`: a repository draws open by default, so a
+        // stale closure costs one click, while folding several namespaces'
+        // closures together would shut a repository the reader has open now.
+        let stale: Vec<StoredKey> = self
+            .expanded
+            .iter()
+            .filter(|key| {
+                matches!(key, StoredKey::WorktreeAgents(repo, _) if *repo != repo_anchor && live.contains(repo))
+            })
+            .cloned()
+            .collect();
+        for key in stale {
+            let StoredKey::WorktreeAgents(_, worktree) = &key else {
+                continue;
+            };
+            let worktree = worktree.clone();
+            self.expanded.remove(&key);
+            self.expanded
+                .insert(StoredKey::WorktreeAgents(repo_anchor.clone(), worktree));
+            changed = true;
+        }
+
         let before = self.expanded.len();
         self.expanded.retain(|key| match key {
             StoredKey::WorktreeAgents(repo, worktree) => {
-                *repo != repo_path || live.contains(worktree)
+                *repo != repo_anchor || live.contains(worktree)
             }
             StoredKey::Repo(_) => true,
         });
-        if self.expanded.len() != before {
+        changed |= self.expanded.len() != before;
+
+        if changed {
             self.schedule_write(cx);
             cx.notify();
         }
@@ -436,6 +471,65 @@ mod tests {
             assert!(
                 state.is_open(&repo),
                 "dropping it leaves the repository at its default, which is open"
+            );
+        });
+    }
+
+    /// Entries written while the record was keyed by the checkout the panel was
+    /// open at carry that checkout where the repository's anchor now goes. They
+    /// still name the right row, so `prune` moves them across rather than
+    /// leaving them in a namespace nothing will ever look up again.
+    #[gpui::test]
+    fn prune_rekeys_an_entry_written_under_a_checkouts_own_namespace(cx: &mut TestAppContext) {
+        let state = cx.new(|_| CheckoutViewState::new());
+        // What the old code wrote while the reader stood in `wt-a` and opened
+        // that same checkout's agent list.
+        let old = agents("/repos/zode/wt-a", "/repos/zode/wt-a");
+        let anchored = agents("/repos/zode", "/repos/zode/wt-a");
+        state.update(cx, |state, cx| {
+            state.toggle(old.clone(), cx);
+            state.prune(
+                Path::new("/repos/zode"),
+                &[
+                    PathBuf::from("/repos/zode"),
+                    PathBuf::from("/repos/zode/wt-a"),
+                ],
+                cx,
+            );
+            assert!(
+                state.is_open(&anchored),
+                "the reader opened this checkout's agent list, so it stays open \
+                 under the key the panel now asks with"
+            );
+            assert!(
+                !state.expanded.contains(&old),
+                "and the namespace it was written under is gone, rather than left \
+                 to sit in the record unread"
+            );
+        });
+    }
+
+    /// The re-key is scoped the same way the drop is: a namespace this
+    /// repository cannot vouch for is left exactly where it is, or one project's
+    /// rebuild would quietly rewrite another's rows into its own.
+    #[gpui::test]
+    fn prune_rekeys_nothing_outside_its_own_checkouts(cx: &mut TestAppContext) {
+        let state = cx.new(|_| CheckoutViewState::new());
+        let elsewhere = agents("/repos/other/wt", "/repos/other/wt");
+        state.update(cx, |state, cx| {
+            state.toggle(elsewhere.clone(), cx);
+            state.prune(
+                Path::new("/repos/zode"),
+                &[
+                    PathBuf::from("/repos/zode"),
+                    PathBuf::from("/repos/zode/wt-a"),
+                ],
+                cx,
+            );
+            assert!(
+                state.expanded.contains(&elsewhere),
+                "a namespace that is not a checkout of this repository is not this \
+                 repository's to rewrite"
             );
         });
     }

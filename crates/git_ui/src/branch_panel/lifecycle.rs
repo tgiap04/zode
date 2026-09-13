@@ -188,10 +188,14 @@ impl BranchPanel {
         // needs the id turned back into the path the shared record is keyed
         // by. Building this here keeps `row_open_for` an O(1) lookup instead
         // of a scan of `self.repos` per row.
+        //
+        // `anchor`, not `path` -- see `RepoData::anchor`. The record has to
+        // answer the same question from every checkout of a repository, and
+        // `path` is a different directory in each of them.
         let paths: HashMap<RepositoryId, Arc<Path>> = self
             .repos
             .iter()
-            .map(|repo| (repo.id, repo.path.clone()))
+            .map(|repo| (repo.id, repo.anchor.clone()))
             .collect();
 
         // Cloning the handle rather than borrowing `self.checkout_state`
@@ -314,9 +318,9 @@ impl BranchPanel {
     fn prune_dead_checkouts(&self, cx: &mut Context<Self>) {
         for repo in &self.repos {
             let live: Vec<PathBuf> = repo.worktrees.iter().map(|w| w.path.clone()).collect();
-            let repo_path = repo.path.clone();
+            let anchor = repo.anchor.clone();
             self.checkout_state
-                .update(cx, |state, cx| state.prune(&repo_path, &live, cx));
+                .update(cx, |state, cx| state.prune(&anchor, &live, cx));
         }
     }
 
@@ -461,9 +465,10 @@ impl BranchPanel {
         let Some(repo) = self.repos.iter().find(|repo| repo.id == key.repository_id()) else {
             return matches!(key, RowKey::Repo(_));
         };
+        let anchor = repo.anchor.to_string_lossy();
         self.checkout_state
             .read(cx)
-            .is_open(&StoredKey::from_row_key(key, &repo.path.to_string_lossy()))
+            .is_open(&StoredKey::from_row_key(key, &anchor))
     }
 
     pub(crate) fn toggle_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
@@ -471,7 +476,7 @@ impl BranchPanel {
             .repos
             .iter()
             .find(|repo| repo.id == key.repository_id())
-            .map(|repo| repo.path.to_string_lossy().to_string())
+            .map(|repo| repo.anchor.to_string_lossy().to_string())
         else {
             return;
         };

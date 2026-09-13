@@ -23,11 +23,20 @@ pub(crate) const BRANCH_PANEL_KEY: &str = "BranchPanel";
 /// The live set is keyed this way too, not only the stored one. A session id is
 /// not the only thing a `RepositoryId` fails to survive: switching checkout
 /// builds a second `Workspace` and a second panel, and an id minted in one says
-/// nothing in the other. Paths are what both sides agree on.
+/// nothing in the other.
+///
+/// Which path, though, is the part that has to be got right. The repository
+/// component is `RepoData::anchor` -- the *original* repository's working
+/// directory, the same from every checkout -- and never the checkout the panel
+/// happens to be open at. Keying it by the latter is what made a reader's open
+/// agent list close itself on every checkout switch: the key they wrote while
+/// standing in one checkout was not the key the next panel looked up.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum StoredKey {
+    /// A repository, by the absolute path of its original checkout.
     Repo(String),
-    /// A checkout whose agents are showing, by its own absolute path.
+    /// A checkout whose agents are showing: its repository's anchor, then the
+    /// checkout's own absolute path.
     WorktreeAgents(String, String),
 }
 
@@ -89,13 +98,18 @@ impl From<RawSerializedBranchPanel> for SerializedBranchPanel {
 }
 
 impl StoredKey {
-    /// Resolves a live row key against the repository paths of this session.
-    pub(crate) fn from_row_key(key: &RowKey, repo_path: &str) -> Self {
+    /// Resolves a live row key against the repository anchors of this session.
+    ///
+    /// `repo_anchor` must be `RepoData::anchor`. Handing it a checkout path
+    /// compiles and reads as correct -- and re-keys every row the next time the
+    /// reader switches checkout.
+    pub(crate) fn from_row_key(key: &RowKey, repo_anchor: &str) -> Self {
         match key {
-            RowKey::Repo(_) => StoredKey::Repo(repo_path.to_string()),
-            RowKey::WorktreeAgents(_, path) => {
-                StoredKey::WorktreeAgents(repo_path.to_string(), path.to_string_lossy().to_string())
-            }
+            RowKey::Repo(_) => StoredKey::Repo(repo_anchor.to_string()),
+            RowKey::WorktreeAgents(_, path) => StoredKey::WorktreeAgents(
+                repo_anchor.to_string(),
+                path.to_string_lossy().to_string(),
+            ),
         }
     }
 }

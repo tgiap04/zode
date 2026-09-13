@@ -51,6 +51,7 @@ fn repo(id: u64, name: &str, worktrees: Vec<GitWorktree>) -> RepoData {
     RepoData {
         id: repo_id(id),
         path: Arc::from(PathBuf::from(format!("/repos/{name}")).as_path()),
+        anchor: Arc::from(PathBuf::from(format!("/repos/{name}")).as_path()),
         name: name.to_string().into(),
         current_branch: Some("main".into()),
         branches: vec![branch("main", true)],

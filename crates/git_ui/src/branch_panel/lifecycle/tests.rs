@@ -443,6 +443,7 @@ mod restoring_expansion {
         RepoData {
             id,
             path: Arc::from(PathBuf::from(REPO_PATH).as_path()),
+            anchor: Arc::from(PathBuf::from(REPO_PATH).as_path()),
             name: "zode".into(),
             current_branch: Some("develop".into()),
             branches: Vec::new(),
@@ -479,9 +480,16 @@ mod restoring_expansion {
     }
 
     /// **T1.** A second panel over the same checkout -- a different
-    /// `RepositoryId`, the same path, exactly what a checkout switch produces
-    /// (see `reports/study-corrections.md` § 1) -- must see what the first
-    /// one opened.
+    /// `RepositoryId`, the same path -- must see what the first one opened.
+    ///
+    /// Both panels stand in the *same* checkout here, which is only half of
+    /// what a switch produces: the second workspace is opened at the checkout
+    /// it switched to, so its repository reports a different path as well.
+    /// That half is
+    /// `an_agent_list_opened_in_one_checkout_is_still_open_from_another`, and
+    /// it stayed broken for as long as this test was the only one, because
+    /// two panels standing in the same place agree on the key whether or not
+    /// the key is the right one.
     ///
     /// Falsifiable today by the two-set design this replaces: each panel held
     /// its own `expanded: HashSet<RowKey>`, keyed by the session-local id, and
@@ -510,6 +518,103 @@ mod restoring_expansion {
                 panel.row_is_open(&RowKey::WorktreeAgents(id_b, Arc::clone(&checkout)), cx),
                 "a second panel over the same checkout, under a different \
                  RepositoryId, must see what the first one opened"
+            );
+        });
+    }
+
+    /// The same repository as `repo_data`, seen from one of its linked
+    /// worktrees rather than from its original checkout.
+    ///
+    /// That is what the workspace on the far side of a checkout switch holds:
+    /// a fresh `RepositoryId`, `work_directory_abs_path` naming the checkout it
+    /// was opened at, and `original_repo_abs_path` still naming the repository
+    /// (`git_store.rs`, where `is_main_worktree` is exactly the comparison of
+    /// the two).
+    fn repo_data_standing_in(id: RepositoryId, checkout: &str) -> RepoData {
+        RepoData {
+            path: Arc::from(Path::new(checkout)),
+            ..repo_data(id)
+        }
+    }
+
+    /// The defect the reader reported: they open a checkout's agent list, switch
+    /// to another checkout, and find it closed again.
+    ///
+    /// The record was keyed by `work_directory_abs_path` -- the checkout the
+    /// panel is open at -- so every row re-keyed itself the moment the reader
+    /// switched, and nothing written on one side could be found from the other.
+    /// Keying by the repository's anchor is what makes the question the same
+    /// question from both.
+    #[gpui::test]
+    async fn an_agent_list_opened_in_one_checkout_is_still_open_from_another(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel_a, cx) = panel(cx).await;
+        let panel_b = second_panel_over_the_same_workspace(&panel_a, cx);
+
+        let id_a = RepositoryId(1);
+        let id_b = RepositoryId(2);
+        let opened: Arc<Path> = Arc::from(Path::new("/repos/zode/wt-a"));
+
+        panel_a.update(cx, |panel, _| {
+            panel.repos = vec![repo_data_standing_in(id_a, "/repos/zode/wt-a")];
+        });
+        panel_a.update(cx, |panel, cx| {
+            panel.toggle_row(RowKey::WorktreeAgents(id_a, Arc::clone(&opened)), cx);
+        });
+        panel_a.read_with(cx, |panel, cx| {
+            assert!(
+                panel.row_is_open(&RowKey::WorktreeAgents(id_a, Arc::clone(&opened)), cx),
+                "the list must be open where the reader opened it -- without this                  the assertion below could pass on a record that holds nothing"
+            );
+        });
+
+        // The switch: a second workspace over the same repository, open at a
+        // different checkout.
+        panel_b.update(cx, |panel, _| {
+            panel.repos = vec![repo_data_standing_in(id_b, "/repos/zode/wt-b")];
+        });
+
+        panel_b.read_with(cx, |panel, cx| {
+            assert!(
+                panel.row_is_open(&RowKey::WorktreeAgents(id_b, Arc::clone(&opened)), cx),
+                "an agent list opened while standing in one checkout must still                  be open after switching to another"
+            );
+        });
+    }
+
+    /// The same property for the other polarity. A repository the reader closed
+    /// stays closed across a switch -- and, more to the point, one they never
+    /// closed does not come back closed because some other checkout's namespace
+    /// happened to hold an entry for it.
+    #[gpui::test]
+    async fn a_repository_closed_in_one_checkout_is_closed_from_another(cx: &mut TestAppContext) {
+        let (panel_a, cx) = panel(cx).await;
+        let panel_b = second_panel_over_the_same_workspace(&panel_a, cx);
+
+        let id_a = RepositoryId(1);
+        let id_b = RepositoryId(2);
+
+        panel_a.update(cx, |panel, _| {
+            panel.repos = vec![repo_data_standing_in(id_a, "/repos/zode/wt-a")];
+        });
+        panel_b.update(cx, |panel, _| {
+            panel.repos = vec![repo_data_standing_in(id_b, "/repos/zode/wt-b")];
+        });
+
+        panel_b.read_with(cx, |panel, cx| {
+            assert!(
+                panel.row_is_open(&RowKey::Repo(id_b), cx),
+                "nothing has been closed yet, so the repository draws open"
+            );
+        });
+
+        panel_a.update(cx, |panel, cx| panel.toggle_row(RowKey::Repo(id_a), cx));
+
+        panel_b.read_with(cx, |panel, cx| {
+            assert!(
+                !panel.row_is_open(&RowKey::Repo(id_b), cx),
+                "closing a repository in one checkout must close it in the others"
             );
         });
     }
@@ -1001,6 +1106,7 @@ mod hold_known_agents {
         RepoData {
             id,
             path: Arc::from(Path::new(path)),
+            anchor: Arc::from(Path::new(path)),
             name: path
                 .rsplit('/')
                 .next()
