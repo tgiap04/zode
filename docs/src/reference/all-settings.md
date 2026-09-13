@@ -5093,7 +5093,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `sort_by_path`: Whether to sort entries in the panel by path or by status (the default)
 - `collapse_untracked_diff`: Whether to collapse untracked files in the diff panel
 - `scrollbar`: When to show the scrollbar in the git panel
-- `starts_open`: Whether the git panel should open on startup
+- `starts_open`: Whether the git panel should open on startup, when the workspace has no saved dock state of its own yet. Once a dock has restored a record — including one that has the panel closed — that record wins and `starts_open` no longer applies.
 
 ## Git Worktree Directory
 

@@ -168,3 +168,27 @@ it reasoned about "size" without asking _which axis_, in a dock that divides alo
 the other.
 
 When a comment justifies excluding a case, the exclusion is the part to check.
+
+## Correction — 2026-09-13
+
+**This entry recorded a latent issue as dormant. That observation is no longer accurate.**
+
+The claim at line 128–129 and 135: "Only `project_panel` defaults to `starts_open: true`. It does not bite today because it is always added first."
+
+**What is true:** The original observation is correct — `starts_open` *can* collapse a restored stack, the mechanism is as described, and the ordering in the `futures::join!` is load-bearing and untested.
+
+**What is false:** The assertion that this is dormant. Five panels now override `starts_open`, three read it from a setting, and three of those sit on the stacking left dock:
+
+| Panel | Source | Default |
+|---|---|---|
+| `project_panel` | setting + visible-worktree check | `true` |
+| `git_panel` | setting | `false` |
+| `branch_panel` | setting | `false` |
+| `outline_panel` | `self.active` | false at construction |
+| `session_history` | hard `false` | — |
+
+A user who sets `"branch_panel": { "starts_open": true }` in their `settings.json` gets a `starts_open` panel added *after* the project panel. Because the left dock stacks, `activate_panel`'s exclusive `visible = ix == panel_ix` collapses the entire column to the branch panel. This defect is reachable by user configuration and is not latent.
+
+**Closed by:** Phase 5 of the 2026-09-13 work (commit hash to be assigned on merge), which gates the force-open on whether a dock record was found: `if !restored && panel.read(cx).starts_open(..)`. This removes dependence on the implicit ordering and also honors the user's choice to close a panel.
+
+**Test counts:** This entry recorded 780 tests green with workspace 268, git_ui 174. Current totals are workspace 291, git_ui 202, agent_ui 95 (all green as of 2026-09-13). The increase reflects new tests for the defects closed in the parallel phase work.
