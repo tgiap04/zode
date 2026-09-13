@@ -16,7 +16,7 @@ use terminal::Terminal;
 use terminal_view::TerminalView;
 use ui::{Tooltip, prelude::*};
 use workspace::{Pane, Workspace};
-use zed_actions::agent::AgentViewMode;
+use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
 use std::process::ExitStatus;
 use util::ResultExt as _;
@@ -64,6 +64,12 @@ pub struct AgentView {
     /// still running unprompted. An argv cannot be edited after the fact and
     /// this field must not either.
     bypassed: bool,
+    /// What this tab was *asked* for when it was opened, kept for the life of
+    /// the tab so a retry after a missing binary asks for the same thing again.
+    ///
+    /// A request, where `bypassed` is an outcome: this says what was wanted,
+    /// that says what the argv actually carried.
+    requested_prompts: PermissionPrompts,
     rename_editor: Option<Entity<Editor>>,
     _rename_subscription: Option<Subscription>,
     mode: AgentViewMode,
@@ -186,7 +192,15 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_inner(workspace, agent, mode, false, window, cx);
+        Self::open_inner(
+            workspace,
+            agent,
+            mode,
+            false,
+            PermissionPrompts::AsConfigured,
+            window,
+            cx,
+        );
     }
 
     /// Same, but always starts a fresh session even if one is already running.
@@ -197,10 +211,11 @@ impl AgentView {
         workspace: &mut Workspace,
         agent: &str,
         mode: Option<AgentViewMode>,
+        prompts: PermissionPrompts,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_inner(workspace, agent, mode, true, window, cx);
+        Self::open_inner(workspace, agent, mode, true, prompts, window, cx);
     }
 
     /// Starts a fresh thread in a pane the caller names.
@@ -216,7 +231,16 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_into(workspace, agent, None, true, Some(pane), window, cx);
+        Self::open_into(
+            workspace,
+            agent,
+            None,
+            true,
+            PermissionPrompts::AsConfigured,
+            Some(pane),
+            window,
+            cx,
+        );
     }
 
     fn open_inner(
@@ -224,10 +248,13 @@ impl AgentView {
         agent: &str,
         mode: Option<AgentViewMode>,
         always_new: bool,
+        prompts: PermissionPrompts,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_into(workspace, agent, mode, always_new, None, window, cx);
+        Self::open_into(
+            workspace, agent, mode, always_new, prompts, None, window, cx,
+        );
     }
 
     /// The one body behind every entry point above.
@@ -239,6 +266,7 @@ impl AgentView {
         agent: &str,
         mode: Option<AgentViewMode>,
         always_new: bool,
+        prompts: PermissionPrompts,
         destination: Option<Entity<Pane>>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
@@ -294,6 +322,7 @@ impl AgentView {
                             project,
                             workspace.weak_handle(),
                             origin,
+                            prompts,
                             window,
                             cx,
                         )
@@ -411,6 +440,7 @@ impl AgentView {
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
         origin: SessionOrigin,
+        prompts: PermissionPrompts,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -420,6 +450,7 @@ impl AgentView {
             agent,
             custom_name: None,
             bypassed: false,
+            requested_prompts: prompts,
             rename_editor: None,
             _rename_subscription: None,
             mode,
@@ -468,6 +499,7 @@ impl AgentView {
                             project,
                             weak_workspace,
                             origin,
+                            PermissionPrompts::AsConfigured,
                             window,
                             cx,
                         )
@@ -507,6 +539,7 @@ impl AgentView {
             agent,
             custom_name: None,
             bypassed: false,
+            requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
             _rename_subscription: None,
             mode,
@@ -874,6 +907,7 @@ impl AgentView {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
         let intent = self.origin.intent.clone();
+        let prompts = self.requested_prompts;
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
@@ -943,19 +977,19 @@ impl AgentView {
             // and the spawn come to disagree about which checkout this is.
             let cwd = launch_cwd(session.as_ref(), default_cwd);
 
-            let extra_args = match resolve_bypass(&agent, &binary, cwd.as_deref(), &store, cx).await
-            {
-                Ok(extra_args) => extra_args,
-                Err(refusal) => {
-                    this.update(cx, |this, cx| {
-                        this.state = State::Failed(refusal);
-                        cx.emit(AgentViewEvent::UpdateTab);
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
+            let extra_args =
+                match resolve_bypass(&agent, &binary, cwd.as_deref(), prompts, &store, cx).await {
+                    Ok(extra_args) => extra_args,
+                    Err(refusal) => {
+                        this.update(cx, |this, cx| {
+                            this.state = State::Failed(refusal);
+                            cx.emit(AgentViewEvent::UpdateTab);
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
 
             let extra_args_taken = extra_args.clone();
             let terminal = project
@@ -1330,18 +1364,31 @@ async fn resolve_bypass(
     agent: &AgentId,
     binary: &std::path::Path,
     cwd: Option<&std::path::Path>,
+    prompts: PermissionPrompts,
     store: &Entity<AgentServerStore>,
     cx: &mut AsyncWindowContext,
 ) -> Result<Vec<String>, SharedString> {
-    let Some(cwd) = cwd else {
-        return Ok(Vec::new());
+    // Only `AsConfigured` has to go and ask the checkout; a launch the reader
+    // picked by name has already said what it wants. Which is also why the
+    // missing-cwd guard lives in that arm alone -- a one-off must not quietly
+    // fall back to prompting because this window happens to have no folder
+    // open, since the reader would then watch it stop and wait with no reason
+    // given.
+    let wanted = match prompts {
+        PermissionPrompts::SkipOnce => true,
+        PermissionPrompts::AsConfigured => {
+            let Some(cwd) = cwd else {
+                return Ok(Vec::new());
+            };
+            let bypass = cx.update(|_, cx| PermissionBypassStore::global(cx));
+            let Ok(bypass) = bypass else {
+                return Ok(Vec::new());
+            };
+            bypass.update(cx, |bypass, cx| bypass.load(cx)).await;
+            bypass.read_with(cx, |bypass, _| bypass.is_enabled(cwd))
+        }
     };
-    let bypass = cx.update(|_, cx| PermissionBypassStore::global(cx));
-    let Ok(bypass) = bypass else {
-        return Ok(Vec::new());
-    };
-    bypass.update(cx, |bypass, cx| bypass.load(cx)).await;
-    if !bypass.read_with(cx, |bypass, _| bypass.is_enabled(cwd)) {
+    if !wanted {
         return Ok(Vec::new());
     }
 
@@ -1350,7 +1397,7 @@ async fn resolve_bypass(
         .unwrap_or_else(|| agent.as_ref());
 
     let Some(flag) = builtin_agent(agent.as_ref()).and_then(|builtin| builtin.bypass_flag) else {
-        return Err(no_mapping_refusal(name));
+        return Err(no_mapping_refusal(name, prompts));
     };
 
     let check = store
@@ -1369,12 +1416,21 @@ async fn resolve_bypass(
 /// and is the dangerous one: the reader turned the prompts off on purpose, and
 /// an agent that goes on asking anyway is a failure they find out about by
 /// watching it stall.
-fn no_mapping_refusal(name: &str) -> SharedString {
-    format!(
-        "{name} has no flag for running without permission prompts, and this \
-         checkout is set to run agents without them. Turn that off for this \
-         checkout to start {name} here."
-    )
+fn no_mapping_refusal(name: &str, prompts: PermissionPrompts) -> SharedString {
+    match prompts {
+        // Named the checkout, because that is what the reader has to change.
+        PermissionPrompts::AsConfigured => format!(
+            "{name} has no flag for running without permission prompts, and this \
+             checkout is set to run agents without them. Turn that off for this \
+             checkout to start {name} here."
+        ),
+        // Nothing to turn off -- the request was this launch and no more, so
+        // the only move left is to start it the ordinary way.
+        PermissionPrompts::SkipOnce => format!(
+            "{name} has no flag for running without permission prompts, so it \
+             cannot be started without them. Start it normally instead."
+        ),
+    }
     .into()
 }
 
@@ -1622,6 +1678,11 @@ impl workspace::item::SerializableItem for AgentView {
                         project,
                         workspace,
                         origin,
+                        // A one-off is deliberately not written down, so a tab
+                        // that comes back after a restart comes back asking
+                        // whatever its checkout asks. Restoring "skip once" from
+                        // a row would make a choice for one launch outlive it.
+                        PermissionPrompts::AsConfigured,
                         window,
                         cx,
                     );
@@ -2015,15 +2076,39 @@ mod tests {
         );
     }
 
+    /// The safe value is the one you get by forgetting.
+    ///
+    /// `PermissionPrompts` is an enum rather than a `bool` for exactly this, and
+    /// the property is invisible in the type: flipping which arm carries
+    /// `#[default]` compiles, passes every other test here, and turns every
+    /// launch that never named a preference into one that skips the prompts.
+    #[test]
+    fn leaving_the_request_unsaid_keeps_the_prompts() {
+        assert_eq!(
+            PermissionPrompts::default(),
+            PermissionPrompts::AsConfigured,
+            "a launch that says nothing must follow the checkout, never skip"
+        );
+    }
+
     /// The one an implementer is most likely to get wrong, because launching
     /// plain looks like the forgiving choice and is the dangerous one.
     #[test]
     fn an_agent_with_no_mapped_flag_refuses_rather_than_launching_plain() {
-        let refusal = no_mapping_refusal("Some Agent");
+        let refusal = no_mapping_refusal("Some Agent", PermissionPrompts::AsConfigured);
         assert!(refusal.contains("Some Agent"));
         assert!(
             refusal.contains("Turn that off"),
             "the refusal must say what to do instead; got {refusal}"
+        );
+
+        // The one-off has no checkout setting behind it, so telling the reader
+        // to turn one off would send them looking for a control that is not the
+        // reason they were refused.
+        let once = no_mapping_refusal("Some Agent", PermissionPrompts::SkipOnce);
+        assert!(
+            !once.contains("Turn that off") && once.contains("Start it normally"),
+            "a one-off refusal must not point at the checkout setting; got {once}"
         );
     }
 
@@ -2271,6 +2356,7 @@ mod tests {
             display_name: "Claude Code".into(),
             custom_name: None,
             bypassed: false,
+            requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
             _rename_subscription: None,
             mode: AgentViewMode::Terminal,
@@ -2713,6 +2799,7 @@ mod tests {
             display_name: "Claude Code".into(),
             custom_name: None,
             bypassed: false,
+            requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
             _rename_subscription: None,
             mode: AgentViewMode::Terminal,
@@ -3137,6 +3224,7 @@ mod tests {
                     project.clone(),
                     workspace.downgrade(),
                     SessionOrigin::default(),
+                    PermissionPrompts::AsConfigured,
                     window,
                     cx,
                 )
@@ -3537,6 +3625,7 @@ mod tests {
                 workspace,
                 project::CLAUDE_CODE_AGENT_ID,
                 Some(AgentViewMode::Terminal),
+                PermissionPrompts::AsConfigured,
                 window,
                 cx,
             );
@@ -3689,6 +3778,7 @@ mod tests {
                     Box::new(zed_actions::agent::NewAgent {
                         agent: agent.id.to_string(),
                         mode: None,
+                        permission_prompts: Default::default(),
                     }),
                     cx,
                 )

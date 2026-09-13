@@ -50,7 +50,14 @@ pub fn init(cx: &mut App) {
             AgentView::open(workspace, action.agent.as_str(), action.mode, window, cx);
         });
         workspace.register_action(|workspace, action: &NewAgent, window, cx| {
-            AgentView::open_new(workspace, action.agent.as_str(), action.mode, window, cx);
+            AgentView::open_new(
+                workspace,
+                action.agent.as_str(),
+                action.mode,
+                action.permission_prompts,
+                window,
+                cx,
+            );
         });
         // What the rail button does, and the reason it is not `OpenAgent`: the
         // button is a toggle, and a lit toggle that does nothing when pressed

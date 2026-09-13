@@ -4271,6 +4271,7 @@ fn default_render_tab_bar_buttons(
                                     zed_actions::agent::NewAgent {
                                         agent: agent.id.to_string(),
                                         mode: None,
+                                        permission_prompts: Default::default(),
                                     }
                                     .boxed_clone(),
                                 )

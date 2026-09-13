@@ -4,7 +4,7 @@ use agent_ui::AgentView;
 use gpui::{AnyElement, App, Context, Window};
 use project::AgentId;
 use ui::{ContextMenu, ContextMenuEntry, Tooltip, prelude::*, right_click_menu};
-use zed_actions::agent::{NewAgent, ToggleAgent};
+use zed_actions::agent::{NewAgent, PermissionPrompts, ToggleAgent};
 
 impl Sidebar {
     /// Whether a tab for this agent is open anywhere in the editor's panes.
@@ -54,7 +54,24 @@ impl Sidebar {
                 let new_session = NewAgent {
                     agent: agent.to_string(),
                     mode: None,
+                    permission_prompts: PermissionPrompts::AsConfigured,
                 };
+                // The same session, started without the permission prompts, and
+                // for this launch only: nothing is written down, and whatever
+                // the checkout itself is set to is left exactly as it was. The
+                // persistent form of this lives on the worktree row, where it
+                // belongs -- a checkout is what that setting is about.
+                //
+                // Offered only for an agent this editor knows a flag for.
+                // Drawing it otherwise would be an entry whose one outcome is
+                // the refusal `resolve_bypass` raises for a missing mapping.
+                let unprompted = project::builtin_agent(agent)
+                    .and_then(|builtin| builtin.bypass_flag)
+                    .map(|_| NewAgent {
+                        agent: agent.to_string(),
+                        mode: None,
+                        permission_prompts: PermissionPrompts::SkipOnce,
+                    });
 
                 // Lit whether or not its tab is the active one, and whichever pane it
                 // sits in: two agents can be open at once, so there is no single "the
@@ -70,13 +87,25 @@ impl Sidebar {
                 right_click_menu(("rail-agent-menu", ix))
                     .menu(move |window, cx| {
                         let new_session = new_session.clone();
+                        let unprompted = unprompted.clone();
                         ContextMenu::build(window, cx, move |menu, _window, _cx| {
-                            menu.item(
+                            let menu = menu.item(
                                 ContextMenuEntry::new("New Session")
                                     .icon(IconName::Plus)
                                     .icon_position(IconPosition::Start)
                                     .handler(move |window, cx| {
                                         window.dispatch_action(Box::new(new_session.clone()), cx);
+                                    }),
+                            );
+                            let Some(unprompted) = unprompted else {
+                                return menu;
+                            };
+                            menu.item(
+                                ContextMenuEntry::new("New Session Without Permission Prompts")
+                                    .icon(IconName::BoltFilled)
+                                    .icon_position(IconPosition::Start)
+                                    .handler(move |window, cx| {
+                                        window.dispatch_action(Box::new(unprompted.clone()), cx);
                                     }),
                             )
                         })
