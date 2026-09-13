@@ -106,6 +106,7 @@ dependencies = [
  "notifications",
  "paths",
  "project",
+ "serde",
  "serde_json",
  "settings",
  "task",

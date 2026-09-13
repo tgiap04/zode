@@ -634,7 +634,9 @@ mod restoring_expansion {
         state.update(cx, |state, cx| {
             state.seed_from_legacy(
                 crate::branch_panel::state::SerializedBranchPanel {
-                    expanded: [StoredKey::Repo(REPO_PATH.to_string())].into_iter().collect(),
+                    expanded: [StoredKey::Repo(REPO_PATH.to_string())]
+                        .into_iter()
+                        .collect(),
                     collapsed: Default::default(),
                     pinned: Vec::new(),
                     order: Vec::new(),
@@ -689,7 +691,8 @@ mod restoring_expansion {
         // toggle above, still gets the closed answer. The write is throttled
         // 500ms behind the toggle, so the clock has to be advanced before a
         // fresh reader can see it land.
-        cx.background_executor.advance_clock(Duration::from_millis(600));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(600));
         cx.run_until_parked();
 
         let fresh = cx.new(|_| CheckoutViewState::new());
@@ -732,7 +735,8 @@ mod restoring_expansion {
         // recorded closed -- so the closing assertion at the end of this test
         // passes just as well against a `toggle` that writes nothing at all.
         // This positive read is the half that can tell those apart.
-        cx.background_executor.advance_clock(Duration::from_millis(600));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(600));
         cx.run_until_parked();
         let seeded = cx.new(|_| CheckoutViewState::new());
         seeded.update(cx, |state, cx| state.load(cx)).await;
@@ -766,7 +770,8 @@ mod restoring_expansion {
 
         // The write is throttled 500ms behind the toggle; let it land before
         // a fresh reader asks for the record.
-        cx.background_executor.advance_clock(Duration::from_millis(600));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(600));
         cx.run_until_parked();
 
         let fresh = cx.new(|_| CheckoutViewState::new());
@@ -1038,7 +1043,6 @@ async fn a_menu_suppresses_tooltips_only_while_it_is_open(cx: &mut TestAppContex
             "a dismissed menu must hand the tooltips back"
         );
     });
-
 }
 
 /// Tests for `hold_known_agents` -- Defect 2: a checkout's agent list blinking
@@ -1107,12 +1111,7 @@ mod hold_known_agents {
             id,
             path: Arc::from(Path::new(path)),
             anchor: Arc::from(Path::new(path)),
-            name: path
-                .rsplit('/')
-                .next()
-                .unwrap_or(path)
-                .to_string()
-                .into(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string().into(),
             current_branch: Some("main".into()),
             branches: Vec::new(),
             agents: Default::default(),
@@ -1481,9 +1480,7 @@ mod hold_known_agents {
     /// bounded cache stops being bounded. T19 cannot see the difference: it has
     /// one repository, so both readings behave identically.
     #[gpui::test]
-    async fn a_warming_repository_does_not_hold_another_projects_entries(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_warming_repository_does_not_hold_another_projects_entries(cx: &mut TestAppContext) {
         let (panel, cx) = panel(cx).await;
         let settled = RepositoryId(1);
         let warming = RepositoryId(2);
@@ -1495,11 +1492,15 @@ mod hold_known_agents {
 
         // Both repositories listing their checkouts, both holding something.
         panel.update(cx, |panel, cx| {
-            let mut first = repo_data(settled, vec![worktree(REPO_PATH), worktree("/repos/zode/wt-a")]);
+            let mut first = repo_data(
+                settled,
+                vec![worktree(REPO_PATH), worktree("/repos/zode/wt-a")],
+            );
             first
                 .agents
                 .insert(removed.clone(), Arc::from([agent_entry("A")]));
-            let mut second = repo_data_at(warming, "/repos/other", vec![worktree("/repos/other/wt")]);
+            let mut second =
+                repo_data_at(warming, "/repos/other", vec![worktree("/repos/other/wt")]);
             second
                 .agents
                 .insert(warming_checkout.clone(), Arc::from([agent_entry("B")]));
@@ -1529,5 +1530,152 @@ mod hold_known_agents {
                  one project warming up cannot keep another project's entries alive"
             );
         });
+    }
+}
+
+/// The per-checkout agent permission bypass: what it takes to switch on, what it
+/// takes to switch off, and what the card shows once it is on.
+mod permission_bypass {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+    use project::git_store::RepositoryId;
+
+    use crate::branch_panel::render_tree::bypass_mark;
+    use crate::branch_panel::tree::RepoData;
+
+    use super::panel;
+
+    const ANCHOR: &str = "/repos/zode";
+    const CHECKOUT: &str = "/repos/zode/wt";
+
+    fn repo_data(id: RepositoryId) -> RepoData {
+        RepoData {
+            id,
+            path: Arc::from(std::path::Path::new(CHECKOUT)),
+            // Deliberately different from `path`: the record must be keyed off
+            // this, and a test where the two are equal cannot tell them apart.
+            anchor: Arc::from(std::path::Path::new(ANCHOR)),
+            name: "zode".into(),
+            current_branch: None,
+            branches: Vec::new(),
+            agents: Default::default(),
+            worktrees: Arc::from([]),
+        }
+    }
+
+    fn store(cx: &mut gpui::VisualTestContext) -> gpui::Entity<agent_ui::PermissionBypassStore> {
+        cx.update(|_, cx| agent_ui::PermissionBypassStore::global(cx))
+    }
+
+    /// Switching a safety control off is asked about, and a click the reader
+    /// took back must leave nothing behind.
+    #[gpui::test]
+    async fn declining_the_confirmation_writes_nothing(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        panel.update(cx, |panel, _| panel.repos = vec![repo_data(id)]);
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_agent_permission_bypass(id, PathBuf::from(CHECKOUT), window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.pending_prompt().is_some(),
+            "enabling must ask before it writes"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        store(cx).read_with(cx, |store, _| {
+            assert!(
+                !store.is_enabled(std::path::Path::new(CHECKOUT)),
+                "a declined confirmation must not switch the prompts off"
+            );
+        });
+    }
+
+    /// Accepting writes it -- and writes the repository's **anchor**, not the
+    /// checkout. Proven through `prune`, which is the only thing that reads the
+    /// anchor: pruning that repository with a live list that omits this checkout
+    /// must drop the entry. Had the checkout path been stored as the anchor, the
+    /// entry would not match this repository at all and would survive.
+    #[gpui::test]
+    async fn accepting_writes_the_repository_anchor(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        panel.update(cx, |panel, _| panel.repos = vec![repo_data(id)]);
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_agent_permission_bypass(id, PathBuf::from(CHECKOUT), window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Enable");
+        cx.run_until_parked();
+
+        let store = store(cx);
+        store.read_with(cx, |store, _| {
+            assert!(store.is_enabled(std::path::Path::new(CHECKOUT)));
+        });
+
+        store.update(cx, |store, cx| {
+            store.prune(
+                std::path::Path::new(ANCHOR),
+                &[PathBuf::from("/repos/zode/other")],
+                cx,
+            );
+            assert!(
+                !store.is_enabled(std::path::Path::new(CHECKOUT)),
+                "this repository's prune must reach the entry, which it can only \
+                 do if the anchor was stored rather than the checkout path"
+            );
+        });
+    }
+
+    /// Turning it back on has no friction. A prompt here would be friction in
+    /// the direction of staying unsafe.
+    #[gpui::test]
+    async fn disabling_takes_effect_without_a_prompt(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        let id = RepositoryId(1);
+        panel.update(cx, |panel, _| panel.repos = vec![repo_data(id)]);
+
+        store(cx).update(cx, |store, cx| {
+            store.set(
+                std::path::Path::new(CHECKOUT),
+                std::path::Path::new(ANCHOR),
+                true,
+                cx,
+            );
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.toggle_agent_permission_bypass(id, PathBuf::from(CHECKOUT), window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.pending_prompt().is_none(),
+            "switching the prompts back on must not itself prompt"
+        );
+        store(cx).read_with(cx, |store, _| {
+            assert!(!store.is_enabled(std::path::Path::new(CHECKOUT)));
+        });
+    }
+
+    /// Both halves in one test on purpose: an unconditional mark is the easy way
+    /// to make a one-sided version of this pass.
+    ///
+    /// **Holds the condition, not the render site.** The card is not built here,
+    /// so removing the `.children(super::bypass_mark(..))` call from
+    /// `worktree_card.rs` leaves this green. Said out loud because the name
+    /// promises more than the body asserts, which is this repo's recurring
+    /// failure.
+    #[test]
+    fn a_checkout_with_bypass_draws_the_mark_and_one_without_does_not() {
+        assert!(bypass_mark(true).is_some());
+        assert!(bypass_mark(false).is_none());
     }
 }

@@ -30,6 +30,11 @@ impl BranchPanel {
         let can_delete = !worktree.is_main;
         let label = worktree_label(worktree);
         let worktree = worktree.clone();
+        // Read here rather than inside the builder: the builder closure gets no
+        // `App`, and the entry has to draw the state it will toggle.
+        let bypass_on = agent_ui::PermissionBypassStore::global(cx)
+            .read(cx)
+            .is_enabled(&path);
 
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let pin = panel.clone();
@@ -67,6 +72,27 @@ impl BranchPanel {
                         }),
                 );
             }
+
+            // Directly under the "New {agent}" entries because it changes what
+            // they do, and nowhere else: this is the only menu whose subject is
+            // a checkout. Under an agent it would appear five times and mean
+            // five things depending on where the workspace happens to point.
+            let bypass = panel.clone();
+            let path_for_bypass = path.clone();
+            let menu = menu.item(
+                ContextMenuEntry::new("Run Agents Without Permission Prompts")
+                    .toggleable(IconPosition::Start, bypass_on)
+                    .handler(move |window, cx| {
+                        bypass.update(cx, |panel, cx| {
+                            panel.toggle_agent_permission_bypass(
+                                id,
+                                path_for_bypass.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    }),
+            );
 
             let menu = menu
                 .separator()
@@ -174,6 +200,70 @@ impl BranchPanel {
     /// changes, and that refusal is the last guard between a stray click and
     /// somebody's afternoon. The error it returns is shown rather than
     /// swallowed and retried with force.
+    /// Turns the per-checkout permission bypass on or off.
+    ///
+    /// Asks before switching it **on** and not before switching it off. Putting
+    /// friction on the way back to asking-for-permission would be friction in
+    /// the wrong direction.
+    pub(crate) fn toggle_agent_permission_bypass(
+        &mut self,
+        id: RepositoryId,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The repository's own anchor, never the checkout it is open at -- the
+        // record is pruned by repository, and `work_directory_abs_path` is a
+        // different directory in every checkout. See `RepoData::anchor`.
+        let Some(anchor) = self
+            .repos
+            .iter()
+            .find(|repo| repo.id == id)
+            .map(|repo| repo.anchor.clone())
+        else {
+            return;
+        };
+        let store = agent_ui::PermissionBypassStore::global(cx);
+
+        if store.read(cx).is_enabled(&path) {
+            store.update(cx, |store, cx| store.set(&path, &anchor, false, cx));
+            self.mark_stale(cx);
+            cx.notify();
+            return;
+        }
+
+        // Three clauses, and the middle one is the one readers get wrong: the
+        // scope is the checkout, but the agent's reach is the whole machine.
+        let detail = format!(
+            "{}\n\nAgents started in this checkout will not ask before they act.\n\nThey still run as you, with your credentials and your network access -- this limits where the setting applies, not what an agent can reach.\n\nOther checkouts are unaffected.",
+            path.display()
+        );
+        let prompt = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Run agents here without permission prompts?",
+            Some(&detail),
+            // Cancel second, so a stray Return does not switch off a safety
+            // control.
+            &["Enable", "Cancel"],
+            cx,
+        );
+
+        cx.spawn_in(window, async move |panel, cx| {
+            if prompt.await.ok() != Some(0) {
+                return;
+            }
+            panel
+                .update(cx, |panel, cx| {
+                    agent_ui::PermissionBypassStore::global(cx)
+                        .update(cx, |store, cx| store.set(&path, &anchor, true, cx));
+                    panel.mark_stale(cx);
+                    cx.notify();
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     fn confirm_delete_checkout(
         &mut self,
         id: RepositoryId,

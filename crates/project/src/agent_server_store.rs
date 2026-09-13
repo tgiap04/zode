@@ -2,7 +2,9 @@ use std::{any::Any, path::PathBuf, time::Duration};
 
 use anyhow::{Context as _, Result, bail};
 use collections::HashMap;
-use gpui::{AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, Task};
+use gpui::{
+    AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, Subscription, Task,
+};
 use remote::RemoteClient;
 use rpc::{
     AnyProtoClient, TypedEnvelope,
@@ -14,6 +16,7 @@ use settings::{RegisterSetting, SettingsStore};
 use util::{ResultExt as _, debug_panic};
 
 use crate::ProjectEnvironment;
+use crate::agent_bypass::{BypassCheck, CacheKey, PROBE_TIMEOUT};
 
 use crate::worktree_store::WorktreeStore;
 
@@ -119,6 +122,13 @@ pub struct BuiltinAgent {
     /// Install line for macOS/Linux and for Windows, taken from each vendor's docs.
     install_unix: &'static str,
     install_windows: &'static str,
+    /// The flag this CLI takes to stop asking before it acts, or `None` if it
+    /// has none.
+    ///
+    /// Deliberately has no `Default`: adding a sixth agent must not compile
+    /// until somebody has decided what its auto-approve posture is. The five
+    /// values below are not equivalent to each other -- see the two that say so.
+    pub bypass_flag: Option<&'static str>,
 }
 
 impl BuiltinAgent {
@@ -150,6 +160,7 @@ pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
         docs_url: "https://code.claude.com/docs/en/setup",
         install_unix: "curl -fsSL https://claude.ai/install.sh | bash",
         install_windows: "irm https://claude.ai/install.ps1 | iex",
+        bypass_flag: Some("--dangerously-skip-permissions"),
     },
     BuiltinAgent {
         id: CODEX_AGENT_ID,
@@ -158,6 +169,11 @@ pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
         docs_url: "https://developers.openai.com/codex/cli",
         install_unix: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
         install_windows: "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
+        // Not `--dangerously-bypass-approvals-and-sandbox`, which Codex's own
+        // help calls EXTREMELY DANGEROUS: this one stops the asking but keeps
+        // the workspace-write sandbox, which is the nearest thing to what the
+        // other four do, since none of them has a sandbox to drop.
+        bypass_flag: Some("--approve-for-me"),
     },
     BuiltinAgent {
         id: ANTIGRAVITY_AGENT_ID,
@@ -166,6 +182,7 @@ pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
         docs_url: "https://antigravity.google/docs/cli/getting-started/",
         install_unix: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
         install_windows: "irm https://antigravity.google/cli/install.ps1 | iex",
+        bypass_flag: Some("--dangerously-skip-permissions"),
     },
     BuiltinAgent {
         id: COPILOT_AGENT_ID,
@@ -174,6 +191,7 @@ pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
         docs_url: "https://docs.github.com/copilot/how-tos/copilot-cli",
         install_unix: "curl -fsSL https://gh.io/copilot-install | bash",
         install_windows: "winget install GitHub.Copilot",
+        bypass_flag: Some("--allow-all"),
     },
     BuiltinAgent {
         id: OPENCODE_AGENT_ID,
@@ -185,6 +203,10 @@ pub const BUILTIN_AGENTS: &[BuiltinAgent] = &[
         // Windows users to WSL and then list choco, scoop and npm. npm is the one
         // most likely to already work on a machine running this editor.
         install_windows: "npm install -g opencode-ai",
+        // Not the same posture as the other four, and the odd one out in this
+        // table: `--auto` auto-approves everything *except* what the user has
+        // explicitly denied, so a deny-list still holds under it.
+        bypass_flag: Some("--auto"),
     },
 ];
 
@@ -290,6 +312,9 @@ impl ExternalAgentEntry {
 pub struct AgentServerStore {
     state: AgentServerStoreState,
     pub external_agents: HashMap<AgentId, ExternalAgentEntry>,
+    /// Probe answers for this run. See `agent_bypass` for why this is keyed by
+    /// the binary on disk rather than by a version.
+    bypass_flags: crate::agent_bypass::BypassFlagCache,
 }
 
 pub struct AgentServersUpdated;
@@ -440,6 +465,7 @@ impl AgentServerStore {
             this.agent_servers_settings_changed(cx);
         })];
         let mut this = Self {
+            bypass_flags: Default::default(),
             state: AgentServerStoreState::Local {
                 project_environment,
                 downstream_client: None,
@@ -459,6 +485,7 @@ impl AgentServerStore {
         worktree_store: Entity<WorktreeStore>,
     ) -> Self {
         Self {
+            bypass_flags: Default::default(),
             state: AgentServerStoreState::Remote {
                 project_id,
                 upstream_client,
@@ -470,6 +497,7 @@ impl AgentServerStore {
 
     pub fn collab() -> Self {
         Self {
+            bypass_flags: Default::default(),
             state: AgentServerStoreState::Collab,
             external_agents: HashMap::default(),
         }
@@ -516,6 +544,95 @@ impl AgentServerStore {
         self.external_agents
             .get_mut(name)
             .map(|entry| entry.server.as_mut())
+    }
+
+    /// Whether `agent`'s installed binary still takes the flag this editor would
+    /// pass it to stop the permission prompts.
+    ///
+    /// Fails closed. Only `Present` may be read as permission to add the flag:
+    /// an agent with no mapping, an unreadable binary, a spawn that fails and a
+    /// probe that runs long all answer something else. See `agent_bypass` for
+    /// why a mapping that has gone stale has to surface here, as a refusal,
+    /// rather than as a launch that quietly goes on asking.
+    pub fn verify_bypass_flag(
+        &mut self,
+        agent: &AgentId,
+        binary: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<BypassCheck> {
+        let Some(flag) = builtin_agent(agent.as_ref()).and_then(|builtin| builtin.bypass_flag)
+        else {
+            return Task::ready(BypassCheck::Unprobed {
+                reason: format!("`{agent}` has no auto-approve flag recorded"),
+            });
+        };
+        let Some(key) = CacheKey::for_binary(&binary) else {
+            return Task::ready(BypassCheck::Unprobed {
+                reason: format!("could not read `{}`", binary.display()),
+            });
+        };
+        if let Some(present) = self.bypass_flags.get(&key) {
+            return Task::ready(Self::decide(present, flag, binary));
+        }
+
+        cx.spawn(async move |this, cx| {
+            let probe = cx.background_spawn({
+                let binary = binary.clone();
+                async move {
+                    let mut command = util::command::new_command(&binary);
+                    // Without this the 5s timer below only stops *waiting*: the
+                    // dropped future drops the `Child`, and a wedged `--help`
+                    // outlives the app, one per launch. `kill_on_drop` defaults
+                    // to false (`util::command`), which is why every other
+                    // spawn site in this tree sets it.
+                    command.arg("--help").kill_on_drop(true);
+                    command.output().await
+                }
+            });
+            let timer = cx.background_executor().timer(PROBE_TIMEOUT);
+
+            let output = match futures::future::select(Box::pin(probe), Box::pin(timer)).await {
+                futures::future::Either::Left((output, _)) => output,
+                // The probe loses the race. Refusing beats holding a launch open
+                // on a binary that is not answering.
+                futures::future::Either::Right(_) => {
+                    return BypassCheck::Unprobed {
+                        reason: format!(
+                            "`{} --help` did not answer within {}s",
+                            binary.display(),
+                            PROBE_TIMEOUT.as_secs()
+                        ),
+                    };
+                }
+            };
+
+            let output = match output {
+                Ok(output) => output,
+                // A spawn that failed is not evidence the flag is gone, and it is
+                // certainly not evidence it is there.
+                Err(error) => {
+                    return BypassCheck::Unprobed {
+                        reason: format!("could not run `{} --help`: {error}", binary.display()),
+                    };
+                }
+            };
+
+            let present = crate::agent_bypass::flag_present(
+                &crate::agent_bypass::help_text(&output.stdout, &output.stderr),
+                flag,
+            );
+            this.update(cx, |this, _| this.bypass_flags.insert(key, present))
+                .log_err();
+            Self::decide(present, flag, binary)
+        })
+    }
+
+    fn decide(present: bool, flag: &'static str, binary: PathBuf) -> BypassCheck {
+        if present {
+            BypassCheck::Present
+        } else {
+            BypassCheck::Absent { flag, binary }
+        }
     }
 
     /// Locates the agent's own CLI — the one terminal mode runs, and the one the
@@ -1018,7 +1135,7 @@ mod tests {
     use super::*;
     use crate::worktree_store::{WorktreeIdCounter, WorktreeStore};
     use fs::Fs;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
     use settings::Settings as _;
     use std::sync::Arc;
 
@@ -1212,5 +1329,61 @@ mod tests {
             builtin_agent(CLAUDE_CODE_AGENT_ID).map(|builtin| builtin.binary),
             Some("claude")
         );
+    }
+
+    /// The sealed decision, made mechanical.
+    ///
+    /// Codex ships two auto-approve flags and they are not interchangeable: this
+    /// one keeps the workspace-write sandbox, the other drops it and Codex's own
+    /// help calls that EXTREMELY DANGEROUS. Pointing this mapping at the second
+    /// would hand every Codex user the more dangerous posture from a toggle that
+    /// says nothing about sandboxes.
+    #[test]
+    fn codex_maps_to_the_sandboxed_variant() {
+        let codex = builtin_agent(CODEX_AGENT_ID).expect("codex is a builtin");
+        assert_eq!(codex.bypass_flag, Some("--approve-for-me"));
+        assert_ne!(
+            codex.bypass_flag,
+            Some("--dangerously-bypass-approvals-and-sandbox"),
+            "the no-sandbox variant is deliberately not offered"
+        );
+    }
+
+    /// opencode is the odd one out and must stay visibly so.
+    ///
+    /// `--auto` auto-approves everything *except* what the user explicitly
+    /// denied, so a deny-list still holds under it. The other four drop the
+    /// asking outright. Giving opencode one of their spellings would be a claim
+    /// that the five postures are the same, which they are not.
+    #[test]
+    fn opencode_is_not_flattened_into_the_others_posture() {
+        let opencode = builtin_agent(OPENCODE_AGENT_ID).expect("opencode is a builtin");
+        assert_eq!(opencode.bypass_flag, Some("--auto"));
+        for other in [
+            CLAUDE_CODE_AGENT_ID,
+            ANTIGRAVITY_AGENT_ID,
+            COPILOT_AGENT_ID,
+            CODEX_AGENT_ID,
+        ] {
+            assert_ne!(
+                builtin_agent(other).and_then(|agent| agent.bypass_flag),
+                opencode.bypass_flag,
+                "`{other}` must not share opencode's flag"
+            );
+        }
+    }
+
+    /// A sixth agent cannot compile without a value, but it can compile with
+    /// `None`. This is what stops `None` being used as "decide later".
+    #[test]
+    fn every_builtin_has_a_decided_posture() {
+        for agent in BUILTIN_AGENTS {
+            assert!(
+                agent.bypass_flag.is_some(),
+                "`{}` has no auto-approve posture recorded; if it genuinely has \
+                 no such flag, say so here rather than leaving it undecided",
+                agent.id
+            );
+        }
     }
 }

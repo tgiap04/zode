@@ -46,9 +46,15 @@ impl BranchPanel {
             // Registering an observe does not read the entity, so it is safe
             // here where a `read` inside this closure would panic -- see the
             // note on the git store subscription below.
-            subscriptions.push(
-                cx.observe(&checkout_state, |panel: &mut Self, _, cx| panel.mark_stale(cx)),
-            );
+            subscriptions.push(cx.observe(&checkout_state, |panel: &mut Self, _, cx| {
+                panel.mark_stale(cx)
+            }));
+            // Same reason, for the same kind of record: one process-global store
+            // shared by every panel is only observably shared if the panels
+            // watch it. Without this, enabling a bypass in one window leaves the
+            // other window's card unmarked until something unrelated redraws it.
+            let bypass = agent_ui::PermissionBypassStore::global(cx);
+            subscriptions.push(cx.observe(&bypass, |panel: &mut Self, _, cx| panel.mark_stale(cx)));
 
             let mut panel = Self {
                 workspace: workspace_handle,
@@ -103,8 +109,16 @@ impl BranchPanel {
         // "Latent, recorded, not fixed" #1. Removing this await is a change to
         // dock restore behaviour, not a cleanup.
         let shared_load = checkout_state.update(&mut cx, |state, cx| state.load(cx));
+        // The panel draws the permission-bypass mark and builds the menu entry
+        // from this record, so it has to be read here too. Awaiting only
+        // `checkout_state` left the card dark and the menu unchecked for a
+        // bypassed checkout after every restart, while the launch path -- which
+        // does its own load -- went on appending the flag.
+        let bypass = cx.update(|_, cx| agent_ui::PermissionBypassStore::global(cx))?;
+        let bypass_load = bypass.update(&mut cx, |store, cx| store.load(cx));
         let legacy = SerializedBranchPanel::load(&workspace, &mut cx).await;
         shared_load.await;
+        bypass_load.await;
 
         // Offered only after the shared read landed: `seed_from_legacy` itself
         // no-ops once a shared record was found, but that flag is only correct
@@ -321,6 +335,10 @@ impl BranchPanel {
             let anchor = repo.anchor.clone();
             self.checkout_state
                 .update(cx, |state, cx| state.prune(&anchor, &live, cx));
+            // Same anchor, same live list: a checkout that stops existing should
+            // not keep a permission bypass recorded against its path.
+            agent_ui::PermissionBypassStore::global(cx)
+                .update(cx, |store, cx| store.prune(&anchor, &live, cx));
         }
     }
 
@@ -462,7 +480,11 @@ impl BranchPanel {
     /// instead of paying for a fresh scan of `self.repos`.
     #[cfg(test)]
     pub(crate) fn row_is_open(&self, key: &RowKey, cx: &App) -> bool {
-        let Some(repo) = self.repos.iter().find(|repo| repo.id == key.repository_id()) else {
+        let Some(repo) = self
+            .repos
+            .iter()
+            .find(|repo| repo.id == key.repository_id())
+        else {
             return matches!(key, RowKey::Repo(_));
         };
         let anchor = repo.anchor.to_string_lossy();

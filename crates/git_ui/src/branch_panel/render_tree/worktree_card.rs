@@ -53,6 +53,9 @@ impl BranchPanel {
         let path: SharedString = worktree.path.display().to_string().into();
         let is_current = self.is_current_checkout(worktree, cx);
         let is_pinned = self.pinned(cx).contains(&worktree.path);
+        let bypass_on = agent_ui::PermissionBypassStore::global(cx)
+            .read(cx)
+            .is_enabled(&worktree.path);
         let toggle_key = row.toggle_key();
         let switch_to = worktree.clone();
         let menu_for = worktree.clone();
@@ -115,6 +118,7 @@ impl BranchPanel {
                             // window is in is already said by the dot and the
                             // background, while which one is the repository's
                             // own is a fact about the repository.
+                            .children(super::bypass_mark(bypass_on))
                             .when(is_pinned, |this| {
                                 this.child(
                                     Icon::new(IconName::Pin)

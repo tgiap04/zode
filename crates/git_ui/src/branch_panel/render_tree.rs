@@ -12,6 +12,29 @@ use crate::branch_panel::tree::TreeRow;
 mod agent;
 mod worktree_card;
 
+/// The mark a checkout carries once agents in it stop asking before they act.
+///
+/// `IconName::Warning` in `Color::Error` and not `LockOutlined`, which reads as
+/// "locked" -- the opposite of what is true here. There is no shield-off glyph
+/// in `crates/icons`, and this is not the change that adds one.
+///
+/// Lives here rather than in `worktree_card` only because that file was already
+/// within fifteen lines of the 200-line guidance.
+pub(super) fn bypass_mark(enabled: bool) -> Option<impl IntoElement> {
+    enabled.then(|| {
+        div()
+            .id("agent-permission-bypass")
+            .child(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::XSmall)
+                    .color(Color::Error),
+            )
+            .tooltip(Tooltip::text(
+                "Agents run in this checkout without permission prompts",
+            ))
+    })
+}
+
 impl BranchPanel {
     pub(crate) fn render_row(
         &self,
