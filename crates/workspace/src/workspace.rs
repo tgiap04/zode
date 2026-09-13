@@ -2572,8 +2572,18 @@ impl Workspace {
         });
     }
 
+    /// Must read the same entry `render_dock` measures the column from --
+    /// `size_governing_panel`, not `active_panel`. Those disagree once the
+    /// active panel is not entry 0 (`Dock::size_governing_index`), and this is
+    /// the only route in the tree that converts a panel between fixed and
+    /// flexible width, so seeding that conversion from the wrong panel is a
+    /// silent unit mismatch rather than a visible one. The `active_panel`
+    /// fallback only matters when `panel_entries` is empty, where both calls
+    /// return `None` anyway.
     fn dock_size(&self, dock: &Dock, window: &Window, cx: &App) -> Option<Pixels> {
-        let panel = dock.active_panel()?;
+        let panel = dock
+            .size_governing_panel()
+            .or_else(|| dock.active_panel())?;
         let size_state = dock
             .stored_panel_size_state(panel.as_ref())
             .unwrap_or_default();
@@ -14138,6 +14148,105 @@ mod tests {
             }),
             Some(px(420.)),
             "the drag must reach the entry the column's width is read back from"
+        );
+    }
+
+    /// The one control that converts a panel between fixed and flexible width
+    /// has to read the same entry `render_dock` measures the column from, or
+    /// the conversion is seeded from a size nobody is drawing.
+    ///
+    /// Entry 0 owns the column's extent (`size_governing_panel`); the panel
+    /// merely showing (`active_panel`) is a different entry once it is not
+    /// entry 0. `toggle_dock_panel_flexible_size` is the only route in the
+    /// tree that switches a panel between the two units, so if `dock_size`
+    /// reads the wrong one, the user gets a fixed-to-flex conversion seeded
+    /// from a panel they never resized.
+    #[gpui::test]
+    async fn the_flex_toggle_reads_the_panel_the_column_is_measured_from(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(1200.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Entry 0 owns the column's extent.
+            let primary = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.default_size = px(240.);
+                panel
+            });
+            workspace.add_panel(primary, window, cx);
+            // Entry 1 is the one actually showing, with a different extent so
+            // reading the wrong entry is observable.
+            let second = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 101, cx);
+                panel.default_size = px(360.);
+                panel
+            });
+            workspace.add_panel(second, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            workspace.left_dock.update(cx, |dock, cx| {
+                dock.activate_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // The two candidate widths must actually convert to two different
+        // flex values, or the assertion below cannot distinguish which
+        // panel's extent seeded the conversion.
+        let (flex_from_governing, flex_from_active) =
+            workspace.update_in(cx, |workspace, window, cx| {
+                (
+                    workspace.dock_flex_for_size(DockPosition::Left, px(240.), window, cx),
+                    workspace.dock_flex_for_size(DockPosition::Left, px(360.), window, cx),
+                )
+            });
+        assert_ne!(
+            flex_from_governing, flex_from_active,
+            "the two candidate widths must convert to different flex values or the test proves nothing"
+        );
+
+        let second_panel = workspace.update_in(cx, |workspace, _window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .visible_panel()
+                .expect("the second panel should be showing")
+                .clone()
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left_dock = workspace.left_dock.clone();
+            workspace.toggle_dock_panel_flexible_size(
+                &left_dock,
+                second_panel.as_ref(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let stored_flex = workspace.update_in(cx, |workspace, _window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .stored_panel_size_state(second_panel.as_ref())
+                .and_then(|state| state.flex)
+        });
+
+        assert_eq!(
+            stored_flex, flex_from_governing,
+            "the flex toggle must seed its conversion from entry 0, the panel `render_dock` \
+             measures the column from -- not from the panel merely showing"
         );
     }
 
