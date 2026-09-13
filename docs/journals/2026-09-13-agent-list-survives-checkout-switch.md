@@ -15,22 +15,24 @@ Two user reports landed hours apart. A checkout's open agent list snapped shut e
 
 The fix does not require a third key or a migration path that readers must detect. The record moves from `BranchPanel-{workspace_id}` to a single global `BranchPanel`, keyed only on path. One process-global entity owns it — following `SessionStore`'s precedent — because two panels live at once in a `MultiWorkspace` and two private copies would clobber each other's writes. Legacy records stay on disk undeleted, readable as a fallback while the shared record has never been found, so a downgraded build still finds its state.
 
-**Defect 2 sting is different, more subtle:** The list comes back, sure, but for a frame or two the control itself *vanishes*. A moment later it reappears. This was not a rebuild cycle or a docked status — it was a blink-out. The reason splits into two parts. Workspace-local tabs (open agents) are only visible to that workspace. After a switch, the new panel cannot see the agent running in the old workspace. The session index (process-global but eventually consistent) takes time to re-read disk when a new panel is created. So there is a real window where the list is empty — and `build_rows:79` had a contract: `expanded: has_agents && expanded(..)`. An empty list forces closed, and `render_tree/agent.rs:31` had another: if the control's list is empty, return `None`. The control deleted itself rather than closing.
+**Defect 2 sting is different, more subtle:** The list comes back, sure, but for a frame or two the control itself _vanishes_. A moment later it reappears. This was not a rebuild cycle or a docked status — it was a blink-out. The reason splits into two parts. Workspace-local tabs (open agents) are only visible to that workspace. After a switch, the new panel cannot see the agent running in the old workspace. The session index (process-global but eventually consistent) takes time to re-read disk when a new panel is created. So there is a real window where the list is empty — and `build_rows:79` had a contract: `expanded: has_agents && expanded(..)`. An empty list forces closed, and `render_tree/agent.rs:31` had another: if the control's list is empty, return `None`. The control deleted itself rather than closing.
 
-The fix holds the last non-empty list in memory while the session index re-reads. A separate pass before `build_rows`, gated on whether a scan is in flight: if yes and the result is empty, use the held list; if no and the result is empty, drop the held entry and believe the emptiness. The held entries live in memory only, not persisted to disk — the key-value store describes what *the reader decided*, not what *the panel last saw*.
+The fix holds the last non-empty list in memory while the session index re-reads. A separate pass before `build_rows`, gated on whether a scan is in flight: if yes and the result is empty, use the held list; if no and the result is empty, drop the held entry and believe the emptiness. The held entries live in memory only, not persisted to disk — the key-value store describes what _the reader decided_, not what _the panel last saw_.
 
-**Defect 3 was latent until configuration made it live:** A panel with `starts_open: true` added *after* a dock restore would force itself visible by setting `entry.visible = ix == panel_ix` for every entry (`dock.rs:1096-1098`). On a stacking dock like the left rail, this collapses the whole column to that one panel. The 2026-09-11 journal said this was dormant because only `project_panel` had `starts_open: true` and it was always added first. That's false now: five panels override it, three read it from a setting, and three of those sit on the stacking left dock. A user who sets `"branch_panel": { "starts_open": true }` in their config gets this today. The fix: gate the force-open on a fresh workspace. The line checks `restore_state`'s return value (which was previously discarded) — if a record was found, honor it instead of `starts_open`. One line, but changes restore behavior for every workspace, so it lands alone.
+**Defect 3 was latent until configuration made it live:** A panel with `starts_open: true` added _after_ a dock restore would force itself visible by setting `entry.visible = ix == panel_ix` for every entry (`dock.rs:1096-1098`). On a stacking dock like the left rail, this collapses the whole column to that one panel. The 2026-09-11 journal said this was dormant because only `project_panel` had `starts_open: true` and it was always added first. That's false now: five panels override it, three read it from a setting, and three of those sit on the stacking left dock. A user who sets `"branch_panel": { "starts_open": true }` in their config gets this today. The fix: gate the force-open on a fresh workspace. The line checks `restore_state`'s return value (which was previously discarded) — if a record was found, honor it instead of `starts_open`. One line, but changes restore behavior for every workspace, so it lands alone.
 
 ## Technical Details
 
 ### The evidence is in the code
 
 **Defect 1:**
+
 - `state.rs:122-128` — the old key: `format!("{BRANCH_PANEL_KEY}-{id:?}")` over `workspace.database_id()`
 - `checkout_state.rs:46-56` (new) — the struct holds `expanded`/`collapsed`/`pinned`/`order` once for the process
 - `lifecycle.rs` (modified) — `BranchPanel::load` awaits `CheckoutViewState::load(cx)`, which reads `BRANCH_PANEL_KEY` without an id suffix
 
 **Defect 2:**
+
 - `data.rs:173-184` — open tabs come only from `self.workspace.items_of_type::<ItemView>`
 - `session_store.rs:94-115` — the index's `refresh` sets `scanning` synchronously inside the method
 - `panel.rs` (modified) — `last_known_agents: HashMap<Arc<Path>, Arc<[AgentEntry]>>` field, initialized in `new`
@@ -38,6 +40,7 @@ The fix holds the last non-empty list in memory while the session index re-reads
 - `data.rs:observe_agent_tabs` (modified) — compares pre-removal open agent count against live `AgentView` count; requests `session_store.refresh(cx)` only on a decrease
 
 **Defect 3:**
+
 - `dock.rs:997-1015` — `let restored = self.restore_state(..); if !restored && panel.read(cx).starts_open(..) { activate_panel(..) }`
 - `workspace.rs:14668–14700` (test harness) — `restoring_a_dock_does_not_read_the_workspace_it_is_inside` already had the setup for testing this
 
@@ -117,7 +120,7 @@ assert!(!state.is_open(&stored), "a fresh read must still show it closed");
 
 It read rigorous. It was not. `is_open` answers `false` for a key that was **never recorded** exactly as readily as for one recorded closed, so the assertion held just as well against a `toggle` that wrote nothing at all. Deleting the single `schedule_write` line left the test green.
 
-The fix was a *positive* read earlier in the same test — the record must first be seen to come back **open** — because that is the only assertion that distinguishes "persisted correctly" from "persistence absent". The general shape to distrust: any assertion satisfied by the empty, absent, default or zero value of what it is inspecting. It is not testing the mechanism; it is agreeing with the default.
+The fix was a _positive_ read earlier in the same test — the record must first be seen to come back **open** — because that is the only assertion that distinguishes "persisted correctly" from "persistence absent". The general shape to distrust: any assertion satisfied by the empty, absent, default or zero value of what it is inspecting. It is not testing the mechanism; it is agreeing with the default.
 
 The method that caught it is cheap and should be routine: **delete the mechanism, re-run the test, and require it to fail.** A test never watched to fail is a hypothesis, not evidence.
 
@@ -145,15 +148,15 @@ The claim in `docs/journals/2026-09-11-dock-state-read-from-the-wrong-owner.md` 
 
 This is **no longer accurate.** Five panels override `starts_open`, three of them read it from a setting:
 
-| Panel | Source | Default |
-|---|---|---|
-| `project_panel` | setting + visible-worktree check | `true` |
-| `git_panel` | setting | `false` |
-| **`branch_panel`** | setting | `false` |
-| `outline_panel` | self.active | false at construction |
-| `session_history` | hard `false` | — |
+| Panel              | Source                           | Default               |
+| ------------------ | -------------------------------- | --------------------- |
+| `project_panel`    | setting + visible-worktree check | `true`                |
+| `git_panel`        | setting                          | `false`               |
+| **`branch_panel`** | setting                          | `false`               |
+| `outline_panel`    | self.active                      | false at construction |
+| `session_history`  | hard `false`                     | —                     |
 
-A user who sets `"branch_panel": { "starts_open": true }` in their settings gets a `starts_open` panel added *after* the project panel. Because the left dock stacks, it hides the project panel and any restored stack with it. This defect is reachable by user configuration today, not latent.
+A user who sets `"branch_panel": { "starts_open": true }` in their settings gets a `starts_open` panel added _after_ the project panel. Because the left dock stacks, it hides the project panel and any restored stack with it. This defect is reachable by user configuration today, not latent.
 
 The original observation — that `starts_open` can collapse a restored stack — is correct. The claim that it is dormant is wrong as of the current build. Phase 05's `!restored` gate (commit hash to be assigned on merge) closes it.
 
@@ -164,12 +167,12 @@ The test counts recorded in 2026-09-11 as "780 tests green — workspace 268, gi
 **This entry recorded defect 1 as resolved. The fix was real but incomplete, and the symptom
 survived it.**
 
-**What is true:** everything about the key's *location*. The record did move from
+**What is true:** everything about the key's _location_. The record did move from
 `BranchPanel-{workspace_id}` to one un-scoped `BranchPanel` key owned by a process-global
 `CheckoutViewState`, two panels in a `MultiWorkspace` do share one record, and the legacy blob is
 still readable. That work stands.
 
-**What is false:** the conclusion that this closed the defect. The key's *contents* were wrong in a
+**What is false:** the conclusion that this closed the defect. The key's _contents_ were wrong in a
 second, independent way. `StoredKey`'s repository component was `RepoData::path` —
 `work_directory_abs_path`, which is the checkout the workspace is open at, not the repository. Both
 panels shared one record and then looked up different keys in it, so the reader's open agent list

@@ -13,7 +13,7 @@ checkout's agent list while standing in checkout A, switch to B, and A's list is
 
 That journal's fix was real and necessary — the record did move off the per-workspace key and onto
 one process-global entity, and two panels really do share it now. It just was not sufficient,
-because the *contents* of the key were wrong in a second, independent way that moving the key could
+because the _contents_ of the key were wrong in a second, independent way that moving the key could
 not touch.
 
 ## The Brutal Truth
@@ -79,11 +79,11 @@ that window writes an old-shape key. The next rebuild migrates it.
 
 Each mechanism was neutralised in place and the matching test watched to fail:
 
-| Neutralised | Test that failed |
-|---|---|
+| Neutralised                                    | Test that failed                                                                                                                |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `anchor` → `path` at the four resolution sites | `an_agent_list_opened_in_one_checkout_is_still_open_from_another`, `a_repository_closed_in_one_checkout_is_closed_from_another` |
-| re-key filter made unreachable | `prune_rekeys_an_entry_written_under_a_checkouts_own_namespace` |
-| re-key filter made unscoped | `prune_rekeys_nothing_outside_its_own_checkouts` |
+| re-key filter made unreachable                 | `prune_rekeys_an_entry_written_under_a_checkouts_own_namespace`                                                                 |
+| re-key filter made unscoped                    | `prune_rekeys_nothing_outside_its_own_checkouts`                                                                                |
 
 With `anchor` reverted, the eight pre-existing tests in `restoring_expansion` still passed — which is
 the measurement that matters, and the reason the new tests exist at all.

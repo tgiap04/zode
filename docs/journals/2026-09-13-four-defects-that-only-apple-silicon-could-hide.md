@@ -41,7 +41,7 @@ unknown is not a mitigated risk** — and the repo had `run_tests_linux` and
 > `tasks`**. By default, we want to list all processes and tasks are considered processes on
 > their own in linux so we still fetch them by default.
 
-With `ProcessesToUpdate::All`, sysinfo inserts every *thread* as its own process whose
+With `ProcessesToUpdate::All`, sysinfo inserts every _thread_ as its own process whose
 `parent()` is its thread-group leader. The parent-chain walk adopted all of them, and
 `sample()` then read each one's memory from `/proc/<pid>/task/<tid>/statm` — which reports
 the **whole process's** RSS. Summed once per thread.
@@ -58,11 +58,11 @@ thread-group-wide, and each task added its share again.
 value by **the number of CPUs**." That is logical CPUs. The code divided by
 `System::physical_core_count()`.
 
-| Machine | Divisor used | Divisor wanted | Badge |
-|---|---|---|---|
-| SMT x86 (most Linux, all Windows, Intel Macs) | logical/2 | logical | **2x too high** |
-| Linux container, `--cpuset-cpus=0-1` (measured) | 10 | 2 | **5x too low** |
-| Apple Silicon | 10 | 10 | correct |
+| Machine                                         | Divisor used | Divisor wanted | Badge           |
+| ----------------------------------------------- | ------------ | -------------- | --------------- |
+| SMT x86 (most Linux, all Windows, Intel Macs)   | logical/2    | logical        | **2x too high** |
+| Linux container, `--cpuset-cpus=0-1` (measured) | 10           | 2              | **5x too low**  |
+| Apple Silicon                                   | 10           | 10             | correct         |
 
 `std::thread::available_parallelism()` is the answer, respects cgroup quota and CPU
 affinity, and was **already this repo's idiom at five call sites**. `physical_core_count`
@@ -80,10 +80,10 @@ that was red on the machine it was written on.
 
 Measured, a tree of five processes of the same binary:
 
-| Platform | Summed RSS | What the OS says | Overstated by |
-|---|---|---|---|
-| Linux (PSS, `/proc/<pid>/smaps_rollup`) | 25,124,864 | 18,908,160 | **33%** |
-| macOS (`ri_phys_footprint`) | 46,743,552 | 24,594,160 | **90%** |
+| Platform                                | Summed RSS | What the OS says | Overstated by |
+| --------------------------------------- | ---------- | ---------------- | ------------- |
+| Linux (PSS, `/proc/<pid>/smaps_rollup`) | 25,124,864 | 18,908,160       | **33%**       |
+| macOS (`ri_phys_footprint`)             | 46,743,552 | 24,594,160       | **90%**       |
 
 macOS is worse because the dyld shared cache is mapped into every process.
 
@@ -98,12 +98,12 @@ process that cannot be read is not a process using nothing.
 Every mechanism was removed and the matching test watched to fail. The two that carry real
 evidence are the two that had to leave the development machine.
 
-| Neutralised | Test that failed | Where it had to run |
-|---|---|---|
-| `.without_tasks()` in `descendants` | `a_thread_is_not_a_descendant_process` — got 11 pairs, expected 1 | **Linux container.** Green on macOS with the defect present. |
-| the clamp in `combined()` | `combined_cpu_cannot_exceed_the_whole_machine` — `Some(200.0)` vs `Some(100.0)` | anywhere |
-| `Pss:` → `Rss:` in the parser | `parse_pss_bytes_reads_the_kilobyte_field` — `Some(25726976)` vs `Some(19361792)` | anywhere, by design |
-| `kilobytes * 1024` → `kilobytes` | same test — `Some(18908)` vs `Some(19361792)` | anywhere |
+| Neutralised                         | Test that failed                                                                  | Where it had to run                                          |
+| ----------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `.without_tasks()` in `descendants` | `a_thread_is_not_a_descendant_process` — got 11 pairs, expected 1                 | **Linux container.** Green on macOS with the defect present. |
+| the clamp in `combined()`           | `combined_cpu_cannot_exceed_the_whole_machine` — `Some(200.0)` vs `Some(100.0)`   | anywhere                                                     |
+| `Pss:` → `Rss:` in the parser       | `parse_pss_bytes_reads_the_kilobyte_field` — `Some(25726976)` vs `Some(19361792)` | anywhere, by design                                          |
+| `kilobytes * 1024` → `kilobytes`    | same test — `Some(18908)` vs `Some(19361792)`                                     | anywhere                                                     |
 
 Cross-checks against the operating systems' own tools, not against our own code:
 
@@ -121,11 +121,11 @@ Cross-checks against the operating systems' own tools, not against our own code:
   same aarch64 container:
 
   | mappings | `statm` | `smaps_rollup` | ratio |
-  |---|---|---|---|
-  | ~74 | 12.2 µs | 35.0 µs | 2.9x |
-  | ~525 | 10.2 µs | 61.1 µs | 6.0x |
-  | ~2,027 | 9.0 µs | 170.5 µs | 19.0x |
-  | ~8,027 | 13.3 µs | 745.8 µs | 56.3x |
+  | -------- | ------- | -------------- | ----- |
+  | ~74      | 12.2 µs | 35.0 µs        | 2.9x  |
+  | ~525     | 10.2 µs | 61.1 µs        | 6.0x  |
+  | ~2,027   | 9.0 µs  | 170.5 µs       | 19.0x |
+  | ~8,027   | 13.3 µs | 745.8 µs       | 56.3x |
 
   Recorded here because the user documentation compares the two, and a comparison with only
   one side sourced is the same defect in a smaller font. It runs on a background thread
@@ -154,15 +154,15 @@ was not observable at all until a `retained_len()` accessor was added for it. Th
 now fails with `(2 -> 2)` when exactly one line, `self.narrow = System::new()`, is removed.
 
 Two lessons sit in that, and they are not the same lesson. A test can be hollow while its
-comment is confident. And an assertion written to catch a mutant has to be *run against that
-mutant*, because reasoning about which flag moves is exactly the step that was wrong here.
+comment is confident. And an assertion written to catch a mutant has to be _run against that
+mutant_, because reasoning about which flag moves is exactly the step that was wrong here.
 
 ## Still Unverified
 
 Left visible on purpose. This is the section the previous journal had, and honouring it is
 the point.
 
-- **The Windows arm's fidelity.** `PrivateUsage` is private *commit*, not resident, so it
+- **The Windows arm's fidelity.** `PrivateUsage` is private _commit_, not resident, so it
   reads a little higher than Task Manager's "private working set". CI's `run_tests_windows`
   proves it compiles and returns a number. **Nobody has held it next to Task Manager.**
 - **The badge has still never been observed rendering** these numbers. Every check above is
