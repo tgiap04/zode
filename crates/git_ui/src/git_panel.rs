@@ -4522,7 +4522,7 @@ impl Panel for GitPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        3
+        4
     }
 
     fn is_zoomed(&self, _: &Window, _: &App) -> bool {
