@@ -5062,7 +5062,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 
 - Description: Setting to customize the behavior of the git panel.
 - Setting: `git_panel`
-- Note: `default_width` sets the width of the whole left dock, not just this panel. The dock keeps one width across every panel docked there, so switching to the outline panel or the branch panel does not move its edge — and dragging that edge while either one is up resizes the git panel too.
+- Note: `default_width` sets the width of the whole left dock, not just this panel. The dock keeps one width across every panel docked there — currently governed by the branch panel's `default_width`, since it holds the lowest `activation_priority` on that edge. Switching to the outline panel or the branch panel does not move the dock's edge, and dragging that edge while either one is up resizes the branch panel's `default_width` instead of this one.
 - Default:
 
 ```json [settings]
