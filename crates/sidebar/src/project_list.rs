@@ -21,10 +21,40 @@ pub(crate) struct ListEntry {
     /// remembered-but-closed project) -- there's no `Project` entity to
     /// read a lifecycle label off of.
     pub(crate) activity: Option<project::ProjectActivity>,
-    /// FR7: whether this project still carries diagnostic summaries left
-    /// over from a hibernated server generation. See
-    /// `Project::has_stale_diagnostics`.
+    /// FR7: whether this project is genuinely mid-reindex after waking.
+    /// Narrower than `Project::has_stale_diagnostics` on its own -- see
+    /// [`is_reindexing`].
     pub(crate) is_reindexing: bool,
+}
+
+/// Whether a project is genuinely mid-reindex, as opposed to merely
+/// carrying diagnostics from a hibernated server generation.
+///
+/// `Project::has_stale_diagnostics` alone is not that question.
+/// `LspStore::hibernate` fills `stale_language_servers` with every server
+/// it stops, at the moment the project *goes to sleep* -- so the flag is
+/// already true for the whole time the project sits hibernated, doing
+/// nothing. Only `clear_stale_diagnostics_after_reindex` clears it, and
+/// that cannot run until a replacement server has woken and finished a
+/// pass.
+///
+/// The activity label is what separates the two halves of that window.
+/// `reconcile_resource_activity` reaches `wake_resources` only on the
+/// `Hibernated -> Active` edge, and only *after* `set_activity` has
+/// committed the new label -- so a project that is actually reindexing
+/// always reads `Active` (or `Warm`, if it lost focus again since), and
+/// never `Hibernated`.
+///
+/// Both readers give this indicator priority over the hibernated one, on
+/// the grounds that "just woke and is mid-restart" is the more specific
+/// state. That reasoning is sound and was being applied to the wrong
+/// projects: without this, a sleeping project drew the re-indexing mark
+/// and its "hibernated" mark never appeared at all.
+pub(crate) fn is_reindexing(
+    activity: project::ProjectActivity,
+    has_stale_diagnostics: bool,
+) -> bool {
+    has_stale_diagnostics && activity != project::ProjectActivity::Hibernated
 }
 
 #[derive(Default)]
@@ -111,7 +141,11 @@ pub(crate) fn rebuild_contents(
             .first()
             .map(|workspace| {
                 let project = workspace.read(cx).project().read(cx);
-                (Some(project.activity()), project.has_stale_diagnostics(cx))
+                let activity = project.activity();
+                (
+                    Some(activity),
+                    is_reindexing(activity, project.has_stale_diagnostics(cx)),
+                )
             })
             .unwrap_or((None, false));
         rail_entries.push(ListEntry {
@@ -143,5 +177,54 @@ pub(crate) fn rebuild_contents(
         entries,
         rail_entries,
         has_open_projects,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_reindexing;
+    use project::ProjectActivity;
+
+    /// The defect this function was extracted for.
+    ///
+    /// `LspStore::hibernate` records every server it stops, so
+    /// `has_stale_diagnostics` is already true while the project sits
+    /// asleep. The sidebar read that as "re-indexing after waking" and
+    /// drew the mark on projects that were doing nothing at all -- and
+    /// because both readers give re-indexing priority, the hibernated
+    /// mark could never appear.
+    #[test]
+    fn a_sleeping_project_is_not_reindexing() {
+        assert!(
+            !is_reindexing(ProjectActivity::Hibernated, true),
+            "a hibernated project carries stale diagnostics by construction; \
+             that is not the same as being mid-reindex"
+        );
+    }
+
+    /// The counterweight. A fix that simply switched the mark off would
+    /// pass the test above and fail the feature.
+    #[test]
+    fn a_woken_project_that_has_not_finished_indexing_is_reindexing() {
+        assert!(
+            is_reindexing(ProjectActivity::Active, true),
+            "woken and still carrying the previous generation's diagnostics"
+        );
+        assert!(
+            is_reindexing(ProjectActivity::Warm, true),
+            "woke, then lost focus again before its servers finished -- still \
+             mid-reindex, and `Warm` is reachable from `Active` at any moment"
+        );
+    }
+
+    #[test]
+    fn nothing_stale_means_nothing_to_reindex() {
+        for activity in [
+            ProjectActivity::Active,
+            ProjectActivity::Warm,
+            ProjectActivity::Hibernated,
+        ] {
+            assert!(!is_reindexing(activity, false), "{activity:?}");
+        }
     }
 }
