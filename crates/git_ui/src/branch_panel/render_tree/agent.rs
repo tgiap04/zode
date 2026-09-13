@@ -143,7 +143,9 @@ impl BranchPanel {
                         .color(Color::Disabled),
                 )
             })
-            .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+            .when(!self.menu_is_open(), |this| {
+                this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+            })
             .on_click(cx.listener({
                 let entry = entry.clone();
                 move |panel, _: &ClickEvent, window, cx| {
