@@ -137,7 +137,9 @@ impl BranchPanel {
                             .truncate(),
                     )
                     .children(self.render_agents(ix, agents, expanded, toggle_key, cx))
-                    .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+                    .when(!self.menu_is_open(), |this| {
+                        this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+                    })
                     .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                         panel.switch_to_worktree(&switch_to, window, cx);
                     }))

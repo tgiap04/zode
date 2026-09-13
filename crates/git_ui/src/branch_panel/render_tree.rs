@@ -107,7 +107,9 @@ impl BranchPanel {
                         panel.open_context_menu(menu, event.position(), window, cx);
                     })),
             )
-            .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+            .when(!self.menu_is_open(), |this| {
+                this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+            })
             .on_click(cx.listener(move |panel, _: &ClickEvent, _, cx| {
                 panel.toggle_row(crate::branch_panel::tree::RowKey::Repo(id), cx);
             }))

@@ -651,3 +651,49 @@ async fn a_workspace_with_nothing_recorded_lists_its_checkouts(cx: &mut TestAppC
         "a repository nobody has closed must be drawn open, so its checkouts show"
     );
 }
+
+/// Rows drop their tooltip while one of this panel's menus is open, because
+/// GPUI paints tooltips after every deferred draw and a menu is a deferred
+/// draw — so a row's tooltip lands on top of the menu that row just opened.
+/// `menu_is_open` is the whole of that suppression, which makes its lifecycle
+/// load-bearing: leave it stuck on and every tooltip in the panel disappears
+/// for good; leave it stuck off and the menu goes back under the tooltip.
+///
+/// What this does NOT prove is that no tooltip is painted — `tooltip_requests`
+/// is `pub(crate)` to `gpui`, so no crate outside it can observe one. The
+/// painting order was read from the source (`gpui/src/window.rs:2552` then
+/// `:2559`) and the suppression itself is structural.
+#[gpui::test]
+async fn a_menu_suppresses_tooltips_only_while_it_is_open(cx: &mut TestAppContext) {
+    let (panel, cx) = panel(cx).await;
+
+    panel.update(cx, |panel, _| {
+        assert!(
+            !panel.menu_is_open(),
+            "a panel with no menu must not be suppressing tooltips"
+        );
+    });
+
+    let menu = panel.update_in(cx, |panel, window, cx| {
+        let menu = ui::ContextMenu::build(window, cx, |menu, _, _| menu);
+        panel.open_context_menu(menu.clone(), gpui::Point::default(), window, cx);
+        menu
+    });
+    panel.update(cx, |panel, _| {
+        assert!(
+            panel.menu_is_open(),
+            "an open menu must suppress the row tooltips that would cover it"
+        );
+    });
+
+    // Dismissal runs through the subscription `open_context_menu` registered;
+    // if that ever stops clearing the field, tooltips never come back.
+    menu.update(cx, |_, cx| cx.emit(gpui::DismissEvent));
+    cx.run_until_parked();
+    panel.update(cx, |panel, _| {
+        assert!(
+            !panel.menu_is_open(),
+            "a dismissed menu must hand the tooltips back"
+        );
+    });
+}
