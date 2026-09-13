@@ -25,8 +25,8 @@ use ui::{ButtonLike, PopoverMenu, Tooltip};
 use workspace::{MultiWorkspace, StatusItemView, Workspace};
 
 use super::footprint_popover::{
-    CPU_ICON, MEMORY_ICON, build_popover, collect_roots, footprint_parts, footprints_render_the_same,
-    is_discovery_tick, merge_known_pids, wants_polling,
+    CPU_ICON, MEMORY_ICON, build_popover, collect_roots, footprint_parts,
+    footprints_render_the_same, is_discovery_tick, merge_known_pids, wants_polling,
 };
 use super::{
     Footprints, Pid, ProcessSampler, ProjectFootprint, ProjectFootprintSetting,

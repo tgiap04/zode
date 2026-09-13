@@ -111,7 +111,9 @@ pub(crate) fn parse_pss_bytes(contents: &str) -> Option<u64> {
     // `strip_prefix("Pss:")` and not `starts_with("Pss")`: newer kernels also
     // write `Pss_Dirty:`, `Pss_Anon:`, `Pss_File:` and `Pss_Shmem:`, and any of
     // them would be a fraction of the answer reported as the whole of it.
-    let field = contents.lines().find_map(|line| line.strip_prefix("Pss:"))?;
+    let field = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Pss:"))?;
     // Every size in this file is written in kB. A value carrying any other unit
     // is a format this parser does not know, and guessing would put a number
     // three orders of magnitude out onto the badge -- so it declines instead,

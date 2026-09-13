@@ -189,8 +189,8 @@ impl Dock {
                     dock.set_stack_drop_gap(Some(if past_middle { ix + 1 } else { ix }), cx);
                 },
             ))
-            .on_drop(cx.listener(
-                move |dock, dragged: &DraggedPanel, _window, cx| {
+            .on_drop(
+                cx.listener(move |dock, dragged: &DraggedPanel, _window, cx| {
                     let gap = dock.stack_drop_gap.take();
                     if dragged.dock_id != dock_id {
                         return;
@@ -199,8 +199,8 @@ impl Dock {
                         return;
                     };
                     dock.move_stacked_panel(dragged.panel_id, gap, cx);
-                },
-            ))
+                }),
+            )
             .when(leading, |this| {
                 this.child(drop_indicator(axis, false, accent))
             })

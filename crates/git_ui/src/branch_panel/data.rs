@@ -484,13 +484,12 @@ mod tests {
         });
 
         let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
-        let file_item_id = workspace
-            .update_in(cx, |workspace, window, cx| {
-                let editor = cx.new(|cx| editor::Editor::single_line(window, cx));
-                let item_id = editor.entity_id();
-                workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
-                item_id
-            });
+        let file_item_id = workspace.update_in(cx, |workspace, window, cx| {
+            let editor = cx.new(|cx| editor::Editor::single_line(window, cx));
+            let item_id = editor.entity_id();
+            workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+            item_id
+        });
         cx.run_until_parked();
 
         pane.update_in(cx, |pane, window, cx| {

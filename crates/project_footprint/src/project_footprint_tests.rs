@@ -319,10 +319,7 @@ fn is_enabled_follows_the_settings_store_once_installed(cx: &mut TestAppContext)
 #[gpui::test]
 fn combined_cpu_cannot_exceed_the_whole_machine(cx: &mut TestAppContext) {
     let (a, b) = cx.update(|cx| (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id()));
-    let footprints = Footprints(vec![
-        (a, "a".into(), pegged()),
-        (b, "b".into(), pegged()),
-    ]);
+    let footprints = Footprints(vec![(a, "a".into(), pegged()), (b, "b".into(), pegged())]);
 
     assert_eq!(
         footprints.combined().cpu_percent,

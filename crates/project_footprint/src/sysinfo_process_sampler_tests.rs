@@ -111,7 +111,10 @@ fn sampling_this_process_reports_real_memory() {
         .first()
         .copied()
         .expect("this process must be sampleable");
-    assert!(memory > 0, "expected a positive memory reading for the test process");
+    assert!(
+        memory > 0,
+        "expected a positive memory reading for the test process"
+    );
 }
 
 /// The denominator must be the CPUs this process may actually run on, not the

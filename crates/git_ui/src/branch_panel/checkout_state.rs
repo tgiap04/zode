@@ -116,7 +116,11 @@ impl CheckoutViewState {
     /// `Dock::load_workspace_scoped_size_state`, and for the same reason: the
     /// key-value store has no compare-and-swap, and the cost is one wrong
     /// starting shape that a single gesture corrects.
-    pub(crate) fn seed_from_legacy(&mut self, legacy: SerializedBranchPanel, cx: &mut Context<Self>) {
+    pub(crate) fn seed_from_legacy(
+        &mut self,
+        legacy: SerializedBranchPanel,
+        cx: &mut Context<Self>,
+    ) {
         if self.found_shared_record {
             return;
         }
@@ -299,9 +303,9 @@ impl CheckoutViewState {
         self.pending_write = Some(cx.spawn(async move |_, cx| {
             cx.background_executor().timer(WRITE_THROTTLE).await;
             let value = serde_json::to_string(&record).log_err()?;
-            cx.background_spawn(async move {
-                kvp.write_kvp(BRANCH_PANEL_KEY.to_string(), value).await
-            })
+            cx.background_spawn(
+                async move { kvp.write_kvp(BRANCH_PANEL_KEY.to_string(), value).await },
+            )
             .await
             .context("writing checkout view state")
             .log_err()
@@ -426,7 +430,10 @@ mod tests {
                 &[PathBuf::from("/repos/zode")],
                 cx,
             );
-            assert!(state.is_open(&live), "the surviving checkout keeps its state");
+            assert!(
+                state.is_open(&live),
+                "the surviving checkout keeps its state"
+            );
             assert!(!state.is_open(&gone), "the removed one is forgotten");
         });
     }

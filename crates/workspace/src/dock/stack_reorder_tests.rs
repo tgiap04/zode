@@ -123,7 +123,10 @@ async fn moving_a_section_reorders_the_stack(cx: &mut TestAppContext) {
             .left_dock()
             .update(cx, |dock, cx| dock.move_stacked_panel(before[1], 0, cx))
     });
-    assert!(moved, "moving the lower section to the top gap is a real move");
+    assert!(
+        moved,
+        "moving the lower section to the top gap is a real move"
+    );
 
     let after = drawn_order(&workspace, cx);
     assert_eq!(
@@ -207,8 +210,9 @@ async fn reordering_the_stack_leaves_the_column_width_alone(cx: &mut TestAppCont
 async fn reordering_the_stack_leaves_the_active_index_alone(cx: &mut TestAppContext) {
     let (workspace, cx) = stacked_left_dock(&[100, 101], cx).await;
     let drawn = drawn_order(&workspace, cx);
-    let active_before =
-        workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).active_panel_index());
+    let active_before = workspace.read_with(cx, |workspace, cx| {
+        workspace.left_dock().read(cx).active_panel_index()
+    });
 
     workspace.update(cx, |workspace, cx| {
         workspace
@@ -244,7 +248,11 @@ async fn dropping_a_section_on_its_own_edge_does_nothing(cx: &mut TestAppContext
             "gap {gap} names where the first section already is, so it is not a move"
         );
     }
-    assert_eq!(drawn_order(&workspace, cx), drawn, "nothing should have moved");
+    assert_eq!(
+        drawn_order(&workspace, cx),
+        drawn,
+        "nothing should have moved"
+    );
 }
 
 /// The height shares travel with the section rather than being reset, so the
@@ -666,7 +674,10 @@ async fn moving_the_last_section_between_the_first_two(cx: &mut TestAppContext) 
             .left_dock()
             .update(cx, |dock, cx| dock.move_stacked_panel(before[2], 1, cx))
     });
-    assert!(moved, "dropping the last section into the first gap is a real move");
+    assert!(
+        moved,
+        "dropping the last section into the first gap is a real move"
+    );
     assert_eq!(
         drawn_order(&workspace, cx),
         vec![before[0], before[2], before[1]],
@@ -694,7 +705,10 @@ async fn dragging_the_last_header_between_the_first_two(cx: &mut TestAppContext)
     for fraction in [0.25, 0.5, 0.75, 1.0] {
         let y = last.center().y + (middle.center().y - last.center().y) * fraction;
         cx.simulate_mouse_move(
-            Point { x: last.center().x, y },
+            Point {
+                x: last.center().x,
+                y,
+            },
             Some(MouseButton::Left),
             Modifiers::default(),
         );
@@ -743,11 +757,18 @@ async fn releasing_over_a_section_body_still_reorders(cx: &mut TestAppContext) {
         .debug_bounds("dock-stack-header:2")
         .expect("the last section's header must be drawn");
 
-    cx.simulate_mouse_down(last_header.center(), MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_down(
+        last_header.center(),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
     for fraction in [0.25, 0.5, 0.75, 1.0] {
         let y = last_header.center().y + (first.center().y - last_header.center().y) * fraction;
         cx.simulate_mouse_move(
-            Point { x: first.center().x, y },
+            Point {
+                x: first.center().x,
+                y,
+            },
             Some(MouseButton::Left),
             Modifiers::default(),
         );
