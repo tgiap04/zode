@@ -11560,6 +11560,7 @@ name = "project_footprint"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "libc",
  "log",
  "project",
  "settings",

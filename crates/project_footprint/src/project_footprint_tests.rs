@@ -9,12 +9,12 @@ use settings::SettingsStore;
 
 use super::*;
 
-/// A stand-in process table: `(pid, parent, rss, cpu)`. `parent == 0` marks a
+/// A stand-in process table: `(pid, parent, memory, cpu)`. `parent == 0` marks a
 /// root with no tracked parent of its own.
 #[derive(Default)]
 struct FakeSampler {
     processes: Vec<(Pid, Pid, u64, Option<f32>)>,
-    core_count: usize,
+    cpu_count: usize,
     descendants_calls: usize,
 }
 
@@ -42,13 +42,13 @@ impl ProcessSampler for FakeSampler {
                 self.processes
                     .iter()
                     .find(|&&(candidate, ..)| candidate == pid)
-                    .map(|&(pid, _, rss, cpu)| (pid, rss, cpu))
+                    .map(|&(pid, _, memory, cpu)| (pid, memory, cpu))
             })
             .collect()
     }
 
-    fn core_count(&self) -> usize {
-        self.core_count.max(1)
+    fn cpu_count(&self) -> usize {
+        self.cpu_count.max(1)
     }
 }
 
@@ -71,7 +71,7 @@ fn disjoint_trees_sum_only_their_own_processes(cx: &mut TestAppContext) {
             (10, 0, 300, None),
             (11, 10, 400, None), // child of root 10
         ],
-        core_count: 1,
+        cpu_count: 1,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1]), roots(b, &[10])];
@@ -80,8 +80,8 @@ fn disjoint_trees_sum_only_their_own_processes(cx: &mut TestAppContext) {
 
     let footprint_a = result.iter().find(|(key, _, _)| *key == a).unwrap().1;
     let footprint_b = result.iter().find(|(key, _, _)| *key == b).unwrap().1;
-    assert_eq!(footprint_a.rss_bytes, Some(300));
-    assert_eq!(footprint_b.rss_bytes, Some(700));
+    assert_eq!(footprint_a.memory_bytes, Some(300));
+    assert_eq!(footprint_b.memory_bytes, Some(700));
 }
 
 #[gpui::test]
@@ -97,7 +97,7 @@ fn a_pid_reachable_from_two_roots_is_counted_once(cx: &mut TestAppContext) {
             (5, 1, 50, None),
             (5, 2, 50, None),
         ],
-        core_count: 1,
+        cpu_count: 1,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1]), roots(b, &[2])];
@@ -110,19 +110,19 @@ fn a_pid_reachable_from_two_roots_is_counted_once(cx: &mut TestAppContext) {
             .collect(),
     );
 
-    let total_rss = footprints.combined().rss_bytes.unwrap();
+    let total_memory = footprints.combined().memory_bytes.unwrap();
     assert_eq!(
-        total_rss, 300,
+        total_memory, 300,
         "pid 5 must be counted once, not once per claiming root"
     );
 }
 
 #[gpui::test]
-fn cpu_is_normalized_by_core_count(cx: &mut TestAppContext) {
+fn cpu_is_normalized_by_cpu_count(cx: &mut TestAppContext) {
     let a = cx.update(|cx| cx.new(|_| ()).entity_id());
     let mut sampler = FakeSampler {
         processes: vec![(1, 0, 100, Some(340.0))],
-        core_count: 10,
+        cpu_count: 10,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1])];
@@ -137,7 +137,7 @@ fn cpu_over_100_percent_after_normalization_is_clamped(cx: &mut TestAppContext) 
     let a = cx.update(|cx| cx.new(|_| ()).entity_id());
     let mut sampler = FakeSampler {
         processes: vec![(1, 0, 100, Some(1400.0))],
-        core_count: 10,
+        cpu_count: 10,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1])];
@@ -148,23 +148,23 @@ fn cpu_over_100_percent_after_normalization_is_clamped(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn no_cpu_baseline_yet_reports_none_while_rss_is_real(cx: &mut TestAppContext) {
+fn no_cpu_baseline_yet_reports_none_while_memory_is_real(cx: &mut TestAppContext) {
     let a = cx.update(|cx| cx.new(|_| ()).entity_id());
     let mut sampler = FakeSampler {
         processes: vec![(1, 0, 100, None)],
-        core_count: 1,
+        cpu_count: 1,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1])];
 
     let result = collect(&mut sampler, &project_roots, true);
 
-    assert_eq!(result[0].1.rss_bytes, Some(100));
+    assert_eq!(result[0].1.memory_bytes, Some(100));
     assert_eq!(result[0].1.cpu_percent, None);
 
     let footprints = Footprints(vec![(a, "project".into(), result[0].1)]);
     let combined = footprints.combined();
-    assert_eq!(combined.rss_bytes, Some(100));
+    assert_eq!(combined.memory_bytes, Some(100));
     assert_eq!(combined.cpu_percent, None);
 }
 
@@ -174,7 +174,7 @@ fn a_project_with_no_local_pids_reports_nothing_measured(cx: &mut TestAppContext
     let local = cx.update(|cx| cx.new(|_| ()).entity_id());
     let mut sampler = FakeSampler {
         processes: vec![(1, 0, 500, Some(10.0))],
-        core_count: 1,
+        cpu_count: 1,
         ..Default::default()
     };
     let project_roots = [roots(remote, &[]), roots(local, &[1])];
@@ -182,7 +182,7 @@ fn a_project_with_no_local_pids_reports_nothing_measured(cx: &mut TestAppContext
     let result = collect(&mut sampler, &project_roots, true);
 
     let remote_footprint = result.iter().find(|(key, _, _)| *key == remote).unwrap().1;
-    assert_eq!(remote_footprint.rss_bytes, None);
+    assert_eq!(remote_footprint.memory_bytes, None);
     assert_eq!(remote_footprint.cpu_percent, None);
 
     let footprints = Footprints(
@@ -192,7 +192,7 @@ fn a_project_with_no_local_pids_reports_nothing_measured(cx: &mut TestAppContext
             .collect(),
     );
     assert_eq!(
-        footprints.combined().rss_bytes,
+        footprints.combined().memory_bytes,
         Some(500),
         "the remote project with nothing measured must not drag the total to a lower Some(_)"
     );
@@ -203,7 +203,7 @@ fn discover_false_skips_the_enumeration_and_returns_what_it_attributed(cx: &mut 
     let a = cx.update(|cx| cx.new(|_| ()).entity_id());
     let mut sampler = FakeSampler {
         processes: vec![(1, 0, 100, None), (2, 1, 50, None)],
-        core_count: 1,
+        cpu_count: 1,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1])];
@@ -211,7 +211,7 @@ fn discover_false_skips_the_enumeration_and_returns_what_it_attributed(cx: &mut 
     let discovered = collect(&mut sampler, &project_roots, true);
     assert_eq!(sampler.descendants_calls, 1);
     assert_eq!(
-        discovered[0].1.rss_bytes,
+        discovered[0].1.memory_bytes,
         Some(150),
         "a discovery pass must include the descendant"
     );
@@ -232,7 +232,7 @@ fn discover_false_skips_the_enumeration_and_returns_what_it_attributed(cx: &mut 
         "discover: false must not call descendants again"
     );
     assert_eq!(
-        reused[0].1.rss_bytes,
+        reused[0].1.memory_bytes,
         Some(150),
         "re-offering the discovered PIDs must preserve the descendant's memory"
     );
@@ -246,20 +246,20 @@ fn a_narrow_pass_given_only_roots_loses_the_descendants(cx: &mut TestAppContext)
     let a = cx.update(|cx| cx.new(|_| ()).entity_id());
     let mut sampler = FakeSampler {
         processes: vec![(1, 0, 100, None), (2, 1, 50, None)],
-        core_count: 1,
+        cpu_count: 1,
         ..Default::default()
     };
     let project_roots = [roots(a, &[1])];
 
     let result = collect(&mut sampler, &project_roots, false);
-    assert_eq!(result[0].1.rss_bytes, Some(100));
+    assert_eq!(result[0].1.memory_bytes, Some(100));
 }
 
 #[gpui::test]
-fn format_rss_reports_one_decimal_above_a_megabyte() {
-    assert_eq!(format_rss(1_610_612_736).to_string(), "1.5 GB");
-    assert_eq!(format_rss(1_572_864).to_string(), "1.5 MB");
-    assert_eq!(format_rss(3072).to_string(), "3 KB");
+fn format_memory_reports_one_decimal_above_a_megabyte() {
+    assert_eq!(format_memory(1_610_612_736).to_string(), "1.5 GB");
+    assert_eq!(format_memory(1_572_864).to_string(), "1.5 MB");
+    assert_eq!(format_memory(3072).to_string(), "3 KB");
 }
 
 #[gpui::test]
@@ -308,4 +308,69 @@ fn is_enabled_follows_the_settings_store_once_installed(cx: &mut TestAppContext)
 
     set_enabled(cx, true);
     cx.update(|cx| assert!(ProjectFootprintSetting::is_enabled(cx)));
+}
+
+/// Each contributor is already a fraction of the whole machine -- `sum`
+/// divided by the CPU count before clamping -- so adding them up can claim more
+/// CPU than the machine has.
+///
+/// The only defect in this batch that is deterministic on every platform, and
+/// the only test here that is red against the code it was written for.
+#[gpui::test]
+fn combined_cpu_cannot_exceed_the_whole_machine(cx: &mut TestAppContext) {
+    let (a, b) = cx.update(|cx| (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id()));
+    let footprints = Footprints(vec![
+        (a, "a".into(), pegged()),
+        (b, "b".into(), pegged()),
+    ]);
+
+    assert_eq!(
+        footprints.combined().cpu_percent,
+        Some(100.0),
+        "two projects each using the whole machine cannot add up to twice the machine"
+    );
+}
+
+/// The counterweight: a clamp that lowers a legitimate total is a different bug
+/// wearing the fix's clothes.
+#[gpui::test]
+fn combined_cpu_below_the_ceiling_is_untouched(cx: &mut TestAppContext) {
+    let (a, b) = cx.update(|cx| (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id()));
+    let footprints = Footprints(vec![
+        (a, "a".into(), busy(30.0)),
+        (b, "b".into(), busy(40.0)),
+    ]);
+
+    assert_eq!(footprints.combined().cpu_percent, Some(70.0));
+}
+
+/// Memory has no such ceiling, and the clamp must not leak onto it.
+#[gpui::test]
+fn combined_memory_is_not_clamped(cx: &mut TestAppContext) {
+    const THREE_GB: u64 = 3 * 1024 * 1024 * 1024;
+    let (a, b) = cx.update(|cx| (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id()));
+    let footprints = Footprints(vec![
+        (a, "a".into(), memory(THREE_GB)),
+        (b, "b".into(), memory(THREE_GB)),
+    ]);
+
+    assert_eq!(footprints.combined().memory_bytes, Some(2 * THREE_GB));
+}
+
+fn pegged() -> ProjectFootprint {
+    busy(100.0)
+}
+
+fn busy(cpu_percent: f32) -> ProjectFootprint {
+    ProjectFootprint {
+        memory_bytes: None,
+        cpu_percent: Some(cpu_percent),
+    }
+}
+
+fn memory(memory_bytes: u64) -> ProjectFootprint {
+    ProjectFootprint {
+        memory_bytes: Some(memory_bytes),
+        cpu_percent: None,
+    }
 }

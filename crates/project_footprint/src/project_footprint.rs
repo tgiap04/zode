@@ -57,7 +57,11 @@ impl ProjectFootprintSetting {
 /// project genuinely using zero -- the former renders as "not measured".
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ProjectFootprint {
-    pub rss_bytes: Option<u64>,
+    /// What this platform's own system monitor calls these processes' memory,
+    /// summed. Named for that and not for RSS, because it is no longer RSS on
+    /// any of the three platforms -- see `footprint_memory`.
+    pub memory_bytes: Option<u64>,
+    /// A share of the CPUs these processes may run on, clamped to 100.
     pub cpu_percent: Option<f32>,
 }
 
@@ -79,24 +83,33 @@ pub struct FootprintRoots {
 pub struct Footprints(pub Vec<(EntityId, SharedString, ProjectFootprint)>);
 
 impl Footprints {
-    /// The badge's number: the sum of every project's RSS and CPU. A `None`
+    /// The badge's number: the sum of every project's memory and CPU. A `None`
     /// contributor is skipped rather than treated as zero; the total is
     /// `None` only when *every* contributor is `None` -- otherwise one
     /// remote project among several real ones would blank the whole badge.
+    ///
+    /// CPU is clamped and memory is not, and the asymmetry is the point. Each
+    /// contributor has already been divided by the CPU count, so it is a share
+    /// of the whole machine and their sum can claim more machine than exists --
+    /// two pegged projects added to 200%. Summed memory has no such ceiling:
+    /// six gigabytes across two projects is simply six gigabytes.
+    ///
+    /// Clamped rather than re-derived, because re-normalizing here would divide
+    /// by the CPU count a second time.
     pub fn combined(&self) -> ProjectFootprint {
-        let mut rss_bytes: Option<u64> = None;
+        let mut memory_bytes: Option<u64> = None;
         let mut cpu_percent: Option<f32> = None;
         for (_, _, footprint) in &self.0 {
-            if let Some(rss) = footprint.rss_bytes {
-                rss_bytes = Some(rss_bytes.unwrap_or(0).saturating_add(rss));
+            if let Some(memory) = footprint.memory_bytes {
+                memory_bytes = Some(memory_bytes.unwrap_or(0).saturating_add(memory));
             }
             if let Some(cpu) = footprint.cpu_percent {
                 cpu_percent = Some(cpu_percent.unwrap_or(0.0) + cpu);
             }
         }
         ProjectFootprint {
-            rss_bytes,
-            cpu_percent,
+            memory_bytes,
+            cpu_percent: cpu_percent.map(|total| total.clamp(0.0, 100.0)),
         }
     }
 }
@@ -113,13 +126,25 @@ pub trait ProcessSampler: Send {
 
     /// A narrow refresh of exactly `pids`. `None` CPU means no baseline yet --
     /// `sysinfo` needs two refreshes at least `MINIMUM_CPU_UPDATE_INTERVAL`
-    /// apart, so a freshly sampled PID has real RSS but no CPU reading.
+    /// apart, so a freshly sampled PID has a real memory reading but no CPU one.
+    ///
+    /// The `u64` is what the *platform's own system monitor* calls this
+    /// process's memory -- proportional set size on Linux, physical footprint
+    /// on macOS, private commit on Windows -- falling back to resident set size
+    /// wherever that reading cannot be taken. Not plain RSS: summing RSS over a
+    /// tree counts every shared page once per process mapping it. See
+    /// `footprint_memory`.
     fn sample(&mut self, pids: &[Pid]) -> Vec<(Pid, u64, Option<f32>)>;
 
-    /// Physical core count, used to normalize `sysinfo`'s per-core CPU
-    /// percentages down to a whole-machine percentage.
-    fn core_count(&self) -> usize;
+    /// How many logical CPUs the measured processes may run on, used to
+    /// normalize `sysinfo`'s per-CPU percentages down to a share of the
+    /// machine. Logical and not physical: `Process::cpu_usage()`'s own doc says
+    /// to divide by "the number of CPUs", and the two differ by the SMT factor
+    /// on every platform except the one this feature was measured on.
+    fn cpu_count(&self) -> usize;
 }
+
+mod footprint_memory;
 
 mod sysinfo_process_sampler;
 pub use sysinfo_process_sampler::SysinfoProcessSampler;
@@ -128,12 +153,15 @@ mod footprint_collect;
 pub use footprint_collect::collect;
 
 mod footprint_format;
-pub use footprint_format::{format_cpu, format_rss};
+pub use footprint_format::{format_cpu, format_memory};
 
 mod footprint_popover;
 
 mod footprint_indicator;
 pub use footprint_indicator::ProjectFootprintIndicator;
+
+#[cfg(test)]
+mod footprint_memory_tests;
 
 #[cfg(test)]
 mod project_footprint_tests;
