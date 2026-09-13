@@ -158,3 +158,26 @@ A user who sets `"branch_panel": { "starts_open": true }` in their settings gets
 The original observation — that `starts_open` can collapse a restored stack — is correct. The claim that it is dormant is wrong as of the current build. Phase 05's `!restored` gate (commit hash to be assigned on merge) closes it.
 
 The test counts recorded in 2026-09-11 as "780 tests green — workspace 268, git_ui 174" are stale. Current counts are git_ui 202, workspace 291, agent_ui 95.
+
+## Correction — 2026-09-13 21:40
+
+**This entry recorded defect 1 as resolved. The fix was real but incomplete, and the symptom
+survived it.**
+
+**What is true:** everything about the key's *location*. The record did move from
+`BranchPanel-{workspace_id}` to one un-scoped `BranchPanel` key owned by a process-global
+`CheckoutViewState`, two panels in a `MultiWorkspace` do share one record, and the legacy blob is
+still readable. That work stands.
+
+**What is false:** the conclusion that this closed the defect. The key's *contents* were wrong in a
+second, independent way. `StoredKey`'s repository component was `RepoData::path` —
+`work_directory_abs_path`, which is the checkout the workspace is open at, not the repository. Both
+panels shared one record and then looked up different keys in it, so the reader's open agent list
+still closed itself on every switch.
+
+The section "Two hypotheses from the plan were disproved by reading source" is worth re-reading with
+that in mind. Hypothesis 1 — "the stored key changes on every switch, and nothing matches any more" —
+was dismissed as "downstream noise". It was right about the mechanism and wrong only about which
+component of the key carried it.
+
+Root cause and fix: [2026-09-13-the-record-was-keyed-by-where-you-were-standing.md](2026-09-13-the-record-was-keyed-by-where-you-were-standing.md).
