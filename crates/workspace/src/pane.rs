@@ -888,6 +888,20 @@ impl Pane {
         self.split_for_drop.clone()
     }
 
+    /// The predicate that decides whether hovering an edge of this pane during
+    /// a drag marks it as a split target.
+    ///
+    /// `handle_drag_move` answers `false` when this is unset, so a pane without
+    /// one records no split direction and a tab dropped on its edge merely
+    /// joins it. Exposed so a panel that owns its own pane group can prove the
+    /// gate is open without staging pointer geometry.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn can_split_predicate(
+        &self,
+    ) -> Option<Arc<dyn Fn(&mut Self, &dyn Any, &mut Window, &mut Context<Self>) -> bool>> {
+        self.can_split_predicate.clone()
+    }
+
     pub fn set_can_split(
         &mut self,
         can_split_predicate: Option<

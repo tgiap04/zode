@@ -1503,6 +1503,65 @@ mod dropping {
     use gpui::{AppContext as _, VisualContext as _};
     use workspace::DraggedTab;
 
+    /// The gate in front of everything else in this module.
+    ///
+    /// `Pane::handle_drag_move` records no split direction unless
+    /// `can_split_predicate` says the edge is a target, and it answers `false`
+    /// when that predicate is unset. A pane without one therefore accepts an
+    /// edge drop as an ordinary tab move and never splits -- silently, with
+    /// the split hook wired correctly and never reached. This window shipped
+    /// in exactly that state, because the drop tests all wrote
+    /// `drag_split_direction` themselves and so began on the far side of it.
+    #[gpui::test]
+    async fn the_edge_is_a_split_target_at_all(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        let predicate = pane
+            .read_with(cx, |pane, _| pane.can_split_predicate())
+            .expect("a pane whose edges cannot be split targets can never be split by a drop");
+
+        let from_here = DraggedTab {
+            pane: pane.clone(),
+            item: pane
+                .read_with(cx, |pane, _| pane.active_item())
+                .expect("the note just opened is this pane's active item"),
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+
+        // This pane's only tab, dropped on this pane's own edge: refused,
+        // because the source empties and the collapse rule undoes the split
+        // the instant it is made.
+        let allowed = pane.update_in(cx, |pane, window, cx| {
+            predicate(pane, &from_here as &dyn std::any::Any, window, cx)
+        });
+        assert!(
+            !allowed,
+            "a pane's only tab dropped on its own edge must not be treated as a split"
+        );
+
+        // The same pane once it holds two: now there is something left behind,
+        // so the split holds and the drag is allowed.
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        let allowed = pane.update_in(cx, |pane, window, cx| {
+            predicate(pane, &from_here as &dyn std::any::Any, window, cx)
+        });
+        assert!(
+            allowed,
+            "a pane holding more than one tab must accept an edge drop as a split"
+        );
+    }
+
     /// The headline: a tab dropped on a floating pane's edge must split the
     /// *floating* group, and the workspace's own centre group -- the one
     /// `Workspace::split_pane` reaches for without this hook -- must stay
@@ -1550,9 +1609,31 @@ mod dropping {
             .expect("the item just added must be the editor pane's active item");
 
         let floating_pane = floating.read_with(cx, |floating, _| floating.active_pane.clone());
-        // Set directly rather than staged through pointer geometry: this
-        // field is exactly what real hover detection writes, and every
-        // other drag test in this crate does the same.
+
+        // The gate, asserted on the path a person actually takes: a tab from
+        // the editor, hovered over this window's edge. Without it the drop
+        // below is staged on a direction real hover never records.
+        let predicate = floating_pane
+            .read_with(cx, |pane, _| pane.can_split_predicate())
+            .expect("the floating pane must mark its edges as split targets");
+        let from_editor = DraggedTab {
+            pane: editor_pane.clone(),
+            item: item.clone(),
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+        assert!(
+            floating_pane.update_in(cx, |pane, window, cx| {
+                predicate(pane, &from_editor as &dyn std::any::Any, window, cx)
+            }),
+            "a tab dragged in from the editor must be allowed to split this window"
+        );
+        // Written directly because `Pane::handle_drag_move`, which is what
+        // fills this in from a real pointer, is private to `workspace`. That
+        // leaves the gate in front of it untested here -- and that gate was
+        // shut for the life of this feature. `the_edge_is_a_split_target_at_all`
+        // below covers it; this test starts one step past it.
         floating_pane.update(cx, |pane, _| {
             pane.drag_split_direction = Some(workspace::SplitDirection::Right);
         });

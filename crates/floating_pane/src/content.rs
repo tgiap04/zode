@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow};
 use gpui::Action as _;
 use gpui::{App, Context, Entity, WeakEntity, Window};
 use ui::prelude::*;
-use workspace::{Pane, Workspace};
+use workspace::{DraggedTab, Pane, Workspace};
 
 use crate::host::FloatingPane;
 
@@ -65,6 +65,23 @@ impl FloatingPane {
                     )
                 }
             });
+            // `handle_drag_move` refuses to record an edge as a split target
+            // unless this says so, and it answers `false` when unset -- so
+            // without this the hook below is never reached and a tab dropped on
+            // an edge simply joins the pane. The editor's centre pane and the
+            // terminal panel each set their own; this window had none.
+            pane.set_can_split(Some(Arc::new(
+                move |pane: &mut Pane, dragged_item: &dyn std::any::Any, _window, cx: &mut Context<Pane>| {
+                    let Some(tab) = dragged_item.downcast_ref::<DraggedTab>() else {
+                        return false;
+                    };
+                    // The one drag that undoes itself: a pane's only tab
+                    // dropped on that same pane's edge leaves the source empty,
+                    // and the collapse rule removes it the instant the split is
+                    // made. Refused rather than performed and reverted.
+                    tab.pane != cx.entity() || pane.items_len() > 1
+                },
+            )));
             // Without this, `handle_tab_drop` routes through
             // `Workspace::split_pane` and splits the editor's centre group --
             // the drop lands behind this window, on code the user was not
