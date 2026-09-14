@@ -1366,5 +1366,14 @@
       "cmd-c": "notebook::InterruptKernel",
       "escape": "notebook::EnterCommandMode",
     },
+  },
+  {
+    // Scoped to the floating window so a split chord here cannot disturb the
+    // editor's own. Only SplitRight is bound: the other three are reachable
+    // from the command palette rather than claiming three more chords.
+    "context": "FloatingPane",
+    "bindings": {
+      "alt-cmd-\\": "floating_pane::SplitRight",
+    },
   }
 ]

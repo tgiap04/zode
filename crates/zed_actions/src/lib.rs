@@ -928,6 +928,23 @@ pub mod floating_pane {
             NewMarkdownNote,
             /// Opens an existing markdown file as a tab in the floating window.
             OpenMarkdownNote,
+            /// Splits the floating window's active pane to the right.
+            ///
+            /// `pane::SplitRight` already reaches the same `Event::Split` once
+            /// focus sits inside a pane, so this is not a second code path —
+            /// it is a window-scoped name a user can bind under the
+            /// `FloatingPane` context without touching the editor's own split
+            /// bindings, matching the five siblings above.
+            SplitRight,
+            /// Splits the floating window's active pane to the left. See
+            /// `SplitRight` for why this exists alongside `pane::SplitLeft`.
+            SplitLeft,
+            /// Splits the floating window's active pane upward. See
+            /// `SplitRight` for why this exists alongside `pane::SplitUp`.
+            SplitUp,
+            /// Splits the floating window's active pane downward. See
+            /// `SplitRight` for why this exists alongside `pane::SplitDown`.
+            SplitDown,
         ]
     );
 }
