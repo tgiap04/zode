@@ -407,12 +407,19 @@ pub fn handle_create_worktree(
     let (git_repos, non_git_paths) = classify_worktrees(project.read(cx), cx);
 
     if git_repos.is_empty() {
-        show_error_toast(
-            cx.entity(),
-            "worktree create",
-            anyhow!("No git repositories found in the project"),
-            cx,
-        );
+        // Deferred: `show_error_toast` updates the workspace, and this function
+        // holds `&mut Workspace`, so the entity is already leased -- reaching it
+        // again here aborts the process rather than failing. The toast runs once
+        // the lease is released.
+        let workspace_entity = cx.entity();
+        cx.defer(move |cx| {
+            show_error_toast(
+                workspace_entity,
+                "worktree create",
+                anyhow!("No git repositories found in the project"),
+                cx,
+            );
+        });
         return;
     }
 
@@ -422,12 +429,15 @@ pub fn handle_create_worktree(
             .remote_client()
             .is_some_and(|client| client.read(cx).is_disconnected());
         if is_disconnected {
-            show_error_toast(
-                cx.entity(),
-                "worktree create",
-                anyhow!("Cannot create worktree: remote connection is not active"),
-                cx,
-            );
+            let workspace_entity = cx.entity();
+            cx.defer(move |cx| {
+                show_error_toast(
+                    workspace_entity,
+                    "worktree create",
+                    anyhow!("Cannot create worktree: remote connection is not active"),
+                    cx,
+                );
+            });
             return;
         }
     }
@@ -464,9 +474,17 @@ pub fn handle_create_worktree(
             workspace_handle
                 .update(cx, |workspace, cx| {
                     workspace.set_active_worktree_creation(None, false, cx);
-                    show_error_toast(cx.entity(), "worktree create", anyhow!("{err:#}"), cx);
                 })
                 .ok();
+            // Outside the update above, not inside it: `show_error_toast`
+            // updates the workspace, and doing that while this closure still
+            // holds it aborts the process instead of showing the error.
+            if let Some(workspace) = workspace_handle.upgrade() {
+                cx.update(|_window, cx| {
+                    show_error_toast(workspace, "worktree create", anyhow!("{err:#}"), cx);
+                })
+                .ok();
+            }
         }
 
         result
@@ -566,9 +584,17 @@ pub fn handle_switch_worktree(
             workspace_handle
                 .update(cx, |workspace, cx| {
                     workspace.set_active_worktree_creation(None, false, cx);
-                    show_error_toast(cx.entity(), "worktree switch", anyhow!("{err:#}"), cx);
                 })
                 .ok();
+            // Outside the update above, not inside it: `show_error_toast`
+            // updates the workspace, and doing that while this closure still
+            // holds it aborts the process instead of showing the error.
+            if let Some(workspace) = workspace_handle.upgrade() {
+                cx.update(|_window, cx| {
+                    show_error_toast(workspace, "worktree switch", anyhow!("{err:#}"), cx);
+                })
+                .ok();
+            }
         }
 
         result
