@@ -43,17 +43,18 @@
 5. Test scheduler detects cross-thread activity and panics at `crates/scheduler/src/test_scheduler.rs:111`.
 6. Fix: `cx.executor().allow_parking()` tells the scheduler "this test is allowed to have background threads." Borrowed from `terminal_panel.rs:1520` (eight instances), already used in this crate's `split_right_dispatched_through_a_real_workspace_splits_the_floating_group` test.
 
-| Run batch | Passes | Fails | Rate |
-|-----------|--------|-------|------|
-| 1–10 | 9 | 1 | 10% |
-| 11–30 | 19 | 1 | 5% |
-| 1–30 combined | 28 | 2 | 6.7% |
-| After fix, 1–50 | 50 | 0 | 0% |
-| Isolated (alone) | 25 | 0 | 0% |
+| Run batch        | Passes | Fails | Rate |
+| ---------------- | ------ | ----- | ---- |
+| 1–10             | 9      | 1     | 10%  |
+| 11–30            | 19     | 1     | 5%   |
+| 1–30 combined    | 28     | 2     | 6.7% |
+| After fix, 1–50  | 50     | 0     | 0%   |
+| Isolated (alone) | 25     | 0     | 0%   |
 
 ### Plan comments in the source code
 
 Grepped the diff; found entries like:
+
 - "Phase 2 introduced the PaneGroup" in a docstring
 - "See phase-03 for why zoom works this way" in a comment
 - "The guard is from phase 5's risk analysis" in an explanation
@@ -63,19 +64,20 @@ All stripped manually. No tool caught them.
 ### The double-writing hazard
 
 `FloatingPane::opening` (`host.rs:188`) is one slot. Writers before this work:
+
 1. `open_terminal` (`content.rs:114`)
 2. `open_markdown_note` (`content.rs:202`)
 3. `new_markdown_note` (`content.rs:221`)
 4. `shut_down` (`host.rs:295`)
 
-Writers added by this work:
-5. Every `handle_split` non-`MovePane` branch (`split.rs:108-110`) calls `self.open_terminal` again.
+Writers added by this work: 5. Every `handle_split` non-`MovePane` branch (`split.rs:108-110`) calls `self.open_terminal` again.
 
 The risk: if a user opens a file dialog (`Open Markdown Note`) and then triggers any split, the file-picker task is cancelled with no log line and no error. The dialog the OS is showing simply stops mattering. Reviewer rated this "High". It was left alone as a policy that predates this work, and is named in PR #38's known gaps.
 
 ### The dispatch test that could not exist, then did
 
 `split_right_dispatched_through_a_real_workspace_splits_the_floating_group` (`floating_pane_tests.rs:1401-1445`):
+
 1. Constructs a real `Workspace` via `cx.new_model`.
 2. Creates a `FloatingPane` with one pane and one tab.
 3. Calls `workspace.register_floating_layer(floating, cx)` — production's exact setup.
@@ -105,7 +107,6 @@ Why `debug_bounds`: the test cannot hold an `Entity<FloatingPane>` across the wo
 - Test for `MovePane` on a single-item pane falling back to terminal — simple to add, not yet written.
 - The root cause of `register_floating_layer` breaking on a second call, pursued from outside `workspace.rs` — not run to ground.
 - Manual drag-and-drop verification with live pointer input — every route was code-reviewed, nothing was visually tested. `split_for_drop` has never run in front of a person.
-
 
 ## Postscript: the hand test found it in a minute
 
