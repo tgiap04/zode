@@ -875,6 +875,19 @@ impl Pane {
         self.can_drop_predicate.clone()
     }
 
+    /// The hook that turns a tab dropped on this pane's edge into a split of
+    /// its owner's own group, rather than the workspace's centre group.
+    ///
+    /// Exposed so a panel that owns its own pane group can be tested at the
+    /// hook.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn split_for_drop(
+        &self,
+    ) -> Option<Arc<dyn Fn(&Entity<Pane>, SplitDirection, &mut Window, &mut App) -> Option<Entity<Pane>>>>
+    {
+        self.split_for_drop.clone()
+    }
+
     pub fn set_can_split(
         &mut self,
         can_split_predicate: Option<

@@ -1,11 +1,13 @@
 //! The window's state: where it is, how big, and what it is holding.
 
+use std::collections::HashMap;
+
 use gpui::{
-    Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, Size, WeakEntity,
-    Window, px, size,
+    AnyWeakView, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Pixels,
+    Point, Size, Subscription, WeakEntity, Window, px, size,
 };
 use ui::prelude::*;
-use workspace::{Pane, Workspace};
+use workspace::{Pane, PaneGroup, Workspace};
 
 /// Where the window sits when it is first opened, measured from the
 /// bottom-right corner so it lands beside the button that opened it.
@@ -15,6 +17,14 @@ const OPENING_INSET: Pixels = px(64.);
 
 /// Below this the tab bar cannot show a tab and its close button together, and
 /// a terminal has no usable line.
+///
+/// It measures the window, not the panes inside it. Splitting divides this area
+/// again and nothing stops it: `PaneAxis::resize` holds a divider drag to 80pt
+/// across and 100pt down, but a split being *made* passes through no such
+/// guard, so a window at this size split four ways leaves 80pt panes. Left
+/// reachable rather than grown with the pane count, which would refuse a resize
+/// somebody asked for over a split they had forgotten about. Closing a pane
+/// undoes it.
 pub(crate) const SMALLEST: Size<Pixels> = size(px(320.), px(180.));
 
 /// How much of the window must stay inside the workspace when it is dragged.
@@ -122,12 +132,27 @@ impl Render for DraggedFloatingPane {
 
 pub struct FloatingPane {
     pub(crate) workspace: WeakEntity<Workspace>,
-    /// The tabs. A real pane, for the reasons in the crate docs.
+    /// The project the window's panes build their items against.
+    ///
+    /// Cached rather than read back through `workspace` on every use: the
+    /// drag-to-split path calls into this crate from inside a
+    /// `Workspace` lease, where reading `self.workspace` a second time is a
+    /// `double_lease_panic` -- an abort, not a recoverable error. Caching it
+    /// here means every method that needs the project already has it.
+    pub(crate) project: Entity<project::Project>,
+    /// The tabs, arranged as a group of one or more panes. A real pane, for
+    /// the reasons in the crate docs.
     ///
     /// Built once and kept even while the window is closed: it holds live
     /// terminals and agent threads, and rebuilding it on each open would end
     /// them.
-    pub(crate) pane: Entity<Pane>,
+    pub(crate) center: PaneGroup,
+    /// The pane new tabs land in and focus moves to.
+    ///
+    /// Kept apart from `center` because the group's tree carries no notion of
+    /// "the one the user is looking at" -- that is what a leader/decorator
+    /// needs to render, and what every `open_*` method targets.
+    pub(crate) active_pane: Entity<Pane>,
     pub(crate) open: bool,
     /// Top-left of the window, relative to the workspace body it floats over.
     ///
@@ -151,6 +176,18 @@ pub struct FloatingPane {
     /// one frame -- invisible, because the clamp corrects it immediately after.
     pub(crate) last_container: Option<Size<Pixels>>,
     pub(crate) focus_handle: FocusHandle,
+    /// The pane currently filling the whole window, if one has been zoomed.
+    ///
+    /// `PaneGroup::render` draws whichever pane matches its own `zoomed`
+    /// argument as an empty `div` -- in the workspace that pane is drawn again
+    /// as a separate top layer. This window has no such layer, so it is always
+    /// `None` that goes into `center.render`, and this field is what draws the
+    /// zoomed pane itself instead.
+    pub(crate) zoomed: Option<AnyWeakView>,
+    /// One subscription per live pane, keyed by entity id so the exact
+    /// subscription for a removed pane can be dropped in the same step that
+    /// removes it. A `Vec` would only ever grow as panes split and collapse.
+    pub(crate) pane_subscriptions: HashMap<EntityId, Subscription>,
 }
 
 pub enum FloatingPaneEvent {}
@@ -168,17 +205,21 @@ impl FloatingPane {
     ///
     /// This is built from inside `observe_new`, where the workspace is already
     /// mutably borrowed; reaching back through the handle to read it would
-    /// borrow it twice and abort.
+    /// borrow it twice and abort. It is also why the project is kept as a
+    /// field rather than re-derived later -- see the field's own doc comment.
     pub fn new(
         workspace: WeakEntity<Workspace>,
         project: Entity<project::Project>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let pane = Self::build_pane(&workspace, project, window, cx);
-        Self {
+        let this = cx.weak_entity();
+        let pane = Self::build_pane(&workspace, project.clone(), this, window, cx);
+        let mut floating_pane = Self {
             workspace,
-            pane,
+            project,
+            center: PaneGroup::new(pane.clone()),
+            active_pane: pane.clone(),
             open: false,
             position: None,
             size: OPENING_SIZE,
@@ -186,7 +227,11 @@ impl FloatingPane {
             opening: None,
             last_container: None,
             focus_handle: cx.focus_handle(),
-        }
+            zoomed: None,
+            pane_subscriptions: HashMap::new(),
+        };
+        floating_pane.subscribe_to(&pane, window, cx);
+        floating_pane
     }
 
     /// Opens the window, or puts it away.
@@ -197,7 +242,7 @@ impl FloatingPane {
     /// operation reached two ways.
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = !self.open;
-        if self.open && self.pane.read(cx).items_len() > 0 {
+        if self.open && self.active_pane.read(cx).items_len() > 0 {
             // Focus only when there is something to focus. On an empty window
             // the menu is the content, and stealing focus into an empty pane
             // would take the keyboard away from the editor for nothing.
@@ -207,8 +252,16 @@ impl FloatingPane {
     }
 
     /// Whether the window has nothing in it, and so shows the menu as its body.
+    ///
+    /// Totalled over every pane in the group, not just the active one: the
+    /// menu is the body only when the *whole* window is empty, not when one
+    /// pane of several happens to be -- which matters as soon as the group holds
+    /// more than one.
     pub(crate) fn is_empty(&self, cx: &gpui::App) -> bool {
-        self.pane.read(cx).items_len() == 0
+        self.center
+            .panes()
+            .iter()
+            .all(|pane| pane.read(cx).items_len() == 0)
     }
 
     /// Ends everything the window is holding, and puts it away.
@@ -223,20 +276,33 @@ impl FloatingPane {
     /// an unsaved note still gets its save prompt. Losing a note to a button
     /// labelled "free some memory" would be the worst possible trade.
     pub(crate) fn shut_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let closing = self.pane.update(cx, |pane, cx| {
-            pane.close_all_items(&workspace::pane::CloseAllItems::default(), window, cx)
-        });
+        // Every pane in the group, not just the active one: the group can
+        // hold more than one, and a shut-down that left a
+        // second pane's terminals running would defeat the whole point of the
+        // button.
+        let closing: Vec<_> = self
+            .center
+            .panes()
+            .into_iter()
+            .map(|pane| {
+                pane.update(cx, |pane, cx| {
+                    pane.close_all_items(&workspace::pane::CloseAllItems::default(), window, cx)
+                })
+            })
+            .collect();
         self.open = false;
         cx.notify();
         self.opening = Some(cx.spawn(async move |_this, _cx| {
-            if let Err(error) = closing.await {
-                log::error!("could not close the floating window's tabs: {error}");
+            for closing in closing {
+                if let Err(error) = closing.await {
+                    log::error!("could not close the floating window's tabs: {error}");
+                }
             }
         }));
     }
 
     pub(crate) fn focus_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.pane.read(cx).focus_handle(cx);
+        let handle = self.active_pane.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
     }
 

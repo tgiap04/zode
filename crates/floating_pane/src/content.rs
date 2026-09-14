@@ -5,22 +5,30 @@
 //! pane, which is why a terminal in this window behaves exactly like a terminal
 //! in the editor.
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
 use gpui::Action as _;
-use gpui::{Context, Entity, WeakEntity, Window};
+use gpui::{App, Context, Entity, WeakEntity, Window};
 use ui::prelude::*;
 use workspace::{Pane, Workspace};
 
 use crate::host::FloatingPane;
 
 impl FloatingPane {
+    /// Takes the weak handle as a parameter rather than deriving it with
+    /// `cx.weak_entity()`, and `&mut App` rather than `Context<Self>`: the
+    /// drag-to-split path calls this from inside a `Workspace`
+    /// lease, where only a bare `&mut App` is available. `Context<Self>`
+    /// derefs to `&mut App`, so today's caller only has to add
+    /// `cx.weak_entity()` at the call site.
     pub(crate) fn build_pane(
         workspace: &WeakEntity<Workspace>,
         project: Entity<project::Project>,
+        this: WeakEntity<Self>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> Entity<Pane> {
-        let this = cx.weak_entity();
         cx.new(|cx| {
             let mut pane = Pane::new(
                 workspace.clone(),
@@ -40,29 +48,58 @@ impl FloatingPane {
             // shift every tab under the pointer at the moment of the click.
             pane.set_should_display_tab_bar(|_, _| true);
             pane.set_zoom_out_on_close(false);
-            // The pane's own `+` offers New File, New Terminal and the agents
-            // as workspace actions, which resolve against the editor's active
-            // pane -- this pane is not one of those, so every entry opened
-            // behind the window. Replaced with the window's own list, the way
-            // the terminal panel replaces it for the same reason.
-            pane.set_render_tab_bar_buttons(cx, move |_pane, _window, _cx| {
-                (None, Some(crate::render::tab_bar_menu(this.clone())))
+            // The pane's own tab-bar buttons are New File, New Terminal and
+            // the agents as workspace actions, which resolve against the
+            // editor's active pane -- this pane is not one of those, so
+            // every entry opened behind the window. Replaced with the
+            // window's own lists on both sides, the way the terminal panel
+            // replaces the right slot for the same reason: a Split control
+            // aimed at this window's own `split_active` in the left slot,
+            // and this window's `+` in the right.
+            pane.set_render_tab_bar_buttons(cx, {
+                let this = this.clone();
+                move |_pane, _window, _cx| {
+                    (
+                        Some(crate::render::tab_bar_split_button(this.clone())),
+                        Some(crate::render::tab_bar_menu(this.clone())),
+                    )
+                }
             });
-            // The pane's own `+` offers New File, New Terminal and the agents
-            // as workspace actions, which resolve against the editor's active
-            // pane -- this pane is not one of those, so every entry opened
-            // behind the window. Replaced with the window's own list, the way
-            // the terminal panel replaces it for the same reason.
+            // Without this, `handle_tab_drop` routes through
+            // `Workspace::split_pane` and splits the editor's centre group --
+            // the drop lands behind this window, on code the user was not
+            // touching. Set on every pane this window builds, so a drop on a
+            // pane created by an earlier drop behaves the same.
+            //
+            // Runs while the workspace entity is leased (`pane.rs`'s
+            // `cx.defer_in` inside `workspace.update`). Nothing below may read
+            // or update `self.workspace`.
+            pane.set_split_for_drop(Some(Arc::new({
+                let this = this.clone();
+                move |to_pane: &Entity<Pane>, direction, window, cx: &mut App| {
+                    match this.update(cx, |this, cx| this.split_off(to_pane, direction, window, cx))
+                    {
+                        Ok(new_pane) => new_pane,
+                        Err(error) => {
+                            log::error!(
+                                "the floating window went while a tab was dropped on it: {error}"
+                            );
+                            None
+                        }
+                    }
+                }
+            })));
             pane
         })
     }
 
     pub(crate) fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.project(cx) else {
-            return;
-        };
+        let project = self.project.clone();
         let workspace = self.workspace.clone();
-        let pane = self.pane.clone();
+        // Captured now rather than read back off `self` inside the spawn: by
+        // the time the terminal is built, focus may have moved to a different
+        // tab, but the item still lands where the user asked for it.
+        let pane = self.active_pane.clone();
         let working_directory = project
             .read(cx)
             .active_project_directory(cx)
@@ -109,10 +146,11 @@ impl FloatingPane {
     /// ordinary untitled buffer, so closing it asks to save exactly the way any
     /// other unsaved buffer does -- nothing is quietly thrown away.
     pub(crate) fn new_markdown_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.project(cx) else {
-            return;
-        };
-        let pane = self.pane.clone();
+        let project = self.project.clone();
+        // Captured now, not read back off `self` inside the spawn: the note
+        // lands where the user asked for it even if focus moved while the
+        // buffer was still being created.
+        let pane = self.active_pane.clone();
         let languages = project.read(cx).languages().clone();
 
         self.opening = Some(cx.spawn_in(window, async move |this, cx| {
@@ -149,10 +187,11 @@ impl FloatingPane {
     /// order. The dialog is also the only one of the two that can reach a note
     /// kept outside the project, which for scratch notes is the common case.
     pub(crate) fn open_markdown_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project) = self.project(cx) else {
-            return;
-        };
-        let pane = self.pane.clone();
+        let project = self.project.clone();
+        // Captured now, not read back off `self` inside the spawn: the file
+        // picker can take a while, and the note still lands where the user
+        // asked for it even if focus moved in the meantime.
+        let pane = self.active_pane.clone();
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -202,7 +241,7 @@ impl FloatingPane {
     /// lives in exactly one pane, and pulling an existing thread in here would
     /// take it out of the editor where somebody left it.
     pub(crate) fn open_agent(&mut self, agent: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let pane = self.pane.clone();
+        let pane = self.active_pane.clone();
         let agent = agent.to_string();
         let updated = self.workspace.update(cx, |workspace, cx| {
             agent_ui::AgentView::open_in_pane(workspace, pane, &agent, window, cx);
@@ -210,12 +249,6 @@ impl FloatingPane {
         if let Err(error) = updated {
             log::error!("could not reach the workspace to open an agent: {error}");
         }
-    }
-
-    pub(crate) fn project(&self, cx: &gpui::App) -> Option<Entity<project::Project>> {
-        self.workspace
-            .read_with(cx, |workspace, _| workspace.project().clone())
-            .ok()
     }
 }
 
