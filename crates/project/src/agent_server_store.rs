@@ -1138,6 +1138,7 @@ mod tests {
     use gpui::TestAppContext;
     use settings::Settings as _;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     fn init_test_settings(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -1158,6 +1159,47 @@ mod tests {
         })
     }
 
+    /// One executable in a directory that is on nobody's `PATH`.
+    ///
+    /// The lookups below used to probe with `std::env::current_exe`, on the
+    /// reasoning that the process `PATH` could not possibly see the test binary.
+    /// That holds on Unix and is false on Windows: cargo puts the test binary's
+    /// own directory on `PATH` there so its DLLs resolve, so both lookups found
+    /// the test binary itself and the two assertions that the process `PATH`
+    /// finds nothing failed. A file under the system temp directory is
+    /// unreachable from `PATH` on every platform, which is what makes the
+    /// negative half of these tests mean the same thing everywhere.
+    struct Probe {
+        dir: TempDir,
+        name: String,
+    }
+
+    impl Probe {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("a temp directory for the probe");
+            // `which` accepts a name on Windows only when its extension is in
+            // PATHEXT, and on Unix only when the executable bit is set.
+            let name = format!("probe{}", std::env::consts::EXE_SUFFIX);
+            let path = dir.path().join(&name);
+            std::fs::write(&path, b"").expect("the probe is written");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("the probe is executable");
+            }
+            Self { dir, name }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.dir.path().join(&self.name)
+        }
+
+        fn search_path(&self) -> String {
+            self.dir.path().to_string_lossy().into_owned()
+        }
+    }
+
     /// The bug this guards against: a GUI application on macOS inherits a minimal
     /// `PATH`, so the native Claude Code installer's `~/.local/bin/claude` is
     /// invisible unless the user's shell environment is consulted first. Both
@@ -1165,21 +1207,21 @@ mod tests {
     /// the process `PATH` alone demonstrably fails to find the same binary.
     #[test]
     fn locates_a_binary_that_the_process_path_cannot_see() {
-        let exe = std::env::current_exe().expect("test binary has a path");
-        let dir = exe.parent().expect("test binary lives in a directory");
-        let name = exe
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("test binary has a name");
+        let probe = Probe::new();
 
+        let found = locate_binary(&probe.name, Some(probe.search_path()))
+            .expect("a binary in the supplied PATH must be found");
+        // Canonicalised on both sides: the macOS temp directory is a symlink
+        // (`/var/folders/...` onto `/private/var/folders/...`), and which end of
+        // it comes back is not what this test is about.
         assert_eq!(
-            locate_binary(name, Some(dir.to_string_lossy().into_owned())).as_deref(),
-            Some(exe.as_path()),
-            "a binary in the supplied PATH must be found"
+            found.canonicalize().ok(),
+            probe.path().canonicalize().ok(),
+            "a binary in the supplied PATH must be found where it was put"
         );
 
         assert_eq!(
-            locate_binary(name, None),
+            locate_binary(&probe.name, None),
             None,
             "the same binary must be invisible to the process PATH, or this test \
              proves nothing about reading the shell environment"
@@ -1190,9 +1232,16 @@ mod tests {
     fn empty_shell_path_falls_back_rather_than_reporting_missing() {
         // A login shell that fails to report a PATH must not be turned into a
         // "not installed" verdict.
-        let exe = std::env::current_exe().expect("test binary has a path");
-        let name = exe.file_name().and_then(|name| name.to_str()).unwrap();
-        assert_eq!(locate_binary(name, Some(String::new())), None);
+        let probe = Probe::new();
+        assert_eq!(
+            locate_binary(&probe.name, Some(String::new())),
+            None,
+            "an empty shell PATH falls back to the process PATH, which cannot \
+             reach a temp directory"
+        );
+        // The other half of the fallback: it has to actually search that PATH.
+        // Windows ships no `sh`, and there is no name it is guaranteed to
+        // resolve, so the claim is made where it can be made.
         assert!(locate_binary("sh", Some(String::new())).is_some() || cfg!(windows));
     }
 
