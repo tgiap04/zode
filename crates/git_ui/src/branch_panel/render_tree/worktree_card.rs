@@ -171,19 +171,29 @@ impl BranchPanel {
 
     /// Whether this window is looking at this checkout.
     ///
-    /// By path prefix rather than equality: a workspace can be rooted at a
-    /// subdirectory of the checkout, and it is still that checkout. The same
-    /// question `agents_by_checkout` asks to decide where a running agent
-    /// belongs, so the card's mark and the agent list cannot disagree about
-    /// where "here" is.
+    /// Through the same `checkout_containing` the agent list uses, and for the
+    /// same reason it exists: a bare prefix test says yes for every checkout a
+    /// root sits under, and a worktree kept inside the repository sits under
+    /// the main one too -- so both cards claimed to be the current checkout,
+    /// and "start an agent here" (`context_menu.rs`) could take the shortcut
+    /// meant for the checkout you are standing in while pointed at a different
+    /// one. Sharing the answer is what keeps the card's mark and the agent list
+    /// from disagreeing about where "here" is.
     pub(crate) fn is_current_checkout(&self, worktree: &GitWorktree, cx: &App) -> bool {
         let Some(workspace) = self.workspace.upgrade() else {
             return false;
         };
-        workspace
-            .read(cx)
-            .root_paths(cx)
+        let roots = workspace.read(cx).root_paths(cx);
+        self.repos
             .iter()
-            .any(|root| root.starts_with(&worktree.path))
+            .filter(|repo| {
+                repo.worktrees
+                    .iter()
+                    .any(|listed| listed.path == worktree.path)
+            })
+            .any(|repo| {
+                crate::branch_panel::data::checkout_containing(&repo.worktrees, &roots)
+                    .is_some_and(|here| here.path == worktree.path)
+            })
     }
 }

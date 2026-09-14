@@ -236,9 +236,7 @@ impl BranchPanel {
             // the workspace sits under. A running agent has no other checkout
             // it could be editing.
             let roots = workspace.read(cx).root_paths(cx);
-            let here = worktrees
-                .iter()
-                .find(|worktree| roots.iter().any(|root| root.starts_with(&worktree.path)));
+            let here = checkout_containing(worktrees, &roots);
 
             if let Some(here) = here {
                 let mut open = Vec::new();
@@ -300,6 +298,40 @@ fn finish(
         .into_iter()
         .map(|(path, entries)| (path, Arc::from(entries)))
         .collect()
+}
+
+/// The checkout a workspace is standing in: the *innermost* one whose path
+/// contains a root of it.
+///
+/// The deepest match and not the first, because one checkout can live inside
+/// another. `git.worktree_directory` is a relative path, so a reader who points
+/// it into the repository -- `.claude/worktrees`, say -- gets linked worktrees
+/// nested under the main checkout, and every one of their paths then starts
+/// with the main checkout's too. `all_checkouts` deliberately lists the main
+/// one first (`tree.rs:325`), so taking the first match filed every open agent
+/// tab under the main row however deep the worktree it was really running in --
+/// and the moment that tab closed, the session came back from the index under
+/// its real working directory, on a different row. The agent did not go
+/// anywhere; the row it had been drawn on was never its own.
+///
+/// Ties keep the first, so the answer follows `all_checkouts`' own order rather
+/// than the iteration accident of `max_by_key`. A tie needs a multi-root
+/// workspace whose roots sit in two equally deep checkouts; there is no better
+/// answer for that, only a stable one.
+pub(crate) fn checkout_containing<'a>(
+    worktrees: &'a [git::repository::Worktree],
+    roots: &[Arc<Path>],
+) -> Option<&'a git::repository::Worktree> {
+    worktrees
+        .iter()
+        .filter(|worktree| roots.iter().any(|root| root.starts_with(&worktree.path)))
+        .reduce(|deepest, worktree| {
+            if worktree.path.components().count() > deepest.path.components().count() {
+                worktree
+            } else {
+                deepest
+            }
+        })
 }
 
 /// The directory name is what the user calls the repository; the full path is
@@ -575,6 +607,112 @@ mod tests {
                  sweep per closed tab"
             );
         });
+    }
+
+    /// The checkout an open agent tab is filed under, with no window needed.
+    ///
+    /// Built in `all_checkouts`' own order -- the main checkout first, then the
+    /// rest by path (`tree.rs:325`) -- because that order is what made the
+    /// first-match version wrong.
+    mod checkout_containing {
+        use super::super::checkout_containing;
+        use std::path::{Path, PathBuf};
+        use std::sync::Arc;
+
+        fn worktree(path: &str, is_main: bool) -> git::repository::Worktree {
+            git::repository::Worktree {
+                path: PathBuf::from(path),
+                ref_name: None,
+                sha: Default::default(),
+                is_main,
+                is_bare: false,
+            }
+        }
+
+        fn roots(paths: &[&str]) -> Vec<Arc<Path>> {
+            paths
+                .iter()
+                .map(|path| Arc::from(Path::new(path)))
+                .collect()
+        }
+
+        /// The regression. A worktree kept inside the repository -- what
+        /// `git.worktree_directory: ".claude/worktrees"` produces -- has a path
+        /// that starts with the main checkout's, and the main checkout is
+        /// listed first. Taking the first match filed the agent under the main
+        /// row, so closing its tab moved the session to the row it had always
+        /// belonged to and it read as having been deleted.
+        #[test]
+        fn a_nested_worktree_wins_over_the_main_checkout_that_contains_it() {
+            let worktrees = [
+                worktree("/repos/zode", true),
+                worktree("/repos/zode/.claude/worktrees/feature", false),
+            ];
+
+            let here = checkout_containing(
+                &worktrees,
+                &roots(&["/repos/zode/.claude/worktrees/feature"]),
+            )
+            .expect("a root inside a checkout has a checkout");
+
+            assert_eq!(
+                here.path,
+                PathBuf::from("/repos/zode/.claude/worktrees/feature"),
+                "the innermost checkout containing the root is the one the window is standing in"
+            );
+        }
+
+        /// The counterweight: standing in the main checkout must still answer
+        /// the main checkout, however many worktrees are nested under it.
+        #[test]
+        fn standing_in_the_main_checkout_still_answers_the_main_checkout() {
+            let worktrees = [
+                worktree("/repos/zode", true),
+                worktree("/repos/zode/.claude/worktrees/feature", false),
+            ];
+
+            let here = checkout_containing(&worktrees, &roots(&["/repos/zode"]))
+                .expect("a root inside a checkout has a checkout");
+
+            assert_eq!(here.path, PathBuf::from("/repos/zode"));
+        }
+
+        /// A sibling worktree -- the shipped default, `"../worktrees"` -- was
+        /// never ambiguous, and must not become so.
+        #[test]
+        fn a_sibling_worktree_is_unaffected() {
+            let worktrees = [
+                worktree("/repos/zode", true),
+                worktree("/repos/worktrees/feature", false),
+            ];
+
+            let here = checkout_containing(&worktrees, &roots(&["/repos/worktrees/feature"]))
+                .expect("a root inside a checkout has a checkout");
+
+            assert_eq!(here.path, PathBuf::from("/repos/worktrees/feature"));
+        }
+
+        /// Component-wise, not textual: `/repos/zode-kit` is not inside
+        /// `/repos/zode`, and filing its agents under a neighbouring project
+        /// would be worse than filing them nowhere.
+        #[test]
+        fn a_name_that_merely_starts_the_same_is_not_inside() {
+            let worktrees = [worktree("/repos/zode", true)];
+
+            assert!(checkout_containing(&worktrees, &roots(&["/repos/zode-kit"])).is_none());
+        }
+
+        /// A window over something no checkout holds has no checkout to file an
+        /// agent under, and must say so rather than guess at the first one.
+        #[test]
+        fn a_root_outside_every_checkout_has_no_checkout() {
+            let worktrees = [
+                worktree("/repos/zode", true),
+                worktree("/repos/zode/.claude/worktrees/feature", false),
+            ];
+
+            assert!(checkout_containing(&worktrees, &roots(&["/elsewhere"])).is_none());
+        }
     }
 
     /// **T15.** A panel that has never been drawn has no session store to ask,
