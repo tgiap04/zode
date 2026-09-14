@@ -165,14 +165,19 @@ Most actions do not require any arguments, and so you can bind them as strings: 
 
 ### Precedence
 
-When multiple keybindings have the same keystroke and are active at the same time, precedence is resolved in two ways:
+When multiple keybindings have the same keystroke and are active at the same time, precedence is resolved by three rules, in order:
 
-- Bindings that match on lower nodes in the context tree win. This means that if you have a binding with a context of `Editor`, it will take precedence over a binding with a context of `Workspace`. Bindings with no context match at the lowest level in the tree.
-- If there are multiple bindings that match at the same level in the tree, then the binding defined later takes precedence. As user keybindings are loaded after system keybindings, this allows user bindings to take precedence over built-in keybindings.
+1. **Bindings you wrote yourself win first.** A binding defined in your own `keymap.json` takes precedence over any bundled binding — the default keymap, a base keymap (VS Code, Atom, etc.), or a Vim-mode binding — even when the bundled binding matches on a deeper context. For example, if your keymap binds `ctrl-w` with a context of `Workspace` and the default keymap binds `ctrl-w` with a context of `Editor`, your binding wins.
+2. **Then context depth.** Among bindings at the same tier (two of your own bindings, or two bundled bindings with no override), the one that matches on a lower node in the context tree wins. A binding with a context of `Editor` takes precedence over one with a context of `Workspace`. Bindings with no context match at the lowest level in the tree.
+3. **Then definition order.** If bindings still tie at the same tier and depth, the one defined later takes precedence.
+
+There's one exception to rule 1: it never applies to a `null` binding (see [Disabling a binding](#disabling-a-binding)). Whenever a `null` binding is competing for a keystroke, the entire set of matching bindings — the `null` and everything it's competing with — is ordered by rules 2 and 3 only. This keeps a shallow `"key": null` in your keymap from reaching past its own context and silencing a bundled binding defined somewhere deeper that you never touched.
 
 The other kind of conflict that arises is when you have two bindings, one of which is a prefix of the other. For example, if you have `"ctrl-w":"editor::DeleteToNextWordEnd"` and `"ctrl-w left":"editor::DeleteToEndOfLine"`.
 
 When this happens, and both bindings are active in the current context, Zode will wait for 1 second after you type `ctrl-w` to see if you're about to type `left`. If you don't type anything, or if you type a different key, then `DeleteToNextWordEnd` will be triggered. If you do, then `DeleteToEndOfLine` will be triggered.
+
+This wait is skipped when a binding from your own keymap is the one that wins the shorter chord. If you rebind `ctrl-w` yourself, rule 1 above means your binding already outranks any bundled `ctrl-w left`, so it fires as soon as you type `ctrl-w` — Zode won't wait to see if a longer bundled sequence was about to follow.
 
 ### Non-QWERTY keyboards
 
