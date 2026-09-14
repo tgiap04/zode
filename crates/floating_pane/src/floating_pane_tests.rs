@@ -1789,12 +1789,14 @@ mod dropping {
     /// `init`'s observer owns the only instance, reached solely through the
     /// actions it registered, exactly like a real keybinding would. A second
     /// manually-built `FloatingPane` registered as its own layer was tried
-    /// first and did not work: overriding `register_floating_layer` a second
-    /// time left every action dispatched afterward, on either pane, silently
-    /// unreachable -- observable directly, since `ToggleFloatingPane` bound
-    /// to that second pane never flipped its own `open` field either. Given
-    /// that, the one instance `init` already owns is the only one this test
-    /// can reach at all.
+    /// first and cannot work. `Workspace::register_floating_layer` replaces
+    /// the layer, while `register_action` appends to a list nothing withdraws
+    /// from -- and `init`'s observer does both. The later registration
+    /// therefore takes the pixels and leaves every action still holding the
+    /// first instance, so `ToggleFloatingPane` flips an `open` field on an
+    /// entity that is no longer drawn. Dispatch works throughout; it reaches
+    /// an orphan. The instance `init` owns is the only one this test can
+    /// reach.
     ///
     /// With no handle to assert against, the split is proven the only way
     /// left -- the active pane's own tab bar redraws narrower and its

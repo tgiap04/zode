@@ -6090,6 +6090,12 @@ impl Workspace {
     ///
     /// One at a time, and the last registration wins: two independent floating
     /// layers would overlap with nothing deciding which is in front.
+    ///
+    /// Only the *layer* is replaced. Actions a caller registered alongside an
+    /// earlier layer stay on `workspace_actions`, which nothing withdraws from,
+    /// still holding that layer's handle — so a second registration leaves the
+    /// first view owning every keybinding while owning no pixels, and the
+    /// second owning pixels no key can reach. Register once per workspace.
     pub fn register_floating_layer<T: Render>(&mut self, view: Entity<T>, cx: &mut Context<Self>) {
         self.floating_layer = Some(Box::new(view));
         cx.notify();
