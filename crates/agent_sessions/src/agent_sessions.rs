@@ -37,7 +37,8 @@ pub use opencode::OpenCodeProvider;
 pub use provider::SessionProvider;
 pub use session_index::SessionIndex;
 pub use summary::{
-    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionSummary, Speaker,
+    AgentCommand, AgentKind, Availability, CompletedSubagents, Deletion, Fork, SessionCounts,
+    SessionSummary, Speaker, SubagentSummary,
 };
 
 use std::sync::Arc;

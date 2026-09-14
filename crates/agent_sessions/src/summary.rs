@@ -117,6 +117,48 @@ impl SessionSummary {
     }
 }
 
+/// One subagent a session spawned.
+///
+/// Cheap in the same way [`SessionSummary`] is: every field comes from a small
+/// sidecar file written when the subagent started, never from a transcript.
+///
+/// Whether it is *still running* is deliberately not here. That answer lives in
+/// the parent's transcript rather than beside the subagent, costs a scan, and is
+/// [`SessionProvider::completed_subagents`](crate::SessionProvider::completed_subagents)'s
+/// job — a field here would invite a caller to read it for free when it is not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentSummary {
+    /// The sidecar's own name for it (`agent-a0118bd794424296a`). Unique within
+    /// the session and stable across refreshes, so a row keeps its identity.
+    pub id: Arc<str>,
+    /// What kind of agent was asked for — `reviewer`, `doc-writer`. What a row
+    /// leads with.
+    ///
+    /// `Arc<str>` rather than `String` for both of these: a row redraws on every
+    /// animation frame while a subagent spins, and a `String` would be copied
+    /// each time where this is a refcount bump.
+    pub kind: Arc<str>,
+    /// The one-line brief the parent gave it.
+    pub description: Arc<str>,
+    /// The parent's tool call that spawned it, and the key its completion is
+    /// reported under. See
+    /// [`SessionProvider::completed_subagents`](crate::SessionProvider::completed_subagents).
+    pub tool_use_id: Arc<str>,
+    /// When the sidecar was written, which is when the subagent started.
+    pub spawned_at: SystemTime,
+}
+
+/// What one incremental pass over a transcript found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompletedSubagents {
+    /// The tool calls reported finished within the bytes just read.
+    pub tool_use_ids: Vec<Arc<str>>,
+    /// Where the next pass should resume. Never moves backwards except when the
+    /// transcript itself shrank, which means a different file is under the same
+    /// path and the whole scan starts again.
+    pub scanned_to: u64,
+}
+
 /// The numbers that cost a full scan of the transcript.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionCounts {
