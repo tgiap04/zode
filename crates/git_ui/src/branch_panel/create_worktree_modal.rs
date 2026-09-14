@@ -762,7 +762,10 @@ mod tests {
     #[test]
     fn picking_an_existing_branch_is_never_a_collision() {
         let branches = [SharedString::from("test")];
-        assert_eq!(branch_colliding_with(NameMode::Branch, "test", &branches), None);
+        assert_eq!(
+            branch_colliding_with(NameMode::Branch, "test", &branches),
+            None
+        );
     }
 
     /// git refs are case-sensitive, and a warning that fires on a name which
@@ -770,8 +773,14 @@ mod tests {
     #[test]
     fn a_different_case_is_a_different_branch() {
         let branches = [SharedString::from("test")];
-        assert_eq!(branch_colliding_with(NameMode::Name, "Test", &branches), None);
-        assert_eq!(branch_colliding_with(NameMode::Name, "testing", &branches), None);
+        assert_eq!(
+            branch_colliding_with(NameMode::Name, "Test", &branches),
+            None
+        );
+        assert_eq!(
+            branch_colliding_with(NameMode::Name, "testing", &branches),
+            None
+        );
         assert_eq!(branch_colliding_with(NameMode::Name, "", &branches), None);
     }
     use zed_actions::NewWorktreeBranchTarget;
@@ -885,5 +894,4 @@ mod location {
             );
         }
     }
-
 }

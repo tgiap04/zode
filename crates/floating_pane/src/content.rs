@@ -71,7 +71,10 @@ impl FloatingPane {
             // an edge simply joins the pane. The editor's centre pane and the
             // terminal panel each set their own; this window had none.
             pane.set_can_split(Some(Arc::new(
-                move |pane: &mut Pane, dragged_item: &dyn std::any::Any, _window, cx: &mut Context<Pane>| {
+                move |pane: &mut Pane,
+                      dragged_item: &dyn std::any::Any,
+                      _window,
+                      cx: &mut Context<Pane>| {
                     let Some(tab) = dragged_item.downcast_ref::<DraggedTab>() else {
                         return false;
                     };
@@ -93,16 +96,16 @@ impl FloatingPane {
             // or update `self.workspace`.
             pane.set_split_for_drop(Some(Arc::new({
                 let this = this.clone();
-                move |to_pane: &Entity<Pane>, direction, window, cx: &mut App| {
-                    match this.update(cx, |this, cx| this.split_off(to_pane, direction, window, cx))
-                    {
-                        Ok(new_pane) => new_pane,
-                        Err(error) => {
-                            log::error!(
-                                "the floating window went while a tab was dropped on it: {error}"
-                            );
-                            None
-                        }
+                move |to_pane: &Entity<Pane>, direction, window, cx: &mut App| match this
+                    .update(cx, |this, cx| {
+                        this.split_off(to_pane, direction, window, cx)
+                    }) {
+                    Ok(new_pane) => new_pane,
+                    Err(error) => {
+                        log::error!(
+                            "the floating window went while a tab was dropped on it: {error}"
+                        );
+                        None
                     }
                 }
             })));

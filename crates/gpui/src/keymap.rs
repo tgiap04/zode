@@ -1118,8 +1118,7 @@ mod tests {
         let bindings = [
             KeyBinding::new("cmd-r", ActionBeta {}, Some("Editor"))
                 .with_meta(KeyBindingMetaIndex(3)),
-            KeyBinding::new("cmd-r", NoAction {}, Some("Editor"))
-                .with_meta(KeyBindingMetaIndex(0)),
+            KeyBinding::new("cmd-r", NoAction {}, Some("Editor")).with_meta(KeyBindingMetaIndex(0)),
         ];
 
         let mut keymap = Keymap::default();
@@ -1187,10 +1186,10 @@ mod tests {
     fn test_a_disable_between_two_tiers_keeps_a_total_order() {
         let user_shallow = KeyBinding::new("ctrl-w", ActionAlpha {}, Some("Workspace"))
             .with_meta(KeyBindingMetaIndex(0));
-        let disable_middle =
-            KeyBinding::new("ctrl-w", NoAction {}, Some("Editor")).with_meta(KeyBindingMetaIndex(3));
-        let default_deep =
-            KeyBinding::new("ctrl-w", ActionBeta {}, Some("Pane")).with_meta(KeyBindingMetaIndex(3));
+        let disable_middle = KeyBinding::new("ctrl-w", NoAction {}, Some("Editor"))
+            .with_meta(KeyBindingMetaIndex(3));
+        let default_deep = KeyBinding::new("ctrl-w", ActionBeta {}, Some("Pane"))
+            .with_meta(KeyBindingMetaIndex(3));
 
         let entries = [
             (1usize, BindingIndex(0), &user_shallow),

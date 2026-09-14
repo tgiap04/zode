@@ -883,8 +883,9 @@ impl Pane {
     #[cfg(any(test, feature = "test-support"))]
     pub fn split_for_drop(
         &self,
-    ) -> Option<Arc<dyn Fn(&Entity<Pane>, SplitDirection, &mut Window, &mut App) -> Option<Entity<Pane>>>>
-    {
+    ) -> Option<
+        Arc<dyn Fn(&Entity<Pane>, SplitDirection, &mut Window, &mut App) -> Option<Entity<Pane>>>,
+    > {
         self.split_for_drop.clone()
     }
 

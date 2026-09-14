@@ -1247,7 +1247,10 @@ mod splitting {
         cx.run_until_parked();
 
         let right_pane = window.read_with(cx, |window, _| window.active_pane.clone());
-        assert_ne!(left_pane, right_pane, "the split must have a new active pane");
+        assert_ne!(
+            left_pane, right_pane,
+            "the split must have a new active pane"
+        );
 
         // Asserted against the window's real focus rather than the
         // `active_pane` field: `Pane::focus_in` only re-emits `Event::Focus`
@@ -1320,7 +1323,12 @@ mod splitting {
         cx.run_until_parked();
 
         let before = window.read_with(cx, |window, _| {
-            window.center.panes().into_iter().cloned().collect::<Vec<_>>()
+            window
+                .center
+                .panes()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
         });
 
         window.update_in(cx, |window, _window_handle, cx| {
@@ -1329,7 +1337,12 @@ mod splitting {
         cx.run_until_parked();
 
         let after = window.read_with(cx, |window, _| {
-            window.center.panes().into_iter().cloned().collect::<Vec<_>>()
+            window
+                .center
+                .panes()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
         });
         assert_eq!(
             after,
