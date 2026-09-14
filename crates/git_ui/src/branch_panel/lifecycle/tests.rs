@@ -1679,3 +1679,369 @@ mod permission_bypass {
         assert!(bypass_mark(false).is_none());
     }
 }
+
+/// `confirm_delete_checkout`, driven directly rather than through the menu
+/// entry that calls it.
+///
+/// **What these do not cover.** A session actually surviving or actually
+/// going: `agent_ui::SessionStore`'s only way to stock a session without
+/// sweeping the real transcripts on this machine is
+/// `set_index_for_test`, gated behind agent_ui's own `test-support`
+/// feature -- which `git_ui`'s `Cargo.toml` does not enable, and which is
+/// out of scope here (the wiring under test owns `checkout_menu.rs` and this file
+/// only). Every worktree path used below is deliberately never registered
+/// with the fake repository, so `remove_worktree` always answers `Err` --
+/// enough to drive the worktree-only and failed-removal branches and prove
+/// they touch neither the pinned/order state nor the session store, and that
+/// neither takes down the process on a leased workspace. Exercising the
+/// third button against a real, non-empty plan -- and the successful
+/// combined branch's tab-closing and `execute_session_deletion` call -- is
+/// left to a follow-up once that feature gate is wired in, and to the manual
+/// pass this plan already calls for.
+mod confirm_delete_checkout {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use agent_sessions::{AgentKind, SessionSummary};
+    use gpui::{TestAppContext, VisualTestContext};
+    use project::git_store::RepositoryId;
+
+    use crate::branch_panel::panel::BranchPanel;
+
+    use super::panel_over_a_repo;
+
+    const TARGET: &str = "/repos/zode-wt-a";
+
+    /// A panel over a real (fake) repository, with its `repos` populated so
+    /// `confirm_delete_checkout`'s own `self.repository(id, cx)` lookup and
+    /// `other_live_worktrees` scan have something to read.
+    async fn panel_ready_to_delete(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        RepositoryId,
+        &mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        cx.run_until_parked();
+        let id = panel.update(cx, |panel, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+            panel.repos[0].id
+        });
+        (panel, id, cx)
+    }
+
+    /// The safety gate. `TARGET` is pinned first so a pruned pin is
+    /// observable evidence that the delete ran at all -- proving cancel left
+    /// it alone is only meaningful next to proof that answering would not
+    /// have.
+    #[gpui::test]
+    async fn cancelling_takes_nothing(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+
+        panel.update(cx, |panel, cx| panel.toggle_pinned(&target, cx));
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.pending_prompt().is_some(),
+            "a delete must ask before it does anything"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            let pinned = panel.checkout_state.read(cx).pinned().to_vec();
+            assert!(
+                pinned.iter().any(|pinned| pinned == TARGET),
+                "cancelling must not prune anything -- the pin from before the \
+                 prompt has to still be there"
+            );
+        });
+    }
+
+    /// A worktree with no sessions in the store gets exactly today's prompt:
+    /// two buttons, and the same sentence the old, session-blind code wrote.
+    /// Proven by answering with the label the old code used -- if a third
+    /// button had appeared, that label would not be the one at its index and
+    /// the harness would panic identifying the mismatch.
+    #[gpui::test]
+    async fn a_checkout_with_no_sessions_shows_todays_two_buttons(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        let (_, detail) = cx.pending_prompt().expect("the delete must prompt");
+        assert_eq!(
+            detail,
+            format!(
+                "wt-a\n\nThe worktree at {TARGET} will be removed. Its branch and its commits stay."
+            )
+        );
+        cx.simulate_prompt_answer("Delete");
+        cx.run_until_parked();
+    }
+
+    /// "Delete Worktree Only" is unreachable without a session store to
+    /// offer it (see the module doc for why), so this drives the same
+    /// two-button `Some(0)` route `delete_choice_for` maps to
+    /// `DeleteChoice::WorktreeOnly` regardless, and checks its two
+    /// consequences: the pin is pruned, and the session store -- present,
+    /// just never stocked with anything by this test -- is never asked to
+    /// refresh.
+    #[gpui::test]
+    async fn worktree_only_prunes_state_without_touching_the_session_store(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+
+        panel.update_in(cx, |panel, _window, cx| {
+            panel.toggle_pinned(&target, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+        let generation_before = panel.read_with(cx, |panel, cx| {
+            panel
+                .session_store
+                .as_ref()
+                .expect("ensure_session_store just ran")
+                .read(cx)
+                .generation()
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Delete");
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            let pinned = panel.checkout_state.read(cx).pinned().to_vec();
+            assert!(
+                !pinned.iter().any(|pinned| pinned == TARGET),
+                "the pin must be pruned once a delete actually ran"
+            );
+            assert_eq!(
+                panel
+                    .session_store
+                    .as_ref()
+                    .expect("still the same store")
+                    .read(cx)
+                    .generation(),
+                generation_before,
+                "a worktree-only delete must never ask the session store to refresh"
+            );
+        });
+    }
+
+    /// The removal git refuses must not crash the process, and must not take
+    /// the pin down with it. `TARGET` was never registered as a worktree, so
+    /// the fake repository's `remove_worktree` answers `Err` deterministically
+    /// -- the same shape a real dirty tree produces against a real one.
+    ///
+    /// This is also the process-abort regression test: `report_failure` runs
+    /// from a spawned closure specifically so this does not double-lease the
+    /// workspace, and a panic here (rather than a clean failing assertion)
+    /// is what that regression would look like.
+    #[gpui::test]
+    async fn a_failed_removal_prunes_and_reports_without_a_lease_panic(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+        panel.update(cx, |panel, cx| panel.toggle_pinned(&target, cx));
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Delete");
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            let pinned = panel.checkout_state.read(cx).pinned().to_vec();
+            assert!(
+                !pinned.iter().any(|pinned| pinned == TARGET),
+                "a failed removal still prunes the pin -- the checkout's own \
+                 state does not wait on git to agree"
+            );
+        });
+    }
+
+    /// A stocked session inside the checkout under test, shaped like a real
+    /// Claude row: `log_path` set is what makes `deletion()` answer `Trash`
+    /// rather than `Nothing`, which is what makes the plan -- and so the
+    /// third button -- non-empty at all.
+    fn session_in(id: &str, cwd: PathBuf) -> SessionSummary {
+        let log_path = cwd.join(format!("{id}.jsonl"));
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd,
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: Some(log_path),
+            log_bytes: 1024,
+        }
+    }
+
+    /// Stocks the shared session store with two sessions inside `TARGET` --
+    /// one at its own root, one nested under it -- so "every one of those
+    /// sessions" below has more than a single member to fail on. Waits out
+    /// the store's real (empty) initial sweep first, the same ordering
+    /// `worktree_only_prunes_state_without_touching_the_session_store` above
+    /// already relies on, so that sweep landing later can never clobber the
+    /// stocked index with an empty one.
+    fn stock_sessions_inside_target(
+        panel: &gpui::Entity<BranchPanel>,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Entity<agent_ui::SessionStore> {
+        panel.update(cx, |panel, cx| panel.ensure_session_store(cx));
+        cx.run_until_parked();
+        let store = panel
+            .read_with(cx, |panel, _| panel.session_store.clone())
+            .expect("ensure_session_store just ran");
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(
+                vec![
+                    session_in("inside-root", PathBuf::from(TARGET)),
+                    session_in("inside-nested", PathBuf::from(TARGET).join("nested")),
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        store
+    }
+
+    /// The button that promises to keep sessions has to actually keep them:
+    /// both the checkout's own session and the one nested under it must still
+    /// be in the store afterwards, not merely absent from what the prompt
+    /// named.
+    #[gpui::test]
+    async fn worktree_only_leaves_every_session(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+        let store = stock_sessions_inside_target(&panel, cx);
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        // Proves the prompt actually saw the stocked sessions, so this test
+        // is driving the non-empty, three-button branch and not the
+        // no-sessions path `a_checkout_with_no_sessions_shows_todays_two_buttons`
+        // already covers.
+        let (_, detail) = cx.pending_prompt().expect("the delete must prompt");
+        assert!(
+            detail.contains("2 sessions"),
+            "both stocked sessions must be counted, or this is not the branch \
+             under test: {detail}"
+        );
+        cx.simulate_prompt_answer("Delete Worktree Only");
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            let ids: Vec<Arc<str>> = store
+                .index()
+                .sessions()
+                .iter()
+                .map(|session| session.id.clone())
+                .collect();
+            assert!(
+                ids.iter().any(|id| id.as_ref() == "inside-root"),
+                "the session at the checkout's own root must survive"
+            );
+            assert!(
+                ids.iter().any(|id| id.as_ref() == "inside-nested"),
+                "and so must the one nested inside it"
+            );
+        });
+    }
+
+    /// `TARGET` is never registered as a worktree (see the module doc), so
+    /// `remove_worktree` answers `Err` even when the reader presses the
+    /// button that asks for sessions to go too --
+    /// `confirm_delete_checkout` takes the same nothing-happened branch on a
+    /// failed removal as it does for worktree-only, before a single session
+    /// is read or a single tab is closed. Proven by pressing the destructive
+    /// button and checking both the session store and an open agent tab came
+    /// out untouched.
+    #[gpui::test]
+    async fn a_failed_removal_leaves_every_session(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+        let store = stock_sessions_inside_target(&panel, cx);
+        let generation_before = store.read_with(cx, |store, _| store.generation());
+
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("the panel's workspace is still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let tabs_before = workspace.read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<agent_ui::AgentView>(cx).count()
+        });
+        assert_eq!(
+            tabs_before, 1,
+            "the tab this test guards must actually be open"
+        );
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Delete Worktree and Sessions");
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.generation(),
+                generation_before,
+                "a failed removal must never ask the session store to refresh \
+                 or forget anything"
+            );
+            let ids: Vec<Arc<str>> = store
+                .index()
+                .sessions()
+                .iter()
+                .map(|session| session.id.clone())
+                .collect();
+            assert!(
+                ids.iter().any(|id| id.as_ref() == "inside-root"),
+                "no session goes down with a removal git itself refused"
+            );
+            assert!(ids.iter().any(|id| id.as_ref() == "inside-nested"));
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.items_of_type::<agent_ui::AgentView>(cx).count(),
+                1,
+                "a removal git refused must not close any agent tab either"
+            );
+        });
+    }
+}

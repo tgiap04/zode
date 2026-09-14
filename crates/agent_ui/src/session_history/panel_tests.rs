@@ -830,7 +830,7 @@ async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContex
 /// `delete_session` resolves the *real* Claude provider (see the comment on
 /// `a_session_with_nothing_on_disk_offers_to_drop_the_row`), and its `Trash`
 /// arm checks `path.exists()` against the real OS before ever reaching the
-/// injected `Fs` -- pre-existing, and not this phase's to change. So the path
+/// injected `Fs`, which is longstanding behaviour here. So the path
 /// this test fails to trash has to be a real file: written straight to the
 /// host's temp directory, never registered with `FakeFs`, and cleaned up
 /// after.

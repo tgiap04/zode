@@ -19,7 +19,10 @@ pub use actions::*;
 pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks};
 pub use agent_view::{AgentView, AgentViewEvent, SessionOrigin};
 pub use permission_bypass::PermissionBypassStore;
-pub use session_history::{AgentHistoryPanel, delete_session, resume_session};
+pub use session_history::{
+    AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, delete_all_detail, delete_session,
+    execute_session_deletion, plan_delete_all, resume_session, sessions_in_project,
+};
 pub use session_store::SessionStore;
 pub use subagents::{SubagentTracker, provider_for_agent};
 

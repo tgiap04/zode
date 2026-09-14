@@ -14,6 +14,7 @@
 //! branch list, worktrees and stashes, and the git store announces every change
 //! to them -- so this is a pure reader, and a closed panel costs nothing.
 
+pub(crate) mod checkout_deletion;
 mod checkout_menu;
 pub(crate) mod checkout_state;
 mod context_menu;

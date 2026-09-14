@@ -24,6 +24,7 @@ use workspace::{
     ModalView, MultiWorkspace, Workspace, dock::DockPosition, notifications::DetachAndPromptErr,
 };
 
+use crate::branch_panel::checkout_deletion;
 use crate::git_panel::show_error_toast;
 use zed_actions::{
     CreateWorktree, NewWorktreeBranchTarget, OpenWorktreeInNewWindow, SwitchWorktree,
@@ -355,7 +356,73 @@ impl WorktreePickerDelegate {
         let path = worktree.path.clone();
         let workspace = self.workspace.clone();
 
+        // The same first line the row itself shows, so the prompt names the
+        // checkout the way the reader already recognizes it.
+        let main_worktree_path = self
+            .all_worktrees
+            .iter()
+            .find(|wt| wt.is_main)
+            .map(|wt| wt.path.clone());
+        let display_name = worktree.directory_name(main_worktree_path.as_deref());
+        let label = display_name
+            .lines()
+            .next()
+            .unwrap_or(&display_name)
+            .to_string();
+        let other_live_worktrees: Vec<PathBuf> = self
+            .all_worktrees
+            .iter()
+            .filter(|wt| wt.path != path)
+            .map(|wt| wt.path.clone())
+            .collect();
+
+        // `try_global`, not `global`: opening this picker must not bring a
+        // process-wide session scan into existence just because its Delete
+        // action might get pressed. `None` here means an empty plan -- and
+        // today's exact prompt, unchanged.
+        let session_store = agent_ui::SessionStore::try_global(cx);
+        let plan = session_store
+            .as_ref()
+            .map(|store| {
+                checkout_deletion::plan_session_deletion(
+                    store.read(cx).index(),
+                    &path,
+                    &other_live_worktrees,
+                )
+            })
+            .unwrap_or(agent_ui::DeleteAll {
+                targets: Vec::new(),
+                total_bytes: 0,
+            });
+
+        let detail = checkout_deletion::confirm_detail(&label, &path, &plan);
+        let buttons = checkout_deletion::confirm_buttons(&plan);
+        let cancel_index = buttons.len() - 1;
+        let plan_holds_sessions = !plan.is_empty();
+
+        let prompt = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Delete this worktree?",
+            Some(&detail),
+            buttons,
+            cx,
+        );
+
+        // Read while `window` is still held synchronously: a `WindowHandle`
+        // downcast off `&Window` fails once inside this same window's own
+        // async update (see `checkout_deletion::agent_tabs_in`'s doc), so it
+        // cannot be deferred into the task below.
+        let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+
         cx.spawn_in(window, async move |picker, cx| {
+            let Some(choice) = prompt.await.ok() else {
+                return Ok(());
+            };
+            if choice == cancel_index {
+                return Ok(());
+            }
+            let take_sessions = plan_holds_sessions && choice == 0;
+
             let result = repo
                 .update(cx, |repo, _| repo.remove_worktree(path.clone(), false))
                 .await?;
@@ -375,6 +442,45 @@ impl WorktreePickerDelegate {
                 }
 
                 return Ok(());
+            }
+
+            if take_sessions {
+                let other_reachable_workspaces = match window_handle {
+                    Some(handle) => handle
+                        .update(cx, |multi_workspace, _window, _cx| {
+                            multi_workspace.retained_workspaces().to_vec()
+                        })
+                        .unwrap_or_default(),
+                    None => Vec::new(),
+                };
+
+                let tabs = cx
+                    .update(|_window, cx| {
+                        checkout_deletion::agent_tabs_in(
+                            &path,
+                            &workspace,
+                            &other_reachable_workspaces,
+                            cx,
+                        )
+                    })
+                    .unwrap_or_default();
+
+                let close =
+                    cx.update(|window, cx| checkout_deletion::close_agent_tabs(tabs, window, cx))?;
+                close.await;
+
+                if let Some(ws) = workspace.upgrade() {
+                    let delete = cx.update(|_window, cx| {
+                        agent_ui::execute_session_deletion(&ws, plan.targets, cx)
+                    })?;
+                    delete.await;
+                }
+
+                if let Some(store) = session_store {
+                    cx.update(|_window, cx| {
+                        store.update(cx, |store, cx| store.refresh(cx));
+                    })?;
+                }
             }
 
             picker.update_in(cx, |picker, _window, cx| {
@@ -1418,5 +1524,154 @@ mod tests {
             worktree_ref_names(&worktree_picker, cx).is_empty(),
             "nothing to list without a repository"
         );
+    }
+
+    /// The path `add_worktree_admin_entry` writes an admin entry for:
+    /// `FakeGitRepository::worktrees` derives the checkout's path from the
+    /// admin entry's `gitdir` file, which this mirrors exactly.
+    fn added_worktree_path(name: &str) -> PathBuf {
+        PathBuf::from(format!("{}/{name}", path!("/wt")))
+    }
+
+    /// The `matches` index of the row for `path`, the same lookup the
+    /// keyboard shortcut and the row's own delete button both make before
+    /// calling `delete_worktree`.
+    fn worktree_match_index(
+        worktree_picker: &Entity<WorktreePicker>,
+        path: &std::path::Path,
+        cx: &mut VisualTestContext,
+    ) -> usize {
+        worktree_picker
+            .read_with(cx, |worktree_picker, cx| {
+                worktree_picker.picker.read(cx).delegate.matches.iter().position(|entry| {
+                    matches!(entry, WorktreeEntry::Worktree { worktree, .. } if worktree.path == path)
+                })
+            })
+            .expect("the added worktree should have its own row in matches")
+    }
+
+    /// Before this, `delete_worktree` called `remove_worktree` straight from
+    /// the keypress -- the picker was the one path in this codebase that
+    /// deleted a checkout with no confirmation at all. This proves the gate
+    /// now exists: the removal must not have started, and a prompt must be
+    /// waiting for an answer.
+    #[gpui::test]
+    async fn deleting_from_the_picker_asks_first(cx: &mut TestAppContext) {
+        let (fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+        add_worktree_admin_entry(&fs, "wt-a").await;
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let path = added_worktree_path("wt-a");
+        let ix = worktree_match_index(&worktree_picker, &path, cx);
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                picker.delegate.delete_worktree(ix, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.has_pending_prompt(),
+            "the picker must ask before it removes anything"
+        );
+        assert_eq!(
+            worktree_ref_names(&worktree_picker, cx),
+            vec!["refs/heads/main", "refs/heads/wt-a"],
+            "an unanswered prompt must not have removed the worktree yet"
+        );
+    }
+
+    /// A click taken back must leave both halves of the plan untouched: the
+    /// worktree stays listed, and -- since `try_global` never brought a
+    /// session store into existence for this picker -- nothing was ever in
+    /// scope to take in the first place.
+    #[gpui::test]
+    async fn cancelling_in_the_picker_removes_nothing(cx: &mut TestAppContext) {
+        let (fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+        add_worktree_admin_entry(&fs, "wt-a").await;
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let path = added_worktree_path("wt-a");
+        let ix = worktree_match_index(&worktree_picker, &path, cx);
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                picker.delegate.delete_worktree(ix, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+
+        assert_eq!(
+            worktree_ref_names(&worktree_picker, cx),
+            vec!["refs/heads/main", "refs/heads/wt-a"],
+            "cancelling must leave the worktree exactly as it was"
+        );
+        assert!(
+            cx.update(|_, cx| agent_ui::SessionStore::try_global(cx).is_none()),
+            "opening and cancelling from this picker must never have created a session store"
+        );
+    }
+
+    /// Two doors onto the same act read the same sentence: this reads what
+    /// the picker actually put in front of the user and checks it against
+    /// `checkout_deletion::confirm_detail` computed directly, rather than any
+    /// wording of the picker's own. An empty plan is `checkout_deletion`'s
+    /// own byte-for-byte copy of the branch panel's sentence (see its
+    /// `a_worktree_with_no_sessions_keeps_todays_prompt_exactly`), so
+    /// matching it here is matching the branch panel's door too.
+    #[gpui::test]
+    async fn the_picker_and_the_panel_show_the_same_words(cx: &mut TestAppContext) {
+        let (fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+        add_worktree_admin_entry(&fs, "wt-a").await;
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let path = added_worktree_path("wt-a");
+        let ix = worktree_match_index(&worktree_picker, &path, cx);
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                picker.delegate.delete_worktree(ix, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let (message, detail) = cx.pending_prompt().expect("a prompt must be pending");
+        assert_eq!(message, "Delete this worktree?");
+
+        let empty_plan = agent_ui::DeleteAll {
+            targets: Vec::new(),
+            total_bytes: 0,
+        };
+        let expected = checkout_deletion::confirm_detail("wt-a", &path, &empty_plan);
+        assert_eq!(detail, expected);
+        assert_eq!(
+            detail,
+            format!(
+                "wt-a\n\nThe worktree at {} will be removed. Its branch and its commits stay.",
+                path.display()
+            ),
+            "today's exact sentence must survive unchanged when the plan is empty"
+        );
+
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
     }
 }
