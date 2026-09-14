@@ -114,16 +114,37 @@ pub(crate) enum AgentActivity {
     Responding,
 }
 
+/// What one agent row's subagent list is held under.
+///
+/// Not the session id alone: the same conversation can be open in two tabs, and
+/// expanding one of them must not expand the other. A tab is keyed by its view
+/// and a finished transcript by the id its store knows it as.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum SubagentKey {
+    Open(gpui::EntityId),
+    Past(Arc<str>),
+}
+
 /// The mark for a tab that still exists, from the two questions asked of it.
 ///
 /// Split out because the case worth pinning is the quiet one: a tab whose CLI
 /// has exited is still an open tab, and reporting it as ready would send
 /// someone to a session that ended.
-pub(crate) fn activity_for(working: bool, responding: bool) -> AgentActivity {
-    match (working, responding) {
-        (false, _) => AgentActivity::Gone,
-        (true, true) => AgentActivity::Responding,
-        (true, false) => AgentActivity::Ready,
+pub(crate) fn activity_for(
+    working: bool,
+    responding: bool,
+    a_subagent_is_running: bool,
+) -> AgentActivity {
+    match (working, responding, a_subagent_is_running) {
+        (false, _, _) => AgentActivity::Gone,
+        // The work belongs to the subagent, and the row beneath this one is
+        // already saying so. Both spinning would claim two things are being
+        // produced when there is one -- the pty carries a subagent's output as
+        // the session's own, so the session's mark cannot tell them apart and
+        // must give way to the row that can.
+        (true, _, true) => AgentActivity::Ready,
+        (true, true, false) => AgentActivity::Responding,
+        (true, false, false) => AgentActivity::Ready,
     }
 }
 
@@ -181,7 +202,25 @@ impl AgentEntry {
             return AgentActivity::Gone;
         };
         let view = view.read(cx);
-        activity_for(view.is_working(cx), view.is_responding(cx))
+        // `is_answering` and not `is_responding`: the tab's mark is the settled
+        // one, and a panel drawing the raw value beside it would disagree with
+        // it several times inside every reply.
+        activity_for(
+            view.is_working(cx),
+            view.is_answering(),
+            view.any_subagent_running(),
+        )
+    }
+
+    /// What this row's subagent list is remembered under, or `None` when there
+    /// is nothing left to remember it by.
+    pub(crate) fn subagent_key(&self) -> Option<SubagentKey> {
+        match self {
+            AgentEntry::Open { view, .. } => view
+                .upgrade()
+                .map(|view| SubagentKey::Open(view.entity_id())),
+            AgentEntry::Past { id, .. } => Some(SubagentKey::Past(id.clone())),
+        }
     }
 
     pub(crate) fn updated_at(&self) -> Option<std::time::SystemTime> {

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use collections::{HashMap, HashSet};
 use gpui::{
     App, AppContext as _, AsyncWindowContext, Context, Entity, ListAlignment, ListState,
-    WeakEntity, Window, px,
+    SharedString, WeakEntity, Window, px,
 };
 use project::git_store::RepositoryId;
 use workspace::Workspace;
@@ -17,7 +17,9 @@ use workspace::Workspace;
 use crate::branch_panel::checkout_state::CheckoutViewState;
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
-use crate::branch_panel::tree::{AgentActivity, RowKey, TreeRow, build_rows};
+use crate::branch_panel::tree::{
+    AgentActivity, AgentEntry, RowKey, SubagentKey, TreeRow, build_rows,
+};
 
 /// How often the panel redraws while an agent is live.
 ///
@@ -70,6 +72,9 @@ impl BranchPanel {
                 rebuild_count: 0,
                 repos: Vec::new(),
                 last_known_agents: HashMap::default(),
+                expanded_subagents: HashSet::default(),
+                past_subagents: HashMap::default(),
+                _subagent_reads: HashMap::default(),
                 rows: Vec::new(),
                 running_remote_ops: collections::HashSet::default(),
                 reloading: false,
@@ -232,6 +237,62 @@ impl BranchPanel {
         self.rows = rows;
         self.sync_list_state();
         self.track_agent_tab_names(cx);
+        self.follow_listed_subagents(cx);
+    }
+
+    /// Keeps the subagent caches to exactly what this panel is drawing.
+    ///
+    /// Reads run from here rather than from the click that opens a disclosure,
+    /// because that disclosure cannot be drawn until the read has landed: it
+    /// says how many subagents there are, and until something has counted them
+    /// the honest answer is to draw nothing. An open tab is skipped — it
+    /// follows its own session already, and asking twice reads one transcript
+    /// twice.
+    ///
+    /// The three maps are then trimmed back to what is listed, which is what
+    /// keeps them from growing for the life of a window that has browsed a lot
+    /// of checkouts. Trimming also does the invalidating: resuming a past
+    /// session turns its row into an open one, which drops the cached read, so
+    /// when the tab closes and the row goes back to being past it is read
+    /// again — the subagents it gained while it was open are in that answer,
+    /// where a cache kept on "have we ever read this id" would have missed them
+    /// forever.
+    fn follow_listed_subagents(&mut self, cx: &mut Context<Self>) {
+        let drawn: Vec<&AgentEntry> = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                TreeRow::Worktree {
+                    agents, expanded, ..
+                } if *expanded => Some(agents),
+                _ => None,
+            })
+            .flat_map(|agents| agents.iter())
+            .collect();
+
+        let open_keys: HashSet<SubagentKey> = drawn
+            .iter()
+            .filter_map(|entry| entry.subagent_key())
+            .collect();
+        let past: Vec<(SharedString, Arc<str>)> = drawn
+            .iter()
+            .filter_map(|entry| match entry {
+                AgentEntry::Past { agent, id, .. } => Some((agent.clone(), id.clone())),
+                AgentEntry::Open { .. } => None,
+            })
+            .collect();
+        let past_ids: HashSet<Arc<str>> = past.iter().map(|(_, id)| id.clone()).collect();
+
+        // Dropping a read that is still running cancels it, which is the right
+        // answer for a session nothing is drawing any more.
+        self.past_subagents.retain(|id, _| past_ids.contains(id));
+        self._subagent_reads.retain(|id, _| past_ids.contains(id));
+        self.expanded_subagents
+            .retain(|key| open_keys.contains(key));
+
+        for (agent, id) in past {
+            self.read_past_subagents(&agent, &id, cx);
+        }
     }
 
     /// Whether the disk index cannot yet be trusted to speak for a checkout it

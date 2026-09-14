@@ -13,7 +13,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::branch_panel::checkout_state::CheckoutViewState;
 use crate::branch_panel::settings::BranchPanelSettings;
 use crate::branch_panel::state::BRANCH_PANEL_KEY;
-use crate::branch_panel::tree::{AgentEntry, RepoData, TreeRow};
+use crate::branch_panel::tree::{AgentEntry, RepoData, SubagentKey, TreeRow};
 
 actions!(
     branch_panel,
@@ -105,6 +105,33 @@ pub struct BranchPanel {
     /// is never written to disk.
     pub(crate) last_known_agents: HashMap<Arc<Path>, Arc<[AgentEntry]>>,
     pub(crate) rows: Vec<TreeRow>,
+    /// Which agent rows have their subagent list open.
+    ///
+    /// In memory rather than in `checkout_state`, unlike every other disclosure
+    /// here. The others are a shape you arrange once and expect back tomorrow;
+    /// this is a look inside one session's work while you are watching it, and
+    /// persisting it would put a row in the store for every session anyone ever
+    /// opened. Closed by default for the same reason a list is worth having at
+    /// all: one session here had spawned twenty-five subagents, and twenty-five
+    /// rows under each of several sessions is a panel nobody can read.
+    pub(crate) expanded_subagents: HashSet<SubagentKey>,
+    /// Subagents of sessions with no tab open on them. An open tab keeps its own
+    /// tracker and is never in here.
+    ///
+    /// Filled once per time the session is drawn as finished, because the read
+    /// touches disk and a row redraws sixty times a second. Dropped when the
+    /// session stops being drawn that way -- including when it is resumed into
+    /// a tab, which is what stops the subagents it gains while open from being
+    /// missed after it closes again.
+    pub(crate) past_subagents: HashMap<Arc<str>, agent_ui::SubagentTracker>,
+    /// The reads in flight, one per session, held so they stop with the panel.
+    ///
+    /// Trimmed to the sessions currently drawn on every rebuild, along with the
+    /// two maps above -- see `follow_listed_subagents`, which is also where a
+    /// resumed session gets its stale entry dropped. Nothing here removes an
+    /// entry from inside the task that is running it, which is the hazard that
+    /// shape would otherwise invite.
+    pub(crate) _subagent_reads: HashMap<Arc<str>, Task<()>>,
     /// Network operations currently in flight, one slot per kind. Leaning on
     /// the fetch button must not spawn a queue of git processes.
     pub(crate) running_remote_ops: HashSet<crate::branch_panel::remote::RemoteOp>,
