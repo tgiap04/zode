@@ -106,3 +106,17 @@ Why `debug_bounds`: the test cannot hold an `Entity<FloatingPane>` across the wo
 - The root cause of `register_floating_layer` breaking on a second call, pursued from outside `workspace.rs` — not run to ground.
 - Manual drag-and-drop verification with live pointer input — every route was code-reviewed, nothing was visually tested. `split_for_drop` has never run in front of a person.
 
+
+## Postscript: the hand test found it in a minute
+
+Everything above shipped, and then someone dragged a tab. It did not split.
+
+`split_for_drop` is half the wiring. `Pane::handle_drag_move` (`crates/workspace/src/pane.rs:3768`) records no edge as a split target unless `can_split_predicate` says so, and an unset predicate answers `false` — it returns before `drag_split_direction` is ever written, so `handle_tab_drop` reads `None` and performs an ordinary tab move. The editor's centre pane sets one (`crates/workspace/src/workspace.rs:1680`), the terminal panel sets one (`crates/terminal_view/src/terminal_panel.rs:1227`). This window set none. The hook was correct and unreachable.
+
+**The tests were green because they started past the gate.** Every drop test wrote `drag_split_direction` itself, with a comment explaining that this is what real hover detection writes and that every other drag test in the crate does the same. Both statements are true. Neither is a reason: the field being writable by hand is exactly what let the test skip the thing that was broken. A test that stages its own precondition is only testing what comes after it, and nothing said so.
+
+That is the third green-and-empty test on this branch, after `a_second_panel_sees_what_the_first_opened` and the drop test that dragged a pane's only tab onto itself. The shape repeats: the test constructs the state it means to observe, and so cannot observe the code that was supposed to produce it.
+
+**And an error of my own worth recording.** Mid-investigation I grepped for `set_can_split_predicate` — the field's name — found nothing, and concluded drag-to-split was dead across the whole fork, editor included. The method is `set_can_split`, with four live callers. A grep that returns nothing is evidence about the grep before it is evidence about the code, and the larger the conclusion it invites, the more that is worth remembering.
+
+The predicate now also refuses the one drag that undoes itself: a pane's only tab dropped on that pane's own edge, which empties the source and lets the collapse rule remove the split as it is made. Both drop tests assert the gate is open before they begin, and both fail when the predicate is removed — checked, not assumed.
