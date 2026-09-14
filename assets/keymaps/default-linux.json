@@ -493,8 +493,12 @@
       "ctrl-b": "workspace::ToggleLeftDock",
       "ctrl-j": "workspace::ToggleBottomDock",
       "ctrl-alt-j": "multi_workspace::ToggleWorkspaceSidebar",
-      "alt-`": "floating_pane::ToggleFloatingPane",
-      "alt-~": "floating_pane::CloseFloatingPane",
+      // Not alt-` : GNOME and GTK bind Alt+Above_Tab to cycling windows of the
+      // same application, so the compositor takes the keystroke and the editor
+      // never sees it. Nothing the app does with precedence can reach a chord
+      // it is not sent.
+      "ctrl-alt-`": "floating_pane::ToggleFloatingPane",
+      "ctrl-alt-~": "floating_pane::CloseFloatingPane",
       "ctrl-alt-;": "multi_workspace::FocusWorkspaceSidebar",
       "ctrl-alt-y": "workspace::ToggleAllDocks",
       "ctrl-alt-0": "workspace::ResetActiveDockSize",
