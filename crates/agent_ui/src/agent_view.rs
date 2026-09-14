@@ -14,7 +14,7 @@ use crate::permission_bypass::PermissionBypassStore;
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal::Terminal;
 use terminal_view::TerminalView;
-use ui::{Tooltip, prelude::*};
+use ui::{CommonAnimationExt as _, Tooltip, prelude::*};
 use workspace::{Pane, Workspace};
 use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
@@ -44,6 +44,16 @@ const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 /// easily. Eight is comfortably above the idle rate and comfortably below the
 /// working one, which is the only property it needs.
 const RESPONDING_WRITES: usize = 8;
+
+/// How often a live tab re-asks whether its agent is answering.
+///
+/// Polled rather than driven by an event, for the reason the branch panel's own
+/// tick gives: nothing happens when an agent starts or stops answering except
+/// the rate at which a pty is written to, and there is no event for a rate.
+///
+/// Matched to the branch panel's 250ms so the same fact does not appear in two
+/// places a quarter of a second apart.
+const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
 pub struct AgentView {
     /// Which session this tab belongs to, and what that session was called when
@@ -89,6 +99,19 @@ pub struct AgentView {
     _exit_watch: Option<Task<()>>,
     /// Carries the shell's own `CloseItem` outward. See [`AgentView::hand_back_a_shell`].
     _shell_close: Option<Subscription>,
+    /// Whether the agent was answering as of the last [`ACTIVITY_TICK`].
+    ///
+    /// A sampled field rather than a call at draw time, for two reasons. The
+    /// mark it drives animates, and an animation re-renders the *pane* on every
+    /// frame — so a render-time [`Self::is_responding`] would walk the
+    /// terminal's write history sixty times a second to answer a question that
+    /// changes four times a second. And a field is settable, which is the only
+    /// way the rules drawn from it can be tested: making `is_responding` true
+    /// needs a real pty.
+    responding: bool,
+    /// Polls [`Self::is_responding`] while this tab's agent is alive. See
+    /// [`AgentView::track_responding`].
+    _activity_tick: Option<Task<()>>,
 }
 
 enum State {
@@ -120,6 +143,14 @@ enum State {
 
 pub enum AgentViewEvent {
     UpdateTab,
+    /// The agent started or stopped answering, so the tab has a different mark
+    /// to draw.
+    ///
+    /// Separate from [`Self::UpdateTab`] because the two differ in what they
+    /// are worth writing down: a rename belongs in the persisted row, and an
+    /// agent drawing breath does not. `should_serialize` is where that split
+    /// is spent — see its doc.
+    Activity,
     /// The shell this tab handed back has exited, so the tab goes with it.
     Close,
 }
@@ -462,6 +493,8 @@ impl AgentView {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
         };
         view.start(window, cx);
         view
@@ -551,6 +584,8 @@ impl AgentView {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
         }
     }
 
@@ -625,6 +660,44 @@ impl AgentView {
                         .pty_writes_within(RESPONDING_WINDOW),
                 )
             })
+    }
+
+    /// Keeps [`Self::responding`] following the agent for as long as it runs,
+    /// and tells the pane when the answer changes.
+    ///
+    /// Lives only while the CLI does: the loop ends the first time the tab is
+    /// no longer showing a running agent, which covers both an agent that exits
+    /// and a tab that has swapped its terminal for a shell.
+    ///
+    /// Emits on the edges only. The pane's reaction to `UpdateTab` reaches the
+    /// workspace as well, and a tab that raised it four times a second for the
+    /// length of a conversation would be paying that for the three hundred and
+    /// ninety-six ticks out of four hundred where nothing changed.
+    fn track_responding(&mut self, cx: &mut Context<Self>) {
+        self._activity_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ACTIVITY_TICK).await;
+                // A failed update means the tab is gone, and so is the task
+                // about to be dropped with it.
+                let Ok(still_running) = this.update(cx, |this, cx| {
+                    let responding = this.is_responding(cx);
+                    if responding != this.responding {
+                        this.responding = responding;
+                        cx.emit(AgentViewEvent::Activity);
+                    }
+                    this.is_working(cx)
+                }) else {
+                    return;
+                };
+                // Asked after the comparison above, never instead of it: an
+                // agent that exits mid-answer goes from working-and-responding
+                // to neither, and leaving on the spot would leave the mark lit
+                // over a process that has ended.
+                if !still_running {
+                    return;
+                }
+            }
+        }));
     }
 
     /// What the tab shows: the name the user gave this session, or the agent's.
@@ -759,6 +832,11 @@ impl AgentView {
         // install the one that replaces it.
         self._exit_watch = None;
         self._shell_close = None;
+        // Cleared together: the tick is what keeps the flag honest, so a flag
+        // left set with no tick behind it would spin a mark over a tab that is
+        // starting from scratch.
+        self._activity_tick = None;
+        self.responding = false;
         let previous = std::mem::replace(&mut self.state, State::Starting);
         Self::warn_if_retained(&previous, cx);
         drop(previous);
@@ -1023,6 +1101,7 @@ impl AgentView {
                         });
                         this.state = State::Terminal(view);
                         this.watch_for_exit(completed, window, cx);
+                        this.track_responding(cx);
                     }
                     Err(error) => this.state = State::Failed(SharedString::from(error.to_string())),
                 }
@@ -1513,7 +1592,11 @@ impl workspace::item::Item for AgentView {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
         match event {
-            AgentViewEvent::UpdateTab => f(workspace::item::ItemEvent::UpdateTab),
+            // The same outward event: `UpdateTab` is how an item asks its pane
+            // to redraw the tab, and that is all either of these wants.
+            AgentViewEvent::UpdateTab | AgentViewEvent::Activity => {
+                f(workspace::item::ItemEvent::UpdateTab)
+            }
             AgentViewEvent::Close => f(workspace::item::ItemEvent::CloseItem),
         }
     }
@@ -1528,10 +1611,16 @@ impl workspace::item::Item for AgentView {
     /// editor appears, which moves the tab the user just clicked out from under
     /// the pointer. The label stays, drawn transparent, and holds the width.
     ///
-    /// The label only — no icon. The pane draws that from `tab_icon` below, and
+    /// No agent glyph here. The pane draws that from `tab_icon` below, and
     /// sizes and mutes it to match every other tab; drawing one here as well put
     /// two agent glyphs on the tab. `TerminalView`, which this is modelled on,
     /// gets away with its own icon because it implements no `tab_icon` at all.
+    ///
+    /// The spinner is the one icon drawn here, and only because `tab_icon` hands
+    /// its slot over for exactly as long as it is: an `Icon` cannot be animated,
+    /// so the mark has to be built where elements are. It is not a second glyph
+    /// beside the first — it is the first one's place, borrowed. Anything else
+    /// added here is the duplicate this paragraph is warning about.
     fn tab_content(
         &self,
         params: workspace::item::TabContentParams,
@@ -1552,6 +1641,25 @@ impl workspace::item::Item for AgentView {
                         .ok();
                 }
             })
+            // First, in the place `tab_icon` has given up while this is drawn:
+            // the glyph that says which agent and the mark that says it is
+            // working occupy one slot, so the label never shifts.
+            //
+            // The same spinner, colour and speed the worktree panel gives the
+            // same fact. A second vocabulary for one meaning is how a mark
+            // stops carrying information.
+            .children(self.responding.then(|| {
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::Small)
+                    .color(Color::Accent)
+                    // Keyed by the tab: every agent tab shares this call site,
+                    // and one id for all of them is one animation state for all
+                    // of them.
+                    .with_keyed_rotate_animation(
+                        ("agent-tab-spinner", self.self_handle.entity_id()),
+                        1,
+                    )
+            }))
             .children(self.runs_without_prompts().then(|| {
                 // The same glyph and colour the checkout card uses for the same
                 // fact. A second vocabulary for one meaning is how a mark stops
@@ -1611,8 +1719,19 @@ impl workspace::item::Item for AgentView {
         vec![("Rename".into(), Box::new(RenameAgent))]
     }
 
+    /// The vendor's glyph — except while the agent is answering, when
+    /// `tab_content` draws a spinner in this slot's place.
+    ///
+    /// Given up rather than drawn alongside, because the two say the same thing
+    /// about the same tab and a strip carrying both reads as two agents. The
+    /// swap has to happen there and not here because an [`Icon`] cannot be
+    /// animated: only an element can, and this returns an icon.
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(agent_icon(self.agent.as_ref())))
+        (!self.responding).then(|| Icon::new(agent_icon(self.agent.as_ref())))
+    }
+
+    fn is_busy(&self, _cx: &App) -> bool {
+        self.responding
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
@@ -1726,8 +1845,13 @@ impl workspace::item::SerializableItem for AgentView {
     /// a session's name never survived a restart: nothing but the workspace-wide
     /// pass ever wrote the row, and a rename does not trigger that pass. A rename
     /// and a mode switch both arrive as `UpdateTab`, and both belong in the row.
-    fn should_serialize(&self, _event: &Self::Event) -> bool {
-        true
+    ///
+    /// `Activity` does not. Nothing it reports appears in the row, and an agent
+    /// pauses to read a file or wait on a model several times inside one answer
+    /// — so answering `true` here would put a database write behind every one of
+    /// those, for a row that comes back byte for byte the same.
+    fn should_serialize(&self, event: &Self::Event) -> bool {
+        !matches!(event, AgentViewEvent::Activity)
     }
 }
 
@@ -1947,6 +2071,64 @@ mod tests {
                 view.runs_without_prompts(),
                 "the mark describes the argv this session was spawned with, not \
                  what the checkout's setting says a minute later"
+            );
+        });
+    }
+
+    /// One slot, not two: the glyph that says which agent steps aside for the
+    /// mark that says it is working, rather than sitting next to it.
+    ///
+    /// Both marks are drawn from this one flag, so both are held here. The
+    /// flag rather than [`AgentView::is_responding`] for the reason its own doc
+    /// gives — making that true needs a real pty, which `test_new` exists to
+    /// avoid.
+    #[gpui::test]
+    async fn an_answering_tab_swaps_its_glyph_rather_than_adding_one(cx: &mut TestAppContext) {
+        use workspace::item::Item as _;
+
+        let (view, cx) = bypass_view(cx).await;
+
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.tab_icon(window, cx).is_some(),
+                "a tab whose agent is waiting shows the agent it is waiting for"
+            );
+            assert!(!view.is_busy(cx));
+        });
+
+        view.update(cx, |view, _| view.responding = true);
+
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.tab_icon(window, cx).is_none(),
+                "the spinner takes this slot, and two agent marks on one tab reads as two agents"
+            );
+            assert!(view.is_busy(cx));
+        });
+    }
+
+    /// An agent pausing to read a file is not news the workspace has to write
+    /// to disk, and it happens several times inside a single answer.
+    ///
+    /// Both halves, because the risk lives in the pair: this impl answered
+    /// `true` unconditionally before the activity event existed, and leaving it
+    /// that way is the cheap way to add one.
+    #[gpui::test]
+    async fn an_agent_drawing_breath_is_not_worth_writing_down(cx: &mut TestAppContext) {
+        use workspace::item::SerializableItem as _;
+
+        let (view, cx) = bypass_view(cx).await;
+
+        view.read_with(cx, |view, _| {
+            assert!(
+                !view.should_serialize(&AgentViewEvent::Activity),
+                "nothing an activity tick reports appears in the persisted row"
+            );
+            assert!(
+                view.should_serialize(&AgentViewEvent::UpdateTab),
+                "and the rename it shares a pane event with still does"
             );
         });
     }
@@ -2368,6 +2550,8 @@ mod tests {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
         });
 
         let terminal_view = cx.new_window_entity(|window, cx| {
@@ -2811,6 +2995,8 @@ mod tests {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
         });
 
         let left_behind = terminal_view.downgrade();

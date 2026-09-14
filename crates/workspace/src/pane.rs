@@ -18,11 +18,11 @@ use anyhow::Result;
 use collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{
-    Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
-    DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
-    Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle, Window, actions, anchored,
-    deferred, prelude::*,
+    Action, Anchor, Animation, AnimationExt as _, AnyElement, App, AsyncWindowContext, ClickEvent,
+    ClipboardItem, Context, Div, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths,
+    FocusHandle, FocusOutEvent, Focusable, KeyContext, MouseButton, NavigationDirection, Pixels,
+    Point, PromptLevel, Render, ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle,
+    Window, actions, anchored, bounce, deferred, ease_in_out, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -3077,7 +3077,13 @@ impl Pane {
                     .when(capability == Capability::Read && has_file_icon, |this| {
                         this.child(read_only_toggle(true))
                     }),
-            );
+            )
+            // Out of flow, so the label keeps the place it had when the item
+            // was idle -- a tab that widens the moment its agent starts
+            // answering would shuffle every tab to its right.
+            .when(item.is_busy(cx), |this| {
+                this.child(render_tab_busy_bar(item_id, cx))
+            });
 
         let single_entry_to_resolve = (self.items[ix].buffer_kind(cx) == ItemBufferKind::Singleton)
             .then(|| self.items[ix].project_entry_ids(cx).get(0).copied())
@@ -4955,6 +4961,62 @@ pub fn tab_details(items: &[Box<dyn ItemHandle>], _window: &Window, cx: &App) ->
     })
 }
 
+/// How long the busy bar takes to cross its tab and come back.
+///
+/// Slow enough to read as one deliberate sweep rather than a flicker, quick
+/// enough that a glance at the tab strip lands on something moving.
+const BUSY_BAR_SWEEP: Duration = Duration::from_millis(1600);
+
+/// How much of the tab the moving segment covers, as a fraction of its width.
+const BUSY_BAR_SEGMENT: f32 = 0.3;
+
+/// The bar a tab draws along its bottom edge while its item is working.
+///
+/// Indeterminate, and so deliberately not [`ui::ProgressBar`]: that one wants a
+/// value and a maximum, and its own doc rules it out for progress whose end is
+/// unknown — which is every case this exists for.
+///
+/// Drawn here rather than handed over by the item, because it spans the whole
+/// tab and an item's `tab_content` is one flex child inside it. See
+/// [`Item::is_busy`].
+///
+/// Keyed by the item and not by the tab's index: tabs get dragged around, and
+/// an index key would restart the sweep on every tab past a drop.
+fn render_tab_busy_bar(item_id: EntityId, cx: &App) -> impl IntoElement + use<> {
+    let accent = Color::Accent.color(cx);
+    div()
+        .debug_selector(|| "TAB_BUSY_BAR".into())
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .h(px(2.))
+        .rounded_full()
+        // A track, faint enough not to read as a second border: without one the
+        // segment at either end of its sweep looks like a stray mark rather
+        // than something travelling a known distance.
+        .bg(accent.opacity(0.15))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(relative(BUSY_BAR_SEGMENT))
+                .rounded_full()
+                .bg(accent)
+                .with_animation(
+                    ("tab-busy-bar", item_id),
+                    Animation::new(BUSY_BAR_SWEEP)
+                        .repeat()
+                        // `bounce` runs the easing forwards then backwards, so
+                        // one period is a there-and-back. A plain repeat would
+                        // snap the segment from the right edge to the left.
+                        .with_easing(bounce(ease_in_out)),
+                    |segment, delta| segment.left(relative(delta * (1. - BUSY_BAR_SEGMENT))),
+                ),
+        )
+}
+
 pub fn render_item_indicator(item: Box<dyn ItemHandle>, cx: &App) -> Option<Indicator> {
     maybe!({
         let indicator_color = match (item.has_conflict(cx), item.is_dirty(cx)) {
@@ -5565,6 +5627,67 @@ mod tests {
         assert!(
             pinned_row_bounds.is_none(),
             "pinned_tabs_row should not exist when setting is disabled"
+        );
+    }
+
+    /// The bar appears when the item says it is working, and the tab it marks
+    /// stays exactly the size it was.
+    ///
+    /// The size is the half worth asserting. The bar has to span the tab, and
+    /// the obvious way to build something that spans its parent is `w_full` in
+    /// flow — which widens every busy tab and shoves the rest of the strip
+    /// sideways the moment an agent starts answering.
+    #[gpui::test]
+    async fn test_busy_bar_is_drawn_without_resizing_the_tab(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let item = add_labeled_item(&pane, "A", false, cx);
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let idle = cx
+            .debug_bounds("TAB-0")
+            .expect("the pane must draw a tab for its only item");
+        assert!(
+            cx.debug_bounds("TAB_BUSY_BAR").is_none(),
+            "an item with nothing running has nothing to report"
+        );
+
+        item.update(cx, |item, cx| {
+            item.is_busy = true;
+            cx.notify();
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("TAB_BUSY_BAR")
+            .expect("the tab must say its item is working");
+        let busy = cx
+            .debug_bounds("TAB-0")
+            .expect("the tab is still the same tab");
+        // A bar stretched between two insets rather than given a width, which
+        // is a shape a layout engine is free not to honour -- and an invisible
+        // bar is the same as no bar at all.
+        assert!(
+            bar.size.width > busy.size.width / 2. && bar.size.width <= busy.size.width,
+            "the bar must span the tab it marks, not collapse inside it: {bar:?} in {busy:?}"
+        );
+        assert_eq!(bar.size.height, px(2.));
+        assert!(
+            bar.bottom() <= busy.bottom(),
+            "the bar belongs on the tab's bottom edge, not below it: {bar:?} in {busy:?}"
+        );
+        assert_eq!(
+            busy.size, idle.size,
+            "the bar is out of flow, so the tab it marks keeps its size"
         );
     }
 
