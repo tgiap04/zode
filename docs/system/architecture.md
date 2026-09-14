@@ -165,10 +165,10 @@ graph TB
 `acp_thread`, `agent_servers`, `acp_tools`, `agent_settings`, `collab` (server binary),
 `language_model` + per-vendor provider crates (`anthropic`, `open_ai`, `google_ai`, `bedrock`,
 `ollama`, …), `livekit_api`/`livekit_client`, `edit_prediction*` (Zeta). Note that `agent_ui` **is**
-present but is not the upstream crate: it is a terminal-only agent tab — ~9.7k lines across
+present but is not the upstream crate: it is a terminal-only agent tab — ~10.3k lines across
 `actions.rs`, `agent_roster.rs`, `agent_ui.rs`, `agent_view.rs`, `missing_binary.rs`,
-`permission_bypass.rs`, `session_store.rs` and `session_history/` — with no chat view, no message
-editor and no model or mode selector.
+`permission_bypass.rs`, `session_store.rs`, `subagents.rs` and `session_history/` — with no chat
+view, no message editor and no model or mode selector.
 
 This is a lean, non-collaborative editor fork centered on local editing, multi-project workflows,
 and remote (SSH) development. It carries no in-editor AI chat surface and no language-model provider
