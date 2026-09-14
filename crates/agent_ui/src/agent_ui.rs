@@ -13,6 +13,7 @@ mod missing_binary;
 mod permission_bypass;
 mod session_history;
 mod session_store;
+pub mod subagents;
 
 pub use actions::*;
 pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks};
@@ -20,6 +21,7 @@ pub use agent_view::{AgentView, AgentViewEvent, SessionOrigin};
 pub use permission_bypass::PermissionBypassStore;
 pub use session_history::{AgentHistoryPanel, delete_session, resume_session};
 pub use session_store::SessionStore;
+pub use subagents::{SubagentTracker, provider_for_agent};
 
 use gpui::App;
 use project::AgentId;

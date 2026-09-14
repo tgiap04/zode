@@ -11,6 +11,8 @@ use project::agent_server_store::AgentServerStore;
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 
 use crate::permission_bypass::PermissionBypassStore;
+use crate::subagents::{SubagentTracker, provider_for_agent};
+use agent_sessions::SubagentSummary;
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal::Terminal;
 use terminal_view::TerminalView;
@@ -19,6 +21,7 @@ use workspace::{Pane, Workspace};
 use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
 use std::process::ExitStatus;
+use std::sync::Arc;
 use util::ResultExt as _;
 
 /// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
@@ -54,6 +57,64 @@ const RESPONDING_WRITES: usize = 8;
 /// Matched to the branch panel's 250ms so the same fact does not appear in two
 /// places a quarter of a second apart.
 const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a change has to hold before the mark follows it.
+const RESPONDING_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The same delay, counted in ticks — which is the only clock the loop has.
+///
+/// Derived rather than written out, so the two cannot drift apart when one of
+/// them is tuned. Counted rather than timed because reaching for a real clock
+/// would mean either `Instant::now`, which a test's fake timers do not move, or
+/// a dependency on the scheduler crate for one type. A tick that arrives late
+/// makes the wait longer than two seconds, which costs this nothing: the point
+/// is to outlast a flicker, not to measure one.
+const RESPONDING_DEBOUNCE_TICKS: u32 =
+    (RESPONDING_DEBOUNCE.as_millis() / ACTIVITY_TICK.as_millis()) as u32;
+
+/// How long between subagent scans.
+///
+/// Slower than the mark's own tick because it costs file reads, and because
+/// what it watches moves at human speed: a subagent starting or finishing is
+/// not a four-times-a-second event. One second still lands well inside the
+/// two-second debounce above, so nothing it reports is late to the mark.
+const SUBAGENT_SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether the mark should change, given what the terminal says on this tick.
+///
+/// Both edges by one rule: a new answer has to survive
+/// [`RESPONDING_DEBOUNCE_TICKS`] ticks in a row before the mark follows it. An
+/// agent crosses the write-rate threshold repeatedly inside a single reply — it
+/// pauses to read a file, to run a command, to wait on the model — and a mark
+/// that followed every crossing would strobe for the length of the answer.
+///
+/// The delay on the *appearing* edge is deliberate, not an oversight of the
+/// other one. A mark that appears instantly and leaves slowly still strobes;
+/// it just strobes with a longer off-beat.
+///
+/// `None` means leave the mark alone. A free function because it is the whole
+/// rule and the loop that calls it cannot be run without a pty.
+fn settle(pending: &mut Option<(bool, u32)>, raw: bool, shown: bool) -> Option<bool> {
+    if raw == shown {
+        // Whatever was building has been contradicted before it landed.
+        *pending = None;
+        return None;
+    }
+    let ticks = match pending {
+        Some((wanted, ticks)) if *wanted == raw => {
+            *ticks += 1;
+            *ticks
+        }
+        _ => {
+            *pending = Some((raw, 1));
+            1
+        }
+    };
+    (ticks >= RESPONDING_DEBOUNCE_TICKS).then(|| {
+        *pending = None;
+        raw
+    })
+}
 
 pub struct AgentView {
     /// Which session this tab belongs to, and what that session was called when
@@ -112,6 +173,12 @@ pub struct AgentView {
     /// Polls [`Self::is_responding`] while this tab's agent is alive. See
     /// [`AgentView::track_responding`].
     _activity_tick: Option<Task<()>>,
+    /// Reads the session's subagents while its agent is alive, on its own beat.
+    /// See [`AgentView::track_subagents`].
+    _subagent_tick: Option<Task<()>>,
+    /// This session's subagents, and which of them are still working. Followed
+    /// by the same tick, at a slower cadence — see [`SUBAGENT_SCAN_EVERY`].
+    subagents: SubagentTracker,
 }
 
 enum State {
@@ -495,6 +562,8 @@ impl AgentView {
             _shell_close: None,
             responding: false,
             _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         };
         view.start(window, cx);
         view
@@ -586,6 +655,8 @@ impl AgentView {
             _shell_close: None,
             responding: false,
             _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         }
     }
 
@@ -675,17 +746,39 @@ impl AgentView {
     /// ninety-six ticks out of four hundred where nothing changed.
     fn track_responding(&mut self, cx: &mut Context<Self>) {
         self._activity_tick = Some(cx.spawn(async move |this, cx| {
+            let mut pending: Option<(bool, u32)> = None;
+
             loop {
                 cx.background_executor().timer(ACTIVITY_TICK).await;
+
                 // A failed update means the tab is gone, and so is the task
                 // about to be dropped with it.
                 let Ok(still_running) = this.update(cx, |this, cx| {
-                    let responding = this.is_responding(cx);
-                    if responding != this.responding {
-                        this.responding = responding;
+                    let working = this.is_working(cx);
+                    // A subagent counts. Its output reaches the same pty, but
+                    // not at the same rate: a CLI waiting on one repaints a
+                    // spinner once or twice a second, which is under the
+                    // threshold `is_responding` needs, so the tab would go dark
+                    // for the minutes a subagent takes. The session is working
+                    // the whole time.
+                    let raw = working && (this.is_responding(cx) || this.subagents.any_running());
+                    // The debounce holds a mark steady across the pauses inside
+                    // one answer. It must not hold one over a process that has
+                    // ended: there is nothing left to flicker, and the wait
+                    // would be two seconds of a spinner above a dead prompt.
+                    let settled = if working {
+                        settle(&mut pending, raw, this.responding)
+                    } else {
+                        pending = None;
+                        Some(false)
+                    };
+                    if let Some(settled) = settled
+                        && settled != this.responding
+                    {
+                        this.responding = settled;
                         cx.emit(AgentViewEvent::Activity);
                     }
-                    this.is_working(cx)
+                    working
                 }) else {
                     return;
                 };
@@ -698,6 +791,93 @@ impl AgentView {
                 }
             }
         }));
+    }
+
+    /// Reads this session's subagents for as long as its agent runs.
+    ///
+    /// A loop of its own rather than a branch inside [`Self::track_responding`],
+    /// which is where it started. That loop decides whether the mark is lit and
+    /// notices when the CLI exits, and both of those have to keep to their own
+    /// beat: a first pass over a multi-megabyte transcript, or a home directory
+    /// on a stalled network mount, would otherwise hold the mark and the exit
+    /// check behind however long a disk takes. Two loops, and neither waits on
+    /// the other.
+    fn track_subagents(&mut self, cx: &mut Context<Self>) {
+        // Resolved once, outside the loop: neither can change for the life of
+        // a tab, and both are needed on the first pass.
+        let Some(provider) = provider_for_agent(&self.agent) else {
+            return;
+        };
+        // Nothing to look up. An untracked tab holds no session id, so there is
+        // no sidecar to find and no subagent it could name -- stated here by
+        // not starting the loop at all, rather than discovered once a second as
+        // an empty list.
+        let SessionIntent::Tracked(session_id) = &self.origin.intent else {
+            return;
+        };
+        let session_id = session_id.clone();
+
+        self._subagent_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok((session, from)) = this.read_with(cx, |this, _| this.subagents.cursor())
+                else {
+                    return;
+                };
+                // Off the UI thread: this opens files, and one of them is a
+                // transcript that reaches megabytes on its first pass.
+                let pass = cx
+                    .background_spawn({
+                        let provider = provider.clone();
+                        let session_id = session_id.clone();
+                        async move { SubagentTracker::scan(&provider, session, session_id, from) }
+                    })
+                    .await;
+
+                let Ok(still_running) = this.update(cx, |this, cx| {
+                    this.subagents.apply(pass);
+                    // The panel draws a row per subagent off this, and the tab's
+                    // own mark follows `any_running` on its next tick.
+                    cx.notify();
+                    this.is_working(cx)
+                }) else {
+                    return;
+                };
+                if !still_running {
+                    return;
+                }
+
+                cx.background_executor().timer(SUBAGENT_SCAN_EVERY).await;
+            }
+        }));
+    }
+
+    /// This session's subagents, newest first.
+    ///
+    /// Empty until the first scan lands, and empty for good on an untracked tab
+    /// or an agent whose store this editor cannot read — only Claude keeps a
+    /// sidecar naming them.
+    pub fn subagents(&self) -> &Arc<[SubagentSummary]> {
+        self.subagents.subagents()
+    }
+
+    /// Whether this subagent is still working.
+    pub fn subagent_is_running(&self, subagent: &SubagentSummary) -> bool {
+        self.subagents.is_running(subagent)
+    }
+
+    /// Whether any of them is.
+    pub fn any_subagent_running(&self) -> bool {
+        self.subagents.any_running()
+    }
+
+    /// Whether this tab's mark says it is answering.
+    ///
+    /// The debounced answer, not [`Self::is_responding`]'s raw one, and the only
+    /// one anything outside this file should read: a panel drawing the raw
+    /// value beside a tab drawing the settled one would disagree several times
+    /// inside every reply.
+    pub fn is_answering(&self) -> bool {
+        self.responding
     }
 
     /// What the tab shows: the name the user gave this session, or the agent's.
@@ -836,6 +1016,7 @@ impl AgentView {
         // left set with no tick behind it would spin a mark over a tab that is
         // starting from scratch.
         self._activity_tick = None;
+        self._subagent_tick = None;
         self.responding = false;
         let previous = std::mem::replace(&mut self.state, State::Starting);
         Self::warn_if_retained(&previous, cx);
@@ -1102,6 +1283,7 @@ impl AgentView {
                         this.state = State::Terminal(view);
                         this.watch_for_exit(completed, window, cx);
                         this.track_responding(cx);
+                        this.track_subagents(cx);
                     }
                     Err(error) => this.state = State::Failed(SharedString::from(error.to_string())),
                 }
@@ -2313,6 +2495,91 @@ mod tests {
     /// 4ms timer, so even a spinner animated while the model thinks clears the
     /// bar. The constant only has to sit between those two rates, and these
     /// name both so that lowering it back toward the idle one fails here.
+    /// The delay, held on its own because the loop that applies it cannot run
+    /// without a pty and a real two seconds. Ticks, not time — see
+    /// [`super::RESPONDING_DEBOUNCE_TICKS`].
+    mod debounce {
+        use super::super::{ACTIVITY_TICK, RESPONDING_DEBOUNCE, RESPONDING_DEBOUNCE_TICKS, settle};
+
+        /// Feeds `raw` in for `ticks` ticks and reports what the mark became.
+        fn run(start: bool, raw: bool, ticks: u32) -> bool {
+            let mut pending = None;
+            let mut shown = start;
+            for _ in 0..ticks {
+                if let Some(settled) = settle(&mut pending, raw, shown) {
+                    shown = settled;
+                }
+            }
+            shown
+        }
+
+        #[test]
+        fn the_delay_is_the_two_seconds_it_claims_to_be() {
+            assert_eq!(
+                RESPONDING_DEBOUNCE_TICKS as u128 * ACTIVITY_TICK.as_millis(),
+                RESPONDING_DEBOUNCE.as_millis(),
+                "the tick count and the duration it stands for have drifted apart"
+            );
+        }
+
+        #[test]
+        fn a_change_one_tick_short_of_the_delay_has_not_landed_yet() {
+            assert!(!run(false, true, RESPONDING_DEBOUNCE_TICKS - 1));
+            assert!(run(false, true, RESPONDING_DEBOUNCE_TICKS));
+        }
+
+        /// Both edges, which is the half a one-sided delay would miss: a mark
+        /// that appears instantly and leaves slowly still strobes.
+        #[test]
+        fn the_delay_applies_to_leaving_as_well_as_arriving() {
+            assert!(run(true, false, RESPONDING_DEBOUNCE_TICKS - 1));
+            assert!(!run(true, false, RESPONDING_DEBOUNCE_TICKS));
+        }
+
+        /// The flicker this exists for. An agent crosses the threshold several
+        /// times inside one reply -- it stops to read a file, to run a command,
+        /// to wait on the model -- and none of those crossings lasts two
+        /// seconds.
+        #[test]
+        fn a_pause_inside_one_answer_never_reaches_the_mark() {
+            let mut pending = None;
+            let mut shown = true;
+            let mut changes = 0;
+            // Seven ticks answering, three quiet, over and over: every gap is
+            // shorter than the delay, so the mark must never move.
+            for tick in 0..200 {
+                let raw = tick % 10 < 7;
+                if let Some(settled) = settle(&mut pending, raw, shown) {
+                    shown = settled;
+                    changes += 1;
+                }
+            }
+            assert_eq!(
+                changes, 0,
+                "the mark moved {changes} times during one unbroken answer"
+            );
+            assert!(shown);
+        }
+
+        /// A change that is contradicted before it lands starts again from
+        /// zero, rather than resuming its count on the next crossing.
+        #[test]
+        fn a_contradicted_change_does_not_carry_its_count_forward() {
+            let mut pending = None;
+            let shown = false;
+
+            for _ in 0..RESPONDING_DEBOUNCE_TICKS - 1 {
+                assert!(settle(&mut pending, true, shown).is_none());
+            }
+            assert!(settle(&mut pending, false, shown).is_none());
+            assert!(
+                settle(&mut pending, true, shown).is_none(),
+                "one tick of quiet reset the count, so one tick of answering \
+                 must not finish it"
+            );
+        }
+    }
+
     mod responding_rate {
         use super::super::{RESPONDING_WRITES, responding_at};
 
@@ -2552,6 +2819,8 @@ mod tests {
             _shell_close: None,
             responding: false,
             _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         });
 
         let terminal_view = cx.new_window_entity(|window, cx| {
@@ -2997,6 +3266,8 @@ mod tests {
             _shell_close: None,
             responding: false,
             _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         });
 
         let left_behind = terminal_view.downgrade();
