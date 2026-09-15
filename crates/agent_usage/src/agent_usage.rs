@@ -15,13 +15,16 @@
 pub mod claude;
 pub mod codex;
 mod status_bar_items;
+mod usage_store;
 pub mod usage_panel;
 
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui::{Anchor, Context, Entity, IntoElement, Render, Subscription, Task, Window, div};
+use gpui::{Anchor, App, Context, Entity, IntoElement, Render, Subscription, Window, div};
 use project::AgentId;
+
+use crate::usage_store::AgentUsageStore;
 use settings::AgentUsageDisplay;
 use ui::prelude::*;
 use ui::{
@@ -140,32 +143,6 @@ pub struct UsageWindow {
     pub kind: WindowKind,
 }
 
-/// How often the quota is re-read while the window has the user's attention.
-///
-/// Claude's endpoint offers no push, so polling is the only way its numbers stay
-/// current. A minute is short enough that a reset is noticed soon after it
-/// happens and long enough that it is not traffic worth thinking about.
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
-/// How recent a successful read has to be for regaining focus to trust it rather
-/// than ask again.
-///
-/// Regaining focus used to fetch unconditionally, so alt-tabbing in and out five
-/// times was five requests in a few seconds — against an undocumented endpoint
-/// this editor shares with the Claude Code CLI on one token. That is a good way
-/// to earn the 429 the retry above now has to absorb. A manual refresh is never
-/// throttled: the whole point of pressing it is to distrust what is on screen.
-const ACTIVATION_MIN_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Whether a poll was asked for by a person or by the window regaining focus,
-/// which decides whether the immediate fetch may be skipped.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum PollReason {
-    /// The window regained focus. Skippable when the numbers are fresh.
-    Activation,
-    /// Someone pressed refresh. Never skipped.
-    Manual,
-}
-
 /// What a source's answer means for what is on screen.
 ///
 /// The two sources fail in different vocabularies — an HTTP status on one side, a
@@ -250,7 +227,7 @@ pub(crate) struct SourceState {
 }
 
 impl SourceState {
-    fn new(agent: AgentId) -> Self {
+    pub(crate) fn new(agent: AgentId) -> Self {
         Self {
             agent,
             windows: Vec::new(),
@@ -259,7 +236,7 @@ impl SourceState {
         }
     }
 
-    fn apply(&mut self, outcome: Outcome, now: DateTime<Utc>) {
+    pub(crate) fn apply(&mut self, outcome: Outcome, now: DateTime<Utc>) {
         match outcome {
             Outcome::Windows(windows) => {
                 self.windows = windows;
@@ -280,30 +257,19 @@ impl SourceState {
 
 /// The status-bar indicator.
 ///
+/// A view over [`AgentUsageStore`] and nothing more. It holds no numbers of its
+/// own: the status bar builds one of these per `Workspace`, and this fork keeps a
+/// workspace per project inside one window, so state kept here would be state
+/// kept N times — and, when it was, N poll loops against one endpoint on one
+/// token.
+///
 /// Rendering nothing at all while there is nothing to say is the point rather
 /// than a placeholder — a status bar that reserves space for absent data is worse
 /// than one that does not mention it.
 pub struct AgentUsageIndicator {
-    /// Fixed order, so the numbers do not swap places between reads.
-    sources: [SourceState; 2],
-    /// A fetch is in flight. Guards the click so pressing twice does not queue a
-    /// second request behind the first.
-    fetching: bool,
-    /// When a read was last *attempted*, whatever came back.
-    ///
-    /// Deliberately not "when a read last succeeded": the question the activation
-    /// throttle asks is "have I already asked recently", and answering it with
-    /// success would invert the whole thing. `Outcome::Keep` never sets a
-    /// source's `fetched_at` and `Outcome::Clear` nulls it, so a persistent 429 —
-    /// or a Codex CLI that is simply not installed — would leave every activation
-    /// unthrottled, and each one now costs a retry chain rather than one request.
-    /// That would make the sustained-rate-limit case, the one this exists for,
-    /// several times worse instead of better.
-    last_polled_at: Option<DateTime<Utc>>,
-    /// The interval loop. Held so it stops when the indicator goes away, and
-    /// replaced rather than accumulated when polling restarts.
-    _poll: Option<Task<()>>,
-    _fetch: Option<Task<()>>,
+    store: Entity<AgentUsageStore>,
+    /// Redraws this indicator when the shared numbers change.
+    _observe: Subscription,
     _activation: Option<Subscription>,
     /// The panel's open/closed state, held here so an action can toggle it from
     /// outside the render.
@@ -312,224 +278,39 @@ pub struct AgentUsageIndicator {
 
 impl AgentUsageIndicator {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let store = AgentUsageStore::global(cx);
+
         let mut this = Self {
-            sources: [
-                SourceState::new(AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string())),
-                SourceState::new(AgentId::new(project::CODEX_AGENT_ID.to_string())),
-            ],
-            fetching: false,
-            last_polled_at: None,
-            _poll: None,
-            _fetch: None,
+            _observe: cx.observe(&store, |_, _, cx| cx.notify()),
+            store: store.clone(),
             _activation: None,
             panel_handle: PopoverMenuHandle::default(),
         };
 
-        // Polling follows the window's attention. Nothing about quota is urgent
-        // enough to justify a request every minute at a machine nobody is sitting
-        // at -- and coming back to a stale number would be worse than the request,
-        // which is why regaining focus fetches at once rather than waiting for the
-        // next tick.
+        // Polling follows the application's attention. Nothing about quota is
+        // urgent enough to justify a request every minute at a machine nobody is
+        // sitting at -- and coming back to a stale number would be worse than the
+        // request, which is why regaining focus asks at once rather than waiting
+        // for the next tick.
+        //
+        // Every indicator in a window reports that one window's activation, so
+        // the store is called once per indicator for one event and throttles
+        // them back down to a single request.
         this._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
-                this.start_polling(PollReason::Activation, window, cx);
-            } else {
-                this._poll = None;
-            }
+            let active = window.is_window_active();
+            this.store.update(cx, |store, cx| {
+                if active {
+                    store.window_activated(cx);
+                } else {
+                    store.window_deactivated(cx);
+                }
+            });
         }));
 
         if window.is_window_active() {
-            // The first read of the session has nothing on screen to trust, so it
-            // is never skippable.
-            this.start_polling(PollReason::Manual, window, cx);
+            store.update(cx, |store, cx| store.window_activated(cx));
         }
         this
-    }
-
-    /// Whether this build is allowed to read a quota at all.
-    ///
-    /// Reading one means shelling out to the OS keychain, reading the user's home
-    /// directory, calling an HTTP endpoint and spawning a CLI. That is the right
-    /// behaviour in the editor and the wrong behaviour underneath a test of
-    /// something else: it is real I/O the deterministic scheduler cannot account
-    /// for, and it made every test that opens a workspace fail.
-    ///
-    /// Gated on the feature rather than on `cfg(test)`, because the tests that
-    /// were failing live in another crate — `cfg(test)` is only ever set for the
-    /// crate under test, so it would not have reached them.
-    const fn may_read_usage() -> bool {
-        !cfg!(feature = "test-support")
-    }
-
-    /// (Re)starts the interval loop, fetching immediately unless `reason` allows
-    /// the fetch to be skipped and the numbers on screen are still fresh.
-    ///
-    /// Assigning over `_poll` drops any previous loop, so this can be called
-    /// freely -- on activation, or after a manual refresh -- without stacking
-    /// timers.
-    fn start_polling(&mut self, reason: PollReason, window: &mut Window, cx: &mut Context<Self>) {
-        if !Self::may_read_usage() {
-            return;
-        }
-        if reason == PollReason::Activation && self.polled_recently(Utc::now()) {
-            // Still restart the timer -- the loop was dropped when focus was
-            // lost, so without this the numbers would never refresh again.
-            self.restart_timer(window, cx);
-            return;
-        }
-        self.refresh(window, cx);
-        self.restart_timer(window, cx);
-    }
-
-    /// The interval loop on its own, with no immediate fetch.
-    fn restart_timer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self._poll = Some(cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL_INTERVAL).await;
-                let carry_on = this
-                    .update_in(cx, |this, window, cx| this.refresh(window, cx))
-                    .is_ok();
-                if !carry_on {
-                    return;
-                }
-            }
-        }));
-    }
-
-    /// Whether a read was attempted recently enough that regaining focus can skip
-    /// asking again.
-    ///
-    /// Keyed on the attempt, not on the answer. Nothing has been asked yet when
-    /// `last_polled_at` is `None`, so the very first activation — the one the user
-    /// actually notices — is never the one that gets skipped.
-    ///
-    /// A clock stepped backwards by an NTP correction can make this read `true`
-    /// early. That only suppresses the on-focus fetch, never the unconditional
-    /// 60-second loop, so it self-heals within one interval and cannot leave the
-    /// indicator permanently stale.
-    fn polled_recently(&self, now: DateTime<Utc>) -> bool {
-        let Ok(cutoff) = chrono::Duration::from_std(ACTIVATION_MIN_INTERVAL) else {
-            return false;
-        };
-        self.last_polled_at
-            .is_some_and(|polled_at| now - polled_at < cutoff)
-    }
-
-    /// Which agents a refresh should actually ask.
-    ///
-    /// A pure function, deliberately separate from `refresh`: `may_read_usage()`
-    /// disables all real I/O under `test-support` (see its doc comment above), so
-    /// no test in this repo can observe an HTTP request or a subprocess spawn
-    /// being skipped. This decision -- which agents are even worth asking -- is
-    /// what stays provable once the I/O around it is untestable.
-    fn agents_to_fetch(settings: &StatusBarSettings) -> (bool, bool) {
-        (settings.claude_usage_button, settings.codex_usage_button)
-    }
-
-    /// What a switched-off agent's source becomes instead of a real fetch.
-    ///
-    /// `Clear`, not `Keep`: it nulls the source's windows along with skipping the
-    /// request, releasing the memory the same way an entitlement failure does.
-    /// The numbers are not on screen for a disabled agent anyway, and leaving a
-    /// stale `fetched_at` on a source nobody is watching would only distort the
-    /// activation throttle for the agent that *is* still being asked.
-    fn disabled_outcome() -> Outcome {
-        Outcome::Clear("switched off in status bar settings".into())
-    }
-
-    /// Reads both agents' quota once, concurrently.
-    ///
-    /// Silently does nothing while a fetch is already in flight: the caller may be
-    /// a click, and two requests for one intention is the shape of a queue.
-    fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.fetching {
-            return;
-        }
-
-        let (claude_on, codex_on) = Self::agents_to_fetch(StatusBarSettings::get_global(cx));
-        if !claude_on && !codex_on {
-            // Nothing to ask -- and returning here, before `fetching` and
-            // `last_polled_at` are stamped, is load-bearing: stamping them and
-            // then never landing an `apply` to clear `fetching` would wedge the
-            // indicator, disabling the click and the poll loop for good. This is
-            // also defensive rather than the normal path: with both agents off,
-            // `has_anything_to_show` is false and the entity is usually gone
-            // before a tick ever reaches here.
-            return;
-        }
-
-        self.fetching = true;
-        // Stamped here rather than on the answer: this is the moment a request
-        // goes out, and it is requests the throttle is trying not to duplicate.
-        self.last_polled_at = Some(Utc::now());
-        cx.notify();
-
-        let http_client = cx.http_client();
-        let executor = cx.background_executor().clone();
-        let claude_executor = executor.clone();
-        let codex_executor = executor;
-        self._fetch = Some(cx.spawn_in(window, async move |this, cx| {
-            // Concurrently, and neither waits on the other: one agent being
-            // absent must not delay the other's numbers by a process spawn. A
-            // disabled agent substitutes a `ready` future rather than dropping
-            // out of the `join`, so the concurrency shape is unchanged whichever
-            // agents are on.
-            let claude_future = if claude_on {
-                futures::future::Either::Left(async move {
-                    Outcome::from(claude::fetch(http_client, claude_executor).await)
-                })
-            } else {
-                futures::future::Either::Right(std::future::ready(Self::disabled_outcome()))
-            };
-            let codex_future = if codex_on {
-                futures::future::Either::Left(async move {
-                    Outcome::from(codex::fetch(codex_executor).await)
-                })
-            } else {
-                futures::future::Either::Right(std::future::ready(Self::disabled_outcome()))
-            };
-
-            let (claude_outcome, codex_outcome) =
-                futures::future::join(claude_future, codex_future).await;
-
-            this.update(cx, |this, cx| {
-                this.apply(claude_outcome, codex_outcome, Utc::now());
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    /// Folds both outcomes into the displayed state.
-    ///
-    /// Pure and separate from the fetching on purpose: the interesting decision is
-    /// which failures keep the old numbers and which clear them, and that is worth
-    /// asserting without a network or a subprocess in the way.
-    fn apply(&mut self, claude: Outcome, codex: Outcome, now: DateTime<Utc>) {
-        self.fetching = false;
-        self.sources[0].apply(claude, now);
-        self.sources[1].apply(codex, now);
-    }
-
-    /// An indicator with fixed state and no tasks.
-    ///
-    /// Tests about drawing and about `apply` must not start a poll loop: that
-    /// would put a real HTTP request and a real subprocess behind a unit test,
-    /// which is slow, machine-dependent, and not what is being asserted.
-    #[cfg(test)]
-    fn test_new() -> Self {
-        Self {
-            sources: [
-                SourceState::new(AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string())),
-                SourceState::new(AgentId::new(project::CODEX_AGENT_ID.to_string())),
-            ],
-            fetching: false,
-            last_polled_at: None,
-            _poll: None,
-            _fetch: None,
-            _activation: None,
-            panel_handle: PopoverMenuHandle::default(),
-        }
     }
 
     /// Whether an agent is one the user has asked to see.
@@ -546,11 +327,14 @@ impl AgentUsageIndicator {
     }
 
     /// The sources with both something to say and permission to say it.
+    ///
+    /// A free function over a slice rather than a method: the numbers live in the
+    /// store now, and the indicator reads a snapshot of them per draw.
     fn visible_sources<'a>(
-        &'a self,
+        sources: &'a [SourceState],
         settings: &'a StatusBarSettings,
     ) -> impl Iterator<Item = &'a SourceState> {
-        self.sources.iter().filter(move |source| {
+        sources.iter().filter(move |source| {
             !source.windows.is_empty() && Self::agent_is_enabled(&source.agent, settings)
         })
     }
@@ -560,8 +344,8 @@ impl AgentUsageIndicator {
     /// A source that answered but reported no windows counts as nothing: there is
     /// no number to show, and an icon on its own would read as "0%". A source the
     /// user has switched off counts as nothing for the same reason.
-    fn has_anything_to_show(&self, settings: &StatusBarSettings) -> bool {
-        self.visible_sources(settings).next().is_some()
+    fn has_anything_to_show(sources: &[SourceState], settings: &StatusBarSettings) -> bool {
+        Self::visible_sources(sources, settings).next().is_some()
     }
 
     /// The panel's handle, for an action registered outside this crate.
@@ -570,8 +354,8 @@ impl AgentUsageIndicator {
     }
 
     /// Whether a read is in flight, for the panel's refresh glyph.
-    pub(crate) fn is_fetching(&self) -> bool {
-        self.fetching
+    pub(crate) fn is_fetching(&self, cx: &App) -> bool {
+        self.store.read(cx).is_fetching()
     }
 
     /// The state as it stands, for the panel to render.
@@ -580,18 +364,19 @@ impl AgentUsageIndicator {
     /// panel is a separate entity, and reaching back into this one while it is
     /// being drawn is the mistake this crate's neighbours have paid for more than
     /// once.
-    pub(crate) fn source_snapshot(&self) -> Vec<SourceState> {
-        self.sources.to_vec()
+    pub(crate) fn source_snapshot(&self, cx: &App) -> Vec<SourceState> {
+        self.store.read(cx).source_states()
     }
 
     /// Re-reads both agents now, at the panel's request.
     ///
     /// Restarts the loop rather than firing a bare fetch, so the next automatic
     /// read is a full interval after this one instead of arriving moments later.
-    pub(crate) fn refresh_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.start_polling(PollReason::Manual, window, cx);
+    pub(crate) fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| store.refresh_now(cx));
     }
 }
+
 
 impl Render for AgentUsageIndicator {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -599,15 +384,17 @@ impl Render for AgentUsageIndicator {
         // that the status bar's own gap applies to, so an "empty" item would
         // still push its neighbours over by one gap.
         let settings = StatusBarSettings::get_global(cx);
-        if !self.has_anything_to_show(settings) {
+        // One read of the shared state per draw, rather than a borrow held while
+        // the element tree is built.
+        let sources = self.store.read(cx).source_states();
+        if !Self::has_anything_to_show(&sources, settings) {
             return div();
         }
 
         let now = Utc::now();
-        let fetching = self.fetching;
+        let fetching = self.store.read(cx).is_fetching();
         let compact = settings.agent_usage_display == AgentUsageDisplay::Compact;
-        let groups = self
-            .visible_sources(settings)
+        let groups = Self::visible_sources(&sources, settings)
             .map(|source| {
                 // Compact keeps one window per agent rather than one window
                 // overall: which agent a number belongs to is the thing the icon
@@ -914,6 +701,7 @@ pub fn format_countdown(remaining: Duration) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::usage_store::{AgentUsageStore, PollReason};
     use super::*;
 
     /// The countdown thresholds, including the one that produces nothing.
@@ -1169,8 +957,8 @@ mod tests {
     /// Switching an agent off hides that agent and only that agent.
     #[test]
     fn switching_one_agent_off_leaves_the_other_alone() {
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(
+        let mut store = AgentUsageStore::test_new();
+        store.apply(
             Outcome::Windows(vec![a_window()]),
             Outcome::Windows(vec![a_window()]),
             Utc::now(),
@@ -1179,8 +967,8 @@ mod tests {
         let mut settings = all_agents_shown();
         settings.codex_usage_button = false;
 
-        let visible: Vec<_> = indicator
-            .visible_sources(&settings)
+        let sources = store.source_states();
+        let visible: Vec<_> = AgentUsageIndicator::visible_sources(&sources, &settings)
             .map(|source| source.agent.as_ref().to_string())
             .collect();
         assert_eq!(
@@ -1188,7 +976,7 @@ mod tests {
             vec![project::CLAUDE_CODE_AGENT_ID.to_string()],
             "Codex is switched off; Claude is untouched"
         );
-        assert!(indicator.has_anything_to_show(&settings));
+        assert!(AgentUsageIndicator::has_anything_to_show(&store.source_states(), &settings));
     }
 
     /// Switching both off leaves nothing to draw — and nothing to right-click.
@@ -1198,8 +986,8 @@ mod tests {
     /// settings file. Asserted here so the hole is recorded rather than discovered.
     #[test]
     fn switching_both_agents_off_leaves_nothing_at_all() {
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(
+        let mut store = AgentUsageStore::test_new();
+        store.apply(
             Outcome::Windows(vec![a_window()]),
             Outcome::Windows(vec![a_window()]),
             Utc::now(),
@@ -1210,7 +998,7 @@ mod tests {
         settings.codex_usage_button = false;
 
         assert!(
-            !indicator.has_anything_to_show(&settings),
+            !AgentUsageIndicator::has_anything_to_show(&store.source_states(), &settings),
             "no numbers, no icons, and no right-click target"
         );
     }
@@ -1247,7 +1035,7 @@ mod tests {
     #[test]
     fn agents_to_fetch_reflects_each_agent_independently() {
         assert_eq!(
-            AgentUsageIndicator::agents_to_fetch(&all_agents_shown()),
+            AgentUsageStore::agents_to_fetch(&all_agents_shown()),
             (true, true),
             "defaults: both agents are asked"
         );
@@ -1255,7 +1043,7 @@ mod tests {
         let mut claude_off = all_agents_shown();
         claude_off.claude_usage_button = false;
         assert_eq!(
-            AgentUsageIndicator::agents_to_fetch(&claude_off),
+            AgentUsageStore::agents_to_fetch(&claude_off),
             (false, true),
             "Claude switched off, Codex untouched"
         );
@@ -1263,7 +1051,7 @@ mod tests {
         let mut codex_off = all_agents_shown();
         codex_off.codex_usage_button = false;
         assert_eq!(
-            AgentUsageIndicator::agents_to_fetch(&codex_off),
+            AgentUsageStore::agents_to_fetch(&codex_off),
             (true, false),
             "Codex switched off, Claude untouched"
         );
@@ -1272,7 +1060,7 @@ mod tests {
         both_off.claude_usage_button = false;
         both_off.codex_usage_button = false;
         assert_eq!(
-            AgentUsageIndicator::agents_to_fetch(&both_off),
+            AgentUsageStore::agents_to_fetch(&both_off),
             (false, false),
             "both off: nothing to fetch"
         );
@@ -1287,8 +1075,8 @@ mod tests {
     #[test]
     fn clearing_one_source_leaves_the_other_untouched() {
         let now = Utc::now();
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(
+        let mut store = AgentUsageStore::test_new();
+        store.apply(
             Outcome::Windows(vec![a_window()]),
             Outcome::Windows(vec![a_window()]),
             now,
@@ -1297,22 +1085,22 @@ mod tests {
         // Codex gets `Keep`, not another `Windows` or a `Clear`: this isolates
         // the assertion to `apply`'s independence between sources rather than
         // to what a real second fetch would have returned.
-        indicator.apply(
-            AgentUsageIndicator::disabled_outcome(),
+        store.apply(
+            AgentUsageStore::disabled_outcome(),
             Outcome::Keep("still up to date".into()),
             now,
         );
 
         assert!(
-            indicator.sources[0].windows.is_empty(),
+            store.source_at(0).windows.is_empty(),
             "the disabled agent's windows are cleared"
         );
         assert_eq!(
-            indicator.sources[0].fetched_at, None,
+            store.source_at(0).fetched_at, None,
             "and its read time goes with them"
         );
         assert_eq!(
-            indicator.sources[1].windows.len(),
+            store.source_at(1).windows.len(),
             1,
             "the agent still on screen is untouched by the other's Clear"
         );
@@ -1328,39 +1116,39 @@ mod tests {
     fn keep_holds_the_last_numbers_and_clear_takes_them_away() {
         let now = Utc::now();
 
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(Outcome::Windows(vec![a_window()]), nothing(), now);
+        let mut store = AgentUsageStore::test_new();
+        store.apply(Outcome::Windows(vec![a_window()]), nothing(), now);
         assert!(
-            indicator.has_anything_to_show(&all_agents_shown()),
+            AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
             "a good read shows numbers"
         );
 
-        indicator.apply(
+        store.apply(
             Outcome::Keep("the endpoint could not be reached".into()),
             nothing(),
             now,
         );
         assert!(
-            indicator.has_anything_to_show(&all_agents_shown()),
+            AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
             "a transient failure must not empty the bar -- the panel carries the reason"
         );
         assert_eq!(
-            indicator.sources[0].reason.as_ref().map(|r| r.as_ref()),
+            store.source_at(0).reason.as_ref().map(|r| r.as_ref()),
             Some("the endpoint could not be reached"),
             "and the reason is kept verbatim for the panel to show"
         );
 
-        indicator.apply(
+        store.apply(
             Outcome::Clear("no sign-in was found".into()),
             nothing(),
             now,
         );
         assert!(
-            !indicator.has_anything_to_show(&all_agents_shown()),
+            !AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
             "a number the user is no longer entitled to must go"
         );
         assert_eq!(
-            indicator.sources[0].fetched_at, None,
+            store.source_at(0).fetched_at, None,
             "and the read time goes with it, or the panel would date absent data"
         );
     }
@@ -1462,22 +1250,22 @@ mod tests {
     #[test]
     fn an_attempt_made_recently_lets_activation_skip_asking_again() {
         let now = Utc::now();
-        let mut indicator = AgentUsageIndicator::test_new();
+        let mut store = AgentUsageStore::test_new();
 
         assert!(
-            !indicator.polled_recently(now),
+            store.should_fetch(PollReason::Activation, now),
             "nothing has been asked yet — the first activation is the one the user \
              notices, and it must not be the one that is skipped"
         );
 
-        indicator.last_polled_at = Some(now);
-        assert!(indicator.polled_recently(now), "just asked");
+        store.set_last_polled_at(Some(now));
+        assert!(!store.should_fetch(PollReason::Activation, now), "just asked");
         assert!(
-            indicator.polled_recently(now + chrono::Duration::seconds(29)),
+            !store.should_fetch(PollReason::Activation, now + chrono::Duration::seconds(29)),
             "still inside the window"
         );
         assert!(
-            !indicator.polled_recently(now + chrono::Duration::seconds(31)),
+            store.should_fetch(PollReason::Activation, now + chrono::Duration::seconds(31)),
             "past the window, ask again"
         );
     }
@@ -1493,20 +1281,20 @@ mod tests {
     #[test]
     fn a_failing_source_does_not_disengage_the_throttle() {
         let now = Utc::now();
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.last_polled_at = Some(now);
+        let mut store = AgentUsageStore::test_new();
+        store.set_last_polled_at(Some(now));
 
-        indicator.apply(
+        store.apply(
             Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RateLimited)),
             Outcome::Keep("codex would not start".into()),
             now,
         );
         assert!(
-            indicator.polled_recently(now),
+            !store.should_fetch(PollReason::Activation, now),
             "a 429 is still an attempt; asking again immediately is what earned it"
         );
         assert_eq!(
-            indicator.sources[0].fetched_at, None,
+            store.source_at(0).fetched_at, None,
             "and nothing about it made the data fresh — which is why the throttle \
              must not be asking that question"
         );
@@ -1518,20 +1306,20 @@ mod tests {
     #[test]
     fn a_source_that_will_never_answer_does_not_disengage_the_throttle() {
         let now = Utc::now();
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.last_polled_at = Some(now);
+        let mut store = AgentUsageStore::test_new();
+        store.set_last_polled_at(Some(now));
 
-        indicator.apply(
+        store.apply(
             Outcome::Windows(Vec::new()),
             Outcome::from(Err::<Vec<_>, _>(codex::Unavailable::NotInstalled)),
             now,
         );
         assert_eq!(
-            indicator.sources[1].fetched_at, None,
+            store.source_at(1).fetched_at, None,
             "Clear nulls it, and an uninstalled CLI never un-nulls it"
         );
         assert!(
-            indicator.polled_recently(now),
+            !store.should_fetch(PollReason::Activation, now),
             "the throttle still works for a Claude-only user"
         );
     }
@@ -1541,8 +1329,8 @@ mod tests {
     #[test]
     fn rate_limiting_keeps_the_numbers_it_already_had() {
         let now = Utc::now();
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(
+        let mut store = AgentUsageStore::test_new();
+        store.apply(
             Outcome::Windows(vec![UsageWindow {
                 percent: 42,
                 resets_at: None,
@@ -1553,18 +1341,18 @@ mod tests {
             now,
         );
 
-        indicator.apply(
+        store.apply(
             Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RateLimited)),
             Outcome::Windows(Vec::new()),
             now,
         );
         assert_eq!(
-            indicator.sources[0].windows.len(),
+            store.source_at(0).windows.len(),
             1,
             "the 42% must survive a 429"
         );
         assert!(
-            indicator.sources[0]
+            store.source_at(0)
                 .reason
                 .as_ref()
                 .is_some_and(|reason| reason.contains("rate limited")),
@@ -1579,28 +1367,28 @@ mod tests {
     /// panel, without touching Claude's row.
     #[test]
     fn one_agent_being_absent_does_not_hide_the_other() {
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(
+        let mut store = AgentUsageStore::test_new();
+        store.apply(
             Outcome::Windows(vec![a_window()]),
             Outcome::Clear("the codex CLI is not installed".into()),
             Utc::now(),
         );
 
         assert!(
-            indicator.has_anything_to_show(&all_agents_shown()),
+            AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
             "Claude still reports"
         );
         assert!(
-            indicator.sources[1].windows.is_empty(),
+            store.source_at(1).windows.is_empty(),
             "and Codex contributes no row rather than an empty icon"
         );
         assert_eq!(
-            indicator.sources[1].reason.as_ref().map(|r| r.as_ref()),
+            store.source_at(1).reason.as_ref().map(|r| r.as_ref()),
             Some("the codex CLI is not installed"),
             "the reason has to survive for the panel to explain the absence"
         );
         assert!(
-            indicator.sources[0].fetched_at.is_some(),
+            store.source_at(0).fetched_at.is_some(),
             "and Claude's read time is untouched by Codex failing"
         );
     }
@@ -1608,13 +1396,13 @@ mod tests {
     /// A successful read that reports no windows is nothing to show, not an error.
     #[test]
     fn a_read_with_no_windows_shows_nothing_without_complaining() {
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(Outcome::Windows(vec![a_window()]), nothing(), Utc::now());
-        indicator.apply(Outcome::Windows(Vec::new()), nothing(), Utc::now());
+        let mut store = AgentUsageStore::test_new();
+        store.apply(Outcome::Windows(vec![a_window()]), nothing(), Utc::now());
+        store.apply(Outcome::Windows(Vec::new()), nothing(), Utc::now());
 
-        assert!(!indicator.has_anything_to_show(&all_agents_shown()));
+        assert!(!AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()));
         assert!(
-            indicator.sources[0].reason.is_none(),
+            store.source_at(0).reason.is_none(),
             "nothing went wrong, so nothing is reported as wrong"
         );
     }
@@ -1632,11 +1420,11 @@ mod tests {
             Outcome::Keep("blink".into()),
             Outcome::Clear("gone".into()),
         ] {
-            let mut indicator = AgentUsageIndicator::test_new();
-            indicator.fetching = true;
-            indicator.apply(outcome, nothing(), now);
+            let mut store = AgentUsageStore::test_new();
+            store.mark_fetching();
+            store.apply(outcome, nothing(), now);
             assert!(
-                !indicator.fetching,
+                !store.is_fetching(),
                 "a stuck flag disables the click and mutes the poll loop for ever"
             );
         }
@@ -1645,15 +1433,15 @@ mod tests {
     /// Whatever reaches the screen, it must not be credential-shaped.
     #[test]
     fn no_reason_reaching_the_screen_is_credential_shaped() {
-        let mut indicator = AgentUsageIndicator::test_new();
-        indicator.apply(
+        let mut store = AgentUsageStore::test_new();
+        store.apply(
             Outcome::Clear("no Claude Code sign-in was found on this machine".into()),
             Outcome::Clear("the codex CLI is not installed".into()),
             Utc::now(),
         );
 
         let now = Utc::now();
-        for source in &indicator.sources {
+        for source in &store.source_states() {
             // Through the panel's own renderer, because that is the only surface a
             // reason reaches now that the status bar has no tooltip.
             let shown = crate::usage_panel::UsagePanel::source_status(source, now);
@@ -1669,17 +1457,52 @@ mod tests {
 
     /// An indicator holding nothing must not reserve space.
     ///
+    /// The reason this store exists: a window full of workspaces is one reader.
+    ///
+    /// The status bar builds an indicator per `Workspace`, and this fork keeps a
+    /// workspace per project inside one window. Eight of them used to mean eight
+    /// poll loops against one endpoint on one token. They must now all resolve to
+    /// the same store, because that is what makes it one loop.
+    #[gpui::test]
+    fn every_indicator_in_the_app_reads_one_store(cx: &mut gpui::TestAppContext) {
+        // An empty root, so building the indicators does not also draw them:
+        // drawing reads settings this crate's tests deliberately do without.
+        let window = cx.add_window(|_, _| gpui::Empty);
+
+        let stores: Vec<_> = (0..8)
+            .map(|_| {
+                window
+                    .update(cx, |_, window, cx| {
+                        cx.new(|cx| AgentUsageIndicator::new(window, cx))
+                            .read(cx)
+                            .store
+                            .clone()
+                    })
+                    .expect("the window was just built")
+            })
+            .collect();
+
+        let first = stores[0].entity_id();
+        for (index, store) in stores.iter().enumerate() {
+            assert_eq!(
+                store.entity_id(),
+                first,
+                "indicator {index} built its own store, which is one more poll loop"
+            );
+        }
+    }
+
     /// The status bar puts a gap between items, so an item that returns a flex
     /// box rather than a bare `div` shifts everything beside it while showing
     /// nothing — visible as a hole in the bar on any build where no agent is
     /// configured, which is most of them.
     #[gpui::test]
     fn an_indicator_with_no_data_shows_nothing(cx: &mut gpui::TestAppContext) {
-        let indicator = cx.new(|_| AgentUsageIndicator::test_new());
+        let store = cx.new(|_| AgentUsageStore::test_new());
 
-        indicator.read_with(cx, |indicator, _| {
+        store.read_with(cx, |store, _| {
             assert!(
-                !indicator.has_anything_to_show(&all_agents_shown()),
+                !AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
                 "a fresh indicator has no source and therefore nothing to say"
             );
         });
@@ -1694,15 +1517,15 @@ mod tests {
     fn an_agent_with_no_windows_is_still_nothing_to_show(cx: &mut gpui::TestAppContext) {
         // A source that answered with no windows: the vector has an entry, so a
         // naive `!sources.is_empty()` would pass and draw an icon with no number.
-        let indicator = cx.new(|_| {
-            let mut indicator = AgentUsageIndicator::test_new();
-            indicator.apply(Outcome::Windows(Vec::new()), nothing(), Utc::now());
-            indicator
+        let store = cx.new(|_| {
+            let mut store = AgentUsageStore::test_new();
+            store.apply(Outcome::Windows(Vec::new()), nothing(), Utc::now());
+            store
         });
 
-        indicator.read_with(cx, |indicator, _| {
+        store.read_with(cx, |store, _| {
             assert!(
-                !indicator.has_anything_to_show(&all_agents_shown()),
+                !AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
                 "an icon with no percentage beside it reads as 0%, which is a lie"
             );
         });
