@@ -10,7 +10,12 @@ mod multi_workspace_tests;
 pub mod notifications;
 pub mod pane;
 pub mod pane_group;
+mod panel_size_key;
+pub mod panel_size_prune;
 pub mod project_appearance;
+pub mod project_avatar;
+pub mod project_logo;
+mod project_logo_store;
 pub mod path_list {
     pub use util::path_list::{PathList, SerializedPathList};
 }
@@ -35,8 +40,8 @@ pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedProject, DraggedSidebar, FocusWorkspaceSidebar,
     MoveProjectToNewWindow, MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject,
-    ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent,
-    SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
+    ProjectGroup, ProjectGroupKey, ProjectPresentation, SerializedProjectGroupState, Sidebar,
+    SidebarEvent, SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -161,6 +166,7 @@ pub use workspace_settings::{
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
 use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
+use crate::panel_size_key::{PROJECT_PANEL_SIZE_STATE_KEY, panel_size_key};
 use crate::{
     persistence::{
         SerializedAxis,
@@ -1420,6 +1426,20 @@ pub struct Workspace {
     /// position into its width. Keyed by column rather than by side, because an
     /// own column stands on the rail's side and so cannot be told apart by it.
     database_column_bounds: Option<Bounds<Pixels>>,
+    /// Which project this workspace is about to hold, while it does not hold it
+    /// yet.
+    ///
+    /// Restoring a workspace by id builds the window and its panels first and
+    /// opens the folders afterwards, so for a moment there is no worktree to
+    /// name the project by -- and a panel added in that moment would take its
+    /// width from the shared record rather than from the project's own. The
+    /// paths are known before the window exists, so the opener resolves one and
+    /// leaves it here.
+    ///
+    /// A fallback, never an override: once a visible worktree exists it answers
+    /// instead, so removing the first folder re-points the record rather than
+    /// sticking to what was restored.
+    restoring_project_path: Option<Arc<Path>>,
     pub centered_layout: bool,
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
@@ -1885,6 +1905,7 @@ impl Workspace {
             // This data will be incorrect, but it will be overwritten by the time it needs to be used.
             bounds: Default::default(),
             database_column_bounds: None,
+            restoring_project_path: None,
             centered_layout: false,
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
@@ -2435,21 +2456,93 @@ impl Workspace {
         })
     }
 
+    /// Which project this workspace's dock sizes are recorded against: the main
+    /// repository of its first visible worktree.
+    ///
+    /// A linked worktree answers with the repository it was cut from, so every
+    /// checkout of one repository reads and writes one record -- a sidebar no
+    /// longer changes width on the way between two branches of the same work.
+    /// Two unrelated repositories answer differently and so keep their own.
+    ///
+    /// Read afresh each time rather than cached: the first folder can be
+    /// removed from the workspace, and a repository can appear under a folder
+    /// that had none when it was opened.
+    pub fn panel_size_project_path(&self, cx: &App) -> Option<PathBuf> {
+        self.project
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .map(|worktree| {
+                worktree
+                    .read(cx)
+                    .snapshot()
+                    .main_worktree_abs_path()
+                    .to_path_buf()
+            })
+            // Only while a restore has not opened its folders yet. The live
+            // worktree is asked first, so this never overrides one.
+            .or_else(|| {
+                self.restoring_project_path
+                    .as_ref()
+                    .map(|path| path.to_path_buf())
+            })
+    }
+
+    /// Names the project a restore is on its way to opening, so panels added
+    /// before its folders land still find its record. See
+    /// [`Workspace::restoring_project_path`].
+    pub fn set_restoring_project_path(&mut self, path: Option<Arc<Path>>) {
+        self.restoring_project_path = path;
+    }
+
+    /// The key this workspace's project records a panel's size under, or `None`
+    /// when there is no project to record it against.
+    ///
+    /// The one place the shape is decided, so that a read and the write that
+    /// follows it cannot disagree about which project they mean -- which is
+    /// what keeps the record independent of the order folders and panels
+    /// happen to arrive in.
+    pub(crate) fn project_panel_size_key(&self, panel_key: &str, cx: &App) -> Option<String> {
+        let project_path = self.panel_size_project_path(cx)?;
+        // Two hosts holding the same path are two projects, so the host belongs
+        // in the key -- as it already does in `ProjectGroupKey`.
+        let host = self
+            .project
+            .read(cx)
+            .remote_connection_options(cx)
+            .as_ref()
+            .map(RemoteConnectionIdentity::from);
+        panel_size_key(panel_key, host.as_ref(), &project_path)
+    }
+
     pub fn persisted_panel_size_state(
         &self,
         panel_key: &'static str,
         cx: &App,
     ) -> Option<dock::PanelSizeState> {
-        dock::Dock::load_persisted_size_state(panel_key, cx)
+        self.project_panel_size_key(panel_key, cx)
+            .and_then(|key| dock::Dock::load_project_size_state(&key, cx))
+            .or_else(|| dock::Dock::load_persisted_size_state(panel_key, cx))
     }
 
     /// Records how wide -- or, at the bottom, how tall -- a dock stands.
     ///
-    /// Written against the panel alone, with no workspace in the key: a
-    /// sidebar that changed width on the way between two checkouts of the same
-    /// repository was the same complaint as one that changed width between two
-    /// panels, and a record per workspace is what made the first of those
-    /// unavoidable. One drag, one width, everywhere.
+    /// Written twice. The project's own record is the one read back, and every
+    /// checkout of one repository shares it: a sidebar that changed width on
+    /// the way between two branches of the same work was the original
+    /// complaint, and a record per workspace is what made it unavoidable. Two
+    /// unrelated repositories answer to different keys and so keep their own
+    /// widths.
+    ///
+    /// The shared record is refreshed alongside it, and now means only "the
+    /// width a project with no record of its own starts at" -- so a project
+    /// opened for the first time begins where the last drag left off rather
+    /// than at a width frozen on the day records became per-project.
+    ///
+    /// Two windows on two checkouts of one repository write the same record and
+    /// the last drag wins. They converge at the next open rather than live: a
+    /// background window resizing itself under the user's eyes would be the
+    /// worse of the two behaviours.
     pub fn persist_panel_size_state(
         &self,
         panel_key: &str,
@@ -2457,11 +2550,17 @@ impl Workspace {
         cx: &mut App,
     ) {
         let kvp = db::kvp::KeyValueStore::global(cx);
+        let project_size_key = self.project_panel_size_key(panel_key, cx);
         let panel_key = panel_key.to_string();
         cx.background_spawn(async move {
-            let scope = kvp.scoped(dock::PANEL_SIZE_STATE_KEY);
-            scope
-                .write(panel_key, serde_json::to_string(&size_state)?)
+            let value = serde_json::to_string(&size_state)?;
+            if let Some(project_size_key) = project_size_key {
+                kvp.scoped(PROJECT_PANEL_SIZE_STATE_KEY)
+                    .write(project_size_key, value.clone())
+                    .await?;
+            }
+            kvp.scoped(dock::PANEL_SIZE_STATE_KEY)
+                .write(panel_key, value)
                 .await
         })
         .detach_and_log_err(cx);
@@ -2712,26 +2811,32 @@ impl Workspace {
             .unwrap_or_else(|| self.dock_at_position(dock_position));
         let any_panel = panel.to_any();
         let persisted_size_state = self
-            .persisted_panel_size_state(T::panel_key(), cx)
-            // A width this workspace recorded before widths were shared. Handed
-            // over to the shared record on the way past, so the next workspace
-            // to open reads it rather than its own.
+            .project_panel_size_key(T::panel_key(), cx)
+            .and_then(|key| dock::Dock::load_project_size_state(&key, cx))
+            // Below the project's own record lie three older ones, each a width
+            // recorded before the last narrowing of what a width belonged to:
+            // shared by every project, then by every panel of one workspace,
+            // then the original per-panel blob. Whichever answers first is
+            // handed up into the project's record on the way past, so this
+            // ladder is climbed once and the project reads its own record
+            // afterwards -- and nothing moves on screen at the upgrade, since
+            // the width applied is the width that was already there.
             .or_else(|| {
-                dock::Dock::load_workspace_scoped_size_state(self, T::panel_key(), cx).inspect(
-                    |state| {
+                dock::Dock::load_persisted_size_state(T::panel_key(), cx)
+                    .or_else(|| {
+                        dock::Dock::load_workspace_scoped_size_state(self, T::panel_key(), cx)
+                    })
+                    .or_else(|| {
+                        load_legacy_panel_size(T::panel_key(), dock_position, self, cx).map(|size| {
+                            dock::PanelSizeState {
+                                size: Some(size),
+                                flex: None,
+                            }
+                        })
+                    })
+                    .inspect(|state| {
                         self.persist_panel_size_state(T::panel_key(), *state, cx);
-                    },
-                )
-            })
-            .or_else(|| {
-                load_legacy_panel_size(T::panel_key(), dock_position, self, cx).map(|size| {
-                    let state = dock::PanelSizeState {
-                        size: Some(size),
-                        flex: None,
-                    };
-                    self.persist_panel_size_state(T::panel_key(), state, cx);
-                    state
-                })
+                    })
             });
 
         dock.update(cx, |dock, cx| {
@@ -9481,6 +9586,7 @@ pub async fn apply_restored_multiworkspace_state(
                 expanded,
                 initials,
                 colour,
+                logo,
             } = serialized.into_restored_state();
             if key.path_list().paths().is_empty() {
                 continue;
@@ -9504,6 +9610,7 @@ pub async fn apply_restored_multiworkspace_state(
                     expanded,
                     initials,
                     colour,
+                    logo,
                 });
             }
         }
@@ -10098,6 +10205,31 @@ pub fn open_workspace_by_id(
 
         let centered_layout = serialized_workspace.centered_layout;
 
+        // This path builds the window, and its panels with it, before it opens
+        // the folders -- so a panel can be added while the project still has no
+        // worktree to name it by. The paths are already in hand here, and
+        // resolving one the way a worktree will resolve it gives the same
+        // answer whichever of the two lands first.
+        let restoring_project_path: Option<Arc<Path>> = match &serialized_workspace.location {
+            SerializedWorkspaceLocation::Local => {
+                match serialized_workspace.paths.ordered_paths().next().cloned() {
+                    Some(path) => {
+                        let main_repo = project::git_store::resolve_git_worktree_to_main_repo(
+                            app_state.fs.as_ref(),
+                            &path,
+                        )
+                        .await;
+                        Some(main_repo.unwrap_or(path).into())
+                    }
+                    None => None,
+                }
+            }
+            // A remote path says nothing about this disk, so resolving it here
+            // would be asking the wrong machine. A remote restore keeps to the
+            // key its worktree yields once it arrives.
+            SerializedWorkspaceLocation::Remote(_) => None,
+        };
+
         let (window, workspace) = if let Some(window) = requesting_window {
             let workspace = window.update(cx, |multi_workspace, window, cx| {
                 let workspace = cx.new(|cx| {
@@ -10109,6 +10241,7 @@ pub fn open_workspace_by_id(
                         cx,
                     );
                     workspace.centered_layout = centered_layout;
+                    workspace.set_restoring_project_path(restoring_project_path.clone());
                     workspace
                 });
                 multi_workspace.add(workspace.clone(), &*window, cx);
@@ -10139,6 +10272,7 @@ pub fn open_workspace_by_id(
             let window = cx.open_window(options, {
                 let app_state = app_state.clone();
                 let project_handle = project_handle.clone();
+                let restoring_project_path = restoring_project_path.clone();
                 move |window, cx| {
                     let workspace = cx.new(|cx| {
                         let mut workspace = Workspace::new(
@@ -10149,6 +10283,7 @@ pub fn open_workspace_by_id(
                             cx,
                         );
                         workspace.centered_layout = centered_layout;
+                        workspace.set_restoring_project_path(restoring_project_path);
                         workspace
                     });
                     cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
@@ -11799,7 +11934,9 @@ mod tests {
                     "group B should go back where it stood"
                 );
                 assert_eq!(
-                    mw.project_presentation(&key_b).0.map(|i| i.to_string()),
+                    mw.project_presentation(&key_b)
+                        .initials
+                        .map(|i| i.to_string()),
                     Some("BB".to_string()),
                     "the restored group should keep its initials"
                 );
@@ -14027,6 +14164,515 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// A repository with a linked worktree beside it, and an unrelated
+    /// repository to tell the two apart from.
+    async fn projects_fs(cx: &mut gpui::TestAppContext) -> Arc<FakeFs> {
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/main-repo",
+            json!({
+                ".git": {
+                    "worktrees": {
+                        "feature": { "commondir": "../../", "HEAD": "ref: refs/heads/feature" }
+                    }
+                },
+                "src": { "main.rs": "" }
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            "/worktree-checkout",
+            json!({
+                ".git": "gitdir: /main-repo/.git/worktrees/feature",
+                "src": { "main.rs": "" }
+            }),
+        )
+        .await;
+        fs.insert_tree("/other-repo", json!({ ".git": {}, "src": { "main.rs": "" } }))
+            .await;
+        fs
+    }
+
+    async fn write_size_record(
+        namespace: &'static str,
+        key: String,
+        width: Pixels,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let value = serde_json::to_string(&PanelSizeState {
+            size: Some(width),
+            flex: None,
+        })
+        .expect("a panel size state should serialise");
+        cx.update(|cx| {
+            let kvp = db::kvp::KeyValueStore::global(cx);
+            cx.background_spawn(async move { kvp.scoped(namespace).write(key, value).await })
+        })
+        .await
+        .expect("writing a size record should succeed");
+    }
+
+    /// Opens a workspace on `path`, drags its left dock to `width`, and lets
+    /// the write land.
+    async fn record_left_dock_width(
+        fs: Arc<FakeFs>,
+        path: &str,
+        width: Pixels,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let project = Project::test(fs, [Path::new(path)], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(800.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_left_dock(width, window, cx);
+        });
+
+        cx.run_until_parked();
+    }
+
+    /// Opens a workspace on `path` and reports the width its left dock takes on
+    /// the frame the panel is added -- before any later write could move it.
+    async fn left_dock_width_on_open(
+        fs: Arc<FakeFs>,
+        path: &str,
+        cx: &mut gpui::TestAppContext,
+    ) -> Option<Pixels> {
+        let project = Project::test(fs, [Path::new(path)], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(800.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+
+            let left_dock = workspace.left_dock().read(cx);
+            left_dock
+                .panel::<TestPanel>()
+                .and_then(|panel| left_dock.stored_panel_size_state(&panel))
+                .and_then(|state| state.size)
+        })
+    }
+
+    /// Two checkouts of one repository are one project and answer to one width,
+    /// even with another project's drag standing between them.
+    #[gpui::test]
+    async fn worktrees_of_one_repository_share_a_dock_width(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        record_left_dock_width(fs.clone(), "/main-repo", px(350.), cx).await;
+        // An unrelated repository drags afterwards, so the shared record holds
+        // 200 by now. Only the repository's own record still holds 350, which
+        // is what makes this assertion about the project row and not a fallback.
+        record_left_dock_width(fs.clone(), "/other-repo", px(200.), cx).await;
+
+        assert_eq!(
+            left_dock_width_on_open(fs.clone(), "/worktree-checkout", cx).await,
+            Some(px(350.)),
+            "a linked worktree should open at the width its repository recorded, \
+             not at the width the last project to drag left behind"
+        );
+    }
+
+    /// Two repositories keep two widths, and neither drag disturbs the other.
+    #[gpui::test]
+    async fn two_projects_keep_their_own_dock_widths(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        record_left_dock_width(fs.clone(), "/main-repo", px(350.), cx).await;
+        record_left_dock_width(fs.clone(), "/other-repo", px(200.), cx).await;
+
+        assert_eq!(
+            left_dock_width_on_open(fs.clone(), "/other-repo", cx).await,
+            Some(px(200.)),
+            "the second repository should open at its own width"
+        );
+        assert_eq!(
+            left_dock_width_on_open(fs.clone(), "/main-repo", cx).await,
+            Some(px(350.)),
+            "and returning to the first should find it as it was left"
+        );
+    }
+
+    /// Nothing moves at the upgrade: a project with no record of its own takes
+    /// the shared width on the frame its panel is added, and keeps it.
+    #[gpui::test]
+    async fn an_upgrade_seeds_the_project_from_the_shared_record(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+        write_size_record(
+            dock::PANEL_SIZE_STATE_KEY,
+            TestPanel::panel_key().to_string(),
+            px(350.),
+            cx,
+        )
+        .await;
+
+        let project = Project::test(fs, [Path::new("/main-repo")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(800.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+
+            let left_dock = workspace.left_dock().read(cx);
+            let size = left_dock
+                .panel::<TestPanel>()
+                .and_then(|panel| left_dock.stored_panel_size_state(&panel))
+                .and_then(|state| state.size);
+            assert_eq!(
+                size,
+                Some(px(350.)),
+                "the width must be in place on the frame the panel is added -- a \
+                 dock can become visible in that same frame, so a width arriving \
+                 later would be a jump the user sees"
+            );
+        });
+
+        cx.run_until_parked();
+
+        let recorded = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .project_panel_size_key(TestPanel::panel_key(), cx)
+                .and_then(|key| dock::Dock::load_project_size_state(&key, cx))
+        });
+        assert_eq!(
+            recorded.and_then(|state| state.size),
+            Some(px(350.)),
+            "and the project should now hold that width as its own"
+        );
+    }
+
+    /// The rung below the shared record: a width one workspace kept for itself,
+    /// from before any record was shared.
+    #[gpui::test]
+    async fn a_workspace_scoped_record_is_climbed_into_the_project_record(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        let project = Project::test(fs, [Path::new("/main-repo")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let workspace_id = workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(800.);
+            i64::from(workspace.database_id().expect("an id was just set"))
+        });
+
+        write_size_record(
+            dock::PANEL_SIZE_STATE_KEY,
+            format!("{workspace_id}:{}", TestPanel::panel_key()),
+            px(420.),
+            cx,
+        )
+        .await;
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+
+            let left_dock = workspace.left_dock().read(cx);
+            let size = left_dock
+                .panel::<TestPanel>()
+                .and_then(|panel| left_dock.stored_panel_size_state(&panel))
+                .and_then(|state| state.size);
+            assert_eq!(size, Some(px(420.)), "the oldest width still applies");
+        });
+
+        cx.run_until_parked();
+
+        let recorded = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .project_panel_size_key(TestPanel::panel_key(), cx)
+                .and_then(|key| dock::Dock::load_project_size_state(&key, cx))
+        });
+        assert_eq!(
+            recorded.and_then(|state| state.size),
+            Some(px(420.)),
+            "and lands in the project's record, so the ladder is climbed once"
+        );
+    }
+
+    /// The rule is per panel, not per dock position -- the bottom dock follows
+    /// it too.
+    #[gpui::test]
+    async fn the_bottom_dock_follows_the_same_rule(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        {
+            let project = Project::test(fs.clone(), [Path::new("/main-repo")], cx).await;
+            let (multi_workspace, cx) =
+                cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+            workspace.update(cx, |workspace, _cx| {
+                workspace.set_random_database_id();
+                workspace.bounds.size = size(px(800.), px(600.));
+            });
+
+            workspace.update_in(cx, |workspace, window, cx| {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
+                workspace.add_panel(panel, window, cx);
+                workspace.toggle_dock(DockPosition::Bottom, window, cx);
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.resize_bottom_dock(px(180.), window, cx);
+            });
+
+            cx.run_until_parked();
+        }
+
+        {
+            let project = Project::test(fs.clone(), [Path::new("/worktree-checkout")], cx).await;
+            let (multi_workspace, cx) =
+                cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+            workspace.update(cx, |workspace, _cx| {
+                workspace.set_random_database_id();
+                workspace.bounds.size = size(px(800.), px(600.));
+            });
+
+            workspace.update_in(cx, |workspace, window, cx| {
+                let panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
+                workspace.add_panel(panel, window, cx);
+
+                let bottom_dock = workspace.bottom_dock().read(cx);
+                let height = bottom_dock
+                    .panel::<TestPanel>()
+                    .and_then(|panel| bottom_dock.stored_panel_size_state(&panel))
+                    .and_then(|state| state.size);
+                assert_eq!(
+                    height,
+                    Some(px(180.)),
+                    "a linked worktree should open the bottom dock at its \
+                     repository's height too"
+                );
+            });
+        }
+    }
+
+    /// A workspace with no folder open has no project to record against: it
+    /// reads and writes the shared record, exactly as it did before, and the
+    /// missing path costs nothing.
+    #[gpui::test]
+    async fn a_workspace_with_no_folder_keeps_the_shared_record(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(800.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_left_dock(px(275.), window, cx);
+        });
+
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.project_panel_size_key(TestPanel::panel_key(), cx),
+                None,
+                "with no folder open there is no project to key a record to"
+            );
+            assert_eq!(
+                dock::Dock::load_persisted_size_state(TestPanel::panel_key(), cx)
+                    .and_then(|state| state.size),
+                Some(px(275.)),
+                "so the drag lands in the shared record, as it always did"
+            );
+        });
+    }
+
+    /// A restore names its project before it has one, so a panel added while
+    /// the folders are still opening reads that project's record rather than
+    /// the shared one.
+    ///
+    /// Asserted directly rather than by winning the race it guards: the race is
+    /// between two chains of awaits, so a test that reproduced it would only
+    /// prove which one happened to finish first that run.
+    #[gpui::test]
+    async fn a_restoring_workspace_reads_its_project_before_its_folders_land(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        // What the repository recorded last time, and a different width in the
+        // shared record, so the two cannot be confused.
+        write_size_record(
+            PROJECT_PANEL_SIZE_STATE_KEY,
+            panel_size_key(TestPanel::panel_key(), None, Path::new("/main-repo"))
+                .expect("a UTF-8 path has a key"),
+            px(350.),
+            cx,
+        )
+        .await;
+        write_size_record(
+            dock::PANEL_SIZE_STATE_KEY,
+            TestPanel::panel_key().to_string(),
+            px(200.),
+            cx,
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(800.);
+            workspace.set_restoring_project_path(Some(Path::new("/main-repo").into()));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel, window, cx);
+
+            let left_dock = workspace.left_dock().read(cx);
+            let size = left_dock
+                .panel::<TestPanel>()
+                .and_then(|panel| left_dock.stored_panel_size_state(&panel))
+                .and_then(|state| state.size);
+            assert_eq!(
+                size,
+                Some(px(350.)),
+                "a panel added before the folders arrive should still read the \
+                 restoring project's record, not the shared one"
+            );
+        });
+
+        // And once a folder does arrive, it is the folder that answers: the
+        // seed only ever fills the gap.
+        project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree("/other-repo", true, cx)
+            })
+            .await
+            .expect("adding a worktree should succeed");
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.panel_size_project_path(cx),
+                Some(PathBuf::from("/other-repo")),
+                "the live worktree must win over the seed, so removing a folder \
+                 re-points the record instead of sticking to what was restored"
+            );
+        });
+    }
+
+    /// The seed and the worktree must agree, or a restore would write one
+    /// project's width into another's record.
+    #[gpui::test]
+    async fn the_seed_and_the_worktree_answer_alike_for_a_linked_worktree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        // What the opener resolves from the serialized path, before any
+        // worktree exists.
+        let seeded = project::git_store::resolve_git_worktree_to_main_repo(
+            fs.as_ref(),
+            Path::new("/worktree-checkout"),
+        )
+        .await;
+        assert_eq!(seeded, Some(PathBuf::from("/main-repo")));
+
+        // What the worktree itself answers once it has landed.
+        let project = Project::test(fs.clone(), [Path::new("/worktree-checkout")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.panel_size_project_path(cx),
+                seeded,
+                "the two entry points must not be able to disagree -- that is \
+                 what makes the record independent of which one arrives first"
+            );
+        });
+    }
+
+    /// A plain checkout resolves to itself, so the seed is right for it too.
+    #[gpui::test]
+    async fn the_seed_and_the_worktree_answer_alike_for_a_plain_checkout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = projects_fs(cx).await;
+
+        let resolved = project::git_store::resolve_git_worktree_to_main_repo(
+            fs.as_ref(),
+            Path::new("/other-repo"),
+        )
+        .await;
+        assert_eq!(
+            resolved, None,
+            "a plain checkout has no main repo to point at, so the opener keeps \
+             the path it was given"
+        );
+
+        let project = Project::test(fs.clone(), [Path::new("/other-repo")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.panel_size_project_path(cx),
+                Some(PathBuf::from("/other-repo"))
+            );
+        });
     }
 
     /// A column is one column however many panels take turns in it.

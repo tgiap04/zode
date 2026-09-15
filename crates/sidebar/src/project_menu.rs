@@ -3,7 +3,7 @@
 //! Split from the item that draws it: the drawing and the offering change for
 //! different reasons, and `rail_item.rs` was already carrying two features.
 
-use crate::project_actions;
+use crate::{project_actions, project_appearance_actions};
 use gpui::{App, Entity, SharedString, WeakEntity, Window};
 use project::ProjectGroupKey;
 use ui::{ContextMenu, ContextMenuEntry, prelude::*};
@@ -31,6 +31,11 @@ pub(crate) fn build_project_menu(
         })
         .unwrap_or(false);
     let path_exists = project_actions::project_path_exists(&key);
+    let has_logo = multi_workspace
+        .read_with(cx, |multi_workspace, _| {
+            multi_workspace.project_logo(&key).is_some()
+        })
+        .unwrap_or(false);
 
     ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
         let entry = |menu: ContextMenu,
@@ -82,7 +87,13 @@ pub(crate) fn build_project_menu(
             let key = key.clone();
             let label = label.clone();
             Box::new(move |window, cx| {
-                project_actions::prompt_for_initials(&multi_workspace, &key, &label, window, cx);
+                project_appearance_actions::prompt_for_initials(
+                    &multi_workspace,
+                    &key,
+                    &label,
+                    window,
+                    cx,
+                );
             })
         });
         menu = entry(menu, "Change Colour\u{2026}", IconName::Palette, true, {
@@ -91,7 +102,7 @@ pub(crate) fn build_project_menu(
             let key = key.clone();
             let label = label.clone();
             Box::new(move |window, cx| {
-                project_actions::prompt_for_colour(
+                project_appearance_actions::prompt_for_colour(
                     &multi_workspace,
                     &sidebar,
                     &key,
@@ -101,6 +112,25 @@ pub(crate) fn build_project_menu(
                 );
             })
         });
+        menu = entry(menu, "Change Logo\u{2026}", IconName::Image, true, {
+            let multi_workspace = multi_workspace.clone();
+            let key = key.clone();
+            Box::new(move |window, cx| {
+                project_appearance_actions::prompt_for_logo(&multi_workspace, &key, window, cx);
+            })
+        });
+        // Left out rather than drawn disabled, the same distinction `can_move`
+        // draws above: with no logo set there is nothing for this entry to
+        // undo, not merely something it cannot do right now.
+        if has_logo {
+            menu = entry(menu, "Remove Logo", IconName::Trash, true, {
+                let multi_workspace = multi_workspace.clone();
+                let key = key.clone();
+                Box::new(move |_window, cx| {
+                    project_appearance_actions::remove_logo(&multi_workspace, &key, cx);
+                })
+            });
+        }
         menu = menu.separator();
         entry(menu, "Remove Project", IconName::Trash, true, {
             let key = key.clone();

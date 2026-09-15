@@ -1386,10 +1386,7 @@ impl WorktreeStore {
             .map(|worktree| {
                 let snapshot = worktree.read(cx).snapshot();
                 let folder_path = snapshot.abs_path().to_path_buf();
-                let main_path = snapshot
-                    .root_repo_common_dir()
-                    .and_then(|dir| Some(dir.parent()?.to_path_buf()))
-                    .unwrap_or_else(|| folder_path.clone());
+                let main_path = snapshot.main_worktree_abs_path().to_path_buf();
                 (main_path, folder_path)
             })
             .unzip();

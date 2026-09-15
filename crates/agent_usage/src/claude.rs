@@ -336,12 +336,25 @@ async fn fetch_with_token(
                     break;
                 };
                 let wait = after.unwrap_or(*backoff).min(MAX_WAIT);
+                // Debug rather than warn: one absorbed 429 is the routine case
+                // this retry chain exists for, and a warning per occurrence would
+                // bury the one below that actually reached the user.
+                log::debug!(
+                    "claude usage: attempt {} of {MAX_ATTEMPTS} was told to wait; retrying in {:?}",
+                    attempt + 1,
+                    wait
+                );
                 executor.timer(wait).await;
             }
         }
     }
 
-    Err(last_retryable.unwrap_or(Unavailable::RateLimited))
+    let reason = last_retryable.unwrap_or(Unavailable::RateLimited);
+    // The failure the user sees, and until now the one they could not find: it
+    // reached the status bar as "rate limited — retrying" and left no trace on
+    // disk, so a report of "this keeps happening" had nothing behind it.
+    log::warn!("claude usage: giving up after {MAX_ATTEMPTS} attempts ({reason:?})");
+    Err(reason)
 }
 
 /// One request, classified. Nothing here waits or retries — that is the caller's

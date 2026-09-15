@@ -16,7 +16,8 @@ use std::future::Future;
 #[cfg(any(test, feature = "test-support"))]
 use gpui::UpdateGlobal;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ui::prelude::*;
 use util::ResultExt;
@@ -228,6 +229,7 @@ pub struct SerializedProjectGroupState {
     pub expanded: bool,
     pub initials: Option<SharedString>,
     pub colour: Option<Hsla>,
+    pub logo: Option<Arc<Path>>,
 }
 
 /// A project being dragged off its place on the rail.
@@ -241,32 +243,35 @@ pub struct DraggedProject {
     pub label: SharedString,
     pub initials: SharedString,
     pub colour: Option<Hsla>,
+    pub logo: Option<Arc<Path>>,
 }
 
 impl Render for DraggedProject {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let background = self.colour.unwrap_or(colors.element_background);
         gpui::div()
             .size(px(32.))
             .rounded_md()
-            .bg(background)
             .border_1()
             .border_color(colors.border_selected)
-            .flex()
-            .items_center()
-            .justify_center()
             .child(
-                ui::Label::new(self.initials.clone())
-                    .size(ui::LabelSize::Small)
-                    .color(match self.colour {
-                        Some(colour) => {
-                            ui::Color::Custom(crate::project_appearance::label_colour_for(colour))
-                        }
-                        None => ui::Color::Default,
-                    }),
+                crate::project_avatar::ProjectAvatar::new(
+                    self.initials.clone(),
+                    self.colour,
+                    self.logo.clone(),
+                )
+                .size(px(32.))
+                .background(colors.element_background),
             )
     }
+}
+
+/// What a project's avatar draws with, handed back by `project_presentation`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProjectPresentation {
+    pub initials: Option<SharedString>,
+    pub colour: Option<Hsla>,
+    pub logo: Option<Arc<Path>>,
 }
 
 #[derive(Clone)]
@@ -279,6 +284,16 @@ pub struct ProjectGroupState {
     pub initials: Option<SharedString>,
     /// Set by hand; `None` means the default panel background.
     pub colour: Option<Hsla>,
+    /// Set by hand through the project's own menu; `None` means initials
+    /// and colour instead.
+    pub logo: Option<Arc<Path>>,
+    /// Bumped by every logo write -- a set or a clear -- so a copy that is
+    /// still running when a newer write is asked for can tell that what it
+    /// carries is no longer wanted.
+    ///
+    /// Held in memory and never serialized: no copy can still be in flight
+    /// across a restart, so a restored group starts again at zero.
+    pub logo_generation: u64,
 }
 
 /// FR3 (Phase 6 of multi-project-window-switching): how the memory-pressure
@@ -883,6 +898,8 @@ impl MultiWorkspace {
                 last_active_workspace: None,
                 initials: None,
                 colour: None,
+                logo: None,
+                logo_generation: 0,
             },
         );
     }
@@ -1037,6 +1054,7 @@ impl MultiWorkspace {
             expanded,
             initials,
             colour,
+            logo,
         } in groups
         {
             if key.path_list().paths().is_empty() {
@@ -1051,6 +1069,8 @@ impl MultiWorkspace {
                 last_active_workspace: None,
                 initials,
                 colour,
+                logo,
+                logo_generation: 0,
             });
         }
         for existing in std::mem::take(&mut self.project_groups) {
@@ -1212,6 +1232,8 @@ impl MultiWorkspace {
                     last_active_workspace: None,
                     initials: None,
                     colour: None,
+                    logo: None,
+                    logo_generation: 0,
                 }),
             }
         }
@@ -1226,7 +1248,12 @@ impl MultiWorkspace {
     ///
     /// A key this window does not show gets nothing — writing a colour for an
     /// arbitrary key would put a phantom project on the rail.
-    fn presentation_state_for(
+    ///
+    /// `pub(crate)` rather than private: `project_logo_store` writes the
+    /// project's logo through this same door, so a logo set on a project that
+    /// only exists via `derived_project_groups` synthesis gets materialized
+    /// exactly the way initials and colour already do.
+    pub(crate) fn presentation_state_for(
         &mut self,
         key: &ProjectGroupKey,
         cx: &App,
@@ -1279,15 +1306,21 @@ impl MultiWorkspace {
 
     /// What the sidebar needs to draw this project's avatar, without it having
     /// to know how the state is held.
-    pub fn project_presentation(
-        &self,
-        key: &ProjectGroupKey,
-    ) -> (Option<SharedString>, Option<Hsla>) {
+    ///
+    /// A named struct rather than a tuple: a tuple of three `Option`s keeps
+    /// its meaning in field order, so a caller reading `.0`/`.1` positionally
+    /// would keep compiling -- silently reading the wrong field -- the day
+    /// this order changes. A struct turns that miss into a compile error.
+    pub fn project_presentation(&self, key: &ProjectGroupKey) -> ProjectPresentation {
         self.project_groups
             .iter()
             .find(|group| group.key == *key)
-            .map(|group| (group.initials.clone(), group.colour))
-            .unwrap_or((None, None))
+            .map(|group| ProjectPresentation {
+                initials: group.initials.clone(),
+                colour: group.colour,
+                logo: group.logo.clone(),
+            })
+            .unwrap_or_default()
     }
 
     /// Sets the initials drawn on the avatar; an empty string clears them.
@@ -1417,6 +1450,17 @@ impl MultiWorkspace {
 
     pub fn group_state_by_key(&self, key: &ProjectGroupKey) -> Option<&ProjectGroupState> {
         self.project_groups.iter().find(|group| group.key == *key)
+    }
+
+    /// Whether any project on this window still draws its avatar from `logo`.
+    ///
+    /// Two records can name one file -- a record copied by hand is the way
+    /// there -- so this is what stands between a removal and taking the logo
+    /// out from under a project that is still on the rail.
+    pub(crate) fn any_group_names_logo(&self, logo: &Path) -> bool {
+        self.project_groups
+            .iter()
+            .any(|group| group.logo.as_deref() == Some(logo))
     }
 
     pub fn group_state_by_key_mut(
@@ -1598,6 +1642,15 @@ impl MultiWorkspace {
         // the state -- initials, colour, place in the order -- survives to be
         // put back if the close is cancelled below.
         let removed_state = pos.map(|pos| self.project_groups.remove(pos));
+        // Cloned out of `removed_state` here, before anything awaits, because
+        // `removed_state` is *moved* into the restore branch below on the
+        // cancelled path. Deleting the file at this point, while the splice is
+        // still synchronous, would destroy the logo of a removal the user
+        // backs out of a moment later -- the group comes back carrying a path
+        // to a file that no longer exists. So this only names the file; the
+        // actual deletion waits until it is known which of the outcomes below
+        // actually happened.
+        let removed_logo = removed_state.as_ref().and_then(|state| state.logo.clone());
         // Only a close that will actually run needs guarding and undoing: with
         // no workspaces there is no lifecycle to cancel, and `remove` reports
         // `false` for that too.
@@ -1645,6 +1698,13 @@ impl MultiWorkspace {
         );
 
         if !closing {
+            // No workspaces means no lifecycle for the `cx.spawn` below to run
+            // -- this is the group's only final outcome, and the restore
+            // branch there never executes to catch it. Left undeleted here,
+            // this leaks the file forever.
+            if let Some(logo) = removed_logo {
+                self.delete_logo_file(logo, cx);
+            }
             return remove_task;
         }
 
@@ -1689,6 +1749,16 @@ impl MultiWorkspace {
                     // without it, and nothing else will correct that -- `remove`
                     // returns before its own serialize on this path.
                     this.serialize(cx);
+                    // Deliberately not deleted: the group just went back in
+                    // above, still carrying `removed_logo` as its `logo`
+                    // field, and this is the one outcome where the file is
+                    // still owned by something on the rail.
+                } else if let Some(logo) = removed_logo {
+                    // Every other outcome means the group is gone for good --
+                    // either the close went through, or the workspaces it
+                    // named were detached by something else in the meantime
+                    // -- so nothing on the rail names this file any more.
+                    this.delete_logo_file(logo, cx);
                 }
                 cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
                 cx.notify();
@@ -2862,6 +2932,8 @@ impl MultiWorkspace {
             last_active_workspace: None,
             initials: None,
             colour: None,
+            logo: None,
+            logo_generation: 0,
         });
     }
 

@@ -404,7 +404,7 @@ impl Render for UsagePanel {
         let indicator = self.indicator.clone();
         let fetching = self
             .indicator
-            .read_with(cx, |indicator, _| indicator.is_fetching())
+            .read_with(cx, |indicator, cx| indicator.is_fetching(cx))
             .unwrap_or(false);
 
         // Read once and clone, rather than holding the borrow across the render:
@@ -412,7 +412,7 @@ impl Render for UsagePanel {
         // neighbours have repeatedly paid for.
         let sources = self
             .indicator
-            .read_with(cx, |indicator, _| indicator.source_snapshot())
+            .read_with(cx, |indicator, cx| indicator.source_snapshot(cx))
             .unwrap_or_default();
 
         v_flex()
@@ -440,16 +440,21 @@ impl Render for UsagePanel {
                             .child(
                                 IconButton::new("agent-usage-refresh", IconName::ArrowCircle)
                                     .icon_size(IconSize::Small)
+                                    // Swaps the glyph for `LoadCircle` and spins
+                                    // it. Colour alone said "working" only to
+                                    // someone who already knew what the two
+                                    // colours meant.
+                                    .loading(fetching)
                                     .icon_color(if fetching {
                                         Color::Accent
                                     } else {
                                         Color::Muted
                                     })
                                     .tooltip(Tooltip::text("Read the quota again"))
-                                    .on_click(move |_, window, cx| {
+                                    .on_click(move |_, _window, cx| {
                                         indicator
                                             .update(cx, |indicator, cx| {
-                                                indicator.refresh_now(window, cx);
+                                                indicator.refresh_now(cx);
                                             })
                                             .ok();
                                     }),

@@ -128,6 +128,38 @@ fn validate_devcontainer_contents():
             if service.is_none(): Err("must specify a connecting service for docker-compose")
 ```
 
+### BR-006_ProjectLogoCopiedAndStoredAsBareFileName
+
+**Linked FR:** N/A
+**Source:** `crates/workspace/src/project_logo.rs` (`logo_extension`, `MAX_LOGO_BYTES`, `logo_path_for`), `crates/workspace/src/project_logo_store.rs` (`set_project_logo`, `clear_project_logo`, `delete_logo_file`)
+**Applies to:** `MultiWorkspace::set_project_logo`/`clear_project_logo`, `SerializedProjectGroup.logo` (`crates/workspace/src/persistence/model.rs`)
+**Rule:** Setting a project's logo copies the chosen file into `paths::data_dir()/project_avatars/<uuid>.<ext>` — the user's original file is never modified or deleted. Only an extension `gpui::Img::extensions()` can decode, and a source no larger than `MAX_LOGO_BYTES` (10 MiB), is accepted; anything else is refused with a toast before any copy happens. The record persisted to disk (`SerializedProjectGroup.logo`) stores only the bare file name, never a path — `logo_path_for` resolves a stored name back to a real path only if it is a single plain path component, so a hand-edited or corrupted record can never be turned into a `..`/absolute-path escape or a target outside `project_avatars_dir()`. Deleting the file behind a logo (on replace, on clear, or on project removal) is skipped if any other project on the same window still names that same path (`any_group_names_logo`); a missing or undecodable logo file falls back to initials/colour at render time (`ProjectAvatar`'s `with_fallback`) rather than being treated as an error. Because the copy runs in the background, each write takes a generation (`logo_generation`, held in memory only): a copy that lands after a newer set, after "Remove Logo", or after the window closed deletes what it copied instead of writing it, so two rapid uploads cannot leave an unreferenced file behind and an in-flight upload cannot resurrect a logo the user just removed.
+
+**Pseudocode:**
+
+```text
+fn set_project_logo(key, source):
+    extension = logo_extension(source) or return toast("not an image Zode can draw")
+    previous = project_logo(key)
+    generation = bump_logo_generation(key) or return   # unknown project: copy nothing
+    # -- everything below runs in the background --
+    if metadata(source).len > MAX_LOGO_BYTES: return toast("too large")
+    target = project_avatars_dir() / new_logo_file_name(extension)
+    copy_file(source, target)
+    if window is gone:
+        delete target; return          # nothing will ever name it
+    if group[key].generation != generation:
+        delete target; return          # a newer set, or a clear, happened while copying
+    group[key].logo = target
+    serialize()
+    if previous: delete_logo_file(previous)   # no-op if another group still names it
+
+fn logo_path_for(stored_name):
+    if stored_name has exactly one Normal path component and no ':':
+        return project_avatars_dir() / stored_name
+    return None   # refused, falls back to initials/colour
+```
+
 ### Decision Logic
 
 N/A — no user-facing decision logic beyond DISC-001/DISC-003 Polymorphic Behavior. Sidebar rendering branches (activity indicator, remote-host icon) are single-field enum lookups already captured as DISC-003, not multi-predicate/interaction/flow decisions.
