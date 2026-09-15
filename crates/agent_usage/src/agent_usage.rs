@@ -307,6 +307,12 @@ impl AgentUsageIndicator {
             });
         }));
 
+        // This window's own flag, deliberately not the store's
+        // `should_keep_polling` -- the two answer different questions. "Is my
+        // window active" is what decides whether this indicator opens the first
+        // read; "is any window active" is what decides whether the shared loop
+        // keeps running. Asking the second one here would let a window built
+        // while a *different* window has focus claim that focus as its own.
         if window.is_window_active() {
             store.update(cx, |store, cx| store.window_activated(cx));
         }
