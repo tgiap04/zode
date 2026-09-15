@@ -545,6 +545,8 @@ On the left dock, `default_width` is shared: the branch panel is the left dock's
 
 Panels stacked in the same dock (left or bottom) can be reordered by dragging a section's header above or below another — the arrangement is remembered across restarts and does not affect the dock's width. The project rail and status bar keep a fixed order and are not draggable.
 
+A width or height you drag is remembered per project rather than shared globally: two unrelated repositories keep their own dock sizes, while every git worktree of one repository shares a single size, so switching between two checkouts of the same work no longer resizes the sidebar. A project opened for the first time starts at whatever size was last dragged anywhere, so nothing jumps on screen the first time you open it. A remote project's size is tracked separately per host, so the same path opened over two different remote connections is treated as two projects. A workspace with no folder open is unaffected by any of this and keeps one shared size, as before.
+
 ```json [settings]
   // Git Panel
   "git_panel": {
