@@ -359,6 +359,11 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
 }
 
 pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
+    // Once per launch, on a background thread, and holding nothing a window
+    // waits on: dock sizes belonging to projects that are no longer on disk.
+    workspace::panel_size_prune::prune_orphaned_panel_sizes(app_state.fs.clone(), cx)
+        .detach_and_log_err(cx);
+
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
