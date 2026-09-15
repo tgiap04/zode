@@ -1,4 +1,7 @@
-use crate::{AgentCommand, Availability, Deletion, Fork, SessionCounts, SessionSummary};
+use crate::{
+    AgentCommand, Availability, CompletedSubagents, Deletion, Fork, SessionCounts, SessionSummary,
+    SubagentSummary,
+};
 use anyhow::Result;
 use std::path::Path;
 
@@ -66,6 +69,41 @@ pub trait SessionProvider: Send + Sync {
 
     /// The numbers that need a full scan of one transcript.
     fn counts(&self, session: &SessionSummary) -> Result<SessionCounts>;
+
+    /// The subagents this session spawned, newest first.
+    ///
+    /// Empty for every agent but Claude, and that is the honest answer rather
+    /// than an unfinished one — the same split [`Self::counts`] already records.
+    /// Codex writes spawn edges to `thread_spawn_edges` that nothing reads,
+    /// Copilot's `--agent` runs inside the session's own transcript so there is
+    /// nothing separate to name, and opencode's store can count them but cannot
+    /// say what they were.
+    fn subagents(&self, _session: &SessionSummary) -> Result<Vec<SubagentSummary>> {
+        Ok(Vec::new())
+    }
+
+    /// The tool calls this session has reported a result for, reading from byte
+    /// `from` onward.
+    ///
+    /// Incremental because the whole-file alternative is not affordable: a live
+    /// transcript grows continuously and reaches megabytes, so re-reading it on
+    /// every refresh would scan the same bytes over and over to learn one new
+    /// fact. A result is only ever appended, never amended, so a forward scan
+    /// never has to look back at what it already read.
+    ///
+    /// The caller pairs these against [`SubagentSummary::tool_use_id`]: spawned,
+    /// and not yet reported, is a subagent still running. Nothing here decides
+    /// that — a provider reports what the store says and no more.
+    fn completed_subagents(
+        &self,
+        _session: &SessionSummary,
+        from: u64,
+    ) -> Result<CompletedSubagents> {
+        Ok(CompletedSubagents {
+            tool_use_ids: Vec::new(),
+            scanned_to: from,
+        })
+    }
 
     /// `None` when this agent cannot honour the request — Codex and Copilot have
     /// no fork flag, so [`Fork::New`] has no command to build for them. The caller

@@ -4,6 +4,13 @@
 //! the centre and the docks and under the notifications. It occupies no layout:
 //! the outer element is `absolute` and `size_full`, and everything inside it is
 //! positioned by hand.
+//!
+//! Everything here is "how the floating window draws itself", which is why the
+//! Split button sits beside the `+` it draws next to rather than in a file of
+//! its own. If this file passes ~700 lines in a later change, the seam to cut
+//! is `Entry`, `entry_items` and the two menus into their own module -- that
+//! leaves the window chrome (title bar, grips, drags) behind, which is the part
+//! that has no other natural home.
 
 use std::sync::LazyLock;
 
@@ -13,6 +20,11 @@ use gpui::{
 };
 use ui::prelude::*;
 use ui::{ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip};
+use workspace::{
+    ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp, ActivePaneDecorator,
+    MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp, SplitDirection, SwapPaneDown,
+    SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+};
 
 use crate::host::{DraggedFloatingPane, Dragging, FloatingPane, Grab, Grip};
 
@@ -140,9 +152,76 @@ fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
         .menu(move |window, cx| {
             let this = this.clone();
             Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                entry_items(menu, &this)
+                let menu = entry_items(menu, &this);
+                // Not in `Entry`/`entry_items`: that list also feeds the empty
+                // state, and splitting a window with nothing in it would
+                // produce two empty halves.
+                menu.separator()
+                    .submenu_with_icon("Split", IconName::Split, move |menu, _, _| {
+                        split_entries(menu, &this)
+                    })
             }))
         })
+        .into_any_element()
+}
+
+/// The four directions a pane can be split, paired with a label and an icon.
+///
+/// One list, read by the tab bar's Split button and the `+` menu's Split
+/// submenu, so the two can never offer a different set of directions.
+/// `ui::IconName` has no per-direction split icon -- only `Split` and
+/// `SplitAlt` exist, confirmed before writing this -- so `Split` stands for
+/// the horizontal pair and `SplitAlt` for the vertical one rather than
+/// inventing a new asset.
+const SPLIT_DIRECTIONS: [(SplitDirection, &str, IconName); 4] = [
+    (SplitDirection::Right, "Split Right", IconName::Split),
+    (SplitDirection::Left, "Split Left", IconName::Split),
+    (SplitDirection::Up, "Split Up", IconName::SplitAlt),
+    (SplitDirection::Down, "Split Down", IconName::SplitAlt),
+];
+
+/// `SPLIT_DIRECTIONS`, as menu entries against one window.
+///
+/// Shared by the tab bar's Split button and the `+` menu's Split submenu, so
+/// the two lists cannot drift apart.
+fn split_entries(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
+    for (direction, label, icon) in SPLIT_DIRECTIONS {
+        let this = this.clone();
+        menu = menu.item(
+            ContextMenuEntry::new(label)
+                .icon(icon)
+                .handler(move |window, cx| {
+                    this.update(cx, |pane, cx| pane.split_active(direction, window, cx))
+                        .ok();
+                }),
+        );
+    }
+    menu
+}
+
+/// The Split button in the tab bar's left slot.
+///
+/// Built the same way `tab_bar_menu` is: a wrapped `IconButton` with its own
+/// id, so a test can tell it apart from the tab bar's `+`.
+pub(crate) fn tab_bar_split_button(this: WeakEntity<FloatingPane>) -> AnyElement {
+    h_flex()
+        .debug_selector(|| "floating-pane-tab-bar-split".into())
+        .child(
+            PopoverMenu::new("floating-pane-tab-bar-split-menu")
+                .trigger_with_tooltip(
+                    IconButton::new("floating-pane-split", IconName::Split)
+                        .icon_size(IconSize::Small),
+                    Tooltip::text("Split Pane"),
+                )
+                .anchor(Anchor::TopRight)
+                .menu(move |window, cx| {
+                    let this = this.clone();
+                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                        split_entries(menu, &this)
+                    }))
+                })
+                .into_any_element(),
+        )
         .into_any_element()
 }
 
@@ -153,7 +232,7 @@ fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
 const GRIP: Pixels = px(6.);
 
 impl Render for FloatingPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Not `occlude`: the layer covers the whole workspace, and occluding it
         // would swallow every click meant for the code underneath. Only the
         // button and the window itself occlude, which is why they are the only
@@ -178,7 +257,9 @@ impl Render for FloatingPane {
                     }
                 }),
             )
-            .when(self.open, |layer| layer.child(self.render_window(cx)))
+            .when(self.open, |layer| {
+                layer.child(self.render_window(window, cx))
+            })
             .child(self.render_launcher(cx))
             // The layer's own size is the area the window may occupy, and
             // nothing tells it: docks open, the rail widens, the editor window
@@ -264,7 +345,7 @@ impl FloatingPane {
         self.dragging = Some(Dragging { grab, offset });
     }
 
-    fn render_window(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         // Laid out from the container, which is only known while painting. The
         // element is positioned by its stored offset and clamped by `canvas`
@@ -275,8 +356,20 @@ impl FloatingPane {
             height: px(800.),
         }));
 
+        // Resolved once, and the field dropped with it when it no longer
+        // upgrades: a weak left pointing at a pane that is gone would be
+        // retried on every frame for the life of the window.
+        let zoomed = self.zoomed.as_ref().and_then(|view| view.upgrade());
+        if zoomed.is_none() {
+            self.zoomed = None;
+        }
+
         div()
             .id("floating-pane")
+            // What the keymap block `"context": "FloatingPane"` matches
+            // against. Action dispatch already bubbles from the focused pane up
+            // through this div, so no `track_focus` is needed here for that.
+            .key_context("FloatingPane")
             .occlude()
             .absolute()
             .left(placement.origin.x)
@@ -291,6 +384,51 @@ impl FloatingPane {
             .border_1()
             .border_color(colors.border)
             .shadow_lg()
+            // Re-handles the workspace's own pane-navigation actions here,
+            // the same way `terminal_panel` does inside the dock: GPUI
+            // dispatches from the focused element outward, so these only run
+            // while focus is somewhere inside this window, and the
+            // workspace's own handlers see the keystroke exactly as before
+            // whenever it isn't. `ToggleZoom` needs no entry of its own --
+            // `Pane::render` already registers it on the pane itself, which
+            // is what actually emits `Event::ZoomIn`/`ZoomOut` that
+            // `handle_pane_event` reacts to.
+            .on_action(cx.listener(|this, _: &ActivatePaneLeft, window, cx| {
+                this.activate_in(SplitDirection::Left, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivatePaneRight, window, cx| {
+                this.activate_in(SplitDirection::Right, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivatePaneUp, window, cx| {
+                this.activate_in(SplitDirection::Up, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivatePaneDown, window, cx| {
+                this.activate_in(SplitDirection::Down, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneLeft, _window, cx| {
+                this.swap_in(SplitDirection::Left, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneRight, _window, cx| {
+                this.swap_in(SplitDirection::Right, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneUp, _window, cx| {
+                this.swap_in(SplitDirection::Up, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneDown, _window, cx| {
+                this.swap_in(SplitDirection::Down, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneLeft, _window, cx| {
+                this.move_active_to_border(SplitDirection::Left, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneRight, _window, cx| {
+                this.move_active_to_border(SplitDirection::Right, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneUp, _window, cx| {
+                this.move_active_to_border(SplitDirection::Up, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneDown, _window, cx| {
+                this.move_active_to_border(SplitDirection::Down, cx);
+            }))
             .child(self.render_title_bar(placement, cx))
             .child(
                 div()
@@ -302,8 +440,23 @@ impl FloatingPane {
                     // blank rectangle would have told them nothing.
                     .child(if self.is_empty(cx) {
                         self.render_empty_state(cx)
+                    } else if let Some(zoomed) = zoomed {
+                        // `PaneGroup::render` draws whichever pane matches its
+                        // `zoomed` argument as an empty `div` -- the workspace
+                        // draws that pane again as a separate top layer. This
+                        // window has no such layer, so `center.render` below
+                        // always gets `None` and the zoomed pane is drawn here
+                        // instead, filling the window on its own.
+                        div().size_full().child(zoomed).into_any_element()
                     } else {
-                        self.pane.clone().into_any_element()
+                        self.center
+                            .render(
+                                None,
+                                &ActivePaneDecorator::new(&self.active_pane, &self.workspace),
+                                window,
+                                cx,
+                            )
+                            .into_any_element()
                     }),
             )
             .children(

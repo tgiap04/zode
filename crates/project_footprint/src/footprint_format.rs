@@ -8,7 +8,7 @@
 use gpui::SharedString;
 
 /// Formats a byte count as KB/MB/GB, one decimal place above MB.
-pub fn format_rss(bytes: u64) -> SharedString {
+pub fn format_memory(bytes: u64) -> SharedString {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;

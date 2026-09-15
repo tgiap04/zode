@@ -5062,7 +5062,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 
 - Description: Setting to customize the behavior of the git panel.
 - Setting: `git_panel`
-- Note: `default_width` sets the width of the whole left dock, not just this panel. The dock keeps one width across every panel docked there, so switching to the outline panel or the branch panel does not move its edge — and dragging that edge while either one is up resizes the git panel too.
+- Note: `default_width` sets the width of the whole left dock, not just this panel. The dock keeps one width across every panel docked there — currently governed by the branch panel's `default_width`, since it holds the lowest `activation_priority` on that edge. Switching to the outline panel or the branch panel does not move the dock's edge, and dragging that edge while either one is up resizes the branch panel's `default_width` instead of this one.
 - Default:
 
 ```json [settings]
@@ -5093,7 +5093,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `sort_by_path`: Whether to sort entries in the panel by path or by status (the default)
 - `collapse_untracked_diff`: Whether to collapse untracked files in the diff panel
 - `scrollbar`: When to show the scrollbar in the git panel
-- `starts_open`: Whether the git panel should open on startup
+- `starts_open`: Whether the git panel should open on startup, when the workspace has no saved dock state of its own yet. Once a dock has restored a record — including one that has the panel closed — that record wins and `starts_open` no longer applies.
 
 ## Git Worktree Directory
 

@@ -522,7 +522,7 @@ mod opening {
         });
         cx.run_until_parked();
 
-        let tabs = window.read_with(cx, |window, cx| window.pane.read(cx).items_len());
+        let tabs = window.read_with(cx, |window, cx| window.active_pane.read(cx).items_len());
         assert_eq!(tabs, 1, "the note opened");
 
         window.update_in(cx, |window, window_handle, cx| {
@@ -533,7 +533,7 @@ mod opening {
 
         window.read_with(cx, |window, cx| {
             assert_eq!(
-                window.pane.read(cx).items_len(),
+                window.active_pane.read(cx).items_len(),
                 tabs,
                 "and its tabs are still there"
             );
@@ -552,7 +552,7 @@ mod opening {
         });
         cx.run_until_parked();
         window.read_with(cx, |window, cx| {
-            assert_eq!(window.pane.read(cx).items_len(), 1);
+            assert_eq!(window.active_pane.read(cx).items_len(), 1);
         });
 
         window.update_in(cx, |window, window_handle, cx| {
@@ -563,7 +563,7 @@ mod opening {
         window.read_with(cx, |window, cx| {
             assert!(!window.open, "and it is put away too");
             assert_eq!(
-                window.pane.read(cx).items_len(),
+                window.active_pane.read(cx).items_len(),
                 0,
                 "nothing left running: that is the point of the button"
             );
@@ -591,7 +591,11 @@ mod repeated_opens {
         });
         cx.run_until_parked();
         window.read_with(cx, |window, cx| {
-            assert_eq!(window.pane.read(cx).items_len(), 1, "the first note opened");
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the first note opened"
+            );
         });
 
         window.update_in(cx, |window, window_handle, cx| {
@@ -601,7 +605,7 @@ mod repeated_opens {
 
         window.read_with(cx, |window, cx| {
             assert_eq!(
-                window.pane.read(cx).items_len(),
+                window.active_pane.read(cx).items_len(),
                 2,
                 "the second note must join the window, not go to the editor"
             );
@@ -665,7 +669,7 @@ mod repeated_opens {
         cx.run_until_parked();
         window.read_with(cx, |window, cx| {
             assert_eq!(
-                window.pane.read(cx).items_len(),
+                window.active_pane.read(cx).items_len(),
                 1,
                 "the first agent opened"
             );
@@ -690,7 +694,7 @@ mod repeated_opens {
         });
         window.read_with(cx, |window, cx| {
             assert_eq!(
-                window.pane.read(cx).items_len(),
+                window.active_pane.read(cx).items_len(),
                 2,
                 "the second agent must join the window"
             );
@@ -726,5 +730,1128 @@ mod repeated_opens {
                 .unwrap()
         });
         assert_eq!(in_editor, 0, "nothing chosen here belongs to the editor");
+    }
+}
+
+/// The one-pane shape a window opens with.
+///
+/// A fresh window holds a `PaneGroup` of exactly one pane. These pin that
+/// shape, so a change that grows the group has something to prove itself
+/// against.
+mod splitting {
+    use super::a_window;
+    use gpui::{AppContext as _, Focusable as _, VisualContext as _};
+
+    /// A fresh window holds one pane, and that pane is the active one.
+    #[gpui::test]
+    async fn one_pane_until_something_splits_it(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.center.panes().len(),
+                1,
+                "nothing has split the group yet"
+            );
+            assert_eq!(
+                window.center.panes(),
+                vec![&window.active_pane],
+                "the one pane in the group is the active one"
+            );
+        });
+    }
+
+    /// The window is the menu until something is opened, and stays that way
+    /// only for as long as every pane in the group is empty.
+    #[gpui::test]
+    async fn an_empty_window_is_still_the_menu(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.read_with(cx, |window, cx| {
+            assert!(window.is_empty(cx), "nothing has been opened yet");
+        });
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert!(!window.is_empty(cx), "a note is open in the one pane");
+        });
+    }
+
+    /// Closing the last tab brings the menu back, now asserted through the
+    /// group-totalled `is_empty` rather than the single pane's item count.
+    #[gpui::test]
+    async fn closing_the_last_tab_brings_the_menu_back(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.read_with(cx, |window, cx| {
+            assert!(!window.is_empty(cx), "the note opened");
+        });
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.shut_down(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert!(
+                window.is_empty(cx),
+                "closing the only tab empties the only pane"
+            );
+        });
+    }
+
+    /// `Event::Split` with `MovePane` takes the active item into a fresh pane,
+    /// which the group must now hold as a second member -- and that new pane
+    /// becomes the active one.
+    #[gpui::test]
+    async fn a_split_makes_a_second_pane(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let first_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        first_pane.update(cx, |_pane, cx| {
+            cx.emit(workspace::pane::Event::Split {
+                direction: workspace::SplitDirection::Right,
+                mode: workspace::SplitMode::MovePane,
+            });
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.center.panes().len(),
+                2,
+                "the split must add a pane to the group"
+            );
+            assert!(
+                window.active_pane != first_pane,
+                "the new pane becomes the active one"
+            );
+        });
+    }
+
+    /// Closing the only item a split pane holds must collapse that pane back
+    /// out of the group, rather than leaving an empty pane sitting in it.
+    #[gpui::test]
+    async fn closing_the_last_item_in_a_split_pane_collapses_it(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let first_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        first_pane.update(cx, |_pane, cx| {
+            cx.emit(workspace::pane::Event::Split {
+                direction: workspace::SplitDirection::Right,
+                mode: workspace::SplitMode::MovePane,
+            });
+        });
+        cx.run_until_parked();
+        let new_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        window.read_with(cx, |window, _| {
+            assert_eq!(window.center.panes().len(), 2, "the split must have landed");
+        });
+
+        // Held rather than dropped: a `Task` dropped before it is polled
+        // cancels its work, and closing an item is genuinely asynchronous.
+        let closing = window.update_in(cx, |_window, window_handle, cx| {
+            new_pane.update(cx, |pane, cx| {
+                pane.close_all_items(
+                    &workspace::pane::CloseAllItems::default(),
+                    window_handle,
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        drop(closing);
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.center.panes().len(),
+                1,
+                "an emptied split pane must collapse back out of the group"
+            );
+        });
+    }
+
+    /// The last pane in the group is never removed: closing its last item
+    /// must leave the group with exactly that one pane, and let the window's
+    /// menu take over as its body instead of shrinking the group to nothing.
+    #[gpui::test]
+    async fn the_last_pane_survives_an_empty_window(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.shut_down(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.center.panes().len(),
+                1,
+                "the last pane must survive an emptied window"
+            );
+            assert!(window.is_empty(cx), "and the menu must take over its body");
+        });
+    }
+
+    /// `MovePane` on a pane holding only one item would strand that item
+    /// alone in a new pane and leave the source with nothing -- the split
+    /// would collapse the instant it was made. It falls back to opening a
+    /// terminal in the new pane instead, so the split actually holds.
+    #[gpui::test]
+    async fn moving_the_only_tab_does_not_split_into_nothing(cx: &mut gpui::TestAppContext) {
+        // The fallback opens a real shell, whose PTY reader thread the test
+        // scheduler would otherwise report as non-deterministic activity.
+        cx.executor().allow_parking();
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let first_pane = window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the pane being split holds exactly one tab"
+            );
+            window.active_pane.clone()
+        });
+        first_pane.update(cx, |_pane, cx| {
+            cx.emit(workspace::pane::Event::Split {
+                direction: workspace::SplitDirection::Right,
+                mode: workspace::SplitMode::MovePane,
+            });
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.center.panes().len(),
+                2,
+                "the fallback still produces two panes"
+            );
+            assert_eq!(
+                first_pane.read(cx).items_len(),
+                1,
+                "the source pane keeps its only tab"
+            );
+        });
+    }
+
+    /// `ZoomIn` must fill the window with the zoomed pane on its own -- and
+    /// `PaneGroup::render` draws a zoomed pane as an empty `div`, so a frame
+    /// painted after `ZoomIn` still has to draw *something*, or the window has
+    /// silently gone blank. `ZoomOut` must put the group back.
+    #[gpui::test]
+    async fn zoom_fills_the_floating_window(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        pane.update(cx, |_pane, cx| {
+            cx.emit(workspace::pane::Event::ZoomIn);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert!(
+                window.zoomed.is_some(),
+                "ZoomIn must record the zoomed pane"
+            );
+            assert!(
+                pane.read(cx).is_zoomed(),
+                "and mark the pane itself as zoomed"
+            );
+        });
+
+        pane.update(cx, |_pane, cx| {
+            cx.emit(workspace::pane::Event::ZoomOut);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert!(window.zoomed.is_none(), "ZoomOut must clear it");
+            assert!(!pane.read(cx).is_zoomed(), "and un-zoom the pane");
+        });
+    }
+
+    /// Every live pane keeps exactly one subscription -- a collapse must drop
+    /// the removed pane's subscription in the same step, or the map grows
+    /// forever as panes split and close.
+    #[gpui::test]
+    async fn a_removed_pane_drops_its_subscription(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let first_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        first_pane.update(cx, |_pane, cx| {
+            cx.emit(workspace::pane::Event::Split {
+                direction: workspace::SplitDirection::Right,
+                mode: workspace::SplitMode::MovePane,
+            });
+        });
+        cx.run_until_parked();
+        let new_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.pane_subscriptions.len(),
+                window.center.panes().len(),
+                "one subscription per pane after the split"
+            );
+        });
+
+        // Held rather than dropped: a `Task` dropped before it is polled
+        // cancels its work, and closing an item is genuinely asynchronous.
+        let closing = window.update_in(cx, |_window, window_handle, cx| {
+            new_pane.update(cx, |pane, cx| {
+                pane.close_all_items(
+                    &workspace::pane::CloseAllItems::default(),
+                    window_handle,
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        drop(closing);
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.pane_subscriptions.len(),
+                window.center.panes().len(),
+                "the collapsed pane's subscription must go with it"
+            );
+        });
+    }
+
+    /// The tab bar's left slot has to carry the window's own Split control,
+    /// not the empty slot the pane's default buttons were replaced with.
+    #[gpui::test]
+    async fn the_tab_bar_offers_a_split(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("floating-pane-tab-bar-split").is_some(),
+            "a tab bar with a tab in it must draw the window's own Split button"
+        );
+    }
+
+    /// The `+` menu's Split submenu has to offer the same four directions the
+    /// tab-bar button does.
+    ///
+    /// The submenu row draws no debug selector of its own -- unlike a flat
+    /// entry, it opens on hover rather than carrying a fixed identity -- so
+    /// it is found by walking the pointer down from the last labelled row
+    /// until hovering lands on it and its own entries (which do carry a
+    /// selector) appear.
+    #[gpui::test]
+    async fn the_plus_menu_offers_a_split_submenu(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        let plus = cx
+            .debug_bounds("floating-pane-tab-bar-add")
+            .expect("a tab bar with a tab in it must draw its own new-item button");
+        cx.simulate_click(plus.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        let last_fixed_entry = cx
+            .debug_bounds("MENU_ITEM-Open Markdown Note")
+            .expect("the menu must still offer what it always has");
+
+        let mut found = false;
+        let x = last_fixed_entry.center().x;
+        let mut y = last_fixed_entry.bottom() + gpui::px(4.);
+        for _ in 0..60 {
+            cx.simulate_mouse_move(gpui::Point { x, y }, None, Modifiers::default());
+            cx.run_until_parked();
+            if cx.debug_bounds("MENU_ITEM-Split Right").is_some() {
+                found = true;
+                break;
+            }
+            y += gpui::px(4.);
+        }
+
+        assert!(
+            found,
+            "the `+` menu must offer a Split submenu with all four directions"
+        );
+    }
+
+    /// `split_active` is what every one of `floating_pane::SplitRight`'s
+    /// three siblings and the two menu routes delegate to (see
+    /// `render.rs::split_entries`) -- exercised directly here for the same
+    /// reason none of its five siblings above dispatch their action through
+    /// a real keymap either: `workspace.register_action` wires a name to a
+    /// method, and the method is where the behaviour actually lives.
+    /// `center.panes()` must grow by one, and nothing about `self.workspace`
+    /// is touched in doing it.
+    #[gpui::test]
+    async fn the_action_splits_the_active_pane(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.split_active(workspace::SplitDirection::Right, window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.center.panes().len(),
+                2,
+                "the action must split the floating window's group"
+            );
+        });
+    }
+
+    /// Splitting a window with nothing in any pane would leave the user
+    /// staring at two blank halves instead of the menu that tells them what
+    /// the window can hold, so the guard must refuse.
+    #[gpui::test]
+    async fn splitting_an_empty_window_does_nothing(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.split_active(workspace::SplitDirection::Right, window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.center.panes().len(),
+                1,
+                "an empty window must not be split"
+            );
+            assert!(window.is_empty(cx), "and must still show as empty");
+        });
+    }
+
+    /// A closed window has no visible pane worth splitting; the action must
+    /// be a no-op rather than mutate a window nobody can see.
+    #[gpui::test]
+    async fn splitting_a_closed_window_does_nothing(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+            // Put away again: the window now holds a tab but is closed.
+            window.toggle(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.split_active(workspace::SplitDirection::Right, window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.center.panes().len(),
+                1,
+                "a closed window must not be split"
+            );
+        });
+    }
+
+    /// `find_pane_in_direction` reads real geometry, so this needs the window
+    /// actually painted -- an unpainted group has no bounding boxes to find a
+    /// direction from.
+    #[gpui::test]
+    async fn activating_in_a_direction_moves_focus(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let left_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        window.update_in(cx, |window, window_handle, cx| {
+            window.split_off(
+                &left_pane.clone(),
+                workspace::SplitDirection::Right,
+                window_handle,
+                cx,
+            );
+        });
+        // A second paint: the split just changed the geometry the first
+        // frame measured, and `find_pane_in_direction` below needs the
+        // up-to-date bounding boxes, not the ones from before the split.
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        let right_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        assert_ne!(
+            left_pane, right_pane,
+            "the split must have a new active pane"
+        );
+
+        // Asserted against the window's real focus rather than the
+        // `active_pane` field: `Pane::focus_in` only re-emits `Event::Focus`
+        // once per focus/blur cycle (guarded by its own `was_focused`), which
+        // depends on paint-driven dispatch-tree bookkeeping this test does
+        // not otherwise need. `activate_in`'s actual contract is "moves
+        // window focus", so that is what gets checked.
+        window.update_in(cx, |_window, window_handle, cx| {
+            assert!(
+                right_pane.focus_handle(cx).is_focused(window_handle),
+                "the split must have left focus in the new pane"
+            );
+        });
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.activate_in(workspace::SplitDirection::Left, window_handle, cx);
+            assert!(
+                left_pane.focus_handle(cx).is_focused(window_handle),
+                "ActivatePaneLeft must move window focus to the pane on that side"
+            );
+        });
+    }
+
+    /// The leftmost pane has nothing further left: the chord must be a no-op
+    /// rather than walking out into the editor behind the window.
+    #[gpui::test]
+    async fn activating_past_the_edge_stays_inside(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let only_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.activate_in(workspace::SplitDirection::Left, window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.active_pane, only_pane,
+                "a group with nothing further left must leave focus exactly where it was"
+            );
+        });
+    }
+
+    /// `swap_in` must exchange the two panes' places in the group, not just
+    /// move focus between them.
+    #[gpui::test]
+    async fn swapping_exchanges_two_panes(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let left_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        window.update_in(cx, |window, window_handle, cx| {
+            window.split_off(
+                &left_pane.clone(),
+                workspace::SplitDirection::Right,
+                window_handle,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        let before = window.read_with(cx, |window, _| {
+            window
+                .center
+                .panes()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+
+        window.update_in(cx, |window, _window_handle, cx| {
+            window.swap_in(workspace::SplitDirection::Left, cx);
+        });
+        cx.run_until_parked();
+
+        let after = window.read_with(cx, |window, _| {
+            window
+                .center
+                .panes()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            after,
+            before.into_iter().rev().collect::<Vec<_>>(),
+            "swapping the two panes must reverse their order in the group"
+        );
+    }
+
+    /// A single-pane group has no border to move to: `move_to_border` returns
+    /// `Ok(false)`, and the guard around it must not log that as an error.
+    #[gpui::test]
+    async fn moving_to_a_border_does_not_panic_on_a_single_pane(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.update_in(cx, |window, _window_handle, cx| {
+            window.move_active_to_border(workspace::SplitDirection::Left, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, _| {
+            assert_eq!(
+                window.center.panes().len(),
+                1,
+                "a single pane must survive MovePaneLeft untouched"
+            );
+        });
+    }
+
+    /// The risk that matters most in this module: GPUI dispatches an action
+    /// from the focused element outward, so the floating window's own
+    /// `on_action` handlers must only fire while focus is inside it. Wired
+    /// into a *real* workspace via `register_floating_layer`, the same way
+    /// `floating_pane::init` wires the production one, so the two render
+    /// trees are genuine siblings and dispatch has real ancestry to bubble
+    /// through -- not two unrelated windows that could never prove this
+    /// either way.
+    #[gpui::test]
+    async fn pane_navigation_stays_within_whichever_side_has_focus(cx: &mut gpui::TestAppContext) {
+        super::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let ws_project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let handle = workspace.downgrade();
+
+        let floating = cx.new_window_entity(|window, cx| {
+            crate::host::FloatingPane::new(handle, ws_project, window, cx)
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.register_floating_layer(floating.clone(), cx);
+        });
+        floating.update_in(cx, |floating, window, cx| {
+            floating.toggle(window, cx);
+            floating.new_markdown_note(window, cx);
+        });
+        cx.run_until_parked();
+
+        let floating_left = floating.read_with(cx, |floating, _| floating.active_pane.clone());
+        floating.update_in(cx, |floating, window, cx| {
+            floating.split_off(
+                &floating_left.clone(),
+                workspace::SplitDirection::Right,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+        let floating_right = floating.read_with(cx, |floating, _| floating.active_pane.clone());
+        assert_ne!(floating_left, floating_right);
+
+        // `Workspace::activate_pane_in_direction` focuses the *active item*
+        // of the pane it lands on, not the pane itself -- an empty pane has
+        // nothing for it to focus, and this test would pass for the wrong
+        // reason (nothing to focus, so nothing happened) instead of proving
+        // it actually moved between real editor panes.
+        let editor_left = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            let item = cx.new(|cx| workspace::item::test::TestItem::new(cx));
+            workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+        });
+        let editor_right = workspace.update_in(cx, |workspace, window, cx| {
+            let new_pane = workspace.split_pane(
+                editor_left.clone(),
+                workspace::SplitDirection::Right,
+                window,
+                cx,
+            );
+            let item = cx.new(|cx| workspace::item::test::TestItem::new(cx));
+            new_pane.update(cx, |pane, cx| {
+                pane.add_item(Box::new(item), true, true, None, window, cx);
+            });
+            new_pane
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        // Focus in the editor's own right pane: the chord must move real
+        // window focus to the editor's left pane. If the floating window's
+        // handler ran instead, focus would land on `floating_left` (its own
+        // group has nowhere else to go from `floating_right`) rather than
+        // `editor_left` -- the two are different entities, so this
+        // distinguishes "the right handler ran" from "the wrong one did".
+        // Checked against real focus rather than the `active_pane` fields:
+        // those only update through `Pane::focus_in`'s own once-per-cycle
+        // `Event::Focus`, which is a separate mechanism from what this test
+        // is proving.
+        workspace.update_in(cx, |_workspace, window, cx| {
+            window.focus(&editor_right.focus_handle(cx), cx);
+        });
+        // A real paint: `Workspace::activate_pane_in_direction` reads its own
+        // `active_pane` field, which only follows real focus once a draw has
+        // compared the previous and current focus paths and fired
+        // `Pane::focus_in`. Without it, the workspace would still think
+        // `editor_left` was active and the chord would (correctly) do
+        // nothing -- which would make this test pass for the wrong reason.
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+        cx.dispatch_action(workspace::ActivatePaneLeft);
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |_workspace, window, cx| {
+            // `contains_focused`, not `is_focused`: the workspace's own
+            // navigation focuses the pane's active *item*, not the pane's
+            // own root handle.
+            assert!(
+                editor_left.focus_handle(cx).contains_focused(window, cx),
+                "with focus in the editor, ActivatePaneLeft must still move the workspace's own focus"
+            );
+        });
+
+        // Focus moves into the floating window's own right pane: the same
+        // chord must now move focus only within it. If the workspace's own
+        // handler ran instead, focus would stay on `floating_right` (the
+        // workspace's active pane is already leftmost, so its handler is a
+        // no-op) rather than moving to `floating_left`.
+        workspace.update_in(cx, |_workspace, window, cx| {
+            window.focus(&floating_right.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(workspace::ActivatePaneLeft);
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |_workspace, window, cx| {
+            // `contains_focused` again: `floating_left` holds the markdown
+            // note from setup, and `Pane::focus_in` redirects a direct pane
+            // focus onto its active item.
+            assert!(
+                floating_left.focus_handle(cx).contains_focused(window, cx),
+                "with focus in the floating window, ActivatePaneLeft must move focus within it"
+            );
+        });
+    }
+}
+
+/// `Pane::split_for_drop` had zero callers anywhere in the repo before this
+/// module -- the hook had never run, in production or in a test. Every test
+/// here stages a real drop rather than calling the closure directly, so a
+/// lease violation on `self.workspace` would show up as a failing test
+/// instead of a crash nobody could reproduce.
+mod dropping {
+    use gpui::{AppContext as _, VisualContext as _};
+    use workspace::DraggedTab;
+
+    /// The gate in front of everything else in this module.
+    ///
+    /// `Pane::handle_drag_move` records no split direction unless
+    /// `can_split_predicate` says the edge is a target, and it answers `false`
+    /// when that predicate is unset. A pane without one therefore accepts an
+    /// edge drop as an ordinary tab move and never splits -- silently, with
+    /// the split hook wired correctly and never reached. This window shipped
+    /// in exactly that state, because the drop tests all wrote
+    /// `drag_split_direction` themselves and so began on the far side of it.
+    #[gpui::test]
+    async fn the_edge_is_a_split_target_at_all(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        let predicate = pane
+            .read_with(cx, |pane, _| pane.can_split_predicate())
+            .expect("a pane whose edges cannot be split targets can never be split by a drop");
+
+        let from_here = DraggedTab {
+            pane: pane.clone(),
+            item: pane
+                .read_with(cx, |pane, _| pane.active_item())
+                .expect("the note just opened is this pane's active item"),
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+
+        // This pane's only tab, dropped on this pane's own edge: refused,
+        // because the source empties and the collapse rule undoes the split
+        // the instant it is made.
+        let allowed = pane.update_in(cx, |pane, window, cx| {
+            predicate(pane, &from_here as &dyn std::any::Any, window, cx)
+        });
+        assert!(
+            !allowed,
+            "a pane's only tab dropped on its own edge must not be treated as a split"
+        );
+
+        // The same pane once it holds two: now there is something left behind,
+        // so the split holds and the drag is allowed.
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        let allowed = pane.update_in(cx, |pane, window, cx| {
+            predicate(pane, &from_here as &dyn std::any::Any, window, cx)
+        });
+        assert!(
+            allowed,
+            "a pane holding more than one tab must accept an edge drop as a split"
+        );
+    }
+
+    /// The headline: a tab dropped on a floating pane's edge must split the
+    /// *floating* group, and the workspace's own centre group -- the one
+    /// `Workspace::split_pane` reaches for without this hook -- must stay
+    /// exactly as it was. A test that only counted the floating window's
+    /// panes would pass even if the drop had silently rearranged the editor
+    /// behind it.
+    #[gpui::test]
+    async fn a_tab_dropped_on_an_edge_splits_the_floating_group_not_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        super::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let ws_project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let handle = workspace.downgrade();
+
+        let floating = cx.new_window_entity(|window, cx| {
+            crate::host::FloatingPane::new(handle, ws_project, window, cx)
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.register_floating_layer(floating.clone(), cx);
+        });
+        floating.update_in(cx, |floating, window, cx| {
+            floating.toggle(window, cx);
+            floating.new_markdown_note(window, cx);
+        });
+        cx.run_until_parked();
+
+        // Dragged from the editor's own pane, not from a tab already inside
+        // the floating window: dragging the floating window's only tab onto
+        // its own edge would empty that pane out from under itself, and the
+        // pane's own "last item closed" collapse would immediately undo the
+        // split -- proving nothing about the hook this test exists for.
+        let editor_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            let item = cx.new(|cx| workspace::item::test::TestItem::new(cx));
+            workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+        });
+        cx.run_until_parked();
+        let item = editor_pane
+            .read_with(cx, |pane, _| pane.active_item())
+            .expect("the item just added must be the editor pane's active item");
+
+        let floating_pane = floating.read_with(cx, |floating, _| floating.active_pane.clone());
+
+        // The gate, asserted on the path a person actually takes: a tab from
+        // the editor, hovered over this window's edge. Without it the drop
+        // below is staged on a direction real hover never records.
+        let predicate = floating_pane
+            .read_with(cx, |pane, _| pane.can_split_predicate())
+            .expect("the floating pane must mark its edges as split targets");
+        let from_editor = DraggedTab {
+            pane: editor_pane.clone(),
+            item: item.clone(),
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+        assert!(
+            floating_pane.update_in(cx, |pane, window, cx| {
+                predicate(pane, &from_editor as &dyn std::any::Any, window, cx)
+            }),
+            "a tab dragged in from the editor must be allowed to split this window"
+        );
+        // Written directly because `Pane::handle_drag_move`, which is what
+        // fills this in from a real pointer, is private to `workspace`. That
+        // leaves the gate in front of it untested here -- and that gate was
+        // shut for the life of this feature. `the_edge_is_a_split_target_at_all`
+        // below covers it; this test starts one step past it.
+        floating_pane.update(cx, |pane, _| {
+            pane.drag_split_direction = Some(workspace::SplitDirection::Right);
+        });
+
+        let dragged_tab = DraggedTab {
+            pane: editor_pane.clone(),
+            item,
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+        floating_pane.update_in(cx, |pane, window, cx| {
+            pane.handle_tab_drop(&dragged_tab, 0, false, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        floating.read_with(cx, |floating, _| {
+            assert_eq!(
+                floating.center.panes().len(),
+                2,
+                "the drop must split the floating window's own group"
+            );
+        });
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.panes().len(),
+                1,
+                "the editor's centre group must be untouched by a drop on the floating window"
+            );
+        });
+    }
+
+    /// Set in `content.rs::build_pane`, so every pane the window builds --
+    /// including one created by an earlier drop -- carries the hook. Setting
+    /// it only on the pane the window started with would make the routing
+    /// bug reappear the moment somebody dropped a tab on a split pane.
+    #[gpui::test]
+    async fn every_pane_the_window_builds_carries_the_hook(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        let first_pane = window.read_with(cx, |window, _| window.active_pane.clone());
+        window.update_in(cx, |window, window_handle, cx| {
+            window.split_off(
+                &first_pane.clone(),
+                workspace::SplitDirection::Right,
+                window_handle,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            for pane in window.center.panes() {
+                assert!(
+                    pane.read(cx).split_for_drop().is_some(),
+                    "every pane the floating window builds must carry the drop hook"
+                );
+            }
+        });
+    }
+
+    /// A drop with no split direction -- the tab bar's own body, not an edge
+    /// -- must still just add the tab, exactly as it did before this hook
+    /// existed. Dragged across from the editor's own pane, so the drop
+    /// genuinely crosses panes rather than reordering a tab already there.
+    #[gpui::test]
+    async fn a_drop_on_the_centre_still_just_adds_the_tab(cx: &mut gpui::TestAppContext) {
+        super::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let ws_project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let handle = workspace.downgrade();
+
+        let floating = cx.new_window_entity(|window, cx| {
+            crate::host::FloatingPane::new(handle, ws_project, window, cx)
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.register_floating_layer(floating.clone(), cx);
+        });
+        floating.update_in(cx, |floating, window, cx| {
+            floating.toggle(window, cx);
+        });
+        cx.run_until_parked();
+
+        let floating_pane = floating.read_with(cx, |floating, _| floating.active_pane.clone());
+        let items_before = floating_pane.read_with(cx, |pane, _| pane.items_len());
+
+        let editor_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            let item = cx.new(|cx| workspace::item::test::TestItem::new(cx));
+            workspace.add_item_to_active_pane(Box::new(item), None, false, window, cx);
+        });
+        cx.run_until_parked();
+        let item = editor_pane
+            .read_with(cx, |pane, _| pane.active_item())
+            .expect("the item just added must be the editor pane's active item");
+
+        let dragged_tab = DraggedTab {
+            pane: editor_pane.clone(),
+            item,
+            ix: 0,
+            detail: 0,
+            is_active: true,
+        };
+        // `drag_split_direction` defaults to `None` on a pane nothing has
+        // hovered an edge of yet -- a centre drop, not an edge one.
+        floating_pane.update_in(cx, |pane, window, cx| {
+            let ix = pane.items_len();
+            pane.handle_tab_drop(&dragged_tab, ix, false, window, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        floating.read_with(cx, |floating, _| {
+            assert_eq!(
+                floating.center.panes().len(),
+                1,
+                "a centre drop must not split the group"
+            );
+        });
+        floating_pane.read_with(cx, |pane, _| {
+            assert_eq!(
+                pane.items_len(),
+                items_before + 1,
+                "a centre drop must still add the dropped tab"
+            );
+        });
+    }
+
+    /// Builds no `FloatingPane` of its own: it drives the one
+    /// `floating_pane::init`'s own `cx.observe_new` wires up for real, the
+    /// same instant a workspace comes up, through the same actions a
+    /// keybinding would reach -- `ToggleFloatingPane`, then `NewTerminal` to
+    /// get a tab into it, then `SplitRight`. The path from the action,
+    /// through `Workspace::register_action` and `key_context("FloatingPane")`,
+    /// down to `split_active`, had no machine proof before this test -- only a
+    /// reading of the code.
+    ///
+    /// `NewTerminal` rather than `new_markdown_note` (every sibling test's
+    /// usual way in): it is the only registered action that seeds a tab, and
+    /// this test never holds an `Entity<FloatingPane>` to call a method on --
+    /// `init`'s observer owns the only instance, reached solely through the
+    /// actions it registered, exactly like a real keybinding would. A second
+    /// manually-built `FloatingPane` registered as its own layer was tried
+    /// first and cannot work. `Workspace::register_floating_layer` replaces
+    /// the layer, while `register_action` appends to a list nothing withdraws
+    /// from -- and `init`'s observer does both. The later registration
+    /// therefore takes the pixels and leaves every action still holding the
+    /// first instance, so `ToggleFloatingPane` flips an `open` field on an
+    /// entity that is no longer drawn. Dispatch works throughout; it reaches
+    /// an orphan. The instance `init` owns is the only one this test can
+    /// reach.
+    ///
+    /// With no handle to assert against, the split is proven the only way
+    /// left -- the active pane's own tab bar redraws narrower and its
+    /// trailing `+` button moves left, which nothing else in this sequence
+    /// can cause.
+    #[gpui::test]
+    async fn split_right_dispatched_through_a_real_workspace_splits_the_floating_group(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        super::init_test(cx);
+        // `NewTerminal` spawns a real shell process through the project, the
+        // same as any other terminal tab in this codebase's tests.
+        cx.executor().allow_parking();
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (_multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        cx.run_until_parked();
+
+        cx.dispatch_action(zed_actions::floating_pane::ToggleFloatingPane);
+        cx.dispatch_action(zed_actions::floating_pane::NewTerminal);
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        let add_button_before = cx
+            .debug_bounds("floating-pane-tab-bar-add")
+            .expect("a tab bar with a tab in it must draw its own new-item button");
+
+        cx.dispatch_action(zed_actions::floating_pane::SplitRight);
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+
+        let add_button_after = cx
+            .debug_bounds("floating-pane-tab-bar-add")
+            .expect("the active pane must still draw its own new-item button after the split");
+
+        assert!(
+            add_button_after.origin.x < add_button_before.origin.x,
+            "dispatching SplitRight through the real workspace must split the active pane, \
+             narrowing it and moving its own `+` button left"
+        );
     }
 }

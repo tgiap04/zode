@@ -59,12 +59,12 @@ fn an_unmeasured_footprint_says_so_rather_than_claiming_zero() {
     );
     assert!(
         !rendered.contains("0 B"),
-        "{rendered} must not claim zero RSS"
+        "{rendered} must not claim zero memory"
     );
 }
 
 /// Change-detection compares the *rendered* text, so applying an identical
-/// result is reported unchanged (no `cx.notify()`), while a differing RSS is
+/// result is reported unchanged (no `cx.notify()`), while a differing memory reading is
 /// reported changed.
 #[gpui::test]
 fn change_detection_follows_the_rendered_text(cx: &mut TestAppContext) {
@@ -75,7 +75,7 @@ fn change_detection_follows_the_rendered_text(cx: &mut TestAppContext) {
         key,
         label.clone(),
         ProjectFootprint {
-            rss_bytes: Some(10 * 1024 * 1024),
+            memory_bytes: Some(10 * 1024 * 1024),
             cpu_percent: Some(12.0),
         },
     )]);
@@ -85,17 +85,17 @@ fn change_detection_follows_the_rendered_text(cx: &mut TestAppContext) {
         "an identical result must not be reported as a change"
     );
 
-    let differing_rss = Footprints(vec![(
+    let differing_memory = Footprints(vec![(
         key,
         label,
         ProjectFootprint {
-            rss_bytes: Some(20 * 1024 * 1024),
+            memory_bytes: Some(20 * 1024 * 1024),
             cpu_percent: Some(12.0),
         },
     )]);
     assert!(
-        !footprints_render_the_same(&current, &differing_rss),
-        "a different rendered RSS must be reported as a change"
+        !footprints_render_the_same(&current, &differing_memory),
+        "a different rendered memory figure must be reported as a change"
     );
 }
 

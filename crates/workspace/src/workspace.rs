@@ -2572,8 +2572,18 @@ impl Workspace {
         });
     }
 
+    /// Must read the same entry `render_dock` measures the column from --
+    /// `size_governing_panel`, not `active_panel`. Those disagree once the
+    /// active panel is not entry 0 (`Dock::size_governing_index`), and this is
+    /// the only route in the tree that converts a panel between fixed and
+    /// flexible width, so seeding that conversion from the wrong panel is a
+    /// silent unit mismatch rather than a visible one. The `active_panel`
+    /// fallback only matters when `panel_entries` is empty, where both calls
+    /// return `None` anyway.
     fn dock_size(&self, dock: &Dock, window: &Window, cx: &App) -> Option<Pixels> {
-        let panel = dock.active_panel()?;
+        let panel = dock
+            .size_governing_panel()
+            .or_else(|| dock.active_panel())?;
         let size_state = dock
             .stored_panel_size_state(panel.as_ref())
             .unwrap_or_default();
@@ -6080,6 +6090,12 @@ impl Workspace {
     ///
     /// One at a time, and the last registration wins: two independent floating
     /// layers would overlap with nothing deciding which is in front.
+    ///
+    /// Only the *layer* is replaced. Actions a caller registered alongside an
+    /// earlier layer stay on `workspace_actions`, which nothing withdraws from,
+    /// still holding that layer's handle — so a second registration leaves the
+    /// first view owning every keybinding while owning no pixels, and the
+    /// second owning pixels no key can reach. Register once per workspace.
     pub fn register_floating_layer<T: Render>(&mut self, view: Entity<T>, cx: &mut Context<Self>) {
         self.floating_layer = Some(Box::new(view));
         cx.notify();
@@ -14141,6 +14157,105 @@ mod tests {
         );
     }
 
+    /// The one control that converts a panel between fixed and flexible width
+    /// has to read the same entry `render_dock` measures the column from, or
+    /// the conversion is seeded from a size nobody is drawing.
+    ///
+    /// Entry 0 owns the column's extent (`size_governing_panel`); the panel
+    /// merely showing (`active_panel`) is a different entry once it is not
+    /// entry 0. `toggle_dock_panel_flexible_size` is the only route in the
+    /// tree that switches a panel between the two units, so if `dock_size`
+    /// reads the wrong one, the user gets a fixed-to-flex conversion seeded
+    /// from a panel they never resized.
+    #[gpui::test]
+    async fn the_flex_toggle_reads_the_panel_the_column_is_measured_from(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update(cx, |workspace, _cx| {
+            workspace.set_random_database_id();
+            workspace.bounds.size.width = px(1200.);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            // Entry 0 owns the column's extent.
+            let primary = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.default_size = px(240.);
+                panel
+            });
+            workspace.add_panel(primary, window, cx);
+            // Entry 1 is the one actually showing, with a different extent so
+            // reading the wrong entry is observable.
+            let second = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 101, cx);
+                panel.default_size = px(360.);
+                panel
+            });
+            workspace.add_panel(second, window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            workspace.left_dock.update(cx, |dock, cx| {
+                dock.activate_panel(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        // The two candidate widths must actually convert to two different
+        // flex values, or the assertion below cannot distinguish which
+        // panel's extent seeded the conversion.
+        let (flex_from_governing, flex_from_active) =
+            workspace.update_in(cx, |workspace, window, cx| {
+                (
+                    workspace.dock_flex_for_size(DockPosition::Left, px(240.), window, cx),
+                    workspace.dock_flex_for_size(DockPosition::Left, px(360.), window, cx),
+                )
+            });
+        assert_ne!(
+            flex_from_governing, flex_from_active,
+            "the two candidate widths must convert to different flex values or the test proves nothing"
+        );
+
+        let second_panel = workspace.update_in(cx, |workspace, _window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .visible_panel()
+                .expect("the second panel should be showing")
+                .clone()
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left_dock = workspace.left_dock.clone();
+            workspace.toggle_dock_panel_flexible_size(
+                &left_dock,
+                second_panel.as_ref(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let stored_flex = workspace.update_in(cx, |workspace, _window, cx| {
+            workspace
+                .left_dock
+                .read(cx)
+                .stored_panel_size_state(second_panel.as_ref())
+                .and_then(|state| state.flex)
+        });
+
+        assert_eq!(
+            stored_flex, flex_from_governing,
+            "the flex toggle must seed its conversion from entry 0, the panel `render_dock` \
+             measures the column from -- not from the panel merely showing"
+        );
+    }
+
     /// The bottom dock stacks too, so the same rule governs its height.
     ///
     /// Included deliberately rather than by accident: excluding it would mean
@@ -14596,6 +14711,186 @@ mod tests {
                 .count()),
             1,
             "the recorded panel should be showing after the restore"
+        );
+    }
+
+    /// "Starts open" means "when nothing else has said otherwise" -- a dock
+    /// with a record of its own has already said otherwise. `add_panel` used
+    /// to discard `restore_state`'s return value and unconditionally honour
+    /// `starts_open` afterwards, and because `activate_panel` is exclusive,
+    /// that collapsed a whole restored stack down to whichever panel asked to
+    /// open itself, on every panel that overrides `starts_open` -- which by
+    /// configuration includes `branch_panel` and `git_panel`, both on this
+    /// same stacking left dock.
+    #[gpui::test]
+    async fn a_restored_dock_is_not_collapsed_by_a_panel_that_starts_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: true,
+                    active_panel: Some("TestPanel".into()),
+                    zoom: false,
+                });
+                dock.serialized_stack = Some(dock::DockStackState {
+                    showing: vec!["TestPanel".into()],
+                    flexes: vec![1.],
+                });
+            });
+
+            let restored_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(restored_panel, window, cx);
+
+            // Added after the restore, and asking to open itself -- exactly
+            // the shape of a user who set `"branch_panel": { "starts_open":
+            // true } }` while a stack from a previous launch is on record.
+            let opens_itself = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx);
+                panel.0.starts_open = true;
+                panel
+            });
+            workspace.add_panel(opens_itself, window, cx);
+        });
+        cx.run_until_parked();
+
+        let visible_names = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .left_dock()
+                .read(cx)
+                .visible_panels()
+                .map(|panel| panel.persistent_name().to_string())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            visible_names.contains(&"TestPanel".to_string()),
+            "the restored panel should still be showing, got {visible_names:?}"
+        );
+    }
+
+    /// The counterweight to the test above: a workspace with no record of its
+    /// own must still honour `starts_open` -- that is the behaviour the flag
+    /// exists for, and the gate above must not take it away from a fresh
+    /// install.
+    #[gpui::test]
+    async fn a_workspace_with_no_record_still_opens_a_panel_that_starts_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.starts_open = true;
+                panel
+            });
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        let (is_open, shown) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            (dock.is_open(), dock.visible_panels().count())
+        });
+        assert!(is_open, "a fresh dock opens the panel that asked to open");
+        assert_eq!(shown, 1, "the panel that starts open should be showing");
+    }
+
+    /// A second, user-visible defect the same gate closes: today a dock the
+    /// user deliberately closed is forced back open on the next launch by any
+    /// panel added afterwards with `starts_open: true`.
+    #[gpui::test]
+    async fn a_record_that_says_a_dock_is_shut_keeps_it_shut(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: false,
+                    active_panel: None,
+                    zoom: false,
+                });
+            });
+
+            let panel = cx.new(|cx| {
+                let mut panel = TestPanel::new(DockPosition::Left, 100, cx);
+                panel.starts_open = true;
+                panel
+            });
+            workspace.add_panel(panel, window, cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open()),
+            "a dock the record says is shut should stay shut"
+        );
+    }
+
+    /// Same gate, and it is what a `Right` (takes-turns) dock needs to keep
+    /// correct: `activate_panel` moves `active_panel_index` for every entry,
+    /// so a panel added afterwards that starts open used to steal activation
+    /// from the panel the record had just restored.
+    #[gpui::test]
+    async fn the_restored_active_panel_stays_active_after_a_starts_open_panel_is_added(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, _cx| {
+                dock.serialized_dock = Some(crate::persistence::model::DockData {
+                    visible: true,
+                    active_panel: Some("TestPanel".into()),
+                    zoom: false,
+                });
+            });
+
+            let restored_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(restored_panel, window, cx);
+
+            let opens_itself = cx.new(|cx| {
+                let mut panel = dock::test::OtherTestPanel::new(DockPosition::Left, 101, cx);
+                panel.0.starts_open = true;
+                panel
+            });
+            workspace.add_panel(opens_itself, window, cx);
+        });
+        cx.run_until_parked();
+
+        let active_name = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .left_dock()
+                .read(cx)
+                .active_panel()
+                .map(|panel| panel.persistent_name().to_string())
+        });
+        assert_eq!(
+            active_name,
+            Some("TestPanel".to_string()),
+            "the restored active panel should still be active"
         );
     }
 

@@ -320,6 +320,18 @@ type ConflictKeybindMapping = HashMap<
 >;
 
 impl ConflictState {
+    /// Groups by chord *and* by equivalent context predicate, then compares sources only inside a
+    /// group — so two bindings whose contexts differ are never compared, and a conflict between
+    /// them is never reported.
+    ///
+    /// That is narrower than what the resolver does. `Keymap::bindings_for_input` ranks every
+    /// binding that matches the live context stack against every other, across contexts, so one
+    /// binding can shadow another this view calls conflict-free. Reporting those exactly means
+    /// deciding which context predicates can co-occur in a live stack, and
+    /// `KeyBindingContextPredicate::is_superset` does not answer it: `Workspace` is not a syntactic
+    /// superset of `Editor`, yet both match while an editor has focus. A heuristic would surface
+    /// some of these and miss others with nothing to tell the reader which kind they are looking
+    /// at, so the narrow-but-honest grouping is kept deliberately.
     fn new(key_bindings: &[ProcessedBinding]) -> Self {
         let mut action_keybind_mapping = ConflictKeybindMapping::default();
 

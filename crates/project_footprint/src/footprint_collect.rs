@@ -62,19 +62,19 @@ pub fn collect(
     }
 
     let union: Vec<Pid> = owner_of.keys().copied().collect();
-    let mut rss_by_pid: HashMap<Pid, u64> = HashMap::new();
+    let mut memory_by_pid: HashMap<Pid, u64> = HashMap::new();
     let mut cpu_by_pid: HashMap<Pid, Option<f32>> = HashMap::new();
-    for (pid, rss, cpu) in sampler.sample(&union) {
-        rss_by_pid.insert(pid, rss);
+    for (pid, memory, cpu) in sampler.sample(&union) {
+        memory_by_pid.insert(pid, memory);
         cpu_by_pid.insert(pid, cpu);
     }
 
-    let core_count = sampler.core_count().max(1);
+    let cpu_count = sampler.cpu_count().max(1);
     roots
         .iter()
         .map(|project| {
             let pids = project_pids.remove(&project.key).unwrap_or_default();
-            let footprint = sum(&pids, &rss_by_pid, &cpu_by_pid, core_count);
+            let footprint = sum(&pids, &memory_by_pid, &cpu_by_pid, cpu_count);
             (project.key, footprint, pids)
         })
         .collect()
@@ -90,15 +90,15 @@ fn claim(owner_of: &mut HashMap<Pid, EntityId>, pids: &mut Vec<Pid>, pid: Pid, p
     pids.push(pid);
 }
 
-/// Sums one project's PIDs into a footprint. CPU is normalized by core count
-/// and clamped to 100%: `sysinfo::cpu_usage()` is per single core and can
-/// exceed 100% on a multi-core machine, and a badge reading "340%" answers a
-/// different question than the one the user asked.
+/// Sums one project's PIDs into a footprint. CPU is normalized by the logical
+/// CPU count and clamped to 100%: `sysinfo::cpu_usage()` is per single CPU and
+/// can exceed 100% on a multi-core machine, and a badge reading "340%" answers
+/// a different question than the one the user asked.
 fn sum(
     pids: &[Pid],
-    rss_by_pid: &HashMap<Pid, u64>,
+    memory_by_pid: &HashMap<Pid, u64>,
     cpu_by_pid: &HashMap<Pid, Option<f32>>,
-    core_count: usize,
+    cpu_count: usize,
 ) -> ProjectFootprint {
     if pids.is_empty() {
         return ProjectFootprint::default();
@@ -106,11 +106,11 @@ fn sum(
 
     // Already deduplicated by `claim`: a PID is pushed into a project's list
     // only the first time `owner_of` accepts it.
-    let mut rss_bytes: Option<u64> = None;
+    let mut memory_bytes: Option<u64> = None;
     let mut cpu_percent: Option<f32> = None;
     for pid in pids {
-        if let Some(&rss) = rss_by_pid.get(pid) {
-            rss_bytes = Some(rss_bytes.unwrap_or(0).saturating_add(rss));
+        if let Some(&memory) = memory_by_pid.get(pid) {
+            memory_bytes = Some(memory_bytes.unwrap_or(0).saturating_add(memory));
         }
         if let Some(Some(cpu)) = cpu_by_pid.get(pid) {
             cpu_percent = Some(cpu_percent.unwrap_or(0.0) + cpu);
@@ -118,7 +118,7 @@ fn sum(
     }
 
     ProjectFootprint {
-        rss_bytes,
-        cpu_percent: cpu_percent.map(|total| (total / core_count as f32).clamp(0.0, 100.0)),
+        memory_bytes,
+        cpu_percent: cpu_percent.map(|total| (total / cpu_count as f32).clamp(0.0, 100.0)),
     }
 }

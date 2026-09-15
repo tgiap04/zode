@@ -1023,8 +1023,11 @@
     // Where to dock the branch panel. Can be 'left' or 'right'. Defaults to the
     // rail's own side so its button appears in the rail rather than the status bar.
     "dock": "left",
-    // Default width of the branch panel.
-    "default_width": 280,
+    // Default width of the branch panel. Matches the git panel deliberately:
+    // the branch panel holds the lowest activation_priority on the left edge,
+    // so it governs that whole column's width and git and outline follow it.
+    // Lower this alone and the left dock narrows for every panel in it.
+    "default_width": 360,
     // Whether the branch panel should open on startup.
     "starts_open": false,
   },

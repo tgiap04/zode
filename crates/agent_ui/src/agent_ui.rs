@@ -10,14 +10,21 @@ mod actions;
 mod agent_roster;
 mod agent_view;
 mod missing_binary;
+mod permission_bypass;
 mod session_history;
 mod session_store;
+pub mod subagents;
 
 pub use actions::*;
 pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks};
 pub use agent_view::{AgentView, AgentViewEvent, SessionOrigin};
-pub use session_history::{AgentHistoryPanel, delete_session, resume_session};
+pub use permission_bypass::PermissionBypassStore;
+pub use session_history::{
+    AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, delete_all_detail, delete_session,
+    execute_session_deletion, plan_delete_all, resume_session, sessions_in_project,
+};
 pub use session_store::SessionStore;
+pub use subagents::{SubagentTracker, provider_for_agent};
 
 use gpui::App;
 use project::AgentId;
@@ -48,7 +55,14 @@ pub fn init(cx: &mut App) {
             AgentView::open(workspace, action.agent.as_str(), action.mode, window, cx);
         });
         workspace.register_action(|workspace, action: &NewAgent, window, cx| {
-            AgentView::open_new(workspace, action.agent.as_str(), action.mode, window, cx);
+            AgentView::open_new(
+                workspace,
+                action.agent.as_str(),
+                action.mode,
+                action.permission_prompts,
+                window,
+                cx,
+            );
         });
         // What the rail button does, and the reason it is not `OpenAgent`: the
         // button is a toggle, and a lit toggle that does nothing when pressed

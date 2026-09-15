@@ -1,6 +1,6 @@
 use crate::{
-    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
-    SessionSummary,
+    AgentCommand, AgentKind, Availability, CompletedSubagents, Deletion, Fork, SessionCounts,
+    SessionProvider, SessionSummary, SubagentSummary,
     claude_log::{self, HeadFacts, TailFacts},
     provider::is_safe_component,
 };
@@ -232,6 +232,27 @@ impl SessionProvider for ClaudeProvider {
             messages,
             subagents,
         })
+    }
+
+    fn subagents(&self, session: &SessionSummary) -> Result<Vec<SubagentSummary>> {
+        let Some(sidecar) = Self::sidecar_dir(session) else {
+            return Ok(Vec::new());
+        };
+        Ok(read_subagents(&sidecar.join("subagents")))
+    }
+
+    fn completed_subagents(
+        &self,
+        session: &SessionSummary,
+        from: u64,
+    ) -> Result<CompletedSubagents> {
+        let Some(log_path) = session.log_path.as_ref() else {
+            return Ok(CompletedSubagents {
+                tool_use_ids: Vec::new(),
+                scanned_to: from,
+            });
+        };
+        read_completed_tool_uses(log_path, from)
     }
 
     fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
@@ -653,6 +674,235 @@ mod tests {
         assert_eq!(counts.messages, Some(1981), "grep -c of user|assistant");
         assert_eq!(counts.subagents, 13, "ls subagents/*.meta.json | wc -l");
     }
+
+    /// A sidecar written the way Claude writes one, read off a live session:
+    /// `{"agentType":"reviewer","description":"…","toolUseId":"toolu_…","spawnDepth":1}`.
+    fn sidecar(dir: &Path, id: &str, meta: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.meta.json")), meta).unwrap();
+    }
+
+    #[test]
+    fn a_subagent_row_comes_from_its_sidecar_newest_first() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("subagents");
+        sidecar(
+            &dir,
+            "agent-older",
+            r#"{"agentType":"tester","description":"Run the suites","toolUseId":"toolu_a","spawnDepth":1}"#,
+        );
+        // Ordering is by the sidecar's own mtime, so the two have to be written
+        // far enough apart for a filesystem to tell them apart at all.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sidecar(
+            &dir,
+            "agent-newer",
+            r#"{"agentType":"reviewer","description":"Review the diff","toolUseId":"toolu_b","spawnDepth":1}"#,
+        );
+        // No tool call, so nothing could ever report it finished.
+        sidecar(&dir, "agent-mute", r#"{"agentType":"doc-writer"}"#);
+
+        let subagents = read_subagents(&dir);
+        let names: Vec<&str> = subagents.iter().map(|one| &*one.kind).collect();
+        assert_eq!(
+            names,
+            vec!["reviewer", "tester"],
+            "newest first, and a sidecar that can never be marked finished is \
+             left out rather than pinned as running forever"
+        );
+        assert_eq!(&*subagents[0].description, "Review the diff");
+        assert_eq!(&*subagents[0].tool_use_id, "toolu_b");
+        assert_eq!(&*subagents[0].id, "agent-newer");
+    }
+
+    #[test]
+    fn a_sidecar_naming_no_type_still_gets_a_row() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("subagents");
+        sidecar(&dir, "agent-x", r#"{"toolUseId":"toolu_x"}"#);
+
+        let subagents = read_subagents(&dir);
+        assert_eq!(subagents.len(), 1);
+        assert_eq!(&*subagents[0].kind, "agent");
+        assert_eq!(&*subagents[0].description, "");
+    }
+
+    #[test]
+    fn a_missing_sidecar_directory_is_no_subagents_not_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_subagents(&root.path().join("nothing-here")).is_empty());
+    }
+
+    /// The claim the incremental scan lives or dies on.
+    ///
+    /// A transcript is appended to while it is read, so a pass regularly ends
+    /// mid-line. Counting that partial line as read would drop whatever result
+    /// it turns out to carry once the rest of it lands — and a result that is
+    /// missed once is missed forever, leaving a finished subagent marked as
+    /// running for the life of the session.
+    #[test]
+    fn a_half_written_line_is_left_for_the_next_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let finished = |id: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}"}}]}}}}"#
+            )
+        };
+
+        // Ends without a newline, exactly as a live transcript does.
+        std::fs::write(
+            &log,
+            format!("{}\n{}", finished("toolu_a"), finished("toolu_b")),
+        )
+        .unwrap();
+        let first = read_completed_tool_uses(&log, 0).unwrap();
+        assert_eq!(
+            first
+                .tool_use_ids
+                .iter()
+                .map(|id| &**id)
+                .collect::<Vec<_>>(),
+            vec!["toolu_a"],
+            "the unterminated second line has not finished arriving"
+        );
+
+        let complete_line_bytes = finished("toolu_a").len() as u64 + 1;
+        assert_eq!(
+            first.scanned_to, complete_line_bytes,
+            "the pass must stop at the last newline, not at the end of the file"
+        );
+
+        // The rest of that line lands.
+        std::fs::write(
+            &log,
+            format!("{}\n{}\n", finished("toolu_a"), finished("toolu_b")),
+        )
+        .unwrap();
+        let second = read_completed_tool_uses(&log, first.scanned_to).unwrap();
+        assert_eq!(
+            second
+                .tool_use_ids
+                .iter()
+                .map(|id| &**id)
+                .collect::<Vec<_>>(),
+            vec!["toolu_b"],
+            "the second pass reads the line it skipped, and not the one it already had"
+        );
+    }
+
+    /// A shorter file is a different file. Resuming into it would read from the
+    /// middle of a line that belongs to someone else's session.
+    #[test]
+    fn a_transcript_that_shrank_is_read_from_the_start() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        std::fs::write(
+            &log,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_only\"}]}}\n",
+        )
+        .unwrap();
+
+        let pass = read_completed_tool_uses(&log, 10_000).unwrap();
+        assert_eq!(
+            pass.tool_use_ids.iter().map(|id| &**id).collect::<Vec<_>>(),
+            vec!["toolu_only"]
+        );
+    }
+}
+
+/// Every subagent the sidecar directory names, newest first.
+///
+/// Reads each file where [`count_meta_files`] only counts names. Both stay:
+/// the history row wants a number and would be paying twenty-five file reads
+/// for it, and this wants the names and cannot get them from a count.
+///
+/// One unreadable or reshaped file costs its own row and nothing else — the
+/// rule the whole crate follows for formats it does not own. A sidecar with no
+/// `toolUseId` is dropped rather than shown, because that id is the only way to
+/// learn the subagent ever finished, and a row that can only ever say "running"
+/// is worse than no row at all.
+fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut subagents: Vec<SubagentSummary> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_name()?.to_str()?.strip_suffix(".meta.json")?;
+            let text = std::fs::read_to_string(&path).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let tool_use_id = meta.get("toolUseId").and_then(serde_json::Value::as_str)?;
+            Some(SubagentSummary {
+                id: Arc::from(id),
+                // A sidecar naming no type still describes a real subagent, so
+                // it keeps its row under a neutral word rather than vanishing.
+                kind: Arc::from(
+                    meta.get("agentType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("agent"),
+                ),
+                description: Arc::from(
+                    meta.get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                ),
+                tool_use_id: Arc::from(tool_use_id),
+                // An assumption about a format this editor does not own, and the
+                // one claim here no test can settle: every sidecar observed was
+                // written once, at spawn, and never touched again, so its own
+                // mtime is the start time. If Claude Code ever writes to it a
+                // second time — to record a completion, say — this field and the
+                // newest-first order built on it both go quietly wrong. A
+                // subagent list in a nonsensical order is the symptom that sends
+                // a reader back here.
+                //
+                // The transcript beside it is the file that keeps moving, and it
+                // is deliberately not consulted — see
+                // `claude_log::completed_tool_uses`.
+                spawned_at: entry.metadata().ok()?.modified().ok()?,
+            })
+        })
+        .collect();
+    subagents.sort_by(|a, b| b.spawned_at.cmp(&a.spawned_at));
+    subagents
+}
+
+/// Reads `path` from `from` to its end and reports the tool results in it.
+///
+/// Reports the offset of the last complete line rather than the file's length.
+/// A transcript being appended to right now ends mid-line, and counting that
+/// partial line as read would lose whatever result it turns out to carry once
+/// the rest of it lands.
+fn read_completed_tool_uses(path: &Path, from: u64) -> Result<CompletedSubagents> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    // A transcript only ever grows. Shorter than where the last pass stopped
+    // means a different file stands at this path now, so resuming would read
+    // into the middle of someone else's line. Start again instead.
+    let from = if from > length { 0 } else { from };
+    file.seek(SeekFrom::Start(from))?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return Ok(CompletedSubagents {
+            tool_use_ids: Vec::new(),
+            scanned_to: from,
+        });
+    };
+    // Lossy on the complete portion only, and the offset computed from the raw
+    // bytes: a replacement character is a different length from what it stands
+    // in for, so counting the converted string would drift the resume point.
+    let complete = String::from_utf8_lossy(&bytes[..=last_newline]);
+    Ok(CompletedSubagents {
+        tool_use_ids: claude_log::completed_tool_uses(&complete)
+            .into_iter()
+            .map(Arc::from)
+            .collect(),
+        scanned_to: from + last_newline as u64 + 1,
+    })
 }
 
 fn count_meta_files(dir: &Path) -> usize {

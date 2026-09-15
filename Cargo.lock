@@ -106,6 +106,7 @@ dependencies = [
  "notifications",
  "paths",
  "project",
+ "serde",
  "serde_json",
  "settings",
  "task",
@@ -11560,6 +11561,7 @@ name = "project_footprint"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "libc",
  "log",
  "project",
  "settings",

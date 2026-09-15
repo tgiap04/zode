@@ -52,7 +52,10 @@ impl BranchPanel {
         let label: SharedString = worktree_label(worktree).into();
         let path: SharedString = worktree.path.display().to_string().into();
         let is_current = self.is_current_checkout(worktree, cx);
-        let is_pinned = self.pinned.contains(&worktree.path);
+        let is_pinned = self.pinned(cx).contains(&worktree.path);
+        let bypass_on = agent_ui::PermissionBypassStore::global(cx)
+            .read(cx)
+            .is_enabled(&worktree.path);
         let toggle_key = row.toggle_key();
         let switch_to = worktree.clone();
         let menu_for = worktree.clone();
@@ -115,6 +118,7 @@ impl BranchPanel {
                             // window is in is already said by the dot and the
                             // background, while which one is the repository's
                             // own is a fact about the repository.
+                            .children(super::bypass_mark(bypass_on))
                             .when(is_pinned, |this| {
                                 this.child(
                                     Icon::new(IconName::Pin)
@@ -137,7 +141,9 @@ impl BranchPanel {
                             .truncate(),
                     )
                     .children(self.render_agents(ix, agents, expanded, toggle_key, cx))
-                    .tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+                    .when(!self.menu_is_open(), |this| {
+                        this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
+                    })
                     .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                         panel.switch_to_worktree(&switch_to, window, cx);
                     }))
@@ -165,19 +171,29 @@ impl BranchPanel {
 
     /// Whether this window is looking at this checkout.
     ///
-    /// By path prefix rather than equality: a workspace can be rooted at a
-    /// subdirectory of the checkout, and it is still that checkout. The same
-    /// question `agents_by_checkout` asks to decide where a running agent
-    /// belongs, so the card's mark and the agent list cannot disagree about
-    /// where "here" is.
+    /// Through the same `checkout_containing` the agent list uses, and for the
+    /// same reason it exists: a bare prefix test says yes for every checkout a
+    /// root sits under, and a worktree kept inside the repository sits under
+    /// the main one too -- so both cards claimed to be the current checkout,
+    /// and "start an agent here" (`context_menu.rs`) could take the shortcut
+    /// meant for the checkout you are standing in while pointed at a different
+    /// one. Sharing the answer is what keeps the card's mark and the agent list
+    /// from disagreeing about where "here" is.
     pub(crate) fn is_current_checkout(&self, worktree: &GitWorktree, cx: &App) -> bool {
         let Some(workspace) = self.workspace.upgrade() else {
             return false;
         };
-        workspace
-            .read(cx)
-            .root_paths(cx)
+        let roots = workspace.read(cx).root_paths(cx);
+        self.repos
             .iter()
-            .any(|root| root.starts_with(&worktree.path))
+            .filter(|repo| {
+                repo.worktrees
+                    .iter()
+                    .any(|listed| listed.path == worktree.path)
+            })
+            .any(|repo| {
+                crate::branch_panel::data::checkout_containing(&repo.worktrees, &roots)
+                    .is_some_and(|here| here.path == worktree.path)
+            })
     }
 }

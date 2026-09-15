@@ -129,3 +129,30 @@ assertion that runs.
 **And a claim about the repository is a claim, not a background fact.** "No spec layer here"
 took four seconds to check and I did not spend them, so a three-week drift sat unmentioned
 through two deliveries.
+
+## Correction — 2026-09-13
+
+**This entry's "Windows and Linux are untested" line was accurate. What it understated is
+what that meant: four defects, not a caveat.**
+
+Everything here about the measurement discipline stands — the expensive decisions really
+were measured before they were made. The gap is that every measurement was taken on one
+Apple Silicon box, and the resulting figures went into module comments with no platform
+named beside them. Three of the four defects found on 2026-09-13 are invisible on exactly
+that machine:
+
+- `ProcessRefreshKind::nothing()` leaves `tasks` **on**, so on Linux every thread was
+  attributed as a process and its whole-process RSS summed once per thread — measured at 8x.
+  macOS never enumerates tasks.
+- The CPU denominator was `physical_core_count()` where `cpu_usage()`'s doc calls for the
+  logical CPU count. Equal only without SMT, which is to say only on Apple Silicon.
+- Summed RSS double-counts shared pages — 33% on Linux, **90% on macOS**, the one defect
+  here that the measuring machine showed worst and nobody looked for.
+
+The "12-15 ms / ~165 us" figures in `sysinfo_process_sampler.rs` have been annotated with
+the machine they came from rather than corrected, since they were never re-measured
+elsewhere.
+
+Full account, with the falsification table and the cross-checks against `top` and the
+kernel's own `smaps_rollup`:
+[2026-09-13-four-defects-that-only-apple-silicon-could-hide.md](2026-09-13-four-defects-that-only-apple-silicon-could-hide.md).

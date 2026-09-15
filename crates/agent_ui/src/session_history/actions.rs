@@ -1,7 +1,9 @@
 use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
 use agent_sessions::{AgentCommand, AgentKind, Deletion, Fork, SessionProvider, SessionSummary};
 use futures::{FutureExt as _, select_biased};
-use gpui::{App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, Window};
+use gpui::{
+    App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, Task, Window,
+};
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -371,9 +373,9 @@ async fn run_resolved_command_delete<C: gpui::AppContext>(
 /// Generic over the future that actually produces the process's output, which
 /// is what makes this independently testable: a real `smol::process` child
 /// plus its own OS reactor thread does not compose safely with
-/// `#[gpui::test]`'s deterministic dispatcher (phase 04 hit two different
-/// failure modes -- a wrong outcome once, a panic inside `blocking::Executor`'s
-/// thread pool the next -- trying exactly that). Passing the run as a plain
+/// `#[gpui::test]`'s deterministic dispatcher -- trying exactly that produced
+/// two different failure modes, a wrong outcome once and a panic inside
+/// `blocking::Executor`'s thread pool the next. Passing the run as a plain
 /// `Future` lets a test drive the timeout and the idempotency re-check with a
 /// value built by hand (`std::future::ready`/`std::future::pending`), with no
 /// subprocess and no reactor involved, so M6 and C2/H9 get a real test instead
@@ -486,10 +488,21 @@ fn notify_command_delete_failed(
 
 /// One session's worth of a bulk delete: the id to forget, and what has to
 /// happen to it before it may be forgotten.
-pub(crate) struct DeleteTarget {
-    pub(crate) id: Arc<str>,
-    pub(crate) agent: AgentKind,
-    pub(crate) deletion: Deletion,
+///
+/// Produced by [`plan_delete_all`] and consumed by [`execute_session_deletion`].
+/// A caller assembling its own bulk delete builds these from a session and the
+/// `Deletion` its provider reports, and hands the `Vec` straight to
+/// `execute_session_deletion` -- there is nothing else to do with one.
+pub struct DeleteTarget {
+    /// The session id to forget from the shared index once every path or
+    /// command below is confirmed gone.
+    pub id: Arc<str>,
+    /// The agent that owns this session, needed to resolve the right CLI for
+    /// a `Deletion::Command` target.
+    pub agent: AgentKind,
+    /// What this target actually takes: nothing, a set of paths to trash, or
+    /// a command to run against the agent's own store.
+    pub deletion: Deletion,
 }
 
 /// Everything a "delete all" will take, decided before anything is asked or
@@ -498,26 +511,34 @@ pub(crate) struct DeleteTarget {
 /// Built as plain data so the counts and the size in the confirmation are the
 /// same numbers the sweep then acts on -- a prompt that says "12 sessions" and
 /// a sweep that takes 14 is the kind of disagreement nobody notices until it
-/// has already happened.
-pub(crate) struct DeleteAll {
-    pub(crate) targets: Vec<DeleteTarget>,
+/// has already happened. A caller builds one with [`plan_delete_all`], reads
+/// [`Self::trashed`]/[`Self::commanded`]/[`Self::total_bytes`] to word its own
+/// confirmation (see [`delete_all_detail`]), then passes `targets` to
+/// [`execute_session_deletion`] once the user agrees.
+pub struct DeleteAll {
+    pub targets: Vec<DeleteTarget>,
     /// Only ever grown by `Trash` targets: a `Command` session has no file this
     /// editor can stat, so it always carries `log_bytes: 0` and would otherwise
     /// inflate this total with a number nobody measured.
-    pub(crate) total_bytes: u64,
+    pub total_bytes: u64,
 }
 
 impl DeleteAll {
-    pub(crate) fn count(&self) -> usize {
+    /// How many sessions the plan will take in total, trash and command
+    /// targets combined.
+    pub fn count(&self) -> usize {
         self.targets.len()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    /// Whether the plan takes nothing at all -- every in-scope session
+    /// answered `Deletion::Nothing`. A caller checks this before prompting:
+    /// there is nothing to confirm.
+    pub fn is_empty(&self) -> bool {
         self.targets.is_empty()
     }
 
     /// How many targets move to the OS trash and can be recovered from there.
-    pub(crate) fn trashed(&self) -> usize {
+    pub fn trashed(&self) -> usize {
         self.targets
             .iter()
             .filter(|target| matches!(target.deletion, Deletion::Trash(_)))
@@ -527,7 +548,7 @@ impl DeleteAll {
     /// How many targets go through their agent's own CLI and cannot be
     /// recovered. C1 exists because this number used to be invisible to the
     /// bulk prompt.
-    pub(crate) fn commanded(&self) -> usize {
+    pub fn commanded(&self) -> usize {
         self.targets
             .iter()
             .filter(|target| matches!(target.deletion, Deletion::Command(_)))
@@ -535,16 +556,17 @@ impl DeleteAll {
     }
 }
 
-/// The sessions a bulk delete may take: every one that ran inside this
-/// workspace's roots.
+/// The sessions a bulk delete may take: every one that ran inside `roots`.
 ///
 /// **It takes no query, and that is the point.** The panel's list is narrowed
 /// twice -- by project, then by whatever is typed in the search box -- and only
 /// the first narrowing belongs to a delete. A button that took "everything you
 /// can currently see" would quietly mean something different depending on a
 /// half-typed filter. Adding a `query` parameter here is how that regression
-/// would arrive, so there is nowhere to put one.
-pub(crate) fn sessions_in_project<'a>(
+/// would arrive, so there is nowhere to put one. A caller outside the panel
+/// passes whatever roots define its own scope -- a single checkout's path, for
+/// instance -- and feeds the result straight to [`plan_delete_all`].
+pub fn sessions_in_project<'a>(
     sessions: &'a [SessionSummary],
     roots: &'a [PathBuf],
 ) -> impl Iterator<Item = &'a SessionSummary> {
@@ -558,8 +580,11 @@ pub(crate) fn sessions_in_project<'a>(
 /// A session whose provider answers `Nothing` is dropped rather than carried:
 /// it has nothing on disk or in a store to take, so counting it would inflate
 /// the number in the prompt and forgetting it would drop a row describing
-/// something that is still there.
-pub(crate) fn plan_delete_all<'a>(
+/// something that is still there. A caller resolves each session's `Deletion`
+/// through its own provider lookup (`agent_sessions::provider_for` for a
+/// caller with no reason to cache providers), pairs it with the session, and
+/// hands the pairs here.
+pub fn plan_delete_all<'a>(
     scoped: impl IntoIterator<Item = (&'a SessionSummary, Deletion)>,
 ) -> DeleteAll {
     let mut targets = Vec::new();
@@ -585,6 +610,15 @@ pub(crate) fn plan_delete_all<'a>(
     }
 }
 
+/// The session-history panel's own scope sentence, passed to
+/// [`delete_all_detail`] as its `scope` argument. States plainly that the
+/// search box narrows what is *shown*, not what a bulk delete *takes* --
+/// wrong outside the panel, where there is no search box to disclaim, so a
+/// caller with a different scope (a single checkout's sessions, say) passes
+/// its own sentence instead of this one.
+pub const PROJECT_SCOPE: &str =
+    "Every session for this project goes, not just the ones the search shows.";
+
 /// The body of the confirmation.
 ///
 /// Branches on which kinds of session are in the plan (C1): a `Command`
@@ -594,12 +628,16 @@ pub(crate) fn plan_delete_all<'a>(
 /// never merged into one -- their consequences differ, and merging them is
 /// exactly how a bulk sweep would say "recoverable" about a batch that is not.
 ///
-/// The trashed-only branch is byte-for-byte the sentence this function always
-/// used to produce, so the common case reads exactly as it did before this
-/// phase.
-pub(crate) fn delete_all_detail(trashed: usize, commanded: usize, total_bytes: u64) -> String {
-    const SCOPE_SENTENCE: &str =
-        "Every session for this project goes, not just the ones the search shows.";
+/// `scope` is a sentence describing what the plan reaches -- the panel passes
+/// [`PROJECT_SCOPE`], a caller with a narrower or differently-worded scope
+/// passes its own. With `scope == PROJECT_SCOPE`, every branch below produces
+/// exactly the string this function always has.
+pub fn delete_all_detail(
+    trashed: usize,
+    commanded: usize,
+    total_bytes: u64,
+    scope: &str,
+) -> String {
     // `concat!` rather than one wrapped literal in every branch below: a
     // trailing-backslash continuation only strips the next line's indentation
     // while it survives the formatter, and when it does not the spaces land
@@ -612,12 +650,12 @@ pub(crate) fn delete_all_detail(trashed: usize, commanded: usize, total_bytes: u
             format!(
                 concat!(
                     "{count} session{plural} will move to the trash ({bytes}).\n\n",
-                    "Every session for this project goes, not just the ones the search ",
-                    "shows. They move to the OS trash and can be recovered from there.",
+                    "{scope} They move to the OS trash and can be recovered from there.",
                 ),
                 count = trashed,
                 plural = plural,
                 bytes = format_bytes(total_bytes),
+                scope = scope,
             )
         }
         (false, true) => {
@@ -630,7 +668,7 @@ pub(crate) fn delete_all_detail(trashed: usize, commanded: usize, total_bytes: u
                 ),
                 count = commanded,
                 plural = plural,
-                scope = SCOPE_SENTENCE,
+                scope = scope,
             )
         }
         (true, true) => {
@@ -649,7 +687,7 @@ pub(crate) fn delete_all_detail(trashed: usize, commanded: usize, total_bytes: u
                 bytes = format_bytes(total_bytes),
                 commanded = commanded,
                 command_plural = command_plural,
-                scope = SCOPE_SENTENCE,
+                scope = scope,
             )
         }
         // `plan.is_empty()` is checked before this is ever called, so this arm
@@ -698,6 +736,114 @@ fn offer_to_drop_the_row(session: &SessionSummary, window: &mut Window, cx: &mut
         store.update(cx, |store, cx| store.forget(&id, cx));
     })
     .detach();
+}
+
+/// Runs a plan already agreed to: takes every `target`, then forgets the ones
+/// it actually finished.
+///
+/// Free rather than a method on the panel, for the reason [`delete_session`]
+/// is: a second surface with its own targets -- a worktree checkout, for
+/// instance -- runs the identical sweep rather than reimplementing it. `fs`
+/// and the agent-server store are read off `workspace` once, up front, so the
+/// caller does not have to supply them separately.
+///
+/// Keeps every discipline the sweep already had: sequential `Command` runs
+/// (they are writers against one sqlite database in WAL mode, and N concurrent
+/// writers is contention at best), it never aborts early -- one failure must
+/// not strand the rest of the batch behind it -- and a session is forgotten
+/// only once everything it owns is confirmed gone, matching the rule
+/// [`delete_via_trash`] keeps for a single delete. `forget_many` runs through
+/// the global store handle rather than any particular panel, so a window
+/// closed mid-sweep still leaves the shared index agreeing with the disk.
+///
+/// The returned [`Task`] must be awaited or detached like any other -- dropped
+/// early, it cancels the rest of the sweep the same way any other `Task` would.
+pub fn execute_session_deletion(
+    workspace: &Entity<workspace::Workspace>,
+    targets: Vec<DeleteTarget>,
+    cx: &mut App,
+) -> Task<()> {
+    let fs = workspace.read(cx).project().read(cx).fs().clone();
+    let agent_store = workspace
+        .read(cx)
+        .project()
+        .read(cx)
+        .agent_server_store()
+        .clone();
+    let store = crate::SessionStore::global(cx);
+
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        let mut forget: HashSet<Arc<str>> = HashSet::default();
+        for target in targets {
+            // The unit of success is the session, not what it took to get
+            // there: a session is forgotten only once everything it owns
+            // is really gone, so a half-deleted session stays listed and
+            // keeps describing the truth. The sweep never aborts early
+            // either -- one failure must not strand the rest of the batch
+            // behind it. Commands run sequentially and one at a time.
+            match target.deletion {
+                Deletion::Nothing => {}
+                Deletion::Trash(paths) => {
+                    let mut every_path_gone = true;
+                    for path in &paths {
+                        let trashed = fs
+                            .trash(
+                                path,
+                                fs::RemoveOptions {
+                                    recursive: true,
+                                    ignore_if_not_exists: true,
+                                },
+                            )
+                            .await
+                            .log_err();
+                        if trashed.is_none() {
+                            every_path_gone = false;
+                        }
+                    }
+                    if every_path_gone {
+                        forget.insert(target.id);
+                    }
+                }
+                Deletion::Command(command) => {
+                    let provider = agent_sessions::provider_for(target.agent);
+                    let outcome = run_command_delete(
+                        &provider,
+                        &agent_store,
+                        &executor,
+                        target.agent,
+                        &target.id,
+                        &command,
+                        cx,
+                    )
+                    .await;
+                    match outcome {
+                        CommandDeleteOutcome::Gone => {
+                            forget.insert(target.id);
+                        }
+                        // A per-session toast for a sweep of two hundred is a
+                        // toast storm; the rows that stay behind are the
+                        // visible report, matching how a failed `fs.trash`
+                        // above is handled.
+                        CommandDeleteOutcome::BinaryMissing(missing) => {
+                            log::warn!(
+                                "bulk delete: {} missing, session {} kept",
+                                missing.binary,
+                                target.id
+                            );
+                        }
+                        CommandDeleteOutcome::Failed(message) => {
+                            log::warn!("bulk delete: session {} failed: {message}", target.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Through the store handle, not the panel: a window closed mid-sweep
+        // must still leave the shared index agreeing with the disk.
+        store.update(cx, |store, cx| store.forget_many(&forget, cx));
+    })
 }
 
 impl AgentHistoryPanel {
@@ -866,103 +1012,28 @@ impl AgentHistoryPanel {
                 plan.trashed(),
                 plan.commanded(),
                 plan.total_bytes,
+                PROJECT_SCOPE,
             )),
             buttons,
             cx,
         );
 
-        let fs = workspace.read(cx).project().read(cx).fs().clone();
-        let agent_store = workspace
-            .read(cx)
-            .project()
-            .read(cx)
-            .agent_server_store()
-            .clone();
-        let store = crate::SessionStore::global(cx);
         let targets = plan.targets;
 
         cx.spawn(async move |this, cx| {
             if prompt.await.ok() != Some(0) {
                 return;
             }
-            this.update(cx, |this, cx| {
+            let deletion = this.update(cx, |this, cx| {
                 this.deleting = true;
                 cx.notify();
-            })
-            .ok();
+                execute_session_deletion(&workspace, targets, cx)
+            });
+            let Ok(deletion) = deletion else {
+                return;
+            };
+            deletion.await;
 
-            let executor = cx.background_executor().clone();
-            let mut forget: HashSet<Arc<str>> = HashSet::default();
-            for target in targets {
-                // The unit of success is the session, not what it took to get
-                // there: a session is forgotten only once everything it owns
-                // is really gone, so a half-deleted session stays listed and
-                // keeps describing the truth. The sweep never aborts early
-                // either -- one failure must not strand the two hundred
-                // behind it. Commands run sequentially and one at a time: they
-                // are writers against one sqlite database in WAL mode, and N
-                // concurrent writers is contention at best.
-                match target.deletion {
-                    Deletion::Nothing => {}
-                    Deletion::Trash(paths) => {
-                        let mut every_path_gone = true;
-                        for path in &paths {
-                            let trashed = fs
-                                .trash(
-                                    path,
-                                    fs::RemoveOptions {
-                                        recursive: true,
-                                        ignore_if_not_exists: true,
-                                    },
-                                )
-                                .await
-                                .log_err();
-                            if trashed.is_none() {
-                                every_path_gone = false;
-                            }
-                        }
-                        if every_path_gone {
-                            forget.insert(target.id);
-                        }
-                    }
-                    Deletion::Command(command) => {
-                        let provider = agent_sessions::provider_for(target.agent);
-                        let outcome = run_command_delete(
-                            &provider,
-                            &agent_store,
-                            &executor,
-                            target.agent,
-                            &target.id,
-                            &command,
-                            cx,
-                        )
-                        .await;
-                        match outcome {
-                            CommandDeleteOutcome::Gone => {
-                                forget.insert(target.id);
-                            }
-                            // A per-session toast for a sweep of two hundred is a
-                            // toast storm; the rows that stay behind are the
-                            // visible report, matching how a failed `fs.trash`
-                            // above is handled.
-                            CommandDeleteOutcome::BinaryMissing(missing) => {
-                                log::warn!(
-                                    "bulk delete: {} missing, session {} kept",
-                                    missing.binary,
-                                    target.id
-                                );
-                            }
-                            CommandDeleteOutcome::Failed(message) => {
-                                log::warn!("bulk delete: session {} failed: {message}", target.id);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Through the store handle, not the panel: a window closed mid-sweep
-            // must still leave the shared index agreeing with the disk.
-            store.update(cx, |store, cx| store.forget_many(&forget, cx));
             this.update(cx, |this, cx| {
                 this.counts.clear();
                 this.deleting = false;
@@ -1190,9 +1261,9 @@ mod tests {
     #[test]
     fn the_prompt_is_prose_not_an_accidental_code_block() {
         for detail in [
-            delete_all_detail(3, 0, 4096),
-            delete_all_detail(0, 3, 0),
-            delete_all_detail(3, 3, 4096),
+            delete_all_detail(3, 0, 4096, PROJECT_SCOPE),
+            delete_all_detail(0, 3, 0, PROJECT_SCOPE),
+            delete_all_detail(3, 3, 4096, PROJECT_SCOPE),
         ] {
             for line in detail.lines() {
                 assert!(
@@ -1207,11 +1278,11 @@ mod tests {
     /// down to the byte, so the common case reads exactly as it always has.
     #[test]
     fn the_trashed_only_prompt_is_unchanged() {
-        let one = delete_all_detail(1, 0, 1024);
+        let one = delete_all_detail(1, 0, 1024, PROJECT_SCOPE);
         assert!(one.contains("1 session will"), "singular, got: {one}");
         assert!(one.contains("1 KB"), "got: {one}");
 
-        let many = delete_all_detail(42, 0, 13 * 1024 * 1024);
+        let many = delete_all_detail(42, 0, 13 * 1024 * 1024, PROJECT_SCOPE);
         assert!(many.contains("42 sessions will"), "plural, got: {many}");
         assert!(many.contains("13.0 MB"), "got: {many}");
 
@@ -1231,7 +1302,7 @@ mod tests {
     /// and an explicit, unambiguous statement that this cannot be undone.
     #[test]
     fn the_commanded_only_prompt_carries_no_byte_figure_and_says_it_cannot_be_undone() {
-        let one = delete_all_detail(0, 1, 0);
+        let one = delete_all_detail(0, 1, 0, PROJECT_SCOPE);
         assert!(one.contains("1 session will"), "singular, got: {one}");
         assert!(
             one.contains("cannot be undone"),
@@ -1242,7 +1313,7 @@ mod tests {
             "there is no byte figure to report for a Command-only plan, got: {one}"
         );
 
-        let many = delete_all_detail(0, 7, 0);
+        let many = delete_all_detail(0, 7, 0, PROJECT_SCOPE);
         assert!(many.contains("7 sessions will"), "plural, got: {many}");
     }
 
@@ -1250,7 +1321,7 @@ mod tests {
     /// merged total, which is exactly how C1's scenario happens.
     #[test]
     fn the_mixed_prompt_states_both_counts_separately() {
-        let detail = delete_all_detail(3, 40, 40 * 1024);
+        let detail = delete_all_detail(3, 40, 40 * 1024, PROJECT_SCOPE);
         assert!(
             detail.contains("3 session") && detail.contains("40 session"),
             "both counts must appear on their own, got: {detail}"
@@ -1267,6 +1338,30 @@ mod tests {
             !detail.contains("43 session"),
             "the two counts must never be merged into one total, got: {detail}"
         );
+    }
+
+    /// The parameterisation itself: a caller with its own scope sentence sees
+    /// that sentence in the output and never `PROJECT_SCOPE`'s -- proven in
+    /// both a branch that has a scope sentence on its own line (mixed) and
+    /// one that folds it into the middle of a paragraph (trashed-only).
+    #[test]
+    fn a_caller_scope_replaces_the_project_sentence() {
+        const WORKTREE_SCOPE: &str = "Every session under this checkout goes.";
+
+        let trashed_only = delete_all_detail(1, 0, 1024, WORKTREE_SCOPE);
+        assert!(
+            trashed_only.contains(WORKTREE_SCOPE),
+            "the caller's own scope sentence must appear, got: {trashed_only}"
+        );
+        assert!(
+            !trashed_only.contains(PROJECT_SCOPE),
+            "the panel's scope sentence must not leak into another caller's \
+             prompt, got: {trashed_only}"
+        );
+
+        let mixed = delete_all_detail(3, 40, 40 * 1024, WORKTREE_SCOPE);
+        assert!(mixed.contains(WORKTREE_SCOPE), "got: {mixed}");
+        assert!(!mixed.contains(PROJECT_SCOPE), "got: {mixed}");
     }
 
     /// M3: opencode's real failure output, byte for byte. "Trim control

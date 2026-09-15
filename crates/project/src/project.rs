@@ -1,3 +1,4 @@
+pub mod agent_bypass;
 pub mod agent_server_store;
 pub mod bookmark_store;
 pub mod buffer_store;

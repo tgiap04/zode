@@ -99,6 +99,70 @@ pub(crate) fn line_is_message(line: &str) -> bool {
     line.contains(r#""type":"user""#) || line.contains(r#""type":"assistant""#)
 }
 
+/// The tool calls this stretch of transcript reports a result for.
+///
+/// How a subagent's ending is known. The sidecar records the `toolUseId` the
+/// parent used to spawn it; the parent's own transcript later carries a
+/// `tool_result` block under that same id. Both were read off a finished
+/// session before this was written -- the `tool_use` that starts a subagent and
+/// the `tool_result` that ends it are two lines of the parent's log.
+///
+/// The alternative was the subagent's own file, and it was measured and
+/// rejected: within a single run the gap between writes reached 165 seconds, so
+/// no staleness threshold can tell a thinking subagent from a finished one.
+///
+/// Same substring guard as [`line_is_message`], for the same reason -- most
+/// lines here are assistant messages that can run to hundreds of kilobytes, and
+/// parsing all of them to find the few that carry a result costs the budget.
+/// A line that said `tool_result` and could not be understood is **skipped and
+/// never revisited** — the caller advances its cursor past every complete line,
+/// parsed or not. That is a deliberate choice between two bad options: retrying
+/// it would re-read the same unreadable bytes on every pass forever, growing the
+/// read without ever making progress. The cost of skipping is that the subagent
+/// that line was ending stays marked as running until its session's CLI exits.
+///
+/// So it is logged. A spinner that will not stop is a bug someone will report,
+/// and this is the line in the log that explains it.
+pub(crate) fn completed_tool_uses(chunk: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in chunk.lines() {
+        if !line.contains(r#""tool_result""#) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            log::warn!(
+                "a transcript line naming a tool result is not valid JSON; the \
+                 subagent it ends will read as still running"
+            );
+            continue;
+        };
+        let blocks = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array);
+        // Not every line mentioning the word carries a result block -- a user
+        // message can say "tool_result" in prose -- so an absent one is normal
+        // and silent. It is a *result block this code cannot read* that is
+        // worth saying something about, and that is the case below.
+        let Some(blocks) = blocks else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            match block.get("tool_use_id").and_then(Value::as_str) {
+                Some(id) => ids.push(id.to_owned()),
+                None => log::warn!(
+                    "a tool result carries no readable `tool_use_id`; the \
+                     subagent it ends will read as still running"
+                ),
+            }
+        }
+    }
+    ids
+}
+
 enum EntryKind {
     AiTitle(String),
     Message {
@@ -223,6 +287,68 @@ not json at all
         // The branch of the *last* line that carried one, not the first.
         assert_eq!(facts.branch.as_deref(), Some("feat/x"));
         assert_eq!(facts.model.as_deref(), Some("claude-opus-5"));
+    }
+
+    /// The two lines that bracket a subagent, copied from a finished session on
+    /// disk: the `tool_use` that spawned it and the `tool_result` that ended it,
+    /// under one `toolUseId`. Only the second is an ending, and reading the
+    /// first as one would mark every subagent finished the moment it started.
+    const SUBAGENT_BRACKET: &str = r#"
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_started","name":"Task"}]}}
+{"type":"attachment","attachment":{}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_finished","is_error":false,"content":"done"}]}}
+"#;
+
+    #[test]
+    fn only_a_result_ends_a_subagent_not_the_call_that_started_it() {
+        assert_eq!(
+            completed_tool_uses(SUBAGENT_BRACKET),
+            vec!["toolu_finished"]
+        );
+    }
+
+    #[test]
+    fn a_transcript_with_no_results_ends_nothing() {
+        assert!(completed_tool_uses(TAIL).is_empty());
+        assert!(completed_tool_uses("").is_empty());
+    }
+
+    /// The chosen behaviour on a result nobody can read, pinned so it is a
+    /// decision rather than an accident.
+    ///
+    /// The line is skipped, and the caller will advance its cursor past it and
+    /// never look again. The alternative — refusing to advance — re-reads the
+    /// same unreadable bytes on every pass forever without ever getting
+    /// further, which is worse. The visible cost is that the subagent that line
+    /// was ending stays marked running, which is why the skip is logged.
+    #[test]
+    fn a_result_that_cannot_be_read_is_skipped_and_does_not_stop_the_rest() {
+        let mixed = concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_good"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result",}]}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":42}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_after"}]}}"#,
+        );
+        assert_eq!(
+            completed_tool_uses(mixed),
+            vec!["toolu_good", "toolu_after"],
+            "one unreadable result must not cost the readable ones around it"
+        );
+    }
+
+    /// The substring guard in front of the parse must not change the answer —
+    /// it exists to skip hundred-kilobyte assistant lines, not to drop results.
+    #[test]
+    fn the_word_alone_is_not_a_result() {
+        let decoys = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"the tool_result never arrived"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"tool_result"}]}}"#,
+        );
+        assert!(completed_tool_uses(decoys).is_empty());
     }
 
     #[test]

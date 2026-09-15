@@ -3,18 +3,25 @@ use crate::agent_icon;
 use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
-    Task, WeakEntity, Window,
+    AnyElement, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
+    SharedString, Subscription, Task, WeakEntity, Window,
 };
+use project::agent_bypass::BypassCheck;
+use project::agent_server_store::AgentServerStore;
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
+
+use crate::permission_bypass::PermissionBypassStore;
+use crate::subagents::{SubagentTracker, provider_for_agent};
+use agent_sessions::SubagentSummary;
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal::Terminal;
 use terminal_view::TerminalView;
-use ui::prelude::*;
+use ui::{CommonAnimationExt as _, Tooltip, prelude::*};
 use workspace::{Pane, Workspace};
-use zed_actions::agent::AgentViewMode;
+use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
 use std::process::ExitStatus;
+use std::sync::Arc;
 use util::ResultExt as _;
 
 /// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
@@ -41,6 +48,74 @@ const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 /// working one, which is the only property it needs.
 const RESPONDING_WRITES: usize = 8;
 
+/// How often a live tab re-asks whether its agent is answering.
+///
+/// Polled rather than driven by an event, for the reason the branch panel's own
+/// tick gives: nothing happens when an agent starts or stops answering except
+/// the rate at which a pty is written to, and there is no event for a rate.
+///
+/// Matched to the branch panel's 250ms so the same fact does not appear in two
+/// places a quarter of a second apart.
+const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a change has to hold before the mark follows it.
+const RESPONDING_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The same delay, counted in ticks — which is the only clock the loop has.
+///
+/// Derived rather than written out, so the two cannot drift apart when one of
+/// them is tuned. Counted rather than timed because reaching for a real clock
+/// would mean either `Instant::now`, which a test's fake timers do not move, or
+/// a dependency on the scheduler crate for one type. A tick that arrives late
+/// makes the wait longer than two seconds, which costs this nothing: the point
+/// is to outlast a flicker, not to measure one.
+const RESPONDING_DEBOUNCE_TICKS: u32 =
+    (RESPONDING_DEBOUNCE.as_millis() / ACTIVITY_TICK.as_millis()) as u32;
+
+/// How long between subagent scans.
+///
+/// Slower than the mark's own tick because it costs file reads, and because
+/// what it watches moves at human speed: a subagent starting or finishing is
+/// not a four-times-a-second event. One second still lands well inside the
+/// two-second debounce above, so nothing it reports is late to the mark.
+const SUBAGENT_SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether the mark should change, given what the terminal says on this tick.
+///
+/// Both edges by one rule: a new answer has to survive
+/// [`RESPONDING_DEBOUNCE_TICKS`] ticks in a row before the mark follows it. An
+/// agent crosses the write-rate threshold repeatedly inside a single reply — it
+/// pauses to read a file, to run a command, to wait on the model — and a mark
+/// that followed every crossing would strobe for the length of the answer.
+///
+/// The delay on the *appearing* edge is deliberate, not an oversight of the
+/// other one. A mark that appears instantly and leaves slowly still strobes;
+/// it just strobes with a longer off-beat.
+///
+/// `None` means leave the mark alone. A free function because it is the whole
+/// rule and the loop that calls it cannot be run without a pty.
+fn settle(pending: &mut Option<(bool, u32)>, raw: bool, shown: bool) -> Option<bool> {
+    if raw == shown {
+        // Whatever was building has been contradicted before it landed.
+        *pending = None;
+        return None;
+    }
+    let ticks = match pending {
+        Some((wanted, ticks)) if *wanted == raw => {
+            *ticks += 1;
+            *ticks
+        }
+        _ => {
+            *pending = Some((raw, 1));
+            1
+        }
+    };
+    (ticks >= RESPONDING_DEBOUNCE_TICKS).then(|| {
+        *pending = None;
+        raw
+    })
+}
+
 pub struct AgentView {
     /// Which session this tab belongs to, and what that session was called when
     /// the tab opened onto it. See [`SessionOrigin`].
@@ -51,6 +126,21 @@ pub struct AgentView {
     /// are otherwise the same word twice, which is no help in telling apart the
     /// two conversations the `+` menu exists to let you run.
     custom_name: Option<SharedString>,
+    /// Whether the process this tab is showing was spawned with a permission
+    /// bypass flag. Read through [`Self::runs_without_prompts`].
+    ///
+    /// Recorded at spawn and never recomputed. Reading
+    /// `PermissionBypassStore` at render time would report what is true *now*,
+    /// so switching the checkout's toggle off would unmark a tab whose agent is
+    /// still running unprompted. An argv cannot be edited after the fact and
+    /// this field must not either.
+    bypassed: bool,
+    /// What this tab was *asked* for when it was opened, kept for the life of
+    /// the tab so a retry after a missing binary asks for the same thing again.
+    ///
+    /// A request, where `bypassed` is an outcome: this says what was wanted,
+    /// that says what the argv actually carried.
+    requested_prompts: PermissionPrompts,
     rename_editor: Option<Entity<Editor>>,
     _rename_subscription: Option<Subscription>,
     mode: AgentViewMode,
@@ -70,6 +160,25 @@ pub struct AgentView {
     _exit_watch: Option<Task<()>>,
     /// Carries the shell's own `CloseItem` outward. See [`AgentView::hand_back_a_shell`].
     _shell_close: Option<Subscription>,
+    /// Whether the agent was answering as of the last [`ACTIVITY_TICK`].
+    ///
+    /// A sampled field rather than a call at draw time, for two reasons. The
+    /// mark it drives animates, and an animation re-renders the *pane* on every
+    /// frame — so a render-time [`Self::is_responding`] would walk the
+    /// terminal's write history sixty times a second to answer a question that
+    /// changes four times a second. And a field is settable, which is the only
+    /// way the rules drawn from it can be tested: making `is_responding` true
+    /// needs a real pty.
+    responding: bool,
+    /// Polls [`Self::is_responding`] while this tab's agent is alive. See
+    /// [`AgentView::track_responding`].
+    _activity_tick: Option<Task<()>>,
+    /// Reads the session's subagents while its agent is alive, on its own beat.
+    /// See [`AgentView::track_subagents`].
+    _subagent_tick: Option<Task<()>>,
+    /// This session's subagents, and which of them are still working. Followed
+    /// by the same tick, at a slower cadence — see [`SUBAGENT_SCAN_EVERY`].
+    subagents: SubagentTracker,
 }
 
 enum State {
@@ -101,6 +210,14 @@ enum State {
 
 pub enum AgentViewEvent {
     UpdateTab,
+    /// The agent started or stopped answering, so the tab has a different mark
+    /// to draw.
+    ///
+    /// Separate from [`Self::UpdateTab`] because the two differ in what they
+    /// are worth writing down: a rename belongs in the persisted row, and an
+    /// agent drawing breath does not. `should_serialize` is where that split
+    /// is spent — see its doc.
+    Activity,
     /// The shell this tab handed back has exited, so the tab goes with it.
     Close,
 }
@@ -173,7 +290,15 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_inner(workspace, agent, mode, false, window, cx);
+        Self::open_inner(
+            workspace,
+            agent,
+            mode,
+            false,
+            PermissionPrompts::AsConfigured,
+            window,
+            cx,
+        );
     }
 
     /// Same, but always starts a fresh session even if one is already running.
@@ -184,10 +309,11 @@ impl AgentView {
         workspace: &mut Workspace,
         agent: &str,
         mode: Option<AgentViewMode>,
+        prompts: PermissionPrompts,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_inner(workspace, agent, mode, true, window, cx);
+        Self::open_inner(workspace, agent, mode, true, prompts, window, cx);
     }
 
     /// Starts a fresh thread in a pane the caller names.
@@ -203,7 +329,16 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_into(workspace, agent, None, true, Some(pane), window, cx);
+        Self::open_into(
+            workspace,
+            agent,
+            None,
+            true,
+            PermissionPrompts::AsConfigured,
+            Some(pane),
+            window,
+            cx,
+        );
     }
 
     fn open_inner(
@@ -211,10 +346,13 @@ impl AgentView {
         agent: &str,
         mode: Option<AgentViewMode>,
         always_new: bool,
+        prompts: PermissionPrompts,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        Self::open_into(workspace, agent, mode, always_new, None, window, cx);
+        Self::open_into(
+            workspace, agent, mode, always_new, prompts, None, window, cx,
+        );
     }
 
     /// The one body behind every entry point above.
@@ -226,6 +364,7 @@ impl AgentView {
         agent: &str,
         mode: Option<AgentViewMode>,
         always_new: bool,
+        prompts: PermissionPrompts,
         destination: Option<Entity<Pane>>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
@@ -281,6 +420,7 @@ impl AgentView {
                             project,
                             workspace.weak_handle(),
                             origin,
+                            prompts,
                             window,
                             cx,
                         )
@@ -398,6 +538,7 @@ impl AgentView {
         project: Entity<Project>,
         workspace: WeakEntity<Workspace>,
         origin: SessionOrigin,
+        prompts: PermissionPrompts,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -406,6 +547,8 @@ impl AgentView {
             display_name: display_name(&agent),
             agent,
             custom_name: None,
+            bypassed: false,
+            requested_prompts: prompts,
             rename_editor: None,
             _rename_subscription: None,
             mode,
@@ -417,6 +560,10 @@ impl AgentView {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         };
         view.start(window, cx);
         view
@@ -454,6 +601,7 @@ impl AgentView {
                             project,
                             weak_workspace,
                             origin,
+                            PermissionPrompts::AsConfigured,
                             window,
                             cx,
                         )
@@ -492,6 +640,8 @@ impl AgentView {
             display_name: display_name(&agent),
             agent,
             custom_name: None,
+            bypassed: false,
+            requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
             _rename_subscription: None,
             mode,
@@ -503,6 +653,10 @@ impl AgentView {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         }
     }
 
@@ -577,6 +731,153 @@ impl AgentView {
                         .pty_writes_within(RESPONDING_WINDOW),
                 )
             })
+    }
+
+    /// Keeps [`Self::responding`] following the agent for as long as it runs,
+    /// and tells the pane when the answer changes.
+    ///
+    /// Lives only while the CLI does: the loop ends the first time the tab is
+    /// no longer showing a running agent, which covers both an agent that exits
+    /// and a tab that has swapped its terminal for a shell.
+    ///
+    /// Emits on the edges only. The pane's reaction to `UpdateTab` reaches the
+    /// workspace as well, and a tab that raised it four times a second for the
+    /// length of a conversation would be paying that for the three hundred and
+    /// ninety-six ticks out of four hundred where nothing changed.
+    fn track_responding(&mut self, cx: &mut Context<Self>) {
+        self._activity_tick = Some(cx.spawn(async move |this, cx| {
+            let mut pending: Option<(bool, u32)> = None;
+
+            loop {
+                cx.background_executor().timer(ACTIVITY_TICK).await;
+
+                // A failed update means the tab is gone, and so is the task
+                // about to be dropped with it.
+                let Ok(still_running) = this.update(cx, |this, cx| {
+                    let working = this.is_working(cx);
+                    // A subagent counts. Its output reaches the same pty, but
+                    // not at the same rate: a CLI waiting on one repaints a
+                    // spinner once or twice a second, which is under the
+                    // threshold `is_responding` needs, so the tab would go dark
+                    // for the minutes a subagent takes. The session is working
+                    // the whole time.
+                    let raw = working && (this.is_responding(cx) || this.subagents.any_running());
+                    // The debounce holds a mark steady across the pauses inside
+                    // one answer. It must not hold one over a process that has
+                    // ended: there is nothing left to flicker, and the wait
+                    // would be two seconds of a spinner above a dead prompt.
+                    let settled = if working {
+                        settle(&mut pending, raw, this.responding)
+                    } else {
+                        pending = None;
+                        Some(false)
+                    };
+                    if let Some(settled) = settled
+                        && settled != this.responding
+                    {
+                        this.responding = settled;
+                        cx.emit(AgentViewEvent::Activity);
+                    }
+                    working
+                }) else {
+                    return;
+                };
+                // Asked after the comparison above, never instead of it: an
+                // agent that exits mid-answer goes from working-and-responding
+                // to neither, and leaving on the spot would leave the mark lit
+                // over a process that has ended.
+                if !still_running {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Reads this session's subagents for as long as its agent runs.
+    ///
+    /// A loop of its own rather than a branch inside [`Self::track_responding`],
+    /// which is where it started. That loop decides whether the mark is lit and
+    /// notices when the CLI exits, and both of those have to keep to their own
+    /// beat: a first pass over a multi-megabyte transcript, or a home directory
+    /// on a stalled network mount, would otherwise hold the mark and the exit
+    /// check behind however long a disk takes. Two loops, and neither waits on
+    /// the other.
+    fn track_subagents(&mut self, cx: &mut Context<Self>) {
+        // Resolved once, outside the loop: neither can change for the life of
+        // a tab, and both are needed on the first pass.
+        let Some(provider) = provider_for_agent(&self.agent) else {
+            return;
+        };
+        // Nothing to look up. An untracked tab holds no session id, so there is
+        // no sidecar to find and no subagent it could name -- stated here by
+        // not starting the loop at all, rather than discovered once a second as
+        // an empty list.
+        let SessionIntent::Tracked(session_id) = &self.origin.intent else {
+            return;
+        };
+        let session_id = session_id.clone();
+
+        self._subagent_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok((session, from)) = this.read_with(cx, |this, _| this.subagents.cursor())
+                else {
+                    return;
+                };
+                // Off the UI thread: this opens files, and one of them is a
+                // transcript that reaches megabytes on its first pass.
+                let pass = cx
+                    .background_spawn({
+                        let provider = provider.clone();
+                        let session_id = session_id.clone();
+                        async move { SubagentTracker::scan(&provider, session, session_id, from) }
+                    })
+                    .await;
+
+                let Ok(still_running) = this.update(cx, |this, cx| {
+                    this.subagents.apply(pass);
+                    // The panel draws a row per subagent off this, and the tab's
+                    // own mark follows `any_running` on its next tick.
+                    cx.notify();
+                    this.is_working(cx)
+                }) else {
+                    return;
+                };
+                if !still_running {
+                    return;
+                }
+
+                cx.background_executor().timer(SUBAGENT_SCAN_EVERY).await;
+            }
+        }));
+    }
+
+    /// This session's subagents, newest first.
+    ///
+    /// Empty until the first scan lands, and empty for good on an untracked tab
+    /// or an agent whose store this editor cannot read — only Claude keeps a
+    /// sidecar naming them.
+    pub fn subagents(&self) -> &Arc<[SubagentSummary]> {
+        self.subagents.subagents()
+    }
+
+    /// Whether this subagent is still working.
+    pub fn subagent_is_running(&self, subagent: &SubagentSummary) -> bool {
+        self.subagents.is_running(subagent)
+    }
+
+    /// Whether any of them is.
+    pub fn any_subagent_running(&self) -> bool {
+        self.subagents.any_running()
+    }
+
+    /// Whether this tab's mark says it is answering.
+    ///
+    /// The debounced answer, not [`Self::is_responding`]'s raw one, and the only
+    /// one anything outside this file should read: a panel drawing the raw
+    /// value beside a tab drawing the settled one would disagree several times
+    /// inside every reply.
+    pub fn is_answering(&self) -> bool {
+        self.responding
     }
 
     /// What the tab shows: the name the user gave this session, or the agent's.
@@ -711,6 +1012,12 @@ impl AgentView {
         // install the one that replaces it.
         self._exit_watch = None;
         self._shell_close = None;
+        // Cleared together: the tick is what keeps the flag honest, so a flag
+        // left set with no tick behind it would spin a mark over a tab that is
+        // starting from scratch.
+        self._activity_tick = None;
+        self._subagent_tick = None;
+        self.responding = false;
         let previous = std::mem::replace(&mut self.state, State::Starting);
         Self::warn_if_retained(&previous, cx);
         drop(previous);
@@ -859,6 +1166,7 @@ impl AgentView {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
         let intent = self.origin.intent.clone();
+        let prompts = self.requested_prompts;
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         let store = project.read(cx).agent_server_store().clone();
@@ -906,7 +1214,7 @@ impl AgentView {
             // the task that was already awaiting the binary, rather than at
             // construction, because a tab has to be able to exist before it knows
             // whether its session is still on disk.
-            let session = match resolve_session(&agent, &intent, default_cwd, cx).await {
+            let session = match resolve_session(&agent, &intent, default_cwd.clone(), cx).await {
                 SessionStart::Fresh => None,
                 SessionStart::Command(command) => Some(command),
                 SessionStart::Gone => {
@@ -920,16 +1228,42 @@ impl AgentView {
                 }
             };
 
+            // The directory the agent will actually run in. A resumed session
+            // runs where it ran before, not where this window happens to be
+            // pointed: the conversation's context is that directory. Resolved
+            // once, here, because the bypass is looked up against it and
+            // `agent_task` spawns in it -- deriving it twice is how the lookup
+            // and the spawn come to disagree about which checkout this is.
+            let cwd = launch_cwd(session.as_ref(), default_cwd);
+
+            let extra_args =
+                match resolve_bypass(&agent, &binary, cwd.as_deref(), prompts, &store, cx).await {
+                    Ok(extra_args) => extra_args,
+                    Err(refusal) => {
+                        this.update(cx, |this, cx| {
+                            this.state = State::Failed(refusal);
+                            cx.emit(AgentViewEvent::UpdateTab);
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+            let extra_args_taken = extra_args.clone();
             let terminal = project
                 .update(cx, |project, cx| {
                     project.create_terminal_task(
-                        agent_task(&agent, binary, session.as_ref(), project, cx),
+                        agent_task(&agent, binary, session.as_ref(), extra_args, cwd),
                         cx,
                     )
                 })
                 .await;
 
             this.update_in(cx, |this, window, cx| {
+                // Set here, beside the terminal the args went into, so the field
+                // and the argv are decided in one place and cannot drift.
+                this.bypassed = !extra_args_taken.is_empty();
                 match terminal {
                     Ok(terminal) => {
                         // Taken before the handle is given away, and from the
@@ -948,6 +1282,8 @@ impl AgentView {
                         });
                         this.state = State::Terminal(view);
                         this.watch_for_exit(completed, window, cx);
+                        this.track_responding(cx);
+                        this.track_subagents(cx);
                     }
                     Err(error) => this.state = State::Failed(SharedString::from(error.to_string())),
                 }
@@ -1250,12 +1586,152 @@ enum SessionStart {
 /// Which command it is — resume this session, start one under a chosen id, or
 /// nothing at all — is decided in `start`, where the store can be read on a
 /// background thread. This function does not choose.
+/// Where the agent will run.
+///
+/// A resumed session runs where it ran before, not where this window happens to
+/// be pointed: the conversation's context is that directory. The precedence used
+/// to live inside `agent_task`; it is a free function now because the bypass is
+/// looked up against this value and the spawn uses it, and one of the two moving
+/// without the other is the defect worth a test of its own.
+fn launch_cwd(
+    session: Option<&AgentCommand>,
+    default_cwd: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    session.map(|session| session.cwd.clone()).or(default_cwd)
+}
+
+impl AgentView {
+    /// Whether this tab's agent was started without permission prompts.
+    ///
+    /// Reads the field recorded at spawn and deliberately not
+    /// `PermissionBypassStore`: the store says what is true *now*, and a reader
+    /// who switches the checkout's toggle off would watch the mark vanish from a
+    /// tab whose agent is still running unprompted. The mark draws through this
+    /// accessor so it and any test cannot end up looking at different things.
+    pub(crate) fn runs_without_prompts(&self) -> bool {
+        self.bypassed
+    }
+}
+
+/// The extra arguments this launch should carry, or the reason it must not
+/// happen at all.
+///
+/// Fails closed on every uncertain answer. A checkout whose bypass is on and
+/// whose flag cannot be confirmed present does **not** fall through to a plain
+/// launch: the reader turned the prompts off deliberately, and an agent that
+/// silently keeps asking is a quieter failure than a refusal but a worse one --
+/// they would discover it only by watching the agent stop and wait.
+async fn resolve_bypass(
+    agent: &AgentId,
+    binary: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    prompts: PermissionPrompts,
+    store: &Entity<AgentServerStore>,
+    cx: &mut AsyncWindowContext,
+) -> Result<Vec<String>, SharedString> {
+    // Only `AsConfigured` has to go and ask the checkout; a launch the reader
+    // picked by name has already said what it wants. Which is also why the
+    // missing-cwd guard lives in that arm alone -- a one-off must not quietly
+    // fall back to prompting because this window happens to have no folder
+    // open, since the reader would then watch it stop and wait with no reason
+    // given.
+    let wanted = match prompts {
+        PermissionPrompts::SkipOnce => true,
+        PermissionPrompts::AsConfigured => {
+            let Some(cwd) = cwd else {
+                return Ok(Vec::new());
+            };
+            let bypass = cx.update(|_, cx| PermissionBypassStore::global(cx));
+            let Ok(bypass) = bypass else {
+                return Ok(Vec::new());
+            };
+            bypass.update(cx, |bypass, cx| bypass.load(cx)).await;
+            bypass.read_with(cx, |bypass, _| bypass.is_enabled(cwd))
+        }
+    };
+    if !wanted {
+        return Ok(Vec::new());
+    }
+
+    let name = builtin_agent(agent.as_ref())
+        .map(|builtin| builtin.display_name)
+        .unwrap_or_else(|| agent.as_ref());
+
+    let Some(flag) = builtin_agent(agent.as_ref()).and_then(|builtin| builtin.bypass_flag) else {
+        return Err(no_mapping_refusal(name, prompts));
+    };
+
+    let check = store
+        .update(cx, |store, cx| {
+            store.verify_bypass_flag(agent, binary.to_path_buf(), cx)
+        })
+        .await;
+
+    bypass_outcome(name, flag, check)
+}
+
+/// An agent this editor knows no auto-approve flag for, in a checkout set to run
+/// without prompts.
+///
+/// A refusal and not a plain launch. Launching looks like the forgiving choice
+/// and is the dangerous one: the reader turned the prompts off on purpose, and
+/// an agent that goes on asking anyway is a failure they find out about by
+/// watching it stall.
+fn no_mapping_refusal(name: &str, prompts: PermissionPrompts) -> SharedString {
+    match prompts {
+        // Named the checkout, because that is what the reader has to change.
+        PermissionPrompts::AsConfigured => format!(
+            "{name} has no flag for running without permission prompts, and this \
+             checkout is set to run agents without them. Turn that off for this \
+             checkout to start {name} here."
+        ),
+        // Nothing to turn off -- the request was this launch and no more, so
+        // the only move left is to start it the ordinary way.
+        PermissionPrompts::SkipOnce => format!(
+            "{name} has no flag for running without permission prompts, so it \
+             cannot be started without them. Start it normally instead."
+        ),
+    }
+    .into()
+}
+
+/// What a verified, absent or unprobeable flag means for the launch.
+///
+/// Split from the I/O that feeds it so the decision can be tested without a
+/// window, a store, or the agent's CLI installed -- the same reason phase 01's
+/// parser is a free function. Every arm that is not `Present` refuses, and each
+/// says which of the two it was, because "the flag is gone" and "nobody could
+/// tell" call for different next moves from the reader.
+fn bypass_outcome(name: &str, flag: &str, check: BypassCheck) -> Result<Vec<String>, SharedString> {
+    match check {
+        BypassCheck::Present => Ok(vec![flag.to_string()]),
+        BypassCheck::Absent { flag, binary } => Err(format!(
+            "{name} was asked to run without permission prompts, but `{flag}` is \
+             not in `{} --help`. The installed CLI no longer takes that flag.",
+            binary.display()
+        )
+        .into()),
+        BypassCheck::Unprobed { reason } => Err(format!(
+            "{name} was asked to run without permission prompts, but whether \
+             `{flag}` is still supported could not be checked: {reason}."
+        )
+        .into()),
+    }
+}
+
+/// `cwd` is resolved by the caller rather than here, because the permission
+/// bypass is looked up against the directory the agent will run in and the two
+/// must be the same value. Deriving it twice is how they come to disagree.
+///
+/// `extra_args` is appended after the session's own. A session's args carry an
+/// id or a resume flag and are positionally meaningful to some CLIs; a bypass
+/// flag is not, so it goes last.
 fn agent_task(
     agent: &AgentId,
     binary: std::path::PathBuf,
     session: Option<&AgentCommand>,
-    project: &Project,
-    cx: &App,
+    extra_args: Vec<String>,
+    cwd: Option<std::path::PathBuf>,
 ) -> SpawnInTerminal {
     let label = builtin_agent(agent.as_ref())
         .map(|builtin| builtin.display_name.to_string())
@@ -1267,17 +1743,14 @@ fn agent_task(
         label,
         command_label: binary.to_string_lossy().into_owned(),
         command: Some(binary.to_string_lossy().into_owned()),
-        args: session
-            .map(|session| session.args.clone())
-            .unwrap_or_default(),
-        // A resumed session runs where it ran before, not where this window
-        // happens to be pointed: the conversation's context is that directory.
-        cwd: session.map(|session| session.cwd.clone()).or_else(|| {
-            project
-                .visible_worktrees(cx)
-                .next()
-                .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
-        }),
+        args: {
+            let mut args = session
+                .map(|session| session.args.clone())
+                .unwrap_or_default();
+            args.extend(extra_args);
+            args
+        },
+        cwd,
         reveal: RevealStrategy::Never,
         hide: HideStrategy::Never,
         show_summary: false,
@@ -1301,7 +1774,11 @@ impl workspace::item::Item for AgentView {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
         match event {
-            AgentViewEvent::UpdateTab => f(workspace::item::ItemEvent::UpdateTab),
+            // The same outward event: `UpdateTab` is how an item asks its pane
+            // to redraw the tab, and that is all either of these wants.
+            AgentViewEvent::UpdateTab | AgentViewEvent::Activity => {
+                f(workspace::item::ItemEvent::UpdateTab)
+            }
             AgentViewEvent::Close => f(workspace::item::ItemEvent::CloseItem),
         }
     }
@@ -1316,10 +1793,16 @@ impl workspace::item::Item for AgentView {
     /// editor appears, which moves the tab the user just clicked out from under
     /// the pointer. The label stays, drawn transparent, and holds the width.
     ///
-    /// The label only — no icon. The pane draws that from `tab_icon` below, and
+    /// No agent glyph here. The pane draws that from `tab_icon` below, and
     /// sizes and mutes it to match every other tab; drawing one here as well put
     /// two agent glyphs on the tab. `TerminalView`, which this is modelled on,
     /// gets away with its own icon because it implements no `tab_icon` at all.
+    ///
+    /// The spinner is the one icon drawn here, and only because `tab_icon` hands
+    /// its slot over for exactly as long as it is: an `Icon` cannot be animated,
+    /// so the mark has to be built where elements are. It is not a second glyph
+    /// beside the first — it is the first one's place, borrowed. Anything else
+    /// added here is the duplicate this paragraph is warning about.
     fn tab_content(
         &self,
         params: workspace::item::TabContentParams,
@@ -1340,6 +1823,38 @@ impl workspace::item::Item for AgentView {
                         .ok();
                 }
             })
+            // First, in the place `tab_icon` has given up while this is drawn:
+            // the glyph that says which agent and the mark that says it is
+            // working occupy one slot, so the label never shifts.
+            //
+            // The same spinner, colour and speed the worktree panel gives the
+            // same fact. A second vocabulary for one meaning is how a mark
+            // stops carrying information.
+            .children(self.responding.then(|| {
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::Small)
+                    .color(Color::Accent)
+                    // Keyed by the tab: every agent tab shares this call site,
+                    // and one id for all of them is one animation state for all
+                    // of them.
+                    .with_keyed_rotate_animation(
+                        ("agent-tab-spinner", self.self_handle.entity_id()),
+                        1,
+                    )
+            }))
+            .children(self.runs_without_prompts().then(|| {
+                // The same glyph and colour the checkout card uses for the same
+                // fact. A second vocabulary for one meaning is how a mark stops
+                // carrying information.
+                div()
+                    .id("agent-ran-without-prompts")
+                    .child(
+                        Icon::new(IconName::Warning)
+                            .size(IconSize::XSmall)
+                            .color(Color::Error),
+                    )
+                    .tooltip(Tooltip::text("This agent runs without permission prompts"))
+            }))
             .child(
                 div()
                     .relative()
@@ -1386,8 +1901,19 @@ impl workspace::item::Item for AgentView {
         vec![("Rename".into(), Box::new(RenameAgent))]
     }
 
+    /// The vendor's glyph — except while the agent is answering, when
+    /// `tab_content` draws a spinner in this slot's place.
+    ///
+    /// Given up rather than drawn alongside, because the two say the same thing
+    /// about the same tab and a strip carrying both reads as two agents. The
+    /// swap has to happen there and not here because an [`Icon`] cannot be
+    /// animated: only an element can, and this returns an icon.
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(agent_icon(self.agent.as_ref())))
+        (!self.responding).then(|| Icon::new(agent_icon(self.agent.as_ref())))
+    }
+
+    fn is_busy(&self, _cx: &App) -> bool {
+        self.responding
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
@@ -1453,6 +1979,11 @@ impl workspace::item::SerializableItem for AgentView {
                         project,
                         workspace,
                         origin,
+                        // A one-off is deliberately not written down, so a tab
+                        // that comes back after a restart comes back asking
+                        // whatever its checkout asks. Restoring "skip once" from
+                        // a row would make a choice for one launch outlive it.
+                        PermissionPrompts::AsConfigured,
                         window,
                         cx,
                     );
@@ -1496,8 +2027,13 @@ impl workspace::item::SerializableItem for AgentView {
     /// a session's name never survived a restart: nothing but the workspace-wide
     /// pass ever wrote the row, and a rename does not trigger that pass. A rename
     /// and a mode switch both arrive as `UpdateTab`, and both belong in the row.
-    fn should_serialize(&self, _event: &Self::Event) -> bool {
-        true
+    ///
+    /// `Activity` does not. Nothing it reports appears in the row, and an agent
+    /// pauses to read a file or wait on a model several times inside one answer
+    /// — so answering `true` here would put a database write behind every one of
+    /// those, for a row that comes back byte for byte the same.
+    fn should_serialize(&self, event: &Self::Event) -> bool {
+        !matches!(event, AgentViewEvent::Activity)
     }
 }
 
@@ -1630,6 +2166,323 @@ fn centered_message(
 
 #[cfg(test)]
 mod tests {
+
+    use agent_sessions::AgentCommand;
+    use project::agent_bypass::BypassCheck;
+    use std::path::PathBuf;
+
+    fn session(args: &[&str], cwd: &str) -> AgentCommand {
+        AgentCommand {
+            program: "claude".into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            cwd: PathBuf::from(cwd),
+        }
+    }
+
+    /// A tab built without touching a process, per `test_new`'s own doc: a view
+    /// that resolves a real binary passes or fails depending on whether the
+    /// developer happens to have `claude` installed.
+    async fn bypass_view(
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentView>, &mut gpui::VisualTestContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::default(),
+                    cx,
+                )
+            })
+        });
+        (view, cx)
+    }
+
+    /// The safe default, and the half a constant cannot satisfy.
+    ///
+    /// The positive half is driven by the field rather than by a real spawn:
+    /// reaching the spawn needs the agent's CLI on `PATH`, which is what
+    /// `test_new` exists to avoid (see its doc). What the spawn side is held by
+    /// instead is `a_checkout_with_bypass_launches_with_the_mapped_flag` plus
+    /// the single assignment site in `start`.
+    #[gpui::test]
+    async fn a_tab_is_unmarked_until_its_agent_was_actually_started_that_way(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = bypass_view(cx).await;
+        view.read_with(cx, |view, _| {
+            assert!(
+                !view.runs_without_prompts(),
+                "a tab nobody bypassed must not claim it was"
+            );
+        });
+        view.update(cx, |view, _| view.bypassed = true);
+        view.read_with(cx, |view, _| assert!(view.runs_without_prompts()));
+    }
+
+    /// **Holds the condition, not the render site.** `tab_content` is never
+    /// built here, so deleting the `.children(..)` block that draws the mark
+    /// leaves this green. What it does hold is the rule the mark draws from,
+    /// which is where the interesting mistake is.
+    ///
+    /// The reason this is a field and not a lookup.
+    ///
+    /// Switching the checkout's toggle off does not reach into a process that is
+    /// already running, so it must not reach into the mark either. An argv
+    /// cannot be edited after the fact.
+    #[gpui::test]
+    async fn turning_the_toggle_off_does_not_unmark_a_running_session(cx: &mut TestAppContext) {
+        let (view, cx) = bypass_view(cx).await;
+        view.update(cx, |view, _| view.bypassed = true);
+
+        let checkout = std::path::Path::new("/repos/zode/wt");
+        let anchor = std::path::Path::new("/repos/zode");
+        let store = cx.update(|_, cx| crate::PermissionBypassStore::global(cx));
+        // Enabled first. Without this the `set(.., false)` below removes nothing
+        // and the store never reaches the state this test is named for -- it
+        // would still go red against a render-time lookup, but by accident.
+        store.update(cx, |store, cx| store.set(checkout, anchor, true, cx));
+        store.update(cx, |store, cx| store.set(checkout, anchor, false, cx));
+
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.runs_without_prompts(),
+                "the mark describes the argv this session was spawned with, not \
+                 what the checkout's setting says a minute later"
+            );
+        });
+    }
+
+    /// One slot, not two: the glyph that says which agent steps aside for the
+    /// mark that says it is working, rather than sitting next to it.
+    ///
+    /// Both marks are drawn from this one flag, so both are held here. The
+    /// flag rather than [`AgentView::is_responding`] for the reason its own doc
+    /// gives — making that true needs a real pty, which `test_new` exists to
+    /// avoid.
+    #[gpui::test]
+    async fn an_answering_tab_swaps_its_glyph_rather_than_adding_one(cx: &mut TestAppContext) {
+        use workspace::item::Item as _;
+
+        let (view, cx) = bypass_view(cx).await;
+
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.tab_icon(window, cx).is_some(),
+                "a tab whose agent is waiting shows the agent it is waiting for"
+            );
+            assert!(!view.is_busy(cx));
+        });
+
+        view.update(cx, |view, _| view.responding = true);
+
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert!(
+                view.tab_icon(window, cx).is_none(),
+                "the spinner takes this slot, and two agent marks on one tab reads as two agents"
+            );
+            assert!(view.is_busy(cx));
+        });
+    }
+
+    /// An agent pausing to read a file is not news the workspace has to write
+    /// to disk, and it happens several times inside a single answer.
+    ///
+    /// Both halves, because the risk lives in the pair: this impl answered
+    /// `true` unconditionally before the activity event existed, and leaving it
+    /// that way is the cheap way to add one.
+    #[gpui::test]
+    async fn an_agent_drawing_breath_is_not_worth_writing_down(cx: &mut TestAppContext) {
+        use workspace::item::SerializableItem as _;
+
+        let (view, cx) = bypass_view(cx).await;
+
+        view.read_with(cx, |view, _| {
+            assert!(
+                !view.should_serialize(&AgentViewEvent::Activity),
+                "nothing an activity tick reports appears in the persisted row"
+            );
+            assert!(
+                view.should_serialize(&AgentViewEvent::UpdateTab),
+                "and the rename it shares a pane event with still does"
+            );
+        });
+    }
+
+    /// The precedence the cwd hoist could have inverted: a resumed session's own
+    /// directory wins over the window's worktree, and a fresh session falls back
+    /// to it. Held here because the rule left `agent_task` in phase 03 and would
+    /// otherwise be tested by nothing.
+    #[test]
+    fn a_resumed_session_runs_where_it_ran_before() {
+        let resumed = session(&[], "/elsewhere");
+        assert_eq!(
+            launch_cwd(Some(&resumed), Some(PathBuf::from("/here"))),
+            Some(PathBuf::from("/elsewhere"))
+        );
+        assert_eq!(
+            launch_cwd(None, Some(PathBuf::from("/here"))),
+            Some(PathBuf::from("/here")),
+            "a fresh session falls back to the window's own worktree"
+        );
+    }
+
+    /// A counterweight, and it says so: this is green whether or not the bypass
+    /// exists. It earns its place only next to the test below -- together they
+    /// are what shows the flag is conditional rather than always added.
+    #[test]
+    fn a_checkout_without_bypass_launches_with_no_extra_args() {
+        let session = session(&["--resume", "abc"], "/repos/a/wt");
+        let task = agent_task(
+            &AgentId::new("claude-acp"),
+            PathBuf::from("/usr/local/bin/claude"),
+            Some(&session),
+            Vec::new(),
+            Some(PathBuf::from("/repos/a/wt")),
+        );
+        assert_eq!(task.args, vec!["--resume".to_string(), "abc".to_string()]);
+    }
+
+    #[test]
+    fn a_checkout_with_bypass_launches_with_the_mapped_flag() {
+        let task = agent_task(
+            &AgentId::new("claude-acp"),
+            PathBuf::from("/usr/local/bin/claude"),
+            None,
+            vec!["--dangerously-skip-permissions".to_string()],
+            Some(PathBuf::from("/repos/a/wt")),
+        );
+        assert_eq!(
+            task.args,
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
+    }
+
+    /// The flag is appended, never substituted. A session's own args carry an id
+    /// or a resume flag and are positionally meaningful to some CLIs; assigning
+    /// instead of extending drops them and resumes nothing.
+    #[test]
+    fn a_resumed_session_keeps_its_own_args_and_gains_the_flag() {
+        let session = session(&["--resume", "abc"], "/repos/a/wt");
+        let task = agent_task(
+            &AgentId::new("claude-acp"),
+            PathBuf::from("/usr/local/bin/claude"),
+            Some(&session),
+            vec!["--dangerously-skip-permissions".to_string()],
+            Some(session.cwd.clone()),
+        );
+        assert_eq!(
+            task.args,
+            vec![
+                "--resume".to_string(),
+                "abc".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+            ],
+            "session args first, the bypass flag last"
+        );
+        assert_eq!(
+            task.cwd,
+            Some(PathBuf::from("/repos/a/wt")),
+            "a resumed session runs where it ran before"
+        );
+    }
+
+    /// The refusal the whole design exists for: a flag the installed CLI no
+    /// longer takes must stop the launch, not fall through to one that quietly
+    /// goes on asking for permission.
+    #[test]
+    fn an_absent_flag_refuses_the_launch_and_says_why() {
+        let refusal = bypass_outcome(
+            "Claude Code",
+            "--dangerously-skip-permissions",
+            BypassCheck::Absent {
+                flag: "--dangerously-skip-permissions",
+                binary: PathBuf::from("/usr/local/bin/claude"),
+            },
+        )
+        .expect_err("an absent flag must refuse");
+
+        for expected in [
+            "Claude Code",
+            "--dangerously-skip-permissions",
+            "/usr/local/bin/claude",
+        ] {
+            assert!(
+                refusal.contains(expected),
+                "the refusal must name {expected}; got {refusal}"
+            );
+        }
+    }
+
+    /// A probe that could not answer is not permission to launch either, and it
+    /// must not read as the flag having been removed -- the two call for
+    /// different next moves.
+    #[test]
+    fn an_unprobeable_flag_refuses_and_reads_differently_from_an_absent_one() {
+        let unprobed = bypass_outcome(
+            "Codex",
+            "--approve-for-me",
+            BypassCheck::Unprobed {
+                reason: "did not answer within 5s".into(),
+            },
+        )
+        .expect_err("no answer is not a yes");
+        assert!(unprobed.contains("did not answer within 5s"));
+        assert!(
+            !unprobed.contains("no longer takes that flag"),
+            "an unanswered probe must not be reported as a removed flag"
+        );
+    }
+
+    /// The safe value is the one you get by forgetting.
+    ///
+    /// `PermissionPrompts` is an enum rather than a `bool` for exactly this, and
+    /// the property is invisible in the type: flipping which arm carries
+    /// `#[default]` compiles, passes every other test here, and turns every
+    /// launch that never named a preference into one that skips the prompts.
+    #[test]
+    fn leaving_the_request_unsaid_keeps_the_prompts() {
+        assert_eq!(
+            PermissionPrompts::default(),
+            PermissionPrompts::AsConfigured,
+            "a launch that says nothing must follow the checkout, never skip"
+        );
+    }
+
+    /// The one an implementer is most likely to get wrong, because launching
+    /// plain looks like the forgiving choice and is the dangerous one.
+    #[test]
+    fn an_agent_with_no_mapped_flag_refuses_rather_than_launching_plain() {
+        let refusal = no_mapping_refusal("Some Agent", PermissionPrompts::AsConfigured);
+        assert!(refusal.contains("Some Agent"));
+        assert!(
+            refusal.contains("Turn that off"),
+            "the refusal must say what to do instead; got {refusal}"
+        );
+
+        // The one-off has no checkout setting behind it, so telling the reader
+        // to turn one off would send them looking for a control that is not the
+        // reason they were refused.
+        let once = no_mapping_refusal("Some Agent", PermissionPrompts::SkipOnce);
+        assert!(
+            !once.contains("Turn that off") && once.contains("Start it normally"),
+            "a one-off refusal must not point at the checkout setting; got {once}"
+        );
+    }
+
+    #[test]
+    fn a_verified_flag_is_the_only_thing_that_adds_an_argument() {
+        assert_eq!(
+            bypass_outcome("Claude Code", "--x", BypassCheck::Present),
+            Ok(vec!["--x".to_string()])
+        );
+    }
     use super::*;
 
     /// The threshold that separates an agent answering from one sitting idle.
@@ -1642,6 +2495,91 @@ mod tests {
     /// 4ms timer, so even a spinner animated while the model thinks clears the
     /// bar. The constant only has to sit between those two rates, and these
     /// name both so that lowering it back toward the idle one fails here.
+    /// The delay, held on its own because the loop that applies it cannot run
+    /// without a pty and a real two seconds. Ticks, not time — see
+    /// [`super::RESPONDING_DEBOUNCE_TICKS`].
+    mod debounce {
+        use super::super::{ACTIVITY_TICK, RESPONDING_DEBOUNCE, RESPONDING_DEBOUNCE_TICKS, settle};
+
+        /// Feeds `raw` in for `ticks` ticks and reports what the mark became.
+        fn run(start: bool, raw: bool, ticks: u32) -> bool {
+            let mut pending = None;
+            let mut shown = start;
+            for _ in 0..ticks {
+                if let Some(settled) = settle(&mut pending, raw, shown) {
+                    shown = settled;
+                }
+            }
+            shown
+        }
+
+        #[test]
+        fn the_delay_is_the_two_seconds_it_claims_to_be() {
+            assert_eq!(
+                RESPONDING_DEBOUNCE_TICKS as u128 * ACTIVITY_TICK.as_millis(),
+                RESPONDING_DEBOUNCE.as_millis(),
+                "the tick count and the duration it stands for have drifted apart"
+            );
+        }
+
+        #[test]
+        fn a_change_one_tick_short_of_the_delay_has_not_landed_yet() {
+            assert!(!run(false, true, RESPONDING_DEBOUNCE_TICKS - 1));
+            assert!(run(false, true, RESPONDING_DEBOUNCE_TICKS));
+        }
+
+        /// Both edges, which is the half a one-sided delay would miss: a mark
+        /// that appears instantly and leaves slowly still strobes.
+        #[test]
+        fn the_delay_applies_to_leaving_as_well_as_arriving() {
+            assert!(run(true, false, RESPONDING_DEBOUNCE_TICKS - 1));
+            assert!(!run(true, false, RESPONDING_DEBOUNCE_TICKS));
+        }
+
+        /// The flicker this exists for. An agent crosses the threshold several
+        /// times inside one reply -- it stops to read a file, to run a command,
+        /// to wait on the model -- and none of those crossings lasts two
+        /// seconds.
+        #[test]
+        fn a_pause_inside_one_answer_never_reaches_the_mark() {
+            let mut pending = None;
+            let mut shown = true;
+            let mut changes = 0;
+            // Seven ticks answering, three quiet, over and over: every gap is
+            // shorter than the delay, so the mark must never move.
+            for tick in 0..200 {
+                let raw = tick % 10 < 7;
+                if let Some(settled) = settle(&mut pending, raw, shown) {
+                    shown = settled;
+                    changes += 1;
+                }
+            }
+            assert_eq!(
+                changes, 0,
+                "the mark moved {changes} times during one unbroken answer"
+            );
+            assert!(shown);
+        }
+
+        /// A change that is contradicted before it lands starts again from
+        /// zero, rather than resuming its count on the next crossing.
+        #[test]
+        fn a_contradicted_change_does_not_carry_its_count_forward() {
+            let mut pending = None;
+            let shown = false;
+
+            for _ in 0..RESPONDING_DEBOUNCE_TICKS - 1 {
+                assert!(settle(&mut pending, true, shown).is_none());
+            }
+            assert!(settle(&mut pending, false, shown).is_none());
+            assert!(
+                settle(&mut pending, true, shown).is_none(),
+                "one tick of quiet reset the count, so one tick of answering \
+                 must not finish it"
+            );
+        }
+    }
+
     mod responding_rate {
         use super::super::{RESPONDING_WRITES, responding_at};
 
@@ -1866,6 +2804,8 @@ mod tests {
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
             custom_name: None,
+            bypassed: false,
+            requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
             _rename_subscription: None,
             mode: AgentViewMode::Terminal,
@@ -1877,6 +2817,10 @@ mod tests {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         });
 
         let terminal_view = cx.new_window_entity(|window, cx| {
@@ -1915,31 +2859,38 @@ mod tests {
     /// over args and a directory, and `agent_task` is the single place that turns
     /// them into a process. Asserted on the task rather than on the panel because
     /// this is where a wrong `cwd` would send the CLI at the wrong tree.
-    #[gpui::test]
-    async fn a_resumed_session_runs_its_own_arguments_in_its_own_directory(
-        cx: &mut TestAppContext,
-    ) {
-        init_test(cx);
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(path!("/here"), json!({})).await;
-        let project = Project::test(fs, [path!("/here").as_ref()], cx).await;
+    ///
+    /// No project and no filesystem any more: `agent_task` stopped reading the
+    /// project when phase 03 hoisted the cwd out of it, so a `FakeFs` here would
+    /// say this needs one when it does not.
+    #[test]
+    fn a_resumed_session_runs_its_own_arguments_in_its_own_directory() {
         let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
         let binary = std::path::PathBuf::from("/bin/claude");
+        let here = std::path::PathBuf::from(path!("/here"));
 
-        let (fresh, resumed) = cx.update(|cx| {
-            let project = project.read(cx);
-            let fresh = super::agent_task(&agent, binary.clone(), None, project, cx);
-            // An `AgentCommand` as the agent's own store hands one over. Its
-            // `program` is the bare name the store records and is deliberately
-            // ignored below — the executed program is the resolved `binary`.
-            let resume = AgentCommand {
-                program: "claude".into(),
-                args: vec!["--resume".into(), "abc-123".into(), "--fork-session".into()],
-                cwd: std::path::PathBuf::from("/elsewhere"),
-            };
-            let resumed = super::agent_task(&agent, binary.clone(), Some(&resume), project, cx);
-            (fresh, resumed)
-        });
+        let fresh = super::agent_task(
+            &agent,
+            binary.clone(),
+            None,
+            Vec::new(),
+            super::launch_cwd(None, Some(here.clone())),
+        );
+        // An `AgentCommand` as the agent's own store hands one over. Its
+        // `program` is the bare name the store records and is deliberately
+        // ignored below — the executed program is the resolved `binary`.
+        let resume = AgentCommand {
+            program: "claude".into(),
+            args: vec!["--resume".into(), "abc-123".into(), "--fork-session".into()],
+            cwd: std::path::PathBuf::from("/elsewhere"),
+        };
+        let resumed = super::agent_task(
+            &agent,
+            binary,
+            Some(&resume),
+            Vec::new(),
+            super::launch_cwd(Some(&resume), Some(here)),
+        );
 
         // Unchanged for everyone who is not resuming: no arguments, and the cwd is
         // still the window's own worktree.
@@ -2300,6 +3251,8 @@ mod tests {
             agent: AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
             display_name: "Claude Code".into(),
             custom_name: None,
+            bypassed: false,
+            requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
             _rename_subscription: None,
             mode: AgentViewMode::Terminal,
@@ -2311,6 +3264,10 @@ mod tests {
             _startup: None,
             _exit_watch: None,
             _shell_close: None,
+            responding: false,
+            _activity_tick: None,
+            _subagent_tick: None,
+            subagents: SubagentTracker::default(),
         });
 
         let left_behind = terminal_view.downgrade();
@@ -2724,6 +3681,7 @@ mod tests {
                     project.clone(),
                     workspace.downgrade(),
                     SessionOrigin::default(),
+                    PermissionPrompts::AsConfigured,
                     window,
                     cx,
                 )
@@ -3124,6 +4082,7 @@ mod tests {
                 workspace,
                 project::CLAUDE_CODE_AGENT_ID,
                 Some(AgentViewMode::Terminal),
+                PermissionPrompts::AsConfigured,
                 window,
                 cx,
             );
@@ -3276,6 +4235,7 @@ mod tests {
                     Box::new(zed_actions::agent::NewAgent {
                         agent: agent.id.to_string(),
                         mode: None,
+                        permission_prompts: Default::default(),
                     }),
                     cx,
                 )

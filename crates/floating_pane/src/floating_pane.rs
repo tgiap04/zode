@@ -18,11 +18,32 @@
 mod content;
 mod host;
 mod render;
+mod split;
 
 pub use host::FloatingPane;
 
-use gpui::{App, AppContext as _};
-use workspace::Workspace;
+use gpui::{App, AppContext as _, Context, Window};
+use workspace::{SplitDirection, Workspace};
+
+impl FloatingPane {
+    /// Splits the active pane in the given direction, or does nothing.
+    ///
+    /// The guard is the whole reason this exists apart from `split_off`: a
+    /// closed window has no pane worth splitting, and a window with nothing
+    /// in any pane would end up showing two blank halves instead of the menu
+    /// that tells somebody what the window can hold.
+    pub(crate) fn split_active(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.open || self.is_empty(cx) {
+            return;
+        }
+        self.split_off(&self.active_pane.clone(), direction, window, cx);
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
@@ -68,6 +89,48 @@ pub fn init(cx: &mut App) {
             move |_workspace, _: &zed_actions::floating_pane::CloseFloatingPane, window, cx| {
                 view.update(cx, |this, cx| this.confirm_shut_down(window, cx))
                     .ok();
+            }
+        });
+        // Four window-scoped names for the one path `split_active` already
+        // guards: `pane::SplitRight` et al reach the same `Event::Split` the
+        // moment focus sits inside a pane, so these are not a second
+        // implementation -- just a name a keymap can bind under the
+        // `FloatingPane` context without touching the editor's own split
+        // bindings, matching the three siblings above.
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::SplitRight, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.split_active(SplitDirection::Right, window, cx)
+                })
+                .ok();
+            }
+        });
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::SplitLeft, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.split_active(SplitDirection::Left, window, cx)
+                })
+                .ok();
+            }
+        });
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::SplitUp, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.split_active(SplitDirection::Up, window, cx)
+                })
+                .ok();
+            }
+        });
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::SplitDown, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.split_active(SplitDirection::Down, window, cx)
+                })
+                .ok();
             }
         });
     })
