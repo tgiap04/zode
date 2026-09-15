@@ -24,7 +24,10 @@ use gpui::{Anchor, Context, Entity, IntoElement, Render, Subscription, Task, Win
 use project::AgentId;
 use settings::AgentUsageDisplay;
 use ui::prelude::*;
-use ui::{ButtonLike, ContextMenu, IconPosition, PopoverMenu, PopoverMenuHandle, right_click_menu};
+use ui::{
+    ButtonLike, CommonAnimationExt as _, ContextMenu, IconPosition, PopoverMenu, PopoverMenuHandle,
+    right_click_menu,
+};
 use workspace::{ItemHandle, StatusBarSettings, StatusItemView, item::Settings as _};
 
 use crate::usage_panel::UsagePanel;
@@ -650,6 +653,20 @@ impl Render for AgentUsageIndicator {
     }
 }
 
+/// Which glyph the refresh affordance draws while a read is or is not running.
+///
+/// Pulled out of the render so the choice has somewhere to be tested. It has to
+/// agree with what `IconButton::loading` picks for the panel's own refresh
+/// button -- the status bar and the panel are two views of one fact, and a
+/// glyph that drifts on one of them is how that stops being true.
+fn refresh_glyph(fetching: bool) -> IconName {
+    if fetching {
+        IconName::LoadCircle
+    } else {
+        IconName::ArrowCircle
+    }
+}
+
 impl AgentUsageIndicator {
     /// The numbers, wrapped in the popover that opens the panel.
     fn render_trigger(
@@ -658,6 +675,8 @@ impl AgentUsageIndicator {
         fetching: bool,
         panel_handle: PopoverMenuHandle<UsagePanel>,
     ) -> impl IntoElement {
+        // Read before the handle is moved into the menu closure below.
+        let indicator_id = indicator.entity_id();
         PopoverMenu::new("agent-usage")
             .menu(move |window, cx| {
                 let indicator = indicator.clone();
@@ -686,15 +705,40 @@ impl AgentUsageIndicator {
                             // rather than a button beside it -- the whole group
                             // reads as one control, which is what the reference
                             // shows.
-                            .child(
-                                Icon::new(IconName::ArrowCircle)
+                            .child({
+                                // The same two states the panel's own refresh
+                                // button draws, in the same vocabulary: the
+                                // glyph becomes `LoadCircle` and turns while a
+                                // read is in flight. Colour alone said
+                                // "working" only to someone who already knew
+                                // what the two colours meant, and saying it
+                                // one way here and another way there is how a
+                                // mark stops carrying information.
+                                let icon = Icon::new(refresh_glyph(fetching))
                                     .size(IconSize::XSmall)
                                     .color(if fetching {
                                         Color::Accent
                                     } else {
                                         Color::Muted
-                                    }),
-                            ),
+                                    });
+                                if fetching {
+                                    // Keyed by the entity rather than by this
+                                    // call site's location. A window keeps its
+                                    // own element state, so two windows would
+                                    // not collide -- but this fork retains a
+                                    // workspace per project inside one window,
+                                    // and a caller-located id is one animation
+                                    // state for every indicator that ever draws
+                                    // under that roof.
+                                    icon.with_keyed_rotate_animation(
+                                        ("agent-usage-status-spinner", indicator_id),
+                                        2,
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    icon.into_any_element()
+                                }
+                            }),
                     ),
             )
     }
@@ -877,6 +921,20 @@ mod tests {
     /// `Duration` rather than a wall clock so this is deterministic — the same
     /// reason `render_window` will take `now` as an argument rather than reading
     /// it.
+    /// The glyph, not just the tint, says whether a read is running.
+    ///
+    /// Colour alone carried this once, and it told a user who already knew what
+    /// the two colours meant and nobody else. Reverting to a single glyph would
+    /// still compile and still pass every other test here, which is the whole
+    /// reason this one exists.
+    #[test]
+    fn the_refresh_glyph_changes_while_a_read_is_running() {
+        assert_eq!(refresh_glyph(false), IconName::ArrowCircle);
+        // Must stay the glyph `IconButton::loading` draws for the panel's own
+        // refresh button, or the two surfaces say the same thing differently.
+        assert_eq!(refresh_glyph(true), IconName::LoadCircle);
+    }
+
     #[test]
     fn a_countdown_shows_the_two_largest_units() {
         assert_eq!(

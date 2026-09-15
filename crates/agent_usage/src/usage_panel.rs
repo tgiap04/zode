@@ -440,6 +440,11 @@ impl Render for UsagePanel {
                             .child(
                                 IconButton::new("agent-usage-refresh", IconName::ArrowCircle)
                                     .icon_size(IconSize::Small)
+                                    // Swaps the glyph for `LoadCircle` and spins
+                                    // it. Colour alone said "working" only to
+                                    // someone who already knew what the two
+                                    // colours meant.
+                                    .loading(fetching)
                                     .icon_color(if fetching {
                                         Color::Accent
                                     } else {
