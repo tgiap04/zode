@@ -11,6 +11,9 @@ pub mod notifications;
 pub mod pane;
 pub mod pane_group;
 pub mod project_appearance;
+pub mod project_avatar;
+pub mod project_logo;
+mod project_logo_store;
 pub mod path_list {
     pub use util::path_list::{PathList, SerializedPathList};
 }
@@ -35,8 +38,8 @@ pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedProject, DraggedSidebar, FocusWorkspaceSidebar,
     MoveProjectToNewWindow, MultiWorkspace, MultiWorkspaceEvent, NextProject, PreviousProject,
-    ProjectGroup, ProjectGroupKey, SerializedProjectGroupState, Sidebar, SidebarEvent,
-    SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
+    ProjectGroup, ProjectGroupKey, ProjectPresentation, SerializedProjectGroupState, Sidebar,
+    SidebarEvent, SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
 pub use remote::{
@@ -9481,6 +9484,7 @@ pub async fn apply_restored_multiworkspace_state(
                 expanded,
                 initials,
                 colour,
+                logo,
             } = serialized.into_restored_state();
             if key.path_list().paths().is_empty() {
                 continue;
@@ -9504,6 +9508,7 @@ pub async fn apply_restored_multiworkspace_state(
                     expanded,
                     initials,
                     colour,
+                    logo,
                 });
             }
         }
@@ -11799,7 +11804,9 @@ mod tests {
                     "group B should go back where it stood"
                 );
                 assert_eq!(
-                    mw.project_presentation(&key_b).0.map(|i| i.to_string()),
+                    mw.project_presentation(&key_b)
+                        .initials
+                        .map(|i| i.to_string()),
                     Some("BB".to_string()),
                     "the restored group should keep its initials"
                 );
