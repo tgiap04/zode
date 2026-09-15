@@ -91,60 +91,6 @@ pub(crate) fn copy_project_path(key: &ProjectGroupKey, cx: &mut App) {
     }
 }
 
-/// Opens the colour picker for a project.
-pub(crate) fn prompt_for_colour(
-    multi_workspace: &WeakEntity<MultiWorkspace>,
-    sidebar: &WeakEntity<crate::Sidebar>,
-    key: &ProjectGroupKey,
-    label: &SharedString,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(multi_workspace_entity) = multi_workspace.upgrade() else {
-        return;
-    };
-    let current = multi_workspace_entity.read(cx).project_presentation(key).1;
-    let handle = multi_workspace.clone();
-    let sidebar = sidebar.clone();
-    let key = key.clone();
-    let label = label.clone();
-    multi_workspace_entity.update(cx, |multi_workspace, cx| {
-        let workspace = multi_workspace.workspace().clone();
-        workspace.update(cx, |workspace, cx| {
-            workspace.toggle_modal(window, cx, |window, cx| {
-                crate::colour_modal::ColourModal::new(
-                    handle, sidebar, key, label, current, window, cx,
-                )
-            });
-        });
-    });
-}
-
-/// Opens the box that sets the two letters on the avatar.
-pub(crate) fn prompt_for_initials(
-    multi_workspace: &WeakEntity<MultiWorkspace>,
-    key: &ProjectGroupKey,
-    label: &SharedString,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(multi_workspace) = multi_workspace.upgrade() else {
-        return;
-    };
-    let current = multi_workspace.read(cx).project_presentation(key).0;
-    let key = key.clone();
-    let label = label.clone();
-    let handle = multi_workspace.downgrade();
-    multi_workspace.update(cx, |multi_workspace, cx| {
-        let workspace = multi_workspace.workspace().clone();
-        workspace.update(cx, |workspace, cx| {
-            workspace.toggle_modal(window, cx, |window, cx| {
-                crate::initials_modal::InitialsModal::new(handle, key, label, current, window, cx)
-            });
-        });
-    });
-}
-
 impl crate::Sidebar {
     /// Drops a project into the gap the pointer was last over.
     ///
