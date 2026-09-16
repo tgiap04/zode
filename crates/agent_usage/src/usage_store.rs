@@ -460,6 +460,4 @@ mod tests {
         assert!(!store.should_fetch(PollReason::Activation, just_inside));
         assert!(store.should_fetch(PollReason::Activation, just_outside));
     }
-
-
 }

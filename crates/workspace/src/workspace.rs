@@ -165,8 +165,8 @@ pub use workspace_settings::{
 };
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
-use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
 use crate::panel_size_key::{PROJECT_PANEL_SIZE_STATE_KEY, panel_size_key};
+use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
 use crate::{
     persistence::{
         SerializedAxis,
@@ -2833,12 +2833,12 @@ impl Workspace {
                         dock::Dock::load_workspace_scoped_size_state(self, T::panel_key(), cx)
                     })
                     .or_else(|| {
-                        load_legacy_panel_size(T::panel_key(), dock_position, self, cx).map(|size| {
-                            dock::PanelSizeState {
+                        load_legacy_panel_size(T::panel_key(), dock_position, self, cx).map(
+                            |size| dock::PanelSizeState {
                                 size: Some(size),
                                 flex: None,
-                            }
-                        })
+                            },
+                        )
                     })
                     .inspect(|state| {
                         self.persist_panel_size_state(T::panel_key(), *state, cx);
@@ -14196,8 +14196,11 @@ mod tests {
             }),
         )
         .await;
-        fs.insert_tree("/other-repo", json!({ ".git": {}, "src": { "main.rs": "" } }))
-            .await;
+        fs.insert_tree(
+            "/other-repo",
+            json!({ ".git": {}, "src": { "main.rs": "" } }),
+        )
+        .await;
         fs
     }
 
@@ -14568,8 +14571,8 @@ mod tests {
         .await;
 
         let project = Project::test(fs.clone(), [], cx).await;
-        let (multi_workspace, cx) = cx
-            .add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
         workspace.update(cx, |workspace, _cx| {

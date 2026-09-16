@@ -165,7 +165,10 @@ mod tests {
     fn a_path_containing_a_newline_survives() {
         let path = PathBuf::from("/Users/me/odd\nname");
         let key = panel_size_key("ProjectPanel", None, &path).unwrap();
-        assert_eq!(local_project_path_from_key(&key), Some("/Users/me/odd\nname"));
+        assert_eq!(
+            local_project_path_from_key(&key),
+            Some("/Users/me/odd\nname")
+        );
     }
 
     #[test]
@@ -178,9 +181,12 @@ mod tests {
 
     #[test]
     fn a_remote_key_is_not_read_as_a_local_path() {
-        let key =
-            panel_size_key("GitPanel", Some(&ssh("example.com", None, None)), Path::new("/repo"))
-                .unwrap();
+        let key = panel_size_key(
+            "GitPanel",
+            Some(&ssh("example.com", None, None)),
+            Path::new("/repo"),
+        )
+        .unwrap();
         assert!(key.starts_with("GitPanel:R:"));
         assert_eq!(local_project_path_from_key(&key), None);
     }
@@ -200,7 +206,11 @@ mod tests {
         // other and two different projects would land on one key.
         let path = Path::new("/srv/app");
         let left = panel_size_key("GitPanel", Some(&ssh("::1", None, None)), path);
-        let right = panel_size_key("GitPanel", Some(&ssh(":", None, None)), Path::new("1:/srv/app"));
+        let right = panel_size_key(
+            "GitPanel",
+            Some(&ssh(":", None, None)),
+            Path::new("1:/srv/app"),
+        );
         assert_ne!(left, right);
     }
 

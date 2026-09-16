@@ -15,8 +15,8 @@
 pub mod claude;
 pub mod codex;
 mod status_bar_items;
-mod usage_store;
 pub mod usage_panel;
+mod usage_store;
 
 use std::time::Duration;
 
@@ -385,7 +385,6 @@ impl AgentUsageIndicator {
     }
 }
 
-
 impl Render for AgentUsageIndicator {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // An empty `div()` and not `h_flex()`: the latter is still a flex box
@@ -709,8 +708,8 @@ pub fn format_countdown(remaining: Duration) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::usage_store::{AgentUsageStore, PollReason};
     use super::*;
+    use crate::usage_store::{AgentUsageStore, PollReason};
 
     /// The countdown thresholds, including the one that produces nothing.
     ///
@@ -984,7 +983,10 @@ mod tests {
             vec![project::CLAUDE_CODE_AGENT_ID.to_string()],
             "Codex is switched off; Claude is untouched"
         );
-        assert!(AgentUsageIndicator::has_anything_to_show(&store.source_states(), &settings));
+        assert!(AgentUsageIndicator::has_anything_to_show(
+            &store.source_states(),
+            &settings
+        ));
     }
 
     /// Switching both off leaves nothing to draw — and nothing to right-click.
@@ -1104,7 +1106,8 @@ mod tests {
             "the disabled agent's windows are cleared"
         );
         assert_eq!(
-            store.source_at(0).fetched_at, None,
+            store.source_at(0).fetched_at,
+            None,
             "and its read time goes with them"
         );
         assert_eq!(
@@ -1156,7 +1159,8 @@ mod tests {
             "a number the user is no longer entitled to must go"
         );
         assert_eq!(
-            store.source_at(0).fetched_at, None,
+            store.source_at(0).fetched_at,
+            None,
             "and the read time goes with it, or the panel would date absent data"
         );
     }
@@ -1267,7 +1271,10 @@ mod tests {
         );
 
         store.set_last_polled_at(Some(now));
-        assert!(!store.should_fetch(PollReason::Activation, now), "just asked");
+        assert!(
+            !store.should_fetch(PollReason::Activation, now),
+            "just asked"
+        );
         assert!(
             !store.should_fetch(PollReason::Activation, now + chrono::Duration::seconds(29)),
             "still inside the window"
@@ -1302,7 +1309,8 @@ mod tests {
             "a 429 is still an attempt; asking again immediately is what earned it"
         );
         assert_eq!(
-            store.source_at(0).fetched_at, None,
+            store.source_at(0).fetched_at,
+            None,
             "and nothing about it made the data fresh — which is why the throttle \
              must not be asking that question"
         );
@@ -1323,7 +1331,8 @@ mod tests {
             now,
         );
         assert_eq!(
-            store.source_at(1).fetched_at, None,
+            store.source_at(1).fetched_at,
+            None,
             "Clear nulls it, and an uninstalled CLI never un-nulls it"
         );
         assert!(
@@ -1409,7 +1418,10 @@ mod tests {
         store.apply(Outcome::Windows(vec![a_window()]), nothing(), Utc::now());
         store.apply(Outcome::Windows(Vec::new()), nothing(), Utc::now());
 
-        assert!(!AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()));
+        assert!(!AgentUsageIndicator::has_anything_to_show(
+            &store.source_states(),
+            &all_agents_shown()
+        ));
         assert!(
             store.source_at(0).reason.is_none(),
             "nothing went wrong, so nothing is reported as wrong"
@@ -1511,7 +1523,10 @@ mod tests {
 
         store.read_with(cx, |store, _| {
             assert!(
-                !AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
+                !AgentUsageIndicator::has_anything_to_show(
+                    &store.source_states(),
+                    &all_agents_shown()
+                ),
                 "a fresh indicator has no source and therefore nothing to say"
             );
         });
@@ -1534,7 +1549,10 @@ mod tests {
 
         store.read_with(cx, |store, _| {
             assert!(
-                !AgentUsageIndicator::has_anything_to_show(&store.source_states(), &all_agents_shown()),
+                !AgentUsageIndicator::has_anything_to_show(
+                    &store.source_states(),
+                    &all_agents_shown()
+                ),
                 "an icon with no percentage beside it reads as 0%, which is a lie"
             );
         });

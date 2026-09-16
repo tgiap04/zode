@@ -2105,7 +2105,11 @@ impl Dock {
             .database_id()
             .map(|id| i64::from(id).to_string())
             .or(workspace.session_id())?;
-        Self::read_size_state(PANEL_SIZE_STATE_KEY, &format!("{workspace_id}:{panel_key}"), cx)
+        Self::read_size_state(
+            PANEL_SIZE_STATE_KEY,
+            &format!("{workspace_id}:{panel_key}"),
+            cx,
+        )
     }
 
     fn read_size_state(namespace: &str, key: &str, cx: &App) -> Option<PanelSizeState> {
