@@ -172,13 +172,15 @@ impl From<Result<Vec<UsageWindow>, claude::Unavailable>> for Outcome {
             // Keep, not Clear: being asked too often says nothing about whether
             // the numbers already on screen are still true.
             //
+            // It no longer says "retrying", because it no longer does: this
+            // endpoint refuses bursts, so asking again a second later was the
+            // burst. The next poll comes round on its own.
+            //
             // Short on purpose. This lands in a 340px panel row beside the agent's
             // name, and beside a countdown when there are stale numbers to report:
             // "Resets in 27d 2h · <this>". A sentence there is a sentence nobody
             // finishes reading — see `fixed_reasons_fit_the_panel_row`.
-            Err(claude::Unavailable::RateLimited) => {
-                Outcome::Keep("rate limited — retrying".into())
-            }
+            Err(claude::Unavailable::RateLimited) => Outcome::Keep("asked too often".into()),
             // Also short. This one was 84 characters and would have overflowed
             // the panel row on its own, which nobody had noticed because it only
             // shows for a user who has set an ANTHROPIC_* variable.
@@ -1358,10 +1360,11 @@ mod tests {
             "the 42% must survive a 429"
         );
         assert!(
-            store.source_at(0)
+            store
+                .source_at(0)
                 .reason
                 .as_ref()
-                .is_some_and(|reason| reason.contains("rate limited")),
+                .is_some_and(|reason| reason.contains("too often")),
             "and the tooltip must say why it is not fresh"
         );
     }
