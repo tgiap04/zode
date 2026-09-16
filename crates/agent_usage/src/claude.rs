@@ -37,9 +37,16 @@ const BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 /// shorter than `POLL_INTERVAL`, so a retry never overlaps the next poll and
 /// doubles the load this exists to reduce.
 const MAX_WAIT: Duration = Duration::from_secs(5);
-/// Client-side statuses that mean "later", not "no": too many requests, a request
-/// timeout, and an early-data rejection.
-const RETRYABLE_STATUSES: [u16; 3] = [408, 425, 429];
+/// Client-side statuses that mean "later", not "no": a request timeout and an
+/// early-data rejection.
+///
+/// 429 is deliberately absent. This endpoint limits on *burst* rather than on
+/// volume -- ten requests back to back are refused where the same ten spread out
+/// are not -- so asking again a second later is the burst, not the cure. One
+/// rejected request became three, which kept the limit engaged and made the next
+/// read likelier to fail than if nothing had been retried at all. A 429 is now
+/// final for that read; the next poll comes round on its own.
+const RETRYABLE_STATUSES: [u16; 2] = [408, 425];
 
 /// The environment variables that mean "I am not talking to my subscription".
 ///
@@ -321,27 +328,48 @@ async fn fetch_with_token(
     executor: BackgroundExecutor,
     token: &str,
 ) -> Result<Vec<UsageWindow>, Unavailable> {
-    // Attempt, wait, attempt. A 429 here is routine rather than exceptional:
-    // this endpoint is shared with the Claude Code CLI on the same token, so two
-    // clients on one account collide, and a single collision used to leave the
-    // indicator blank until the next poll a minute later.
+    // Attempt, wait, attempt -- but only for the answers that clear up on their
+    // own. A 429 leaves on the first one: see `RETRYABLE_STATUSES`.
     let mut last_retryable = None;
     for attempt in 0..MAX_ATTEMPTS {
         match request_once(&http_client, token).await {
             Attempt::Done(windows) => return Ok(windows),
-            Attempt::Fatal(reason) => return Err(reason),
+            Attempt::Fatal(reason) => return Err(give_up(reason, attempt + 1)),
             Attempt::Retry { after, reason } => {
                 last_retryable = Some(reason);
                 let Some(backoff) = BACKOFF.get(attempt) else {
                     break;
                 };
                 let wait = after.unwrap_or(*backoff).min(MAX_WAIT);
+                // Debug rather than warn: a timeout absorbed by a retry is the
+                // routine case this chain exists for, and a warning per
+                // occurrence would bury the one that actually reached the user.
+                log::debug!(
+                    "claude usage: attempt {} of {MAX_ATTEMPTS} was told to wait; retrying in {:?}",
+                    attempt + 1,
+                    wait
+                );
                 executor.timer(wait).await;
             }
         }
     }
 
-    Err(last_retryable.unwrap_or(Unavailable::RateLimited))
+    Err(give_up(
+        last_retryable.unwrap_or(Unavailable::RateLimited),
+        MAX_ATTEMPTS,
+    ))
+}
+
+/// Records a read that came back with nothing, and hands the reason on.
+///
+/// Every failing exit goes through here, including the one-attempt exits: a 429
+/// no longer reaches the end of the retry loop, and it is the failure a user is
+/// most likely to be asking about. Before this existed the status bar said
+/// "rate limited" and the log said nothing at all, so there was no way to tell a
+/// steady drip from a storm.
+fn give_up(reason: Unavailable, attempts: usize) -> Unavailable {
+    log::warn!("claude usage: no read after {attempts} attempt(s) ({reason:?})");
+    reason
 }
 
 /// One request, classified. Nothing here waits or retries — that is the caller's
@@ -478,16 +506,24 @@ mod tests {
     /// The bug this closes: one transient 429 used to leave the indicator blank
     /// until the next poll, a minute later.
     #[gpui::test]
-    async fn a_single_429_is_absorbed_by_a_retry(cx: &mut gpui::TestAppContext) {
+    async fn a_429_is_not_retried_even_when_the_next_ask_would_have_worked(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Scripted to succeed on a second ask, to prove the second ask is not
+        // made. This endpoint refuses bursts rather than volume -- ten requests
+        // back to back are refused where the same ten spread out are not -- so a
+        // retry a second later is the burst, and it kept the limit engaged
+        // instead of riding it out.
         let (client, calls) = scripted(vec![429, 200], None);
-        let windows = fetch_with_token(client, cx.executor(), "t")
-            .await
-            .expect("the second attempt succeeded");
-        assert_eq!(windows, Vec::new());
+        assert_eq!(
+            fetch_with_token(client, cx.executor(), "t").await,
+            Err(Unavailable::RateLimited),
+            "the first refusal is the answer"
+        );
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            2,
-            "asked once more, not twice more"
+            1,
+            "one refusal must cost one request, not three"
         );
     }
 
@@ -503,8 +539,8 @@ mod tests {
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            MAX_ATTEMPTS,
-            "bounded: retrying forever would spend the rate limit it is waiting on"
+            1,
+            "asking again is what spends the limit it is waiting on"
         );
     }
 
@@ -553,8 +589,9 @@ mod tests {
     #[gpui::test]
     async fn an_absurd_retry_after_does_not_hold_the_task_open(cx: &mut gpui::TestAppContext) {
         // 600s is a legal answer. Honouring it literally would outlive the
-        // 60-second poll that makes the whole attempt moot.
-        let (client, calls) = scripted(vec![429, 200], Some("600"));
+        // 60-second poll that makes the whole attempt moot. Driven with a 408
+        // rather than a 429: a 429 no longer reaches the wait at all.
+        let (client, calls) = scripted(vec![408, 200], Some("600"));
         assert!(fetch_with_token(client, cx.executor(), "t").await.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

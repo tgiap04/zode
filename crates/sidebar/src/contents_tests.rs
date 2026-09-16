@@ -199,6 +199,7 @@ async fn test_restored_project_groups_reach_the_rail(cx: &mut TestAppContext) {
             expanded: true,
             initials: None,
             colour: None,
+            logo: None,
         })
         .collect();
     multi_workspace.update(cx, |mw, cx| {

@@ -209,7 +209,12 @@ impl TerminalView {
         cx: &mut Context<Workspace>,
     ) {
         let local = action.local;
-        let working_directory = default_working_directory(workspace, cx);
+        // The action's own directory wins: it was chosen for this one terminal,
+        // where the setting describes what every other terminal should do.
+        let working_directory = action
+            .working_directory
+            .clone()
+            .or_else(|| default_working_directory(workspace, cx));
         TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
             if local {
                 project.create_local_terminal(cx)

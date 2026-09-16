@@ -1,6 +1,7 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::pane_group::element::pane_axis;
 use crate::pane_group::{SURFACE_MARGIN, SURFACE_ROUNDING};
+use crate::panel_size_key::PROJECT_PANEL_SIZE_STATE_KEY;
 use crate::persistence::model::DockData;
 use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
@@ -2056,19 +2057,37 @@ impl Dock {
         )
     }
 
+    /// The width this project last recorded for a panel.
+    ///
+    /// The record every read starts from, and the only one that separates one
+    /// project from another. `key` comes from
+    /// [`Workspace::project_panel_size_key`], the single place the shape is
+    /// decided, so a read and the write that follows it cannot disagree about
+    /// which project they mean.
+    pub(crate) fn load_project_size_state(key: &str, cx: &App) -> Option<PanelSizeState> {
+        Self::read_size_state(PROJECT_PANEL_SIZE_STATE_KEY, key, cx)
+    }
+
+    /// The width a project with no record of its own starts at.
+    ///
+    /// One row per panel, shared by every project. It is still written on every
+    /// drag, so a project opened for the first time begins at the width last
+    /// chosen rather than at one frozen on the day records became per-project.
+    /// Once that project has dragged a dock itself, its own record answers and
+    /// this one stops mattering to it.
     pub(crate) fn load_persisted_size_state(
         panel_key: &'static str,
         cx: &App,
     ) -> Option<PanelSizeState> {
-        Self::read_size_state(panel_key, cx)
+        Self::read_size_state(PANEL_SIZE_STATE_KEY, panel_key, cx)
     }
 
-    /// The width a workspace of its own recorded, from before the record was
+    /// The width a workspace of its own recorded, from before records were
     /// shared.
     ///
-    /// Only ever read as a fallback, and only until the shared record exists.
+    /// Only ever read as a fallback, and only until this project has a record.
     /// Two workspaces opening together can both find it absent and both write,
-    /// and the one that lands last is the width everybody then gets -- the
+    /// and the one that lands last is the width that project then gets -- the
     /// write is a background task, so this is settled by completion order
     /// rather than by which window opened first. A one-off wrong starting
     /// width, correctable by one drag; not worth a compare-and-swap the
@@ -2086,12 +2105,16 @@ impl Dock {
             .database_id()
             .map(|id| i64::from(id).to_string())
             .or(workspace.session_id())?;
-        Self::read_size_state(&format!("{workspace_id}:{panel_key}"), cx)
+        Self::read_size_state(
+            PANEL_SIZE_STATE_KEY,
+            &format!("{workspace_id}:{panel_key}"),
+            cx,
+        )
     }
 
-    fn read_size_state(key: &str, cx: &App) -> Option<PanelSizeState> {
+    fn read_size_state(namespace: &str, key: &str, cx: &App) -> Option<PanelSizeState> {
         let kvp = KeyValueStore::global(cx);
-        let scope = kvp.scoped(PANEL_SIZE_STATE_KEY);
+        let scope = kvp.scoped(namespace);
         scope
             .read(key)
             .log_err()

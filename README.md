@@ -69,7 +69,7 @@ Three limits are real, not caveats to skim:
    verified their origin except you. If that is not a trade you want, build from source
    below.
 2. **Updates are manual, but they are in-app.** Nothing checks in the background and
-   nothing phones home. When you want to know, use *Help → Check for Updates*: it reads
+   nothing phones home. When you want to know, use *Zode → Check for Updates*: it reads
    this repository's latest published release, and if there is a newer one it downloads
    and installs it for you. A published release only — a draft is invisible to it.
 3. **Debug symbols are stripped in release builds**, so a crash backtrace will be mostly

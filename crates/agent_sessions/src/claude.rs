@@ -2,7 +2,7 @@ use crate::{
     AgentCommand, AgentKind, Availability, CompletedSubagents, Deletion, Fork, SessionCounts,
     SessionProvider, SessionSummary, SubagentSummary,
     claude_log::{self, HeadFacts, TailFacts},
-    provider::is_safe_component,
+    provider::{Untitled, is_safe_component},
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -16,9 +16,12 @@ use std::{
 /// `ai-title`. Grown in steps rather than read whole: the largest transcript on
 /// the author's machine is 13 MB and the title is normally in the last few KB.
 const TAIL_STEPS: &[u64] = &[256 * 1024, 1024 * 1024];
-/// Enough of the beginning to reach the first user message past the handful of
-/// `mode` / `permission-mode` lines every session opens with.
-const HEAD_BYTES: u64 = 16 * 1024;
+/// How much of the beginning to read looking for the first thing the user said.
+/// The first step clears the handful of `mode` / `permission-mode` lines every
+/// session opens with; the second exists because a session opened by a slash
+/// command carries that command's expanded body before the user gets a word in,
+/// and one such body measured 122 KB.
+const HEAD_STEPS: &[u64] = &[16 * 1024, 256 * 1024];
 
 /// Claude Code's transcripts: `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`,
 /// with a sidecar directory of the same stem holding `subagents/` and
@@ -42,7 +45,7 @@ impl ClaudeProvider {
         util::paths::home_dir().join(".claude").join("projects")
     }
 
-    fn summary_for(&self, log_path: &Path) -> Result<Option<SessionSummary>> {
+    fn summary_for(&self, log_path: &Path, untitled: Untitled) -> Result<Option<SessionSummary>> {
         let id = log_path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -57,11 +60,10 @@ impl ClaudeProvider {
 
         let mut file = File::open(log_path)?;
         let tail = read_tail_until_title(&mut file, len)?;
-        let head = read_head(&mut file, len)?;
-        let head = claude_log::parse_head(&head);
+        let head = read_head_until_prompt(&mut file, len)?;
 
-        // A session nobody spoke in is a session nobody is looking for.
         let TailFacts {
+            custom_title,
             title,
             preview,
             preview_speaker,
@@ -73,13 +75,21 @@ impl ClaudeProvider {
             first_user_message,
             cwd: head_cwd,
         } = head;
-        if preview.is_none() && first_user_message.is_none() {
-            return Ok(None);
-        }
 
-        let title = title
-            .or_else(|| first_user_message.clone())
-            .unwrap_or_else(|| id.clone());
+        // Not a name the user typed, not one the CLI generated, not a first word
+        // they never said.
+        let title = custom_title
+            .or(title)
+            .or_else(|| first_user_message.clone());
+        let title = match (title, untitled) {
+            (Some(title), _) => title,
+            // A session nobody spoke in is a session nobody is browsing for.
+            (None, Untitled::Drop) => {
+                log::debug!("a session with nothing to name it is not listed: {id}");
+                return Ok(None);
+            }
+            (None, Untitled::KeepAsId) => id.clone(),
+        };
         // The head's cwd is the session's original one; the tail's is where it
         // ended up. They differ only if the user moved the directory mid-session,
         // in which case the later one is the one that still exists.
@@ -155,7 +165,7 @@ impl SessionProvider for ClaudeProvider {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                     continue;
                 }
-                match self.summary_for(&path) {
+                match self.summary_for(&path, Untitled::Drop) {
                     Ok(Some(summary)) => sessions.push(summary),
                     Ok(None) => {}
                     // One unreadable transcript must not cost the whole list.
@@ -196,7 +206,7 @@ impl SessionProvider for ClaudeProvider {
             if !candidate.is_file() {
                 continue;
             }
-            return match self.summary_for(&candidate) {
+            return match self.summary_for(&candidate, Untitled::KeepAsId) {
                 Ok(summary) => Ok(summary),
                 // The file is there but unreadable. Answering "not held" would
                 // send the caller off to start a fresh session on top of a
@@ -276,9 +286,9 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
-/// Read growing slices of the end of the file until one contains an `ai-title`,
-/// or the steps run out. Falling short is not an error — the caller falls back
-/// to the first user message.
+/// Read growing slices of the end of the file until one contains a title, or the
+/// steps run out. Falling short is not an error — the caller falls back to the
+/// first user message.
 fn read_tail_until_title(file: &mut File, len: u64) -> Result<TailFacts> {
     let mut best = TailFacts::default();
     for step in TAIL_STEPS {
@@ -294,15 +304,26 @@ fn read_tail_until_title(file: &mut File, len: u64) -> Result<TailFacts> {
             text.as_str()
         };
         best = claude_log::parse_tail(text);
-        if best.title.is_some() || want == len {
+        if best.custom_title.is_some() || best.title.is_some() || want == len {
             break;
         }
     }
     Ok(best)
 }
 
-fn read_head(file: &mut File, len: u64) -> Result<String> {
-    read_at(file, 0, HEAD_BYTES.min(len) as usize)
+/// Read growing slices of the beginning of the file until one holds something
+/// the user actually said. Only a session with no title of any kind pays for the
+/// second step, and only that session's row depends on the answer.
+fn read_head_until_prompt(file: &mut File, len: u64) -> Result<HeadFacts> {
+    let mut best = HeadFacts::default();
+    for step in HEAD_STEPS {
+        let want = (*step).min(len);
+        best = claude_log::parse_head(&read_at(file, 0, want as usize)?);
+        if best.first_user_message.is_some() || want == len {
+            break;
+        }
+    }
+    Ok(best)
 }
 
 /// Lossy on purpose: a byte window into a UTF-8 file will cut a character, and a
@@ -451,6 +472,148 @@ mod tests {
         let provider = ClaudeProvider::new(root.path().to_path_buf());
         let sessions = provider.list().unwrap();
         assert_eq!(sessions[0].title, "just this once");
+    }
+
+    #[test]
+    fn a_session_of_nothing_but_local_commands_is_not_listed() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "housekeeping",
+            &[
+                r#"{"type":"mode","mode":"default"}"#,
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name> <command-args></command-args>"},"cwd":"/w/one"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":"No response requested."},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "switching model is not a conversation, and the caveat above it is not its title"
+        );
+    }
+
+    #[test]
+    fn a_session_opened_by_a_slash_command_is_titled_by_its_arguments() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "commanded",
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-message>debug-code</command-message> <command-name>/debug-code</command-name> <command-args>the titles are wrong</command-args>"},"cwd":"/w/one"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":"looking"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(sessions[0].title, "/debug-code the titles are wrong");
+    }
+
+    #[test]
+    fn the_title_the_user_typed_is_the_one_shown() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "renamed",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"do the thing"},"cwd":"/w/one"}"#,
+                r#"{"type":"ai-title","aiTitle":"Doing the thing"}"#,
+                r#"{"type":"custom-title","customTitle":"Renamed by hand"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(
+            sessions[0].title, "Renamed by hand",
+            "a name the user typed outranks one generated for them"
+        );
+    }
+
+    /// A session whose opening scaffolding runs past the first read step. The
+    /// window has to grow to reach the prompt, and the row would otherwise be
+    /// dropped for having no name.
+    #[test]
+    fn a_prompt_past_the_first_window_is_still_found() {
+        let root = projects_dir();
+        let filler = "x".repeat(20 * 1024);
+        let padded = format!(
+            r#"{{"type":"user","isMeta":true,"message":{{"role":"user","content":"{filler}"}},"cwd":"/w/one"}}"#
+        );
+        session(
+            &root.path().join("-w-one"),
+            "deep",
+            &[
+                &padded,
+                r#"{"type":"user","message":{"role":"user","content":"here is the real question"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(sessions[0].title, "here is the real question");
+    }
+
+    /// The counterpart to the test above. `list` and `find` ask different
+    /// questions of the same file, and only one of them is allowed to answer
+    /// "gone": a tab whose session cannot be found is started fresh *under the
+    /// same id*, which would put a second session on top of this transcript.
+    #[test]
+    fn a_session_the_list_hides_is_still_found_by_id() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "housekeeping",
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name> <command-args></command-args>"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(provider.list().unwrap().is_empty());
+        let found = provider
+            .find("housekeeping")
+            .unwrap()
+            .expect("the transcript is on disk, so the id still names a session");
+        assert_eq!(
+            found.title, "housekeeping",
+            "listed under its id, for want of anything better"
+        );
+    }
+
+    /// The accepted loss at the far end of the growing head read: scaffolding
+    /// deeper than every step, and no title ever generated. The row goes, and
+    /// `find` still holds the id so the transcript cannot be written over.
+    #[test]
+    fn a_prompt_past_every_window_costs_the_row_but_not_the_id() {
+        let root = projects_dir();
+        let filler = "x".repeat(300 * 1024);
+        let padded = format!(
+            r#"{{"type":"user","isMeta":true,"message":{{"role":"user","content":"{filler}"}},"cwd":"/w/one"}}"#
+        );
+        session(
+            &root.path().join("-w-one"),
+            "buried",
+            &[
+                &padded,
+                r#"{"type":"user","message":{"role":"user","content":"here is the real question"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "300 KB of scaffolding before the first word is past every step the head grows to"
+        );
+        assert!(
+            provider.find("buried").unwrap().is_some(),
+            "the transcript exists, and saying otherwise invites a second session on top of it"
+        );
     }
 
     #[test]

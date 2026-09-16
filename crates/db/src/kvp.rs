@@ -107,6 +107,18 @@ impl ScopedKeyValueStore<'_> {
         .context("Failed to read from scoped_kv_store")
     }
 
+    /// Every key in this namespace, and no key outside it.
+    ///
+    /// Filtered by namespace in the query rather than by the caller, so no use
+    /// of it can turn into a scan of the whole table.
+    pub fn keys(&self) -> anyhow::Result<Vec<String>> {
+        self.store
+            .select_bound::<&str, String>("SELECT key FROM scoped_kv_store WHERE namespace = (?)")?(
+            self.namespace,
+        )
+        .context("Failed to list keys in scoped_kv_store")
+    }
+
     pub async fn write(&self, key: String, value: String) -> anyhow::Result<()> {
         let namespace = self.namespace.to_owned();
         self.store
@@ -218,6 +230,32 @@ mod tests {
         assert_eq!(scope_a.read("key-2").unwrap(), None);
         assert_eq!(scope_a.read("key-3").unwrap(), None);
         assert_eq!(scope_b.read("key-1").unwrap(), Some("value-b1".to_string()));
+    }
+
+    #[gpui::test]
+    async fn test_scoped_kvp_keys() {
+        let db = KeyValueStore::open_test_db("test_scoped_kvp_keys").await;
+
+        let scope_a = db.scoped("namespace-a");
+        let scope_b = db.scoped("namespace-b");
+
+        assert!(scope_a.keys().unwrap().is_empty());
+
+        for key in ["key-1", "key-2"] {
+            scope_a
+                .write(key.to_string(), "value".to_string())
+                .await
+                .unwrap();
+        }
+        scope_b
+            .write("key-3".to_string(), "value".to_string())
+            .await
+            .unwrap();
+
+        let mut keys = scope_a.keys().unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["key-1".to_string(), "key-2".to_string()]);
+        assert_eq!(scope_b.keys().unwrap(), vec!["key-3".to_string()]);
     }
 }
 
