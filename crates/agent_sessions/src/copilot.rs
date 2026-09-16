@@ -1,6 +1,7 @@
 use crate::{
     AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
-    SessionSummary, Speaker, provider::is_safe_component,
+    SessionSummary, Speaker,
+    provider::{Untitled, is_safe_component},
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -11,7 +12,11 @@ use std::{
     time::SystemTime,
 };
 
-/// Enough of the beginning to reach `session.start`, which the CLI writes first.
+/// Enough of the beginning to reach `session.start`, which the CLI writes first,
+/// and the first `user.message` a few lines after it. Fixed rather than grown
+/// the way Claude's is: this store records a prompt as what the person typed,
+/// with no expanded skill or command body in front of it, and the deepest first
+/// message measured sat at 1.9 KB.
 const HEAD_BYTES: u64 = 16 * 1024;
 /// Enough of the end to reach the last message and the last model change.
 const TAIL_BYTES: u64 = 256 * 1024;
@@ -28,8 +33,9 @@ const TAIL_BYTES: u64 = 256 * 1024;
 /// on-disk shape imposes:
 ///
 /// - A session written by the VS Code extension rather than the CLI has a
-///   `vscode.metadata.json` and **no `events.jsonl`**. It still lists; it simply
-///   has no transcript to open.
+///   `vscode.metadata.json` and **no `events.jsonl`**. It still lists, on the
+///   strength of the `summary` its yaml carries; it simply has no transcript to
+///   open.
 /// - `user.message` carries both `content` and `transformedContent`. The latter
 ///   is the prompt after the CLI stuffed `<current_datetime>`, `<reminder>` and
 ///   tool preambles into it. Only `content` is what the person typed.
@@ -67,7 +73,7 @@ impl CopilotProvider {
             .join("session-state")
     }
 
-    fn summary_for(&self, dir: &Path) -> Result<Option<SessionSummary>> {
+    fn summary_for(&self, dir: &Path, untitled: Untitled) -> Result<Option<SessionSummary>> {
         let dir_id = dir
             .file_name()
             .and_then(|name| name.to_str())
@@ -98,12 +104,23 @@ impl CopilotProvider {
             .or_else(|| workspace.get("cwd").map(PathBuf::from))
             .unwrap_or_default();
 
+        // A row has to be listed under a name, and the id is not one. Five of
+        // the seven session directories this was written against held nothing
+        // but a yaml naming themselves -- opened, never spoken in, never
+        // summarised -- and every one of them listed as its own uuid.
         let title = workspace
             .get("summary")
             .filter(|summary| !summary.is_empty())
             .cloned()
-            .or_else(|| facts.first_user_message.clone())
-            .unwrap_or_else(|| id.clone());
+            .or_else(|| facts.first_user_message.clone());
+        let title = match (title, untitled) {
+            (Some(title), _) => title,
+            (None, Untitled::Drop) => {
+                log::debug!("a session with nothing to name it is not listed: {id}");
+                return Ok(None);
+            }
+            (None, Untitled::KeepAsId) => id.clone(),
+        };
 
         let updated_at = events_metadata
             .as_ref()
@@ -177,7 +194,8 @@ impl CopilotProvider {
             if !path.is_dir() {
                 continue;
             }
-            if matches!(self.summary_for(&path), Ok(Some(found)) if found.id == session.id) {
+            if matches!(self.summary_for(&path, Untitled::KeepAsId), Ok(Some(found)) if found.id == session.id)
+            {
                 return Some(path);
             }
         }
@@ -255,7 +273,7 @@ impl SessionProvider for CopilotProvider {
                 continue;
             }
             let path = entry.path();
-            match self.summary_for(&path) {
+            match self.summary_for(&path, Untitled::Drop) {
                 Ok(Some(summary)) => sessions.push(summary),
                 Ok(None) => {}
                 // One unreadable session must not cost the whole list.
@@ -279,7 +297,7 @@ impl SessionProvider for CopilotProvider {
         // Unlike a missing directory, a directory that will not read is an error:
         // answering "not held" would send the caller off to start a session on
         // top of one that exists.
-        self.summary_for(&dir)
+        self.summary_for(&dir, Untitled::KeepAsId)
     }
 
     fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
@@ -507,6 +525,65 @@ mod tests {
         r#"{"type":"session.shutdown","data":{},"id":"f"}"#,
         "\n",
     );
+
+    #[test]
+    fn a_session_nobody_spoke_in_is_not_listed() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "4ebdb534-a568-4fae-9043-c699cad3a53e",
+            None,
+            "id: 4ebdb534-a568-4fae-9043-c699cad3a53e\n\
+             cwd: /work/project\n\
+             summary_count: 0\n",
+        );
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "a directory opened and never spoken in has no name but its uuid, which is not one"
+        );
+    }
+
+    /// Same split as Claude keeps: the row is not worth browsing, but the
+    /// directory is still there and `find` has to say so — `deletion` locates it
+    /// the same way.
+    #[test]
+    fn a_session_the_list_hides_is_still_found_by_id() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "4ebdb534-a568-4fae-9043-c699cad3a53e";
+        write_session(
+            root.path(),
+            id,
+            None,
+            "id: 4ebdb534-a568-4fae-9043-c699cad3a53e\ncwd: /work/project\n",
+        );
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        assert!(provider.list().unwrap().is_empty());
+        let found = provider
+            .find(id)
+            .unwrap()
+            .expect("the directory is on disk");
+        assert_eq!(found.title, id);
+    }
+
+    /// The VS Code extension writes no `events.jsonl`, so this row exists on the
+    /// strength of its `summary` alone. That is what separates it from the row
+    /// above, and why the rule is "no name" rather than "no transcript".
+    #[test]
+    fn a_summary_alone_is_enough_to_list() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "6454ea85-a0cc-4961-8f75-26c414f668e1",
+            None,
+            WORKSPACE,
+        );
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Vietnamese Greeting");
+        assert_eq!(sessions[0].preview, "");
+    }
 
     #[test]
     fn a_session_reads_its_title_cwd_and_last_speaker() {

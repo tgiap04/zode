@@ -17,6 +17,9 @@ use std::path::PathBuf;
 /// wins — measured at 74 occurrences in a single session.
 #[derive(Default, Debug, PartialEq)]
 pub(crate) struct TailFacts {
+    /// The name the user typed for this session themselves. Written as its own
+    /// line the moment they rename it, and it outranks anything generated.
+    pub custom_title: Option<String>,
     pub title: Option<String>,
     pub preview: Option<String>,
     pub preview_speaker: Option<Speaker>,
@@ -43,6 +46,7 @@ pub(crate) fn parse_tail(tail: &str) -> TailFacts {
             // Later lines overwrite earlier ones on purpose: within the tail the
             // last of each of these is the current truth.
             EntryKind::AiTitle(title) => facts.title = Some(title),
+            EntryKind::CustomTitle(title) => facts.custom_title = Some(title),
             EntryKind::Message { speaker, text } => {
                 if let Some(text) = text {
                     facts.preview = Some(text);
@@ -165,6 +169,7 @@ pub(crate) fn completed_tool_uses(chunk: &str) -> Vec<String> {
 
 enum EntryKind {
     AiTitle(String),
+    CustomTitle(String),
     Message {
         speaker: Speaker,
         text: Option<String>,
@@ -190,6 +195,10 @@ fn parse_line(line: &str) -> Option<Entry> {
             let title = value.get("aiTitle").and_then(Value::as_str)?;
             EntryKind::AiTitle(one_line(title))
         }
+        "custom-title" => {
+            let title = value.get("customTitle").and_then(Value::as_str)?;
+            EntryKind::CustomTitle(one_line(title))
+        }
         role @ ("user" | "assistant") => {
             let speaker = if role == "user" {
                 Speaker::User
@@ -200,6 +209,12 @@ fn parse_line(line: &str) -> Option<Entry> {
                 .get("message")
                 .and_then(|message| message.get("content"))
                 .and_then(message_text);
+            let text = match speaker {
+                Speaker::User => text.and_then(|text| {
+                    spoken_by_the_user(text, value.get("isMeta").and_then(Value::as_bool))
+                }),
+                Speaker::Agent => text,
+            };
             EntryKind::Message { speaker, text }
         }
         _ => EntryKind::Other,
@@ -242,6 +257,66 @@ fn message_text(content: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Tags Claude Code opens a line of its own scaffolding with. Matched at the
+/// start of the text rather than anywhere inside it, so prose that quotes one of
+/// them is still prose.
+const SCAFFOLDING: [&str; 3] = [
+    "<local-command-caveat>",
+    "<local-command-stdout>",
+    "<task-notification>",
+];
+
+/// What a `"type":"user"` line says, or `None` when the person did not say it.
+///
+/// Several kinds of line are written under the user's name that the user never
+/// typed: the caveat inserted before a local command is replayed, that command's
+/// stdout, a notification that a subagent finished, and the body of a skill
+/// expanded on their behalf. They are indistinguishable from speech to anything
+/// that reads the role alone, and 25 of the 32 transcripts this was written
+/// against opened on one of them -- which is how a list of sessions comes to be
+/// titled `<local-command-caveat>Caveat: The messages below...`.
+fn spoken_by_the_user(text: String, is_meta: Option<bool>) -> Option<String> {
+    // `isMeta` is the CLI's own mark for a line it wrote in the user's place.
+    // It covers the caveat and the expanded skill body; it does not cover the
+    // command itself or its output, which are marked by nothing at all.
+    if is_meta == Some(true) {
+        return None;
+    }
+    if SCAFFOLDING.iter().any(|tag| text.starts_with(tag)) {
+        return None;
+    }
+    if text.starts_with("<command-name>") || text.starts_with("<command-message>") {
+        return invoked_command(&text);
+    }
+    Some(text)
+}
+
+/// `/debug-code why is this slow` out of the tags a slash command is recorded
+/// as. `None` when the command carried no arguments: `/clear` and `/model` are
+/// housekeeping, and a session named after one says nothing about itself.
+///
+/// A line with no `<command-args>` tag at all reads the same as one whose tag is
+/// empty. Every command seen on disk writes the tag either way, so the two cases
+/// are the same case today — but if the CLI ever stops writing it, every slash
+/// command goes quiet here rather than loudly wrong, and that is the failure
+/// worth knowing about in advance.
+fn invoked_command(text: &str) -> Option<String> {
+    let arguments = between(text, "<command-args>", "</command-args>")?.trim();
+    if arguments.is_empty() {
+        return None;
+    }
+    match between(text, "<command-name>", "</command-name>") {
+        Some(name) => Some(format!("{} {arguments}", name.trim())),
+        None => Some(arguments.to_owned()),
+    }
+}
+
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let start = text.find(open)? + open.len();
+    let end = text[start..].find(close)? + start;
+    text.get(start..end)
 }
 
 /// Collapse to a single line and drop control characters. The preview goes into
@@ -287,6 +362,86 @@ not json at all
         // The branch of the *last* line that carried one, not the first.
         assert_eq!(facts.branch.as_deref(), Some("feat/x"));
         assert_eq!(facts.model.as_deref(), Some("claude-opus-5"));
+    }
+
+    /// The opening of a real session, byte for byte in shape: a caveat the CLI
+    /// marked as its own, the slash command the person ran, and that command's
+    /// stdout. Not one of the three is speech, and the first of them used to be
+    /// the session's title.
+    const A_SESSION_THAT_OPENS_ON_SCAFFOLDING: &str = r#"
+{"type":"mode","mode":"default","sessionId":"s1"}
+{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}
+{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"},"cwd":"/w/one"}
+{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 5</local-command-stdout>"},"cwd":"/w/one"}
+"#;
+
+    #[test]
+    fn nothing_the_cli_wrote_under_the_users_name_counts_as_a_prompt() {
+        let facts = parse_head(A_SESSION_THAT_OPENS_ON_SCAFFOLDING);
+        assert_eq!(
+            facts.first_user_message, None,
+            "a caveat, a bare slash command and its stdout are all the CLI talking to itself"
+        );
+        assert_eq!(
+            facts.cwd,
+            Some(PathBuf::from("/w/one")),
+            "the cwd is still read off the lines that were skipped"
+        );
+        assert_eq!(
+            parse_tail(A_SESSION_THAT_OPENS_ON_SCAFFOLDING).preview,
+            None,
+            "what is not a title is not a preview either"
+        );
+    }
+
+    #[test]
+    fn a_slash_command_is_named_by_what_was_typed_after_it() {
+        let head = parse_head(
+            r#"{"type":"user","message":{"role":"user","content":"<command-message>debug-code</command-message>\n<command-name>/debug-code</command-name>\n<command-args>the titles are wrong</command-args>"}}"#,
+        );
+        assert_eq!(
+            head.first_user_message.as_deref(),
+            Some("/debug-code the titles are wrong"),
+            "the arguments are the part the person typed, and the name says which command took them"
+        );
+    }
+
+    #[test]
+    fn a_task_notification_is_not_the_user_speaking() {
+        let head = parse_head(
+            r#"{"type":"user","message":{"role":"user","content":"<task-notification> <task-id>abc</task-id> agent finished"}}"#,
+        );
+        assert_eq!(head.first_user_message, None);
+    }
+
+    /// The guard is anchored at the start of the text on purpose: someone asking
+    /// about one of these tags is asking a real question.
+    #[test]
+    fn prose_that_quotes_a_tag_is_still_prose() {
+        let head = parse_head(
+            r#"{"type":"user","message":{"role":"user","content":"why does <local-command-stdout> show up in my titles"}}"#,
+        );
+        assert_eq!(
+            head.first_user_message.as_deref(),
+            Some("why does <local-command-stdout> show up in my titles")
+        );
+    }
+
+    #[test]
+    fn the_title_the_user_typed_outranks_the_one_that_was_generated() {
+        let facts = parse_tail(concat!(
+            r#"{"type":"ai-title","aiTitle":"Generated later"}"#,
+            "\n",
+            r#"{"type":"custom-title","customTitle":"Renamed by hand"}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"Generated later still"}"#,
+        ));
+        assert_eq!(facts.custom_title.as_deref(), Some("Renamed by hand"));
+        assert_eq!(
+            facts.title.as_deref(),
+            Some("Generated later still"),
+            "both are read; which one wins is the caller's decision"
+        );
     }
 
     /// The two lines that bracket a subagent, copied from a finished session on

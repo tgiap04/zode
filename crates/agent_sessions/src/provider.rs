@@ -21,6 +21,25 @@ pub(crate) fn is_safe_component(id: &str) -> bool {
         && !id.contains('\0')
 }
 
+/// What a session with no name of its own is worth to the caller.
+///
+/// A store answers two different questions with one read. `list` asks which
+/// sessions are worth browsing, and a session nobody named and nobody spoke in
+/// is not one of them. `find` asks whether an id still names a transcript, and a
+/// session with no title is still a transcript — answering "no" would send the
+/// caller off to start a fresh session on top of one that already exists, which
+/// is the very thing the `Err` arms of both `find` implementations refuse to do.
+///
+/// The same split `codex` keeps between its two queries, where `find`
+/// deliberately drops the `archived = 0` filter that `list` carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Untitled {
+    /// Leave it out. Nothing names it, and a uuid is not a name.
+    Drop,
+    /// Keep it, listed under its id.
+    KeepAsId,
+}
+
 /// One agent's session store.
 ///
 /// Every method is blocking: these read files and sqlite. Callers run them on a
