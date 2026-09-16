@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use gpui::{ClipboardItem, Entity, Window};
 use project::git_store::RepositoryId;
 use ui::{ContextMenu, ContextMenuEntry, prelude::*};
-use workspace::MultiWorkspace;
+use workspace::{MultiWorkspace, NewCenterTerminal};
 
 use crate::branch_panel::checkout_deletion;
 use crate::branch_panel::panel::BranchPanel;
@@ -43,6 +43,7 @@ impl BranchPanel {
             let path_for_pin = path.clone();
             let copy = panel.clone();
             let path_for_copy = path.clone();
+            let path_for_terminal = path.clone();
             let remove = panel.clone();
             let path_for_remove = path.clone();
             let label = label.clone();
@@ -116,6 +117,36 @@ impl BranchPanel {
                                     path_for_copy.display().to_string(),
                                 ));
                             });
+                        }),
+                )
+                // Beside Copy Path because it is the same kind of act: both
+                // reach into the checkout's directory without going to it. The
+                // terminal opens in the workspace already in front of the
+                // reader, sitting at the other checkout's path -- which is the
+                // whole point of running one from a card you are not standing
+                // in.
+                //
+                // A centre tab rather than the terminal dock, because this is a
+                // place to work in, the way an agent tab is: it takes the room
+                // a tab gets, sits beside the editors, and survives being
+                // switched away from. The dock is for the terminal belonging to
+                // the checkout the workspace is already open at.
+                .item(
+                    ContextMenuEntry::new("Open in Terminal")
+                        .icon(IconName::Terminal)
+                        .icon_position(IconPosition::Start)
+                        .handler(move |window, cx| {
+                            window.dispatch_action(
+                                Box::new(NewCenterTerminal {
+                                    working_directory: Some(path_for_terminal.clone()),
+                                    // Not `local`: a remote project's checkout
+                                    // is a path on the remote, and a local
+                                    // shell would open somewhere that path does
+                                    // not mean anything.
+                                    local: false,
+                                }),
+                                cx,
+                            );
                         }),
                 );
 

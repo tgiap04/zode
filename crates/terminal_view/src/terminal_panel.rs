@@ -1998,6 +1998,61 @@ mod tests {
         );
     }
 
+    /// The mirror of the test above, and the one the checkout menu rests on: a
+    /// terminal asked for by `NewCenterTerminal` belongs in the pane the editors
+    /// are in, not the dock. Both places hold terminals, which is exactly how an
+    /// entry meaning "open a tab" can land in the wrong one and still look like
+    /// it worked.
+    ///
+    /// The directory is passed but not asserted on. `Terminal::working_directory`
+    /// reads the live PTY process, so waiting on it would be timing a test
+    /// against a shell starting up. Placement is what this pins, because
+    /// placement is what no reading of the code settles.
+    #[gpui::test]
+    async fn a_center_terminal_opens_in_the_editor_pane_not_the_dock(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+
+        window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    TerminalView::deploy(
+                        workspace,
+                        &workspace::NewCenterTerminal {
+                            local: false,
+                            working_directory: Some(std::env::temp_dir()),
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .expect("Failed to dispatch deploy");
+
+        cx.run_until_parked();
+
+        let panel_items =
+            terminal_panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len());
+        let center_items = window_handle
+            .read_with(cx, |multi_workspace, cx| {
+                multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_pane()
+                    .read(cx)
+                    .items_len()
+            })
+            .expect("Failed to read center pane items");
+
+        assert_eq!(
+            center_items, 1,
+            "a center terminal belongs in the pane the editors are in"
+        );
+        assert_eq!(panel_items, 0, "and not in the terminal dock");
+    }
+
     #[gpui::test]
     async fn test_new_terminal_opens_in_center_when_center_terminal_focused(
         cx: &mut TestAppContext,

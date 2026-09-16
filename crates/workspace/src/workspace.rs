@@ -487,6 +487,12 @@ pub struct NewCenterTerminal {
     /// If true, creates a local terminal even in remote projects.
     #[serde(default)]
     pub local: bool,
+    /// Where the terminal starts. `None` follows the `terminal.working_directory`
+    /// setting, which is what a keybinding or the new-tab menu wants. A caller
+    /// naming a directory here means a specific one -- a sibling git worktree,
+    /// say -- that the setting would never arrive at.
+    #[serde(default)]
+    pub working_directory: Option<PathBuf>,
 }
 
 /// Opens a new terminal.
