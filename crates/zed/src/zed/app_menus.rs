@@ -62,6 +62,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action("About Zode", zed_actions::About),
+                MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
                     MenuItem::action("Open Settings", zed_actions::OpenSettings),
@@ -289,7 +290,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Help".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::action("Release Notes", auto_update::ViewReleaseNotes),
                 MenuItem::separator(),
                 MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
