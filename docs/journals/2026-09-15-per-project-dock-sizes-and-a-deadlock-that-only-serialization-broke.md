@@ -22,6 +22,7 @@ The galling part is the asymmetry: both suites are entirely green, both complete
 Tests that hang when run in parallel with the full suite:
 
 **In `worktree` crate:**
+
 - `test_file_scan_exclusions`
 - `test_file_scan_exclusions_overrules_inclusions`
 - `test_file_scan_inclusions`
@@ -32,6 +33,7 @@ Tests that hang when run in parallel with the full suite:
 - `test_write_file`
 
 **In `project` crate:**
+
 - `test_file_status`
 - `test_git_repository_status`
 - `test_rename_work_directory`
@@ -89,6 +91,7 @@ Temporarily restored `crates/worktree/src/worktree.rs` to its committed state (b
 - **The prune deletes rows one at a time.** `ScopedKeyValueStore` has no batch-delete API. If a user deletes fifty projects in a session, fifty deletes happen serially. Not urgent, but a note for when the key-value store gets a refresh.
 
 - **Two pre-existing project-identity ambiguities are now observable to users**, since project identity carries state for the first time:
+
   - A case-insensitive filesystem treats two spellings of one directory as two projects and keeps separate widths for each.
   - One checkout reached through two symlinks likewise counts twice.
   - These are edge cases, but worth documenting if a user reports asymmetric widths across what they think is the same project.
