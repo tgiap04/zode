@@ -14177,7 +14177,7 @@ mod tests {
     async fn projects_fs(cx: &mut gpui::TestAppContext) -> Arc<FakeFs> {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(
-            "/main-repo",
+            path!("/main-repo"),
             json!({
                 ".git": {
                     "worktrees": {
@@ -14189,15 +14189,15 @@ mod tests {
         )
         .await;
         fs.insert_tree(
-            "/worktree-checkout",
+            path!("/worktree-checkout"),
             json!({
-                ".git": "gitdir: /main-repo/.git/worktrees/feature",
+                ".git": format!("gitdir: {}", path!("/main-repo/.git/worktrees/feature")),
                 "src": { "main.rs": "" }
             }),
         )
         .await;
         fs.insert_tree(
-            "/other-repo",
+            path!("/other-repo"),
             json!({ ".git": {}, "src": { "main.rs": "" } }),
         )
         .await;
@@ -14289,14 +14289,14 @@ mod tests {
         init_test(cx);
         let fs = projects_fs(cx).await;
 
-        record_left_dock_width(fs.clone(), "/main-repo", px(350.), cx).await;
+        record_left_dock_width(fs.clone(), path!("/main-repo"), px(350.), cx).await;
         // An unrelated repository drags afterwards, so the shared record holds
         // 200 by now. Only the repository's own record still holds 350, which
         // is what makes this assertion about the project row and not a fallback.
-        record_left_dock_width(fs.clone(), "/other-repo", px(200.), cx).await;
+        record_left_dock_width(fs.clone(), path!("/other-repo"), px(200.), cx).await;
 
         assert_eq!(
-            left_dock_width_on_open(fs.clone(), "/worktree-checkout", cx).await,
+            left_dock_width_on_open(fs.clone(), path!("/worktree-checkout"), cx).await,
             Some(px(350.)),
             "a linked worktree should open at the width its repository recorded, \
              not at the width the last project to drag left behind"
@@ -14309,16 +14309,16 @@ mod tests {
         init_test(cx);
         let fs = projects_fs(cx).await;
 
-        record_left_dock_width(fs.clone(), "/main-repo", px(350.), cx).await;
-        record_left_dock_width(fs.clone(), "/other-repo", px(200.), cx).await;
+        record_left_dock_width(fs.clone(), path!("/main-repo"), px(350.), cx).await;
+        record_left_dock_width(fs.clone(), path!("/other-repo"), px(200.), cx).await;
 
         assert_eq!(
-            left_dock_width_on_open(fs.clone(), "/other-repo", cx).await,
+            left_dock_width_on_open(fs.clone(), path!("/other-repo"), cx).await,
             Some(px(200.)),
             "the second repository should open at its own width"
         );
         assert_eq!(
-            left_dock_width_on_open(fs.clone(), "/main-repo", cx).await,
+            left_dock_width_on_open(fs.clone(), path!("/main-repo"), cx).await,
             Some(px(350.)),
             "and returning to the first should find it as it was left"
         );
@@ -14338,7 +14338,7 @@ mod tests {
         )
         .await;
 
-        let project = Project::test(fs, [Path::new("/main-repo")], cx).await;
+        let project = Project::test(fs, [Path::new(path!("/main-repo"))], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -14389,7 +14389,7 @@ mod tests {
         init_test(cx);
         let fs = projects_fs(cx).await;
 
-        let project = Project::test(fs, [Path::new("/main-repo")], cx).await;
+        let project = Project::test(fs, [Path::new(path!("/main-repo"))], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -14442,7 +14442,7 @@ mod tests {
         let fs = projects_fs(cx).await;
 
         {
-            let project = Project::test(fs.clone(), [Path::new("/main-repo")], cx).await;
+            let project = Project::test(fs.clone(), [Path::new(path!("/main-repo"))], cx).await;
             let (multi_workspace, cx) =
                 cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -14465,7 +14465,8 @@ mod tests {
         }
 
         {
-            let project = Project::test(fs.clone(), [Path::new("/worktree-checkout")], cx).await;
+            let project =
+                Project::test(fs.clone(), [Path::new(path!("/worktree-checkout"))], cx).await;
             let (multi_workspace, cx) =
                 cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
             let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -14556,7 +14557,7 @@ mod tests {
         // shared record, so the two cannot be confused.
         write_size_record(
             PROJECT_PANEL_SIZE_STATE_KEY,
-            panel_size_key(TestPanel::panel_key(), None, Path::new("/main-repo"))
+            panel_size_key(TestPanel::panel_key(), None, Path::new(path!("/main-repo")))
                 .expect("a UTF-8 path has a key"),
             px(350.),
             cx,
@@ -14578,7 +14579,7 @@ mod tests {
         workspace.update(cx, |workspace, _cx| {
             workspace.set_random_database_id();
             workspace.bounds.size.width = px(800.);
-            workspace.set_restoring_project_path(Some(Path::new("/main-repo").into()));
+            workspace.set_restoring_project_path(Some(Path::new(path!("/main-repo")).into()));
         });
 
         workspace.update_in(cx, |workspace, window, cx| {
@@ -14602,7 +14603,7 @@ mod tests {
         // seed only ever fills the gap.
         project
             .update(cx, |project, cx| {
-                project.find_or_create_worktree("/other-repo", true, cx)
+                project.find_or_create_worktree(path!("/other-repo"), true, cx)
             })
             .await
             .expect("adding a worktree should succeed");
@@ -14611,7 +14612,7 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert_eq!(
                 workspace.panel_size_project_path(cx),
-                Some(PathBuf::from("/other-repo")),
+                Some(PathBuf::from(path!("/other-repo"))),
                 "the live worktree must win over the seed, so removing a folder \
                  re-points the record instead of sticking to what was restored"
             );
@@ -14631,13 +14632,13 @@ mod tests {
         // worktree exists.
         let seeded = project::git_store::resolve_git_worktree_to_main_repo(
             fs.as_ref(),
-            Path::new("/worktree-checkout"),
+            Path::new(path!("/worktree-checkout")),
         )
         .await;
-        assert_eq!(seeded, Some(PathBuf::from("/main-repo")));
+        assert_eq!(seeded, Some(PathBuf::from(path!("/main-repo"))));
 
         // What the worktree itself answers once it has landed.
-        let project = Project::test(fs.clone(), [Path::new("/worktree-checkout")], cx).await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/worktree-checkout"))], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -14662,7 +14663,7 @@ mod tests {
 
         let resolved = project::git_store::resolve_git_worktree_to_main_repo(
             fs.as_ref(),
-            Path::new("/other-repo"),
+            Path::new(path!("/other-repo")),
         )
         .await;
         assert_eq!(
@@ -14671,7 +14672,7 @@ mod tests {
              the path it was given"
         );
 
-        let project = Project::test(fs.clone(), [Path::new("/other-repo")], cx).await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/other-repo"))], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
@@ -14679,7 +14680,7 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             assert_eq!(
                 workspace.panel_size_project_path(cx),
-                Some(PathBuf::from("/other-repo"))
+                Some(PathBuf::from(path!("/other-repo")))
             );
         });
     }
