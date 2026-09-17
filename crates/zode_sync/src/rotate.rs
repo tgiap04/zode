@@ -43,7 +43,7 @@ pub async fn plan(context: &SyncContext, old: &Dek, new: &Dek) -> Result<Rotatio
             &context.http_client,
             &context.api_url,
             &context.credential.access_token,
-            kind,
+            &crate::envelope::Resource::sync(kind),
         )
         .await?;
 
@@ -106,7 +106,7 @@ where
             &context.http_client,
             &context.api_url,
             &context.credential.access_token,
-            kind,
+            &crate::envelope::Resource::sync(kind),
         )
         .await?
         else {
@@ -120,7 +120,7 @@ where
             &context.http_client,
             &context.api_url,
             &context.credential.access_token,
-            kind,
+            &crate::envelope::Resource::sync(kind),
             &blob,
             Precondition::Replace(&document.revision),
         )
