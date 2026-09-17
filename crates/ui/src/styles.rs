@@ -1,5 +1,6 @@
 pub mod animation;
 mod appearance;
+mod brand;
 mod color;
 mod elevation;
 mod platform;
@@ -9,6 +10,7 @@ mod typography;
 mod units;
 
 pub use appearance::*;
+pub use brand::*;
 pub use color::*;
 pub use elevation::*;
 pub use platform::*;

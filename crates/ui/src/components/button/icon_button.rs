@@ -37,7 +37,7 @@ impl IconButton {
             shape: IconButtonShape::Wide,
             icon,
             icon_size: IconSize::default(),
-            icon_color: Color::Default,
+            icon_color: Color::Icon,
             selected_icon: None,
             selected_icon_color: None,
             selected_style: None,

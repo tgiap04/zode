@@ -18258,6 +18258,179 @@ async fn test_completion_page_up_down_keys(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_completion_preview_reflects_selected_entry(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            completion_provider: Some(lsp::CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    cx.set_state("variableˇ");
+    cx.simulate_keystroke(".");
+    handle_completion_request(
+        "variable.|<>",
+        vec!["alpha", "beta"],
+        false,
+        counter,
+        &mut cx,
+    )
+    .await;
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+
+    cx.update_editor(|editor, _, _| {
+        assert_eq!(
+            editor.current_completion_preview_text().as_deref(),
+            Some("alpha"),
+            "the first entry should be previewed by default"
+        );
+    });
+
+    cx.update_editor(|editor, window, cx| {
+        editor.context_menu_next(&ContextMenuNext, window, cx);
+    });
+    cx.update_editor(|editor, _, _| {
+        assert_eq!(
+            editor.current_completion_preview_text().as_deref(),
+            Some("beta"),
+            "moving the selection should update the preview to the newly selected entry"
+        );
+    });
+
+    cx.update_editor(|editor, window, cx| {
+        editor.cancel(&Cancel, window, cx);
+    });
+    cx.update_editor(|editor, _, _| {
+        assert_eq!(
+            editor.current_completion_preview_text(),
+            None,
+            "closing the completions menu should remove the preview"
+        );
+        assert!(
+            editor.context_menu.borrow().is_none(),
+            "the menu should actually be closed"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_completion_preview_ignores_fuzzy_mismatched_entry(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            completion_provider: Some(lsp::CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    // The typed prefix is not a prefix of the fuzzy-matched entry "get_foo" -
+    // the preview must show nothing rather than a misleading fragment, and
+    // must not panic while checking.
+    update_test_language_settings(&mut cx, &|settings| {
+        settings.defaults.show_completions_on_input = Some(false);
+    });
+    cx.set_state("variable.ˇ");
+    cx.simulate_keystrokes("f o");
+    cx.assert_editor_state("variable.foˇ");
+    cx.update_editor(|editor, window, cx| {
+        editor.show_completions(&ShowCompletions, window, cx);
+    });
+    handle_completion_request("variable.<fo|>", vec!["get_foo"], false, counter, &mut cx).await;
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+
+    cx.update_editor(|editor, _, _| {
+        assert_eq!(
+            editor.current_completion_preview_text(),
+            None,
+            "a fuzzy match whose prefix doesn't align with new_text must not be previewed"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_completion_preview_handles_multibyte_completion_text(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            completion_provider: Some(lsp::CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    // The completion's new_text is full of multi-byte Vietnamese diacritics and an
+    // emoji. Computing "new_text minus what was typed" must not panic on a
+    // non-ASCII char boundary.
+    cx.set_state("variableˇ");
+    cx.simulate_keystroke(".");
+    handle_completion_request("variable.|<>", vec!["chào bạn 😀"], false, counter, &mut cx).await;
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+
+    cx.update_editor(|editor, _, _| {
+        assert_eq!(
+            editor.current_completion_preview_text().as_deref(),
+            Some("chào bạn 😀"),
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_completion_preview_disabled_by_setting(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            completion_provider: Some(lsp::CompletionOptions {
+                trigger_characters: Some(vec![".".to_string()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    update_test_language_settings(&mut cx, &|settings| {
+        settings.defaults.show_completion_preview = Some(false);
+    });
+
+    cx.set_state("variableˇ");
+    cx.simulate_keystroke(".");
+    handle_completion_request("variable.|<>", vec!["alpha"], false, counter, &mut cx).await;
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+
+    cx.update_editor(|editor, _, _| {
+        assert_eq!(
+            editor.current_completion_preview_text(),
+            None,
+            "the preview must stay off when the setting is disabled"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_as_is_completions(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
     let mut cx = EditorLspTestContext::new_rust(

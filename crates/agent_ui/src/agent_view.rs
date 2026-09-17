@@ -31,6 +31,26 @@ fn responding_at(writes_in_window: usize) -> bool {
     writes_in_window >= RESPONDING_WRITES
 }
 
+/// Whether a session should read as answering, before the debounce settles it.
+///
+/// A subagent counts. Its output reaches the same pty, but not at the same rate:
+/// a CLI waiting on one repaints a spinner once or twice a second, which is
+/// under the threshold [`responding_at`] needs, so the mark would go dark for
+/// the minutes a subagent takes. The session is working the whole time.
+///
+/// `working` gates both terms rather than sitting beside them. A running
+/// subagent is one that was spawned with no result reported, read from the
+/// parent's transcript — so a CLI killed mid-flight leaves a record that never
+/// completes. Ungated, that record would read as answering for the rest of the
+/// session, and `keep_awake` would hold the display lit for all of it.
+///
+/// A free function so the rule can be asserted without a process, a pty or a
+/// clock: it is the whole difference between a mark that follows one answer and
+/// one that follows a live tab.
+fn answering_now(working: bool, responding: bool, a_subagent_is_running: bool) -> bool {
+    working && (responding || a_subagent_is_running)
+}
+
 /// The window the agent's pty writes are counted over.
 const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
 
@@ -755,13 +775,11 @@ impl AgentView {
                 // about to be dropped with it.
                 let Ok(still_running) = this.update(cx, |this, cx| {
                     let working = this.is_working(cx);
-                    // A subagent counts. Its output reaches the same pty, but
-                    // not at the same rate: a CLI waiting on one repaints a
-                    // spinner once or twice a second, which is under the
-                    // threshold `is_responding` needs, so the tab would go dark
-                    // for the minutes a subagent takes. The session is working
-                    // the whole time.
-                    let raw = working && (this.is_responding(cx) || this.subagents.any_running());
+                    let raw = answering_now(
+                        working,
+                        this.is_responding(cx),
+                        this.subagents.any_running(),
+                    );
                     // The debounce holds a mark steady across the pauses inside
                     // one answer. It must not hold one over a process that has
                     // ended: there is nothing left to flicker, and the wait
@@ -2170,6 +2188,67 @@ mod tests {
     use agent_sessions::AgentCommand;
     use project::agent_bypass::BypassCheck;
     use std::path::PathBuf;
+
+    /// What counts as answering, before the debounce settles it.
+    ///
+    /// The rule decides two things at once: whether a tab's mark spins, and —
+    /// through `is_answering` — whether `keep_awake` holds the display lit. Both
+    /// of the ways to get it wrong are states a test cannot stage with a real
+    /// process, which is why the rule is a free function.
+    mod answering {
+        use super::super::answering_now;
+
+        #[test]
+        fn output_arriving_counts() {
+            assert!(answering_now(true, true, false));
+        }
+
+        /// A CLI waiting on a subagent repaints a spinner once or twice a
+        /// second, under the threshold `is_responding` needs. Without this term
+        /// the mark goes dark, and the display sleeps, for the minutes a
+        /// subagent takes.
+        #[test]
+        fn a_quiet_parent_with_a_running_subagent_counts() {
+            assert!(
+                answering_now(true, false, true),
+                "work delegated to a subagent is still the session working"
+            );
+        }
+
+        /// Both at once: the parent is replying while a subagent it spawned is
+        /// still going. Harmless today because `responding` alone would carry
+        /// it, which is exactly why it is worth pinning — the day the terms are
+        /// reordered, this is the row that says so.
+        #[test]
+        fn a_parent_answering_alongside_its_subagent_counts() {
+            assert!(answering_now(true, true, true));
+        }
+
+        #[test]
+        fn a_quiet_parent_with_nothing_delegated_does_not() {
+            assert!(
+                !answering_now(true, false, false),
+                "a CLI waiting at its prompt must let the mark settle and the display sleep"
+            );
+        }
+
+        /// The trap the `working` gate exists for. A running subagent is one
+        /// spawned with no result reported; kill the CLI mid-flight and that
+        /// record never completes. Ungated it would read as answering forever.
+        #[test]
+        fn a_subagent_stranded_by_a_dead_cli_does_not() {
+            assert!(
+                !answering_now(false, false, true),
+                "a subagent record left behind by a killed CLI must not keep the session lit"
+            );
+        }
+
+        #[test]
+        fn a_dead_cli_never_counts() {
+            assert!(!answering_now(false, true, false));
+            assert!(!answering_now(false, false, false));
+        }
+    }
 
     fn session(args: &[&str], cwd: &str) -> AgentCommand {
         AgentCommand {

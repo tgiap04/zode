@@ -328,13 +328,20 @@ impl<'a> Iterator for InlayChunks<'a> {
 
                 let mut renderer = None;
                 let mut highlight_style = match inlay.id {
-                    InlayId::EditPrediction(_) => self.highlight_styles.edit_prediction.map(|s| {
-                        if inlay.text().chars().all(|c| c.is_whitespace()) {
-                            s.whitespace
-                        } else {
-                            s.insertion
-                        }
-                    }),
+                    // Completion preview ghost text reuses the edit-prediction highlight
+                    // style: both represent "what accepting this would insert", and the
+                    // two are mutually exclusive at render time (the completions menu
+                    // suppresses edit-prediction ghost text while it is open), so there is
+                    // no case where the shared style would need to differ between them.
+                    InlayId::EditPrediction(_) | InlayId::CompletionPreview(_) => {
+                        self.highlight_styles.edit_prediction.map(|s| {
+                            if inlay.text().chars().all(|c| c.is_whitespace()) {
+                                s.whitespace
+                            } else {
+                                s.insertion
+                            }
+                        })
+                    }
                     InlayId::Hint(_) => self.highlight_styles.inlay_hint,
                     InlayId::DebuggerValue(_) => self.highlight_styles.inlay_hint,
                     InlayId::ReplResult(_) => {

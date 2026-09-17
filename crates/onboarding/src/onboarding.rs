@@ -248,7 +248,7 @@ impl Render for Onboarding {
                                     )
                                     .child({
                                         Button::new("finish_setup", "Finish Setup")
-                                            .style(ButtonStyle::Filled)
+                                            .style(ButtonStyle::Brand)
                                             .size(ButtonSize::Medium)
                                             .width(rems_from_px(200.))
                                             .key_binding(KeyBinding::for_action_in(

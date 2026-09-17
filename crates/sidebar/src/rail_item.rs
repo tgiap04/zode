@@ -89,7 +89,7 @@ impl Sidebar {
         let initials = custom_initials.unwrap_or_else(|| project_initials(&entry.label));
         // Copied out one by one: `cx.theme().colors()` hands back a reference
         // borrowed from `cx`, and the trigger closure below outlives this call.
-        let accent = colors.text_accent;
+        let accent = ui::brand_accent(cx);
         let element_hover = colors.element_hover;
         let sidebar = cx.entity().downgrade();
         let key = entry.key.clone();

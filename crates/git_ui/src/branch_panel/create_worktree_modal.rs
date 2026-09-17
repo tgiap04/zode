@@ -368,7 +368,7 @@ impl Render for CreateWorktreeModal {
                     )
                     .child(
                         Button::new("create", "Create worktree")
-                            .style(ButtonStyle::Filled)
+                            .style(ButtonStyle::Brand)
                             .disabled(!can_create)
                             .key_binding(
                                 KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)

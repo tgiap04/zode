@@ -304,10 +304,20 @@ impl SwitchColor {
         }
 
         match self {
+            // Deliberately the brand colour rather than `Color::Accent`, and the
+            // distinction is load-bearing: a switch being on is a fact about the
+            // app, so it carries the app's colour, while `Color::Accent` stays
+            // with the theme because the ~97 links, hints and emphasis labels it
+            // paints belong to the document, not the chrome. Routing
+            // `Color::Accent` here instead would turn all of those orange too --
+            // that is the simplification to refuse, not the one to make.
+            //
+            // The opacities are unchanged; 0.4 on the thumb and 0.2 behind it are
+            // what keep the switch legible against a panel, and retuning them is
+            // a separate decision from recolouring it.
             SwitchColor::Accent => {
-                let status = cx.theme().status();
-                let colors = cx.theme().colors();
-                (status.info.opacity(0.4), colors.text_accent.opacity(0.2))
+                let accent = crate::brand_accent(cx);
+                (accent.opacity(0.4), accent.opacity(0.2))
             }
             SwitchColor::Custom(color) => (*color, color.opacity(0.6)),
         }
@@ -317,7 +327,18 @@ impl SwitchColor {
 impl From<SwitchColor> for Color {
     fn from(color: SwitchColor) -> Self {
         match color {
-            SwitchColor::Accent => Color::Accent,
+            // Nothing calls this conversion today -- `Switch` renders its label
+            // as a plain `Label` with no `.color()`, and `SwitchColor` never
+            // leaves this file. Verified by deleting the impl: the workspace
+            // still builds.
+            //
+            // It is retargeted anyway so that it is not wrong the day someone
+            // does wire it up: a switch that is on carries the brand colour, and
+            // `Color::Selected` is the token resolving to it. `Color::Accent`
+            // would hand back the theme's accent instead, putting a blue label
+            // beside an orange switch. This conversion has no `App`, so it cannot
+            // reach `brand_accent` directly.
+            SwitchColor::Accent => Color::Selected,
             SwitchColor::Custom(_) => Color::Default,
         }
     }
