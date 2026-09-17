@@ -51,6 +51,13 @@ pub enum Color {
     /// A color used for hint or suggestion text, often a blue color. Use this
     /// color to represent helpful, or semantically neutral information.
     Hint,
+    /// The resting color of an icon.
+    ///
+    /// Distinct from [`Color::Default`], which is the resting color of *text*:
+    /// the two share a value in some themes but answer different questions, and
+    /// keeping them apart is what lets icons be tuned without moving every
+    /// label in the app.
+    Icon,
     /// A color used for items that are intentionally ignored, such as files ignored by version control.
     Ignored,
     /// A color used for informational messages or status indicators, often a blue color.
@@ -100,12 +107,13 @@ impl Color {
             Color::Disabled => cx.theme().colors().text_disabled,
             Color::Hidden => cx.theme().status().hidden,
             Color::Hint => cx.theme().status().hint,
+            Color::Icon => cx.theme().colors().icon,
             Color::Info => cx.theme().status().info,
             Color::Placeholder => cx.theme().colors().text_placeholder,
             Color::Accent => cx.theme().colors().text_accent,
             Color::Player(i) => cx.theme().styles.player.color_for_participant(*i).cursor,
             Color::Error => cx.theme().status().error,
-            Color::Selected => cx.theme().colors().text_accent,
+            Color::Selected => crate::brand_accent(cx),
             Color::Success => cx.theme().status().success,
             Color::VersionControlAdded => cx.theme().colors().version_control_added,
             Color::VersionControlConflict => cx.theme().colors().version_control_conflict,

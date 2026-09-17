@@ -181,7 +181,7 @@ impl Render for SignInModal {
                         // The only filled button in the window.
                         Button::new("account-open-browser", "Open browser to approve")
                             .full_width()
-                            .style(ButtonStyle::Filled)
+                            .style(ButtonStyle::Brand)
                             .end_icon(Icon::new(IconName::ArrowUpRight))
                             .on_click(move |_, _window, cx| cx.open_url(&link)),
                     )

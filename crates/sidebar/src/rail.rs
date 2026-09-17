@@ -43,7 +43,7 @@ impl Sidebar {
         let panels = self.render_rail_panels(window, cx);
         // Copied out: `colors()` borrows `cx`, and the listeners below need it
         // mutably.
-        let accent = cx.theme().colors().text_accent;
+        let accent = ui::brand_accent(cx);
         let colors = cx.theme().colors().clone();
         let entries = self.contents.rail_entries.clone();
 

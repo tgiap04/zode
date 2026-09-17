@@ -71,9 +71,16 @@ pub enum TintColor {
 impl TintColor {
     fn button_like_style(self, cx: &mut App) -> ButtonLikeStyles {
         match self {
+            // The alphas mirror what the theme itself uses for a status tint --
+            // `info_background` is `info` at 0x1a and `info_border` is `info` at
+            // 0x66 -- so only the colour source moves here. The label is still
+            // `colors().text`, because `label_color` below is never read (see
+            // `ButtonLikeStyles`), which makes the tint's legibility a property of
+            // this background alone: measured at 7.86:1 on the dark surface and
+            // 13.52:1 on the light one.
             TintColor::Accent => ButtonLikeStyles {
-                background: cx.theme().status().info_background,
-                border_color: cx.theme().status().info_border,
+                background: crate::brand_accent(cx).opacity(0.1),
+                border_color: crate::brand_accent(cx).opacity(0.4),
                 label_color: cx.theme().colors().text,
                 icon_color: cx.theme().colors().text,
             },
@@ -150,6 +157,15 @@ pub enum ButtonStyle {
     ///
     /// TODO: Better docs for this.
     Transparent,
+
+    /// A solid fill in the app's own brand colour, marking *the* primary action
+    /// of a surface. Two of these on one screen means one of them is wrong.
+    ///
+    /// Not usable with [`ButtonLike::selected_style`]: that path converts a style
+    /// into a [`Color`] through `From<ButtonStyle>`, which receives no `App` and
+    /// so cannot resolve the light/dark pair this style depends on. `Brand` falls
+    /// through to `Color::Default` there -- it compiles, and it is wrong.
+    Brand,
 }
 
 /// Rounding for a button that may have straight edges.
@@ -220,6 +236,15 @@ impl ButtonStyle {
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
+            // `label_color` and `icon_color` are filled in for correctness but
+            // nothing reads them (see `ButtonLikeStyles`); what actually paints a
+            // brand button's label is the branch in `Button::render`.
+            ButtonStyle::Brand => ButtonLikeStyles {
+                background: crate::brand_solid(cx),
+                border_color: transparent_black(),
+                label_color: crate::brand_on_solid(cx),
+                icon_color: crate::brand_on_solid(cx),
+            },
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
             ButtonStyle::Outlined => ButtonLikeStyles {
                 background: element_bg_from_elevation(elevation, cx),
@@ -271,6 +296,12 @@ impl ButtonStyle {
                     icon_color: Color::Default.color(cx),
                 }
             }
+            ButtonStyle::Brand => ButtonLikeStyles {
+                background: crate::brand_solid_hovered(cx),
+                border_color: transparent_black(),
+                label_color: crate::brand_on_solid(cx),
+                icon_color: crate::brand_on_solid(cx),
+            },
             ButtonStyle::Tinted(tint) => {
                 let mut styles = tint.button_like_style(cx);
                 let theme = cx.theme();
@@ -320,6 +351,12 @@ impl ButtonStyle {
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
+            ButtonStyle::Brand => ButtonLikeStyles {
+                background: crate::brand_solid_active(cx),
+                border_color: transparent_black(),
+                label_color: crate::brand_on_solid(cx),
+                icon_color: crate::brand_on_solid(cx),
+            },
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
             ButtonStyle::Subtle => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_active,
@@ -365,6 +402,12 @@ impl ButtonStyle {
                 label_color: Color::Default.color(cx),
                 icon_color: Color::Default.color(cx),
             },
+            ButtonStyle::Brand => ButtonLikeStyles {
+                background: crate::brand_solid(cx),
+                border_color: cx.theme().colors().border_focused,
+                label_color: crate::brand_on_solid(cx),
+                icon_color: crate::brand_on_solid(cx),
+            },
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
             ButtonStyle::Subtle => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_background,
@@ -408,6 +451,15 @@ impl ButtonStyle {
     ) -> ButtonLikeStyles {
         match self {
             ButtonStyle::Filled => ButtonLikeStyles {
+                background: cx.theme().colors().element_disabled,
+                border_color: cx.theme().colors().border_disabled,
+                label_color: Color::Disabled.color(cx),
+                icon_color: Color::Disabled.color(cx),
+            },
+            // Deliberately not a faded brand fill. A washed-out orange still
+            // reads as pressable; the theme's disabled surface reads as disabled,
+            // which is the whole job of this state.
+            ButtonStyle::Brand => ButtonLikeStyles {
                 background: cx.theme().colors().element_disabled,
                 border_color: cx.theme().colors().border_disabled,
                 label_color: Color::Disabled.color(cx),

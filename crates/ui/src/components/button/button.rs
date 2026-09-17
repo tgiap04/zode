@@ -377,8 +377,21 @@ impl RenderOnce for Button {
             .filter(|_| is_selected)
             .unwrap_or(self.label);
 
+        // `ButtonStyle::Brand` has to say what sits on top of its fill from here,
+        // because `ButtonLikeStyles::label_color` is never read -- filling it in
+        // over in `button_like.rs` paints nothing. Left to the default, a brand
+        // button's text would be `colors().text`: near-black on the light fill,
+        // at a contrast the palette never measured.
+        //
+        // It takes precedence over `is_selected` because the fill itself does not
+        // change when the button is selected, so its foreground must not either.
+        let brand_foreground = (self.base.style == ButtonStyle::Brand)
+            .then(|| Color::Custom(crate::brand_on_solid(cx)));
+
         let label_color = if is_disabled {
             Color::Disabled
+        } else if let Some(brand_foreground) = brand_foreground {
+            self.label_color.unwrap_or(brand_foreground)
         } else if is_selected {
             self.selected_label_color.unwrap_or(Color::Selected)
         } else {
@@ -401,6 +414,8 @@ impl RenderOnce for Button {
                     this.when_some(self.start_icon, |this, icon| {
                         this.child(if is_disabled {
                             icon.color(Color::Disabled)
+                        } else if let Some(brand_foreground) = brand_foreground {
+                            icon.color(brand_foreground)
                         } else {
                             icon
                         })
@@ -427,6 +442,8 @@ impl RenderOnce for Button {
                 .when_some(self.end_icon, |this, icon| {
                     this.child(if is_disabled {
                         icon.color(Color::Disabled)
+                    } else if let Some(brand_foreground) = brand_foreground {
+                        icon.color(brand_foreground)
                     } else {
                         icon
                     })
