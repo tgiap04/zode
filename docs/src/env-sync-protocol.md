@@ -65,11 +65,11 @@ Fields joined by `0x1F` (ASCII unit separator). `0x1F` rather than a printable
 character because no user id, resource label or identifier can contain it, so
 no two distinct inputs assemble the same AAD.
 
-| Resource | AAD |
-|---|---|
-| `env/<entry_id>` | `user_id ‖ 0x1F ‖ "env" ‖ 0x1F ‖ v ‖ 0x1F ‖ kid(envDEK) ‖ 0x1F ‖ entry_id` |
-| `sync/env-manifest` | `user_id ‖ 0x1F ‖ "env-manifest" ‖ 0x1F ‖ v ‖ 0x1F ‖ kid(envDEK)` |
-| `sync/env-key` | `user_id ‖ 0x1F ‖ "env-key" ‖ 0x1F ‖ v ‖ 0x1F ‖ **kid(DEK)** |
+| Resource            | AAD                                                                        |
+| ------------------- | -------------------------------------------------------------------------- |
+| `env/<entry_id>`    | `user_id ‖ 0x1F ‖ "env" ‖ 0x1F ‖ v ‖ 0x1F ‖ kid(envDEK) ‖ 0x1F ‖ entry_id` |
+| `sync/env-manifest` | `user_id ‖ 0x1F ‖ "env-manifest" ‖ 0x1F ‖ v ‖ 0x1F ‖ kid(envDEK)`          |
+| `sync/env-key`      | `user_id ‖ 0x1F ‖ "env-key" ‖ 0x1F ‖ v ‖ 0x1F ‖ **kid(DEK)**               |
 
 `kid` is the raw 8 bytes, not its base64 form. `v` is the decimal version as
 ASCII, so `1` is one byte.
@@ -108,7 +108,7 @@ stored size, and watched over a few weeks that difference is a readable account
 of what you are building. Rounding to 4 KiB removes it. Padding is inside the
 ciphertext, so it costs the server nothing to store and tells it nothing.
 
-**`seq`.** A counter that only goes up, written *inside* the ciphertext. A
+**`seq`.** A counter that only goes up, written _inside_ the ciphertext. A
 client records the highest `seq` it has applied for each entry and refuses
 anything lower. This is what makes a replay detectable: a server can hand back
 an old blob, but it cannot manufacture a newer one, because manufacturing one
@@ -152,13 +152,13 @@ would be wrong on the next machine anyway.
 
 ## What the server sees
 
-| Sees | Does not see |
-|---|---|
-| Your user id | Any project name |
-| Opaque 32-character hex identifiers | Any file name or path |
-| Blob length, rounded up to 4 KiB | Any variable name |
-| When a blob was written | Any value |
-| A random per-write revision string | How many variables a file holds |
+| Sees                                | Does not see                    |
+| ----------------------------------- | ------------------------------- |
+| Your user id                        | Any project name                |
+| Opaque 32-character hex identifiers | Any file name or path           |
+| Blob length, rounded up to 4 KiB    | Any variable name               |
+| When a blob was written             | Any value                       |
+| A random per-write revision string  | How many variables a file holds |
 
 ## Verifying this yourself
 

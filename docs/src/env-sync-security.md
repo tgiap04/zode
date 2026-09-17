@@ -9,14 +9,14 @@ repository. Where a claim is weaker than it sounds, it says so.
 
 ## The short version
 
-| | |
-|---|---|
-| Can the server read your environment files? | No. It has no key and never receives one. |
-| Can it tell which projects you have? | No. It sees 32 random hexadecimal characters per file. |
-| Can it tell how many variables a file holds? | No. Every blob is padded to a 4 KiB boundary. |
-| Can it hand you back an old file? | It can try. The client detects it and writes nothing. |
-| Can it hand you someone else's file? | No. The ciphertext is bound to your account and to that file's identifier. |
-| Can Zode recover your data if you lose your recovery key? | **No.** Nobody can. That is what the rest of this page buys. |
+|                                                           |                                                                            |
+| --------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Can the server read your environment files?               | No. It has no key and never receives one.                                  |
+| Can it tell which projects you have?                      | No. It sees 32 random hexadecimal characters per file.                     |
+| Can it tell how many variables a file holds?              | No. Every blob is padded to a 4 KiB boundary.                              |
+| Can it hand you back an old file?                         | It can try. The client detects it and writes nothing.                      |
+| Can it hand you someone else's file?                      | No. The ciphertext is bound to your account and to that file's identifier. |
+| Can Zode recover your data if you lose your recovery key? | **No.** Nobody can. That is what the rest of this page buys.               |
 
 ## The threat model, stated plainly
 
@@ -64,25 +64,25 @@ deliberate: it is what lets the encryption be checked against the fixed vectors
 published in [the protocol page](./env-sync-protocol.md) rather than against a
 running server.
 
-*A standalone `zode env inspect` command is not shipped. The `zode` CLI is a
+_A standalone `zode env inspect` command is not shipped. The `zode` CLI is a
 small launcher that does not link the editor's libraries, and reaching the
 encryption from it would mean dragging the whole UI framework into a binary
 kept deliberately thin. The panel and the proxy answer the same question
-today.*
+today._
 
 ## What the server could still do, and what happens when it tries
 
 An end-to-end encrypted store does not stop a hostile server from
-*misbehaving*. It stops it from succeeding quietly.
+_misbehaving_. It stops it from succeeding quietly.
 
-| It tries | What happens |
-|---|---|
-| Serve file A's blob in file B's slot | Refused. The file's identifier is inside the authenticated data, so the tag fails. |
-| Serve another account's blob | Refused. Your user id is in there too. |
-| Serve a copy from last month | Detected. Every blob carries a counter that only goes up, and your machine remembers the highest it has applied. You are told, and **nothing is written**. |
-| Delete your files | Visible, and not destructive locally: files already on your machine are untouched, and Zode never deletes a local file because the server stopped listing it. |
-| Refuse to serve anything | A denial of service. Real, and the honest answer is: keep your own backups. |
-| Change the ciphertext | Refused. AES-256-GCM authenticates it. |
+| It tries                             | What happens                                                                                                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Serve file A's blob in file B's slot | Refused. The file's identifier is inside the authenticated data, so the tag fails.                                                                            |
+| Serve another account's blob         | Refused. Your user id is in there too.                                                                                                                        |
+| Serve a copy from last month         | Detected. Every blob carries a counter that only goes up, and your machine remembers the highest it has applied. You are told, and **nothing is written**.    |
+| Delete your files                    | Visible, and not destructive locally: files already on your machine are untouched, and Zode never deletes a local file because the server stopped listing it. |
+| Refuse to serve anything             | A denial of service. Real, and the honest answer is: keep your own backups.                                                                                   |
+| Change the ciphertext                | Refused. AES-256-GCM authenticates it.                                                                                                                        |
 
 The last row of the first table is the trade: there is no recovery path,
 because a recovery path is a second way in, and a second way in is a way in for

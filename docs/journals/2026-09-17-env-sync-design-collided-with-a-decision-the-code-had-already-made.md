@@ -59,10 +59,10 @@ diffable against `mitmproxy`.
 
 ## Two holes in the shipped code the design had to close
 
-| Hole | Where | Consequence for env |
-|---|---|---|
-| AAD binds `user_id ∥ kind` only | `zode_sync/src/envelope.rs:aad` | With N entries per user, the server can move a blob between two of that user's own entries and the client decrypts it happily. Closed by adding `entry_id`. |
-| `write_atomic` uses `std::fs::write`; `back_up` writes beside the original | `zode_sync/src/artifact.rs` | Mode 0644 on a `.env`, and a `.env_backup` landing **inside the repo**, ungitignored. Neither is reusable; phase-04 writes its own. |
+| Hole                                                                       | Where                           | Consequence for env                                                                                                                                         |
+| -------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AAD binds `user_id ∥ kind` only                                            | `zode_sync/src/envelope.rs:aad` | With N entries per user, the server can move a blob between two of that user's own entries and the client decrypts it happily. Closed by adding `entry_id`. |
+| `write_atomic` uses `std::fs::write`; `back_up` writes beside the original | `zode_sync/src/artifact.rs`     | Mode 0644 on a `.env`, and a `.env_backup` landing **inside the repo**, ungitignored. Neither is reusable; phase-04 writes its own.                         |
 
 Neither is a defect in settings sync — `settings.json` is 0644 anyway and its backup belongs
 next to it. They are defects only under the new load.
