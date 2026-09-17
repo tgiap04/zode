@@ -18275,7 +18275,14 @@ async fn test_completion_preview_reflects_selected_entry(cx: &mut TestAppContext
 
     cx.set_state("variableˇ");
     cx.simulate_keystroke(".");
-    handle_completion_request("variable.|<>", vec!["alpha", "beta"], false, counter, &mut cx).await;
+    handle_completion_request(
+        "variable.|<>",
+        vec!["alpha", "beta"],
+        false,
+        counter,
+        &mut cx,
+    )
+    .await;
     cx.condition(|editor, _| editor.context_menu_visible())
         .await;
 
@@ -18342,14 +18349,7 @@ async fn test_completion_preview_ignores_fuzzy_mismatched_entry(cx: &mut TestApp
     cx.update_editor(|editor, window, cx| {
         editor.show_completions(&ShowCompletions, window, cx);
     });
-    handle_completion_request(
-        "variable.<fo|>",
-        vec!["get_foo"],
-        false,
-        counter,
-        &mut cx,
-    )
-    .await;
+    handle_completion_request("variable.<fo|>", vec!["get_foo"], false, counter, &mut cx).await;
     cx.condition(|editor, _| editor.context_menu_visible())
         .await;
 
@@ -18383,14 +18383,7 @@ async fn test_completion_preview_handles_multibyte_completion_text(cx: &mut Test
     // non-ASCII char boundary.
     cx.set_state("variableˇ");
     cx.simulate_keystroke(".");
-    handle_completion_request(
-        "variable.|<>",
-        vec!["chào bạn 😀"],
-        false,
-        counter,
-        &mut cx,
-    )
-    .await;
+    handle_completion_request("variable.|<>", vec!["chào bạn 😀"], false, counter, &mut cx).await;
     cx.condition(|editor, _| editor.context_menu_visible())
         .await;
 
