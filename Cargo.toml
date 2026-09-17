@@ -195,6 +195,7 @@ members = [
     "crates/zed",
     "crates/zed_actions",
     "crates/zed_credentials_provider",
+    "crates/os_auth",
     "crates/zode_account",
     "crates/zode_account_ui",
     "crates/zode_sync",
@@ -423,6 +424,7 @@ worktree = { path = "crates/worktree" }
 zode = { path = "crates/zed" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
+os_auth = { path = "crates/os_auth" }
 zode_account = { path = "crates/zode_account" }
 zode_account_ui = { path = "crates/zode_account_ui" }
 zode_sync = { path = "crates/zode_sync" }
