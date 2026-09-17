@@ -21,7 +21,8 @@ reporter were all removed rather than disabled:
 - The optional Zode account exists only to sync your own `settings.json` and
   `keymap.json`, and it is off until you sign in. It records nothing about how you
   use the editor, and what it does store is encrypted on your machine with a key
-  the server never receives — see [the privacy policy](https://github.com/tgiap04/zode/blob/main/legal/privacy-policy.md).
+  the server never receives — `legal/privacy-policy.md` in the repository has the
+  mechanism in full.
 - There is no third-party analytics or crash-reporting service in the dependency
   tree.
 

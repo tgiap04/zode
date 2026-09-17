@@ -57,8 +57,17 @@ Build and lint with the repo's own script, not `cargo clippy` directly:
 ```
 
 It runs clippy in release across all targets and features with `--deny warnings`, then
-`cargo machete` and `typos` if you have them installed. CI runs the same thing, so a clean
-run locally means a clean run there.
+`cargo machete` and `typos` if you have them installed.
+
+**It does not check formatting**, and CI does, so run that separately:
+
+```sh
+cargo fmt --all
+```
+
+This is worth its own line because the gap is invisible: a change can pass
+`./script/clippy` cleanly, look finished, and still fail CI on a line rustfmt would have
+rewrapped. It has already happened in this repository.
 
 Tests:
 
