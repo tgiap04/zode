@@ -11,9 +11,20 @@
 //! The second, and the one that survived the first fix: a CLI sitting at its
 //! prompt waiting for you to type is alive and doing nothing. Holding the
 //! display for it means walking away from an idle agent and coming back to a
-//! screen that never slept. So the lock follows
-//! [`AgentView::is_responding`](agent_ui::AgentView::is_responding) -- output
-//! actually arriving -- and not merely a live process.
+//! screen that never slept. So the lock follows output actually arriving, and
+//! not merely a live process.
+//!
+//! That question is [`AgentView::is_answering`](agent_ui::AgentView::is_answering)'s
+//! to answer, and this module asks it rather than reassembling it. The
+//! distinction matters: the raw
+//! [`is_responding`](agent_ui::AgentView::is_responding) beside it counts pty
+//! writes only, and an agent that hands its work to subagents goes quiet while
+//! they think -- a CLI waiting on one repaints a spinner once or twice a second,
+//! under that threshold, so the display used to sleep in the middle of work the
+//! user was waiting for. `is_answering` already folds a running subagent in, and
+//! already gates it on the CLI being alive so a subagent record stranded by a
+//! killed process cannot pin the display on. Reading the settled answer keeps
+//! that rule in one place instead of two crates deriving it separately.
 //!
 //! That answer is sampled rather than announced, so it is polled, and only
 //! while some tab has a live CLI. A tab with none costs nothing: no timer, no
@@ -392,7 +403,7 @@ impl KeepAwake {
                 continue;
             };
             let agent = view.read(cx);
-            if agent.is_responding(cx) {
+            if agent.is_answering() {
                 watched.last_answered = Some(now);
             }
             if still_answering(watched.last_answered, now) {
