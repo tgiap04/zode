@@ -5092,6 +5092,7 @@ mod tests {
                 "diagnostics",
                 "editor",
                 "encoding_selector",
+                "env_sync",
                 "feedback",
                 "file_finder",
                 "floating_pane",
