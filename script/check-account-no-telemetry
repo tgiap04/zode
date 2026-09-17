@@ -35,7 +35,7 @@ cd "$(dirname "$0")/.."
 # name it in its own source. The first is a graph fact; the second is
 # a grep, and weaker — but a weaker true guard beats a strong false one.
 GRAPH_ISOLATED=(zode_account zode_sync zode_env_sync)
-SOURCE_CLEAN=(zode_account_ui)
+SOURCE_CLEAN=(zode_account_ui zode_env_sync_ui)
 FORBIDDEN=(telemetry telemetry_events)
 
 # Decision D7: sync runs on the machine with the UI, and only there.
