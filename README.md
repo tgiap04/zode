@@ -1,25 +1,68 @@
 # Zode
 
-Zode is a fork of [Zed](https://github.com/zed-industries/zed), the code editor built
-by Zed Industries. This fork exists to answer one question: what does Zed look like
-with every account, cloud, AI, and telemetry code path removed rather than merely
-disabled?
+Zode is a fork of [Zed](https://github.com/zed-industries/zed), the code editor built by
+Zed Industries. It keeps Zed's editor — the same GPUI renderer, LSP integration, terminal,
+and extension system — and replaces everything that pointed at a vendor's servers with
+tooling that points at your own machine.
+
+The result is a development environment rather than only an editor: your databases, your
+containers, your git checkouts, and your coding agents each get a tab, and none of them
+route through a service you did not choose.
+
+## Features
+
+Everything below is specific to this fork; none of it exists upstream.
+
+**Agents as terminal tabs.** Claude Code, Codex, Antigravity, Copilot and opencode each
+open in a pane beside your code. An agent here is a terminal session and nothing else —
+there is no chat view, no message editor, no model or mode selector, and no Agent Client
+Protocol stack underneath. It runs the CLI you installed, with your own credentials, and
+zode never speaks to a model API itself. Sessions survive a restart, agents are tracked
+per git checkout, and a rail mark shows which one is answering.
+
+**Database client.** Postgres, MySQL, SQLite and MongoDB, in a tab. Zode ships no driver
+of its own: each engine is a separate process speaking line-delimited JSON-RPC over its
+stdio, the same shape language servers and debug adapters already use here. A driver that
+hangs or crashes costs a process rather than the editor, and a third party can add an
+engine without patching zode. Drivers download on first connect — see
+[what leaves your machine](#what-leaves-your-machine).
+
+**Containers.** Docker and Kubernetes in one list: what is running on this machine,
+beside the code. The UI asks the backend which kinds and actions it offers rather than
+branching on which engine it holds, so the two read the same way.
+
+**Git tooling.** A worktree panel showing every checkout of the current project's
+repositories and the agents that have run in each, plus branch and remote pickers, blame,
+commit view and a commit graph.
+
+**Multiple projects at once.** A left rail holds every open project, each with its own
+avatar, colour, dock sizes and agent set. A footer badge reports CPU and RAM per project,
+so a runaway build is attributable rather than just "the editor is slow".
 
 ## What's different from upstream Zed
 
-This fork removed:
+Removed:
 
-- **Authentication and accounts** — no sign-in, no session, no credential storage.
-- **Cloud and collaboration** — no real-time collaboration server, no channels, no
-  shared projects. Editing is single-player.
-- **AI and agent features** — no AI providers, no edit predictions, no agent panel.
-- **Telemetry and crash reporting** — no usage analytics, no event tracking, no
-  minidump upload. `telemetry::send_event` is a no-op by construction, not by setting.
-- **Auto-update** — no in-app updater. Updates come from wherever you installed this
-  from (see Installing, below).
+- **Zed accounts and sign-in** — no Zed session, no Zed credential storage.
+- **Cloud and collaboration** — no real-time collaboration server, no channels, no shared
+  projects. Editing is single-player.
+- **In-editor AI** — no AI providers, no edit predictions, no assistant panel, no Agent
+  Client Protocol. Zode holds no model credentials and makes no model calls. Coding
+  agents are terminal sessions running a CLI you installed yourself (see Features above).
+- **Telemetry and crash reporting** — no usage analytics, no event tracking, no minidump
+  upload. `telemetry::send_event` is a no-op by construction, not by setting.
 
-What's kept: the editor itself, LSP integration, the terminal, git integration, the
-debugger, and extensions.
+Kept: the editor, LSP integration, the terminal, git integration, the debugger, and
+extensions.
+
+Rebuilt rather than removed:
+
+- **In-app updates.** Nothing checks in the background. *Zode → Check for Updates* reads
+  this repository's published releases when you ask it to, and installs a newer one if
+  there is one. No backend, no account, no identifier sent.
+- **An optional account**, used only for syncing your own `settings.json` and
+  `keymap.json` between machines. It is opt-in, end-to-end encrypted, and described
+  below.
 
 SSH remote development is a middle case. The code is still here and still builds from
 source, but the released installers **do not ship the `remote_server` binary** it needs
@@ -27,21 +70,51 @@ on the far end: building it doubles the build time and disk of every release, wh
 not fit the free GitHub-hosted runners this project releases from. Build it yourself with
 `cargo build --release --package remote_server` if you want it.
 
-**One dependency was kept and disclosed rather than removed**: browsing and installing
-extensions still queries Zed Industries' extension registry (`api.zed.dev`). Dropping
+## What leaves your machine
+
+A fresh install talks to nothing. This is the complete list:
+
+| When | Where | What |
+|---|---|---|
+| You browse or install an extension | `api.zed.dev` | Zed Industries' extension registry |
+| You connect to a database for the first time | Zode's API | Downloads that engine's driver binary |
+| You run *Check for Updates* | `api.github.com` | Reads this repository's published releases |
+| You sign in and enable sync | `api.zodekit.site` | Your settings, keymap and extension list, encrypted |
+| **Automatic**, if Claude Code is already signed in on this machine | `api.anthropic.com` | Reads your own plan quota for the status bar |
+
+Every row but the last happens only when you ask for it. The last one is the exception and
+is worth stating plainly: if Claude Code's credentials are already on your machine, the
+status bar polls Anthropic's usage endpoint every 60 seconds while the window is focused,
+authorised with Claude Code's own OAuth token. Zode reads that token fresh for each
+request and never stores, logs or transmits it anywhere else. If Claude Code is not signed
+in here, the request never happens. Codex's quota is read through the `codex app-server`
+subprocess instead, so no credential leaves the editor for that one. See
+[`docs/src/telemetry.md`](./docs/src/telemetry.md) for the full detail.
+
+**The extension registry is a kept dependency, disclosed rather than removed.** Dropping
 it meant either running an independent marketplace or losing the extension ecosystem
-entirely; for now, this fork keeps the registry and says so plainly instead. See
-[`legal/third-party-terms.md`](./legal/third-party-terms.md) for the full disclosure and
-[`legal/privacy-policy.md`](./legal/privacy-policy.md) for what does and doesn't leave
-your machine.
+entirely; for now this fork keeps the registry and says so plainly.
+
+**Settings sync is end-to-end encrypted and the server cannot read it.** Three things sync:
+`settings.json`, `keymap.json`, and the list of extension identifiers you have installed —
+the list only; pulling it never installs anything. Your projects, your files and your
+editing history are not part of it. Each is sealed with AES-256-GCM under a 32-byte data
+encryption key generated on your machine.
+That key never leaves it, except as the recovery key you write down. There is no key
+derivation step and no server-held wrapping key, because either would put something
+crackable within reach of the server that already holds the ciphertext. Sync is off until
+you sign in; if you never do, nothing is uploaded and no account exists.
+
+See [`legal/third-party-terms.md`](./legal/third-party-terms.md) for the full third-party
+disclosure and [`legal/privacy-policy.md`](./legal/privacy-policy.md) for the privacy
+statement.
 
 ## Why
 
-Not a judgment on Zed's product decisions — its cloud, AI, and collaboration features
-are legitimate choices for a company building a business. This fork is for people who
-want the editor itself without any of that surface area: nothing phoning home, nothing
-to sign into, nothing to disable in settings because it was never wired up to begin
-with.
+Not a judgment on Zed's product decisions — its cloud, AI, and collaboration features are
+legitimate choices for a company building a business. This fork is for people who want
+the editor without that surface area, and who would rather have the database, container
+and agent tooling in the same window than in four more of them.
 
 ## Installing
 

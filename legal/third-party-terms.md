@@ -46,4 +46,14 @@ Earlier versions of this document (inherited from upstream Zed) listed acceptabl
 policies for Anthropic, GitHub Copilot, Google, OpenAI, OpenRouter, Vercel, and xAI —
 all AI providers reachable through Zed's AI features. None of those integrations exist
 in this fork; the `agent`, `language_models`, and `edit_prediction` subsystems were
-removed. There is nothing left in Zode that talks to any of those providers.
+removed. Zode holds no model credentials of its own and sends no prompt, no completion
+request and no line of your code to any of them.
+
+Two things do still reach a provider, and neither is an inference call:
+
+- **Coding agents.** Zode runs the agent CLI *you* installed, in a terminal tab,
+  authenticated with *your* account at that vendor. What you type at it goes to them
+  under your agreement with them; Zode is running their program, not proxying it.
+- **The status-bar quota read.** If Claude Code is already signed in on your machine,
+  Zode reads your own plan quota from Anthropic's usage endpoint using Claude Code's
+  own token. It sends nothing of yours to process. See `legal/privacy-policy.md`.
