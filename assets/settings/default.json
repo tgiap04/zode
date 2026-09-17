@@ -358,6 +358,9 @@
   // Whether to display inline and alongside documentation for items in the
   // completions menu
   "show_completion_documentation": true,
+  // Whether to show the remainder of the selected completion as dimmed
+  // inline ghost text at the cursor.
+  "show_completion_preview": true,
   // Whether to colorize brackets in the editor.
   // (also known as "rainbow brackets")
   //

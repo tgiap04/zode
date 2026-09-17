@@ -152,6 +152,9 @@ pub struct LanguageSettings {
     /// Whether to display inline and alongside documentation for items in the
     /// completions menu.
     pub show_completion_documentation: bool,
+    /// Whether to show the remainder of the selected completion as dimmed
+    /// inline ghost text at the cursor.
+    pub show_completion_preview: bool,
     /// Completion settings for this language.
     pub completions: CompletionSettings,
     /// Preferred debuggers for this language.
@@ -736,6 +739,7 @@ impl settings::Settings for AllLanguageSettings {
                 },
                 show_completions_on_input: settings.show_completions_on_input.unwrap(),
                 show_completion_documentation: settings.show_completion_documentation.unwrap(),
+                show_completion_preview: settings.show_completion_preview.unwrap(),
                 colorize_brackets: settings.colorize_brackets.unwrap(),
                 completions: CompletionSettings {
                     words: completions.words.unwrap(),

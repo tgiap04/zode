@@ -99,6 +99,14 @@ impl Inlay {
         }
     }
 
+    pub fn completion_preview<T: Into<Rope>>(id: usize, position: Anchor, text: T) -> Self {
+        Self {
+            id: InlayId::CompletionPreview(id),
+            position,
+            content: InlayContent::Text(text.into()),
+        }
+    }
+
     pub fn debugger<T: Into<Rope>>(id: usize, position: Anchor, text: T) -> Self {
         Self {
             id: InlayId::DebuggerValue(id),

@@ -3670,6 +3670,16 @@ Positive integer values
 
 `boolean` values
 
+## Show Completion Preview
+
+- Description: Whether to preview the selected completion inline as dimmed ghost text at the cursor, showing what accepting it would insert. Nothing is previewed when the text already typed is not a literal prefix of the completion, which is common with fuzzy matches.
+- Setting: `show_completion_preview`
+- Default: `true`
+
+**Options**
+
+`boolean` values
+
 ## Show Completion Documentation
 
 - Description: Whether to display inline and alongside documentation for items in the completions menu.

@@ -535,6 +535,12 @@ pub enum PrepareRenameResponse {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InlayId {
     EditPrediction(usize),
+    /// Ghost text previewing the remainder of the selected LSP completion,
+    /// distinct from `EditPrediction` so the two sources can never be
+    /// confused with one another even though they are mutually exclusive at
+    /// render time (the completions menu suppresses edit-prediction ghost
+    /// text while it is open).
+    CompletionPreview(usize),
     DebuggerValue(usize),
     // LSP
     Hint(usize),
@@ -546,6 +552,7 @@ impl InlayId {
     pub fn id(&self) -> usize {
         match self {
             Self::EditPrediction(id) => *id,
+            Self::CompletionPreview(id) => *id,
             Self::DebuggerValue(id) => *id,
             Self::Hint(id) => *id,
             Self::Color(id) => *id,

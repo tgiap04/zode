@@ -673,6 +673,18 @@ struct EditPredictionState {
     invalidation_range: Option<Range<Anchor>>,
 }
 
+/// Tracks the ghost-text inlay previewing the remainder of the selected entry
+/// in an open completions menu (see `Editor::update_completion_preview`).
+struct CompletionPreviewState {
+    inlay_id: InlayId,
+    /// Index into the completions menu's `completions`, used together with
+    /// `position` and `text` to detect when the preview is already up to date
+    /// so we don't needlessly splice inlays on every keystroke.
+    candidate_id: usize,
+    position: Anchor,
+    text: String,
+}
+
 enum EditPredictionSettings {
     Disabled,
     Enabled {
@@ -1251,6 +1263,11 @@ pub struct Editor {
     active_edit_prediction: Option<EditPredictionState>,
     /// Used to prevent flickering as the user types while the menu is open
     stale_edit_prediction_in_menu: Option<EditPredictionState>,
+    /// Ghost text previewing the remainder of the currently selected entry in
+    /// the open completions menu. Mutually exclusive with
+    /// `active_edit_prediction`'s inline ghost text: `update_visible_edit_prediction`
+    /// never renders edit-prediction ghost text while a completions menu is visible.
+    completion_preview: Option<CompletionPreviewState>,
     edit_prediction_settings: EditPredictionSettings,
     edit_predictions_hidden_for_vim_mode: bool,
     show_edit_predictions_override: Option<bool>,
@@ -2511,6 +2528,7 @@ impl Editor {
             edit_prediction_provider: None,
             active_edit_prediction: None,
             stale_edit_prediction_in_menu: None,
+            completion_preview: None,
             edit_prediction_preview: EditPredictionPreview::Inactive {
                 released_too_fast: false,
             },
@@ -6599,6 +6617,7 @@ impl Editor {
                             editor
                                 .discard_edit_prediction(EditPredictionDiscardReason::Ignored, cx);
                         }
+                        editor.update_completion_preview(cx);
 
                         cx.notify();
                         return;
@@ -6629,6 +6648,14 @@ impl Editor {
         } else {
             None
         }
+    }
+
+    /// The ghost text currently previewing the selected completion, if any.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn current_completion_preview_text(&self) -> Option<String> {
+        self.completion_preview
+            .as_ref()
+            .map(|preview| preview.text.clone())
     }
 
     pub fn with_completions_menu_matching_id<R>(
@@ -7077,6 +7104,7 @@ impl Editor {
                         scroll_handle: UniformListScrollHandle::default(),
                         deployed_from,
                     }));
+                editor.update_completion_preview(cx);
                 cx.notify();
                 if spawn_straight_away
                     && let Some(task) = editor.confirm_code_action(
@@ -10938,12 +10966,125 @@ impl Editor {
         let context_menu = self.context_menu.borrow_mut().take();
         self.stale_edit_prediction_in_menu.take();
         self.update_visible_edit_prediction(window, cx);
+        self.update_completion_preview(cx);
         if let Some(CodeContextMenu::Completions(_)) = &context_menu
             && let Some(completion_provider) = &self.completion_provider
         {
             completion_provider.selection_changed(None, window, cx);
         }
         context_menu
+    }
+
+    /// Computes the ghost text that should preview the currently selected
+    /// completion, if any, given the open completions menu (if any) and the
+    /// cursor's current position within it.
+    ///
+    /// Returns the candidate id, the anchor at which to render the ghost
+    /// text, and the ghost text itself. Returns `None` whenever there is
+    /// nothing honest to preview: no menu, no selection, a non-collapsed
+    /// selection, the cursor sitting before the completion's replace range,
+    /// or a typed prefix that isn't actually a prefix of the completion's
+    /// `new_text` (fuzzy matches routinely select entries unrelated to what
+    /// was typed, e.g. typing "ge" can select `get_foo`).
+    fn compute_completion_preview(&self, cx: &App) -> Option<(usize, Anchor, String)> {
+        let context_menu = self.context_menu.borrow();
+        let CodeContextMenu::Completions(menu) = context_menu.as_ref()? else {
+            return None;
+        };
+        if !menu.visible() {
+            return None;
+        }
+
+        let selection = self.selections.newest_anchor();
+        if selection.start != selection.end {
+            return None;
+        }
+        let cursor = selection.head();
+
+        let multibuffer_snapshot = self.buffer.read(cx).snapshot(cx);
+        if !multibuffer_snapshot
+            .language_settings_at(cursor, cx)
+            .show_completion_preview
+        {
+            return None;
+        }
+
+        let entries = menu.entries.borrow();
+        let entry = entries.get(menu.selected_item)?;
+        let completions = menu.completions.borrow();
+        let completion = completions.get(entry.candidate_id)?;
+
+        let (cursor_buffer_anchor, buffer_snapshot) =
+            multibuffer_snapshot.anchor_to_buffer_anchor(cursor)?;
+        if buffer_snapshot.remote_id() != menu.buffer.read(cx).remote_id() {
+            return None;
+        }
+
+        let replace_start_offset = completion.replace_range.start.to_offset(buffer_snapshot);
+        let cursor_offset = cursor_buffer_anchor.to_offset(buffer_snapshot);
+        if cursor_offset < replace_start_offset {
+            return None;
+        }
+
+        let typed_prefix: String = buffer_snapshot
+            .text_for_range(replace_start_offset..cursor_offset)
+            .collect();
+
+        // `str::strip_prefix` is the UTF-8-safe way to compute "new_text minus what was
+        // typed": it never slices at a byte offset that isn't a `new_text` char boundary,
+        // returning `None` instead of panicking when the typed prefix and `new_text` diverge
+        // (as happens with fuzzy matches) or when either string contains multi-byte
+        // characters (Vietnamese diacritics, emoji, etc. in a label or snippet).
+        let remainder = completion.new_text.strip_prefix(typed_prefix.as_str())?;
+        if remainder.is_empty() {
+            return None;
+        }
+
+        Some((entry.candidate_id, cursor, remainder.to_string()))
+    }
+
+    /// Keeps the completion-preview ghost text inlay in sync with the open
+    /// completions menu's current selection. Call this after anything that
+    /// can change what should be previewed: the menu opening, closing, being
+    /// re-filtered, or its selection moving.
+    fn update_completion_preview(&mut self, cx: &mut Context<Self>) {
+        let new_preview = self.compute_completion_preview(cx);
+
+        let unchanged = match (&self.completion_preview, &new_preview) {
+            (Some(existing), Some((candidate_id, position, text))) => {
+                existing.candidate_id == *candidate_id
+                    && existing.position == *position
+                    && existing.text == *text
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+
+        let mut to_remove = Vec::new();
+        if let Some(existing) = self.completion_preview.take() {
+            to_remove.push(existing.inlay_id);
+        }
+
+        let mut to_insert = Vec::new();
+        if let Some((candidate_id, position, text)) = new_preview {
+            let inlay = Inlay::completion_preview(
+                post_inc(&mut self.next_inlay_id),
+                position,
+                text.as_str(),
+            );
+            self.completion_preview = Some(CompletionPreviewState {
+                inlay_id: inlay.id,
+                candidate_id,
+                position,
+                text,
+            });
+            to_insert.push(inlay);
+        }
+
+        self.splice_inlays(&to_remove, to_insert, cx);
     }
 
     fn show_snippet_choices(
@@ -10978,6 +11119,8 @@ impl Editor {
                 snippet_sort_order,
             ),
         ));
+        drop(context_menu);
+        self.update_completion_preview(cx);
     }
 
     pub fn insert_snippet(
@@ -14978,6 +15121,7 @@ impl Editor {
             .map(|menu| menu.select_first(self.completion_provider.as_deref(), window, cx))
             .unwrap_or(false)
         {
+            self.update_completion_preview(cx);
             return;
         }
 
@@ -15102,6 +15246,7 @@ impl Editor {
             .map(|menu| menu.select_last(self.completion_provider.as_deref(), window, cx))
             .unwrap_or(false)
         {
+            self.update_completion_preview(cx);
             return;
         }
 
@@ -15160,6 +15305,7 @@ impl Editor {
         if let Some(context_menu) = self.context_menu.borrow_mut().as_mut() {
             context_menu.select_first(self.completion_provider.as_deref(), window, cx);
         }
+        self.update_completion_preview(cx);
     }
 
     pub fn context_menu_prev(
@@ -15171,6 +15317,7 @@ impl Editor {
         if let Some(context_menu) = self.context_menu.borrow_mut().as_mut() {
             context_menu.select_prev(self.completion_provider.as_deref(), window, cx);
         }
+        self.update_completion_preview(cx);
     }
 
     pub fn context_menu_next(
@@ -15182,6 +15329,7 @@ impl Editor {
         if let Some(context_menu) = self.context_menu.borrow_mut().as_mut() {
             context_menu.select_next(self.completion_provider.as_deref(), window, cx);
         }
+        self.update_completion_preview(cx);
     }
 
     pub fn context_menu_last(
@@ -15193,6 +15341,7 @@ impl Editor {
         if let Some(context_menu) = self.context_menu.borrow_mut().as_mut() {
             context_menu.select_last(self.completion_provider.as_deref(), window, cx);
         }
+        self.update_completion_preview(cx);
     }
 
     pub fn signature_help_prev(
