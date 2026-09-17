@@ -17,6 +17,7 @@ doctest = false
 # asserts the source-level half of that on every run. The graph half cannot be
 # held here for the same reason it cannot be held for `zode_account_ui`:
 # `workspace` is required to register actions, and it reaches `client`.
+editor.workspace = true
 gpui.workspace = true
 menu.workspace = true
 os_auth.workspace = true

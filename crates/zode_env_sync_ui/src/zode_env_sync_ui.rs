@@ -13,6 +13,7 @@
 
 mod env_diff_modal;
 pub mod masking;
+mod toolbar_button;
 mod vault_modal;
 mod wire_panel;
 
@@ -25,6 +26,7 @@ use zode_account::Account;
 use zode_env_sync::{EnvSession, EnvStatus};
 
 pub use env_diff_modal::EnvDiffModal;
+pub use toolbar_button::EnvSyncToolbar;
 pub use vault_modal::VaultModal;
 pub use wire_panel::WirePanel;
 

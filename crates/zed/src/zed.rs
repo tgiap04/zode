@@ -1087,6 +1087,10 @@ fn initialize_pane(
             toolbar.add_item(quick_action_bar, window, cx);
             let diagnostic_editor_controls = cx.new(|_| diagnostics::ToolbarControls::new());
             toolbar.add_item(diagnostic_editor_controls, window, cx);
+            // Shows itself only while an environment file is open, decided by
+            // the same `private_files` setting that already marks them.
+            let env_sync_toolbar = cx.new(|_| zode_env_sync_ui::EnvSyncToolbar::new());
+            toolbar.add_item(env_sync_toolbar, window, cx);
             let project_search_bar = cx.new(|_| ProjectSearchBar::new());
             toolbar.add_item(project_search_bar, window, cx);
             let lsp_log_item = cx.new(|_| LspLogToolbarItemView::new());

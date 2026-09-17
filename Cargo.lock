@@ -20103,6 +20103,7 @@ dependencies = [
 name = "zode_env_sync_ui"
 version = "0.1.0"
 dependencies = [
+ "editor",
  "gpui",
  "menu",
  "os_auth",
