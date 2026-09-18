@@ -68,8 +68,8 @@ fn open_vault(
     session
         .update(cx, |session, cx| session.unlock(cx))
         .detach();
-    workspace.toggle_modal(window, cx, |_window, cx| {
-        VaultModal::new(session.clone(), cx)
+    workspace.toggle_modal(window, cx, |window, cx| {
+        VaultModal::new(session.clone(), window, cx)
     });
 }
 
@@ -102,8 +102,8 @@ fn bind_project(
     session
         .update(cx, |session, cx| session.unlock(cx))
         .detach();
-    workspace.toggle_modal(window, cx, |_window, cx| {
-        VaultModal::binding(session.clone(), root.clone(), cx)
+    workspace.toggle_modal(window, cx, move |window, cx| {
+        VaultModal::binding(session.clone(), root, window, cx)
     });
 }
 
@@ -152,8 +152,8 @@ fn transfer(
         // move: adding a file is a decision about which project owns it, and
         // guessing would put someone's production environment under the wrong
         // name.
-        workspace.toggle_modal(window, cx, |_window, cx| {
-            VaultModal::new(session.clone(), cx)
+        workspace.toggle_modal(window, cx, |window, cx| {
+            VaultModal::new(session.clone(), window, cx)
         });
         return;
     };

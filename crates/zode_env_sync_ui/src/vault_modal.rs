@@ -1,3 +1,4 @@
+use editor::Editor;
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, PathPromptOptions,
     Subscription, Window,
@@ -23,7 +24,14 @@ pub struct VaultModal {
     /// the SAME project, and the only thing that reliably knows which one that
     /// is, is the person who made it.
     binding_for: Option<std::path::PathBuf>,
-    _observation: Subscription,
+    /// The name being typed for a new project, and whether that row is open.
+    ///
+    /// A project has to exist before a file can be added to one, and until
+    /// this row existed the window was a dead end: it said "No projects yet"
+    /// and offered nothing that could make one.
+    name_input: Entity<Editor>,
+    naming: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<DismissEvent> for VaultModal {}
@@ -36,26 +44,67 @@ impl Focusable for VaultModal {
 }
 
 impl VaultModal {
-    pub fn new(session: Entity<EnvSession>, cx: &mut Context<Self>) -> Self {
-        let observation = cx.observe(&session, |_this, _session, cx| cx.notify());
-        // Loading is an explicit consequence of opening this window, and it is
-        // the only thing here that touches the network on its own.
-        session.update(cx, |session, cx| session.load_vault(cx));
+    pub fn new(session: Entity<EnvSession>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let name_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("acme-api", window, cx);
+            editor
+        });
+
+        let mut subscriptions = vec![cx.observe(&session, |_this, _session, cx| cx.notify())];
+        subscriptions.push(cx.subscribe(&name_input, |_this, _editor, event, cx| {
+            if matches!(event, editor::EditorEvent::BufferEdited) {
+                cx.notify();
+            }
+        }));
+
+        // Unlock first, THEN load. Both were kicked off together before, and
+        // because unlocking is asynchronous the load always ran without a key
+        // and set "enter your recovery key" for a moment — a message that was
+        // wrong by the time anyone read it.
+        let unlock = session.update(cx, |session, cx| session.unlock(cx));
+        cx.spawn({
+            let session = session.clone();
+            async move |_this, cx| {
+                unlock.await;
+                _ = session.update(cx, |session, cx| {
+                    if session.is_unlocked() {
+                        session.load_vault(cx);
+                    }
+                });
+            }
+        })
+        .detach();
+
         Self {
             session,
             focus_handle: cx.focus_handle(),
             binding_for: None,
-            _observation: observation,
+            name_input,
+            naming: false,
+            _subscriptions: subscriptions,
         }
+    }
+
+    fn create_project(&mut self, cx: &mut Context<Self>) {
+        let name = self.name_input.read(cx).text(cx).trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.session
+            .update(cx, |session, cx| session.add_project(name, cx));
+        self.naming = false;
+        cx.notify();
     }
 
     /// The same window, opened to bind a checkout.
     pub fn binding(
         session: Entity<EnvSession>,
         worktree_root: std::path::PathBuf,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self::new(session, cx);
+        let mut this = Self::new(session, window, cx);
         this.binding_for = Some(worktree_root);
         this
     }
@@ -118,13 +167,39 @@ impl Render for VaultModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let session = self.session.read(cx);
+        let unlocked = session.is_unlocked();
         let manifest = session.manifest();
         let reconciliation = session.reconciliation();
         let deleted_elsewhere: Vec<EntryId> = reconciliation.deleted_elsewhere.clone();
 
         let mut rows = v_flex().w_full().gap_2();
 
-        if manifest.projects.is_empty() {
+        if !unlocked {
+            // Not a list, and not an empty one either: this account has no
+            // environment key yet, so there is nothing to list and one button
+            // to press. Saying "no projects" here would be true and useless.
+            rows = rows.child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        Label::new(
+                            "Environment sync is not set up on this account yet. Setting it up creates a key, wrapped under the recovery key you already have — there is no second phrase to write down.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Button::new("env-vault-set-up", "Set Up Environment Sync")
+                            .style(ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.session
+                                    .update(cx, |session, cx| session.create_key(cx))
+                                    .detach_and_log_err(cx);
+                            })),
+                    ),
+            );
+        } else if manifest.projects.is_empty() {
             rows = rows.child(
                 Label::new("No projects yet. Add one, then add the files that belong to it.")
                     .size(LabelSize::Small)
@@ -289,14 +364,59 @@ impl Render for VaultModal {
                         .child(Label::new(message).size(LabelSize::Small).color(color)),
                 )
             })
+            .when(unlocked && self.naming, |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .px_3()
+                        .pt_2()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.border)
+                                .bg(colors.editor_background)
+                                .child(self.name_input.clone()),
+                        )
+                        .child(
+                            Button::new("env-vault-create", "Add")
+                                .style(ButtonStyle::Filled)
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.create_project(cx)
+                                })),
+                        ),
+                )
+            })
             .child(
                 h_flex()
                     .w_full()
                     .p_2()
                     .gap_1()
-                    .justify_end()
+                    .justify_between()
                     .items_center()
                     .bg(colors.editor_background)
+                    .child(div().when(unlocked, |this| {
+                        this.child(
+                            Button::new("env-vault-new-project", "New Project\u{2026}")
+                                .label_size(LabelSize::Small)
+                                .tooltip(Tooltip::text(
+                                    "A project groups the environment files that belong together",
+                                ))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.naming = !this.naming;
+                                    if this.naming {
+                                        window.focus(&this.name_input.focus_handle(cx), cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    }))
                     .child(
                         Button::new("env-vault-close", "Close")
                             .label_size(LabelSize::Small)
@@ -364,7 +484,7 @@ mod tests {
     fn the_window_draws_an_empty_vault(cx: &mut TestAppContext) {
         init_theme(cx);
         let session = session(None, cx);
-        let (_modal, cx) = cx.add_window_view(|_window, cx| VaultModal::new(session, cx));
+        let (_modal, cx) = cx.add_window_view(|window, cx| VaultModal::new(session, window, cx));
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -374,8 +494,49 @@ mod tests {
     fn the_window_draws_projects_and_files(cx: &mut TestAppContext) {
         init_theme(cx);
         let session = session(Some(populated()), cx);
-        let (_modal, cx) = cx.add_window_view(|_window, cx| VaultModal::new(session, cx));
+        let (_modal, cx) = cx.add_window_view(|window, cx| VaultModal::new(session, window, cx));
         cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn an_account_with_no_key_is_offered_set_up_rather_than_an_empty_list(cx: &mut TestAppContext) {
+        // The dead end this window used to be: it said "No projects yet" to an
+        // account that had no environment key, which is true and unactionable.
+        init_theme(cx);
+        let session = session(None, cx);
+        let (modal, cx) =
+            cx.add_window_view(|window, cx| VaultModal::new(session.clone(), window, cx));
+        cx.run_until_parked();
+
+        modal.update(cx, |modal, cx| {
+            assert!(
+                !modal.session.read(cx).is_unlocked(),
+                "the fixture account has no env key, which is the case under test",
+            );
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_new_project_row_draws_and_refuses_an_empty_name(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(Some(populated()), cx);
+        let (modal, cx) =
+            cx.add_window_view(|window, cx| VaultModal::new(session.clone(), window, cx));
+        cx.run_until_parked();
+
+        modal.update(cx, |modal, cx| {
+            modal.naming = true;
+            // Nothing typed: adding must be a no-op rather than creating a
+            // project with an empty name nobody can identify later.
+            let before = modal.session.read(cx).manifest().projects.len();
+            modal.create_project(cx);
+            assert_eq!(modal.session.read(cx).manifest().projects.len(), before);
+            assert!(modal.naming, "the row stays open so the name can be typed");
+        });
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
     }
@@ -386,7 +547,8 @@ mod tests {
         // variant cannot be added without a sentence for the user.
         init_theme(cx);
         let session = session(Some(populated()), cx);
-        let (modal, cx) = cx.add_window_view(|_window, cx| VaultModal::new(session.clone(), cx));
+        let (modal, cx) =
+            cx.add_window_view(|window, cx| VaultModal::new(session.clone(), window, cx));
         cx.run_until_parked();
 
         for status in [
