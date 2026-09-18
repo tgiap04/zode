@@ -68,8 +68,9 @@ fn open_vault(
     session
         .update(cx, |session, cx| session.unlock(cx))
         .detach();
-    workspace.toggle_modal(window, cx, |window, cx| {
-        VaultModal::new(session.clone(), window, cx)
+    let handle = cx.weak_entity();
+    workspace.toggle_modal(window, cx, move |window, cx| {
+        VaultModal::new(session.clone(), handle, window, cx)
     });
 }
 
@@ -102,8 +103,9 @@ fn bind_project(
     session
         .update(cx, |session, cx| session.unlock(cx))
         .detach();
+    let handle = cx.weak_entity();
     workspace.toggle_modal(window, cx, move |window, cx| {
-        VaultModal::binding(session.clone(), root, window, cx)
+        VaultModal::binding(session.clone(), handle, root, window, cx)
     });
 }
 
@@ -148,21 +150,24 @@ fn transfer(
         .read(cx)
         .entry_for(&file.worktree_root, &file.absolute)
     else {
-        // Not in the catalogue. Sending the user to the vault is the honest
-        // move: adding a file is a decision about which project owns it, and
-        // guessing would put someone's production environment under the wrong
-        // name.
-        workspace.toggle_modal(window, cx, |window, cx| {
-            VaultModal::new(session.clone(), window, cx)
-        });
+        // Not in the catalogue yet. Exactly one fact is missing — which
+        // project owns this file — so the window asks for that and nothing
+        // else, then sends. Guessing instead would put someone's production
+        // environment under the wrong name.
+        let handle = cx.weak_entity();
+        match direction {
+            Direction::Push => workspace.toggle_modal(window, cx, move |window, cx| {
+                VaultModal::sending(session.clone(), handle, file, window, cx)
+            }),
+            // There is nothing to fetch for a file the account has never seen.
+            Direction::Pull => workspace.toggle_modal(window, cx, move |window, cx| {
+                VaultModal::new(session.clone(), handle, window, cx)
+            }),
+        }
         return;
     };
 
-    let name = file
-        .absolute
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".env".into());
+    let name = file.display_name();
 
     match direction {
         Direction::Push => {
@@ -195,9 +200,36 @@ fn transfer(
 }
 
 /// An environment file open in the active editor.
+#[derive(Clone, Debug)]
 pub struct ActiveEnvFile {
     pub absolute: PathBuf,
     pub worktree_root: PathBuf,
+}
+
+impl ActiveEnvFile {
+    /// The file's own name, for a window title.
+    pub fn display_name(&self) -> SharedString {
+        self.absolute
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".env".into())
+            .into()
+    }
+
+    /// Where the file sits inside its checkout.
+    ///
+    /// Shown rather than the absolute path because the absolute path is both a
+    /// small disclosure — it carries the user's home directory — and the wrong
+    /// thing to reason about: what gets stored, and what a pull on another
+    /// machine reproduces, is this.
+    pub fn relative_label(&self) -> SharedString {
+        self.absolute
+            .strip_prefix(&self.worktree_root)
+            .ok()
+            .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+            .map(SharedString::from)
+            .unwrap_or_else(|| self.display_name())
+    }
 }
 
 /// The active item, if it is a file this editor treats as private.

@@ -216,6 +216,7 @@ impl FloatingPane {
             files: true,
             directories: false,
             multiple: false,
+            show_hidden: false,
             prompt: None,
         });
 

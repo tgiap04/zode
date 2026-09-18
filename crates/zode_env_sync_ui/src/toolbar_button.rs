@@ -78,8 +78,13 @@ impl Render for EnvSyncToolbar {
             )
             .menu(move |window, cx| {
                 Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                    // "Link This Checkout…" used to sit here as a step to do
+                    // first. It is gone because sending now asks which project
+                    // owns the file and records the answer, which is the same
+                    // fact linking asked for. The action still exists for
+                    // re-linking a checkout later.
                     menu.action(
-                        "Send to Your Account",
+                        "Send to Your Account\u{2026}",
                         Box::new(zed_actions::env_sync::PushEnvFile),
                     )
                     .action(
@@ -87,10 +92,6 @@ impl Render for EnvSyncToolbar {
                         Box::new(zed_actions::env_sync::PullEnvFile),
                     )
                     .separator()
-                    .action(
-                        "Link This Checkout\u{2026}",
-                        Box::new(zed_actions::env_sync::BindEnvProject),
-                    )
                     .action(
                         "Environment Files\u{2026}",
                         Box::new(zed_actions::env_sync::OpenEnvVault),

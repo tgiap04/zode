@@ -1,8 +1,7 @@
 use gpui::{
-    App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Window,
+    App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window,
 };
-use ui::{Tooltip, prelude::*};
+use ui::{Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
 use workspace::ModalView;
 use zode_env_sync::{EnvSession, WireBytes};
 
@@ -54,105 +53,114 @@ impl Render for WirePanel {
         let colors = cx.theme().colors();
         let blob_length = self.wire.blob_base64.len();
 
-        v_flex()
+        // Two blocks rather than one, because they answer different
+        // questions: the envelope is what the server can read, the blob is
+        // what it cannot.
+        let block = |id: &'static str, height: Rems| {
+            div()
+                .id(id)
+                .w_full()
+                .max_h(height)
+                .p_2()
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.border_variant)
+                .bg(colors.editor_background)
+                .overflow_y_scroll()
+        };
+
+        div()
             .key_context("EnvWirePanel")
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
-            .w(rems(58.))
-            .overflow_hidden()
+            .occlude()
+            .w(rems(54.))
+            .max_h(rems(44.))
+            // Escape discards. Enter is deliberately not bound to Send: this
+            // window exists to be read, and a keystroke that skips the reading
+            // would remove the only thing it is for.
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
                 this.session
                     .update(cx, |session, cx| session.discard_prepared(cx));
                 cx.emit(DismissEvent);
             }))
             .child(
-                v_flex()
-                    .p_3()
-                    .gap_0p5()
-                    .child(
-                        Label::new("What leaves your machine").weight(FontWeight::MEDIUM),
+                Modal::new("env-wire", None)
+                    .header(
+                        ModalHeader::new()
+                            .icon(
+                                Icon::new(IconName::ArrowUp)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .headline("What leaves your machine")
+                            .description(format!(
+                                "Sending {}. This is the whole request body, and no part of the file is readable in it.",
+                                self.file_name
+                            )),
                     )
-                    .child(
-                        Label::new(format!(
-                            "Sending {}. This is the whole request body — no part of the file is in it.",
-                            self.file_name
-                        ))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
-            )
-            .child(
-                div()
-                    .id("env-wire-body")
-                    .w_full()
-                    .h(rems(20.))
-                    .p_2()
-                    .overflow_y_scroll()
-                    .bg(colors.editor_background)
-                    .border_y_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(
+                    .section(
+                        Section::new()
+                            .meta("Envelope — everything the server can read")
+                            .child(block("env-wire-envelope", rems(11.)).child(
                                 Label::new(self.wire.envelope_json.clone())
                                     .size(LabelSize::Small)
                                     .buffer_font(cx),
-                            )
-                            .child(
-                                Label::new(format!(
-                                    "blob (base64, {blob_length} characters):\n{}",
-                                    self.wire.blob_base64
-                                ))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted)
-                                .buffer_font(cx),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .justify_between()
-                    .items_center()
-                    .bg(colors.editor_background)
-                    .child(
-                        Button::new("env-wire-copy", "Copy")
-                            .label_size(LabelSize::Small)
-                            .tooltip(Tooltip::text(
-                                "Copy it and compare against what a proxy captured",
-                            ))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    this.wire.blob_base64.clone(),
-                                ));
-                            })),
+                            )),
                     )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("env-wire-cancel", "Do not send")
+                    .section(
+                        Section::new()
+                            .meta(format!(
+                                "Ciphertext — {blob_length} characters of base64, and the only place your values are"
+                            ))
+                            .child(block("env-wire-blob", rems(9.)).child(
+                                Label::new(self.wire.blob_base64.clone())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .buffer_font(cx),
+                            )),
+                    )
+                    .footer(
+                        ModalFooter::new()
+                            .start_slot(
+                                Button::new("env-wire-copy", "Copy Ciphertext")
                                     .label_size(LabelSize::Small)
+                                    .start_icon(
+                                        Icon::new(IconName::Copy).size(IconSize::Small),
+                                    )
+                                    .tooltip(Tooltip::text(
+                                        "Copy it and compare against what a proxy captured",
+                                    ))
                                     .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session.update(cx, |session, cx| {
-                                            session.discard_prepared(cx)
-                                        });
-                                        cx.emit(DismissEvent);
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            this.wire.blob_base64.clone(),
+                                        ));
                                     })),
                             )
-                            .child(
-                                Button::new("env-wire-send", "Send")
-                                    .style(ButtonStyle::Filled)
-                                    .label_size(LabelSize::Small)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session.update(cx, |session, cx| {
-                                            session.send_prepared(cx)
-                                        });
-                                        cx.emit(DismissEvent);
-                                    })),
+                            .end_slot(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("env-wire-cancel", "Do Not Send")
+                                            .label_size(LabelSize::Small)
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.session.update(cx, |session, cx| {
+                                                    session.discard_prepared(cx)
+                                                });
+                                                cx.emit(DismissEvent);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("env-wire-send", "Send")
+                                            .style(ButtonStyle::Filled)
+                                            .label_size(LabelSize::Small)
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.session.update(cx, |session, cx| {
+                                                    session.send_prepared(cx)
+                                                });
+                                                cx.emit(DismissEvent);
+                                            })),
+                                    ),
                             ),
                     ),
             )

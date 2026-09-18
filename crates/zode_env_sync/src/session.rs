@@ -567,7 +567,7 @@ impl EnvSession {
         self.bindings.project_for(worktree_root)
     }
 
-    /// Adds a file on disk to a project, then sends it.
+    /// Adds a file on disk to a project and answers with its new entry.
     ///
     /// The path recorded in the catalogue is relative to the checkout bound to
     /// that project, so pulling on another machine lands it in the right place
@@ -575,14 +575,18 @@ impl EnvSession {
     /// name — an absolute path would be both a disclosure and wrong on every
     /// other machine.
     ///
-    /// Thin on purpose is NOT the rule here: this is where the decisions are,
-    /// because the file picker that calls it cannot be driven by a test.
+    /// Recording and sending are deliberately separate. This used to call
+    /// [`Self::push`] itself, which made the one path that creates an entry
+    /// also the one path that reached the network without showing the bytes
+    /// first — quietly contradicting what `docs/src/env-sync-security.md`
+    /// promises. The caller now prepares the push and displays it, like every
+    /// other send.
     pub fn add_file(
         &mut self,
         project: crate::ProjectId,
         absolute_path: PathBuf,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<EntryId> {
         let relative = self
             .bindings
             .worktrees_for(project)
@@ -604,7 +608,7 @@ impl EnvSession {
             Ok(entry) => entry,
             Err(error) => {
                 self.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                return;
+                return None;
             }
         };
 
@@ -613,7 +617,7 @@ impl EnvSession {
                 EnvStatus::Failed("that project is no longer in your vault".into()),
                 cx,
             );
-            return;
+            return None;
         };
         holder.entries.insert(
             entry,
@@ -624,7 +628,7 @@ impl EnvSession {
         );
 
         self.save_manifest(cx);
-        self.push(entry, absolute_path, cx);
+        Some(entry)
     }
 
     /// Creates an empty project in the catalogue.

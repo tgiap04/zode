@@ -1162,6 +1162,9 @@ fn file_open_dialog(
     if options.directories {
         dialog_options |= FOS_PICKFOLDERS;
     }
+    if options.show_hidden {
+        dialog_options |= FOS_FORCESHOWHIDDEN;
+    }
 
     unsafe {
         folder_dialog.SetOptions(dialog_options)?;

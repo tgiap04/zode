@@ -1,8 +1,5 @@
-use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Subscription,
-    Window,
-};
-use ui::{Tooltip, prelude::*};
+use gpui::{App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window};
+use ui::{Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
 use workspace::ModalView;
 use zode_env_sync::EnvSession;
 
@@ -97,12 +94,13 @@ impl Render for EnvDiffModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
 
-        let shell = v_flex()
+        let shell = div()
             .key_context("EnvDiffModal")
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
-            .w(rems(60.))
-            .overflow_hidden()
+            .occlude()
+            .w(rems(58.))
+            .max_h(rems(44.))
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
                 this.session
                     .update(cx, |session, cx| session.dismiss_pending(cx));
@@ -134,101 +132,135 @@ impl Render for EnvDiffModal {
         let unverified_reveal = self.revealed && !self.support.is_available();
         let support_note = self.support.describe();
 
-        shell
-            .child(
-                v_flex()
-                    .p_3()
-                    .gap_0p5()
-                    .child(
-                        Label::new(format!("{name} differs from the server"))
-                            .weight(FontWeight::MEDIUM),
-                    )
-                    .child(
-                        Label::new(if safe {
+        shell.child(
+            Modal::new("env-diff", None)
+                .header(
+                    ModalHeader::new()
+                        .icon(
+                            Icon::new(if safe {
+                                IconName::CloudDownload
+                            } else {
+                                IconName::Warning
+                            })
+                            .size(IconSize::Small)
+                            .color(if safe { Color::Muted } else { Color::Warning }),
+                        )
+                        .headline(format!("{name} differs from the server"))
+                        .description(if safe {
                             "This machine has not changed it since the last sync, so taking the server's copy loses nothing."
                         } else {
                             "Both sides changed since the last sync. Whichever you choose, the other is replaced."
-                        })
-                        .size(LabelSize::Small)
-                        .color(if safe { Color::Muted } else { Color::Warning }),
-                    ),
-            )
-            .child(
-                div()
-                    .id("env-diff-body")
-                    .w_full()
-                    .h(rems(24.))
-                    .p_2()
-                    .overflow_y_scroll()
-                    .bg(colors.editor_background)
-                    .border_y_1()
-                    .border_color(colors.border_variant)
-                    .child(Label::new(body).size(LabelSize::Small).buffer_font(cx)),
-            )
-            .when(unverified_reveal, |this| {
-                this.child(
-                    div().px_2().pt_1().child(
-                        Label::new(format!("Shown without any check — {support_note}."))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Warning),
-                    ),
+                        }),
                 )
-            })
-            .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .justify_between()
-                    .items_center()
-                    .bg(colors.editor_background)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Label::new(format!("+{added} −{removed}"))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
+                .section(
+                    Section::new()
+                        .meta(if self.revealed {
+                            "Values shown"
+                        } else {
+                            "Values masked — names and structure only"
+                        })
+                        .child(
+                            div()
+                                .id("env-diff-body")
+                                .w_full()
+                                .h(rems(22.))
+                                .p_2()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(colors.border_variant)
+                                .bg(colors.editor_background)
+                                .overflow_y_scroll()
+                                .child(Label::new(body).size(LabelSize::Small).buffer_font(cx)),
+                        )
+                        .when(unverified_reveal, |this| {
+                            this.child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(IconName::Warning)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Warning),
+                                    )
+                                    .child(
+                                        Label::new(format!(
+                                            "Shown without any check — {support_note}."
+                                        ))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning),
+                                    ),
                             )
-                            .child(
-                                Button::new("env-diff-reveal", self.reveal_label())
-                                    .label_size(LabelSize::Small)
-                                    .tooltip(Tooltip::text(if self.support.is_available() {
-                                        "Values are hidden until you confirm it is you"
-                                    } else {
-                                        "This machine cannot confirm it is you"
-                                    }))
-                                    .on_click(cx.listener(|this, _, _window, cx| this.reveal(cx))),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("env-diff-cancel", "Cancel")
-                                    .label_size(LabelSize::Small)
-                                    .tooltip(Tooltip::text("Change nothing on either side"))
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session
-                                            .update(cx, |session, cx| session.dismiss_pending(cx));
-                                        cx.emit(DismissEvent);
-                                    })),
-                            )
-                            .child(
-                                Button::new("env-diff-apply", "Write the server's copy")
-                                    .style(ButtonStyle::Filled)
-                                    .label_size(LabelSize::Small)
-                                    .tooltip(Tooltip::text(
-                                        "The current file is copied aside first, outside this project",
-                                    ))
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session
-                                            .update(cx, |session, cx| session.apply_pending(cx));
-                                        cx.emit(DismissEvent);
-                                    })),
-                            ),
-                    ),
-            )
+                        }),
+                )
+                .footer(
+                    ModalFooter::new()
+                        .start_slot(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                // The sign carries the meaning and the colour
+                                // only reinforces it, so the count still reads
+                                // where colour does not.
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new(format!("+{added}"))
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Created),
+                                        )
+                                        .child(
+                                            Label::new(format!("\u{2212}{removed}"))
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Deleted),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("env-diff-reveal", self.reveal_label())
+                                        .label_size(LabelSize::Small)
+                                        .start_icon(
+                                            Icon::new(IconName::Eye).size(IconSize::Small),
+                                        )
+                                        .tooltip(Tooltip::text(if self.support.is_available() {
+                                            "Values are hidden until you confirm it is you"
+                                        } else {
+                                            "This machine cannot confirm it is you"
+                                        }))
+                                        .on_click(
+                                            cx.listener(|this, _, _window, cx| this.reveal(cx)),
+                                        ),
+                                ),
+                        )
+                        .end_slot(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("env-diff-cancel", "Cancel")
+                                        .label_size(LabelSize::Small)
+                                        .tooltip(Tooltip::text("Change nothing on either side"))
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.session.update(cx, |session, cx| {
+                                                session.dismiss_pending(cx)
+                                            });
+                                            cx.emit(DismissEvent);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("env-diff-apply", "Write the Server's Copy")
+                                        .style(ButtonStyle::Filled)
+                                        .label_size(LabelSize::Small)
+                                        .tooltip(Tooltip::text(
+                                            "The current file is copied aside first, outside this project",
+                                        ))
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.session
+                                                .update(cx, |session, cx| session.apply_pending(cx));
+                                            cx.emit(DismissEvent);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
     }
 }
 
