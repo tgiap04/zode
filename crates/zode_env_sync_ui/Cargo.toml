@@ -20,6 +20,7 @@ doctest = false
 editor.workspace = true
 gpui.workspace = true
 menu.workspace = true
+notifications.workspace = true
 os_auth.workspace = true
 ui.workspace = true
 workspace.workspace = true

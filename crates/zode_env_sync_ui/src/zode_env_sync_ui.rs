@@ -20,6 +20,7 @@ mod wire_panel;
 use std::path::PathBuf;
 
 use gpui::{App, Entity, Window};
+use notifications::status_toast::StatusToast;
 use ui::prelude::*;
 use workspace::Workspace;
 use zode_account::Account;
@@ -42,15 +43,38 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-fn session(cx: &App) -> Option<Entity<EnvSession>> {
+/// The session, or a toast saying why there is not one.
+///
+/// Signed out, the feature has nothing to reach. Every one of these actions
+/// used to answer that by returning and doing nothing at all, which from the
+/// outside is indistinguishable from the button being broken -- so the reason
+/// is said out loud, with the one thing that fixes it attached.
+///
+/// Checked here rather than in each handler so there is one place that decides
+/// and one place that explains.
+fn session(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Entity<EnvSession>> {
     let session = EnvSession::global(cx)?;
-    // Signed out, the feature has nothing to reach. Checked here rather than
-    // in every handler so there is one place that decides.
-    Account::global(cx)?
-        .read(cx)
-        .status()
-        .is_signed_in()
-        .then_some(session)
+    if Account::global(cx).is_some_and(|account| account.read(cx).status().is_signed_in()) {
+        return Some(session);
+    }
+
+    let toast = StatusToast::new(
+        "Sign in to sync environment files with your account",
+        cx,
+        |this, _cx| {
+            this.icon(
+                Icon::new(IconName::Person)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .action("Sign In", |window, cx| {
+                window.dispatch_action(Box::new(zed_actions::account::SignIn), cx)
+            })
+            .dismiss_button(true)
+        },
+    );
+    workspace.toggle_status_toast(toast, cx);
+    None
 }
 
 fn open_vault(
@@ -59,7 +83,7 @@ fn open_vault(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some(session) = session(cx) else {
+    let Some(session) = session(workspace, cx) else {
         return;
     };
     // Unlocking reads the keychain first and only reaches the network if it
@@ -75,12 +99,12 @@ fn open_vault(
 }
 
 fn set_up(
-    _: &mut Workspace,
+    workspace: &mut Workspace,
     _: &zed_actions::env_sync::SetUpEnvSync,
     _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some(session) = session(cx) else {
+    let Some(session) = session(workspace, cx) else {
         return;
     };
     session
@@ -94,7 +118,7 @@ fn bind_project(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let Some(session) = session(cx) else {
+    let Some(session) = session(workspace, cx) else {
         return;
     };
     let Some(root) = active_worktree_root(workspace, cx) else {
@@ -139,7 +163,7 @@ fn transfer(
     cx: &mut Context<Workspace>,
     direction: Direction,
 ) {
-    let Some(session) = session(cx) else {
+    let Some(session) = session(workspace, cx) else {
         return;
     };
     let Some(file) = active_env_file(workspace, cx) else {

@@ -3,6 +3,8 @@ use std::time::SystemTime;
 
 use credentials_provider::CredentialsProvider;
 use futures::AsyncReadExt as _;
+use futures::FutureExt as _;
+use futures::future::Shared;
 use gpui::{App, Entity, EventEmitter, Global, SharedString, Task};
 use http_client::{AsyncBody, HttpClient, Request};
 use serde::Deserialize;
@@ -99,6 +101,16 @@ pub struct Account {
     /// Held so dropping the entity — or cancelling the sign-in — stops the
     /// poll. A detached task would keep asking after the modal was closed.
     sign_in_task: Option<Task<()>>,
+    /// A refresh already running, joined by every caller that arrives while it
+    /// does.
+    ///
+    /// Not an optimisation. The refresh token rotates on use and the server
+    /// reads a second use of a spent one as theft, revoking the whole family —
+    /// so two callers refreshing at once do not waste a request, they sign the
+    /// user out. `zode_sync` and `zode_env_sync` reach for a credential
+    /// independently and know nothing about each other, which is exactly the
+    /// race this closes.
+    refreshing: Option<Shared<Task<Option<ApiCredential>>>>,
 }
 
 impl EventEmitter<AccountStatusChanged> for Account {}
@@ -125,6 +137,7 @@ impl Account {
             api_url,
             tokens: None,
             sign_in_task: None,
+            refreshing: None,
         }
     }
 
@@ -150,6 +163,7 @@ impl Account {
             api_url: "http://test.invalid/api".into(),
             tokens: None,
             sign_in_task: None,
+            refreshing: None,
         }
     }
 
@@ -171,6 +185,7 @@ impl Account {
             api_url: "http://test.invalid/api".into(),
             tokens: None,
             sign_in_task: None,
+            refreshing: None,
         }
     }
 
@@ -183,6 +198,16 @@ impl Account {
     /// Lets a test reach the code paths that require one without standing up a
     /// whole device grant. The expiry is far enough out that `needs_refresh`
     /// answers false, so no refresh request is made either.
+    /// The same, but already expired, so a refresh really is attempted.
+    #[cfg(feature = "test-support")]
+    pub fn set_expired_tokens_for_test(&mut self) {
+        self.tokens = Some(StoredTokens {
+            access_token: "test-access".into(),
+            refresh_token: "test-refresh".into(),
+            expires_at: SystemTime::now() - std::time::Duration::from_secs(1),
+        });
+    }
+
     #[cfg(feature = "test-support")]
     pub fn set_tokens_for_test(&mut self) {
         self.tokens = Some(StoredTokens {
@@ -231,38 +256,56 @@ impl Account {
             return Task::ready(None);
         };
 
+        // A refresh already in flight is joined, never raced -- see the
+        // `refreshing` field for why a second one signs the user out. A
+        // finished one is not reused: the token it produced may itself be near
+        // expiry by now, and deciding that is the whole job.
+        if let Some(inflight) = self
+            .refreshing
+            .clone()
+            .filter(|inflight| inflight.peek().is_none())
+        {
+            return cx.spawn(async move |_this, _cx| inflight.await);
+        }
+
         let http_client = self.http_client.clone();
         let credentials = self.credentials.clone();
         let api_url = self.api_url.clone();
 
-        cx.spawn(async move |this, cx| {
-            let had = tokens.access_token.clone();
-            match Self::ensure_fresh(&http_client, &api_url, tokens, SystemTime::now()).await {
-                Ok(fresh) => {
-                    if fresh.access_token != had {
-                        // Persist immediately. A refresh that only lives in
-                        // memory means the rotated refresh token is lost on
-                        // restart, and the old one is already spent — which
-                        // the server reads as reuse and revokes the family.
-                        if let Err(error) = storage::write(&credentials, &user_id, &fresh, cx).await
-                        {
-                            log::warn!("refreshed the session but could not save it: {error}");
+        let refresh = cx
+            .spawn(async move |this, cx| {
+                let had = tokens.access_token.clone();
+                match Self::ensure_fresh(&http_client, &api_url, tokens, SystemTime::now()).await {
+                    Ok(fresh) => {
+                        if fresh.access_token != had {
+                            // Persist immediately. A refresh that only lives in
+                            // memory means the rotated refresh token is lost on
+                            // restart, and the old one is already spent — which
+                            // the server reads as reuse and revokes the family.
+                            if let Err(error) =
+                                storage::write(&credentials, &user_id, &fresh, cx).await
+                            {
+                                log::warn!("refreshed the session but could not save it: {error}");
+                            }
                         }
+                        let access_token = fresh.access_token.clone();
+                        _ = this.update(cx, |this, _| this.tokens = Some(fresh));
+                        Some(ApiCredential {
+                            access_token,
+                            user_id,
+                        })
                     }
-                    let access_token = fresh.access_token.clone();
-                    _ = this.update(cx, |this, _| this.tokens = Some(fresh));
-                    Some(ApiCredential {
-                        access_token,
-                        user_id,
-                    })
+                    Err(RefreshOutcome::Rejected) => {
+                        _ = this.update(cx, |this, cx| this.forget_locally(cx));
+                        None
+                    }
+                    Err(RefreshOutcome::Unreachable) => None,
                 }
-                Err(RefreshOutcome::Rejected) => {
-                    _ = this.update(cx, |this, cx| this.forget_locally(cx));
-                    None
-                }
-                Err(RefreshOutcome::Unreachable) => None,
-            }
-        })
+            })
+            .shared();
+
+        self.refreshing = Some(refresh.clone());
+        cx.spawn(async move |_this, _cx| refresh.await)
     }
 
     /// Restores a session saved by a previous run.

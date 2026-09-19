@@ -266,3 +266,57 @@ async fn a_hung_account_service_does_not_block_the_rest_of_the_app(cx: &mut Test
         assert_eq!(*account.status(), AccountStatus::SignedOut);
     });
 }
+
+/// Invariant 5 — one refresh at a time, however many callers want a token.
+///
+/// The refresh token rotates on use, and the server reads a second use of a
+/// spent one as theft and revokes the whole family. `zode_sync` and
+/// `zode_env_sync` reach for a credential independently and know nothing about
+/// each other, so two refreshes at once do not waste a request — they sign the
+/// user out. Counted rather than reasoned about, because the counting is the
+/// only thing that survives a refactor.
+#[gpui::test]
+async fn two_callers_wanting_a_fresh_token_cause_one_refresh(cx: &mut TestAppContext) {
+    let (http_client, requests) = counting_client();
+    let credentials = StubCredentials::empty();
+
+    let account = cx.update(|cx| {
+        cx.new(|_| {
+            let mut account = Account::for_test_with(
+                AccountStatus::SignedIn(zode_account::AccountUser {
+                    id: "1".into(),
+                    email: "ada@example.com".into(),
+                    name: None,
+                    avatar_url: None,
+                }),
+                http_client,
+                credentials,
+            );
+            account.set_expired_tokens_for_test();
+            account
+        })
+    });
+
+    // Both asked before either could run: the shape two independent crates
+    // produce when a token dies between them.
+    let (first, second) = account.update(cx, |account: &mut Account, cx| {
+        (account.api_credential(cx), account.api_credential(cx))
+    });
+    let (first, second) = futures::future::join(first, second).await;
+
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the second caller must join the refresh already running, not start another"
+    );
+    assert!(
+        first.is_none() && second.is_none(),
+        "the fake answers 500, so neither caller gets a credential"
+    );
+    account.read_with(cx, |account: &Account, _| {
+        assert!(
+            account.status().is_signed_in(),
+            "a server error is not a dead credential — the user stays signed in"
+        );
+    });
+}

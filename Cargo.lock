@@ -20059,6 +20059,7 @@ dependencies = [
  "sysinfo 0.37.2",
  "zed_credentials_provider",
  "zed_env_vars",
+ "zode_account",
 ]
 
 [[package]]
@@ -20107,6 +20108,7 @@ dependencies = [
  "editor",
  "gpui",
  "menu",
+ "notifications",
  "os_auth",
  "settings",
  "theme",
