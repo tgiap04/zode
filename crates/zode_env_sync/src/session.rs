@@ -430,6 +430,13 @@ impl EnvSession {
             return;
         };
         let account = self.account.clone();
+        // Named before the path moves, so the answer can say which file it is
+        // about. "already up to date" on its own reads as a refusal to
+        // download rather than as the answer it is.
+        let name = local_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "that file".into());
         self.set_status(EnvStatus::Working, cx);
 
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -448,10 +455,18 @@ impl EnvSession {
 
             _ = this.update(cx, |this, cx| match outcome {
                 Ok(PullOutcome::UpToDate) => {
-                    this.set_status(EnvStatus::Done("already up to date".into()), cx);
+                    this.set_status(
+                        EnvStatus::Done(
+                            format!("{name} here already matches the stored copy").into(),
+                        ),
+                        cx,
+                    );
                 }
                 Ok(PullOutcome::LocalOnly) => {
-                    this.set_status(EnvStatus::Done("nothing stored for this file".into()), cx);
+                    this.set_status(
+                        EnvStatus::Done(format!("your account holds nothing for {name}").into()),
+                        cx,
+                    );
                 }
                 Ok(PullOutcome::RemoteNewer(divergence)) => {
                     this.hold(entry, local_path, divergence, true, cx);

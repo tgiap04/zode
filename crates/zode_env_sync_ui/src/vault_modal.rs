@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use editor::Editor;
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
-    Subscription, WeakEntity, Window,
+    PromptLevel, Subscription, WeakEntity, Window,
 };
 use ui::{
     CommonAnimationExt, ListItem, ListSeparator, Modal, ModalFooter, ModalHeader, Section, Tooltip,
@@ -281,8 +281,54 @@ impl VaultModal {
         .detach();
     }
 
-    /// Starts the fetch and hands off to the window that shows what it found.
+    /// Asks before fetching onto a file that is already there.
+    ///
+    /// A file already sitting at the destination is the one thing this window
+    /// cannot show, and what the user got instead -- "already up to date" --
+    /// reads as a refusal rather than an answer. Asked with the platform's own
+    /// alert, because replacing a file the user did not know was there is the
+    /// kind of surprise an editor should never spring.
+    ///
+    /// Placed here rather than at the call sites so no route into a fetch can
+    /// skip it.
     fn pull_into(
+        &mut self,
+        entry: EntryId,
+        local_path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !local_path.exists() {
+            self.start_pull(entry, local_path, window, cx);
+            return;
+        }
+
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "A file is already there",
+            Some(&format!(
+                "{} exists on this machine. Replacing it copies the current one aside first, outside this project, and you still see what changes before anything is written.",
+                local_path.display()
+            )),
+            &["Replace", "Cancel"],
+            cx,
+        );
+
+        cx.spawn_in(window, async move |this, cx| {
+            // Anything but the first button -- Cancel, or the alert failing to
+            // answer at all -- leaves the file alone.
+            if answer.await != Ok(0) {
+                return;
+            }
+            _ = this.update_in(cx, |this, window, cx| {
+                this.start_pull(entry, local_path, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Starts the fetch and hands off to the window that shows what it found.
+    fn start_pull(
         &mut self,
         entry: EntryId,
         local_path: PathBuf,
@@ -1044,6 +1090,66 @@ mod tests {
                 "the checkout must be bound by the same choice",
             );
         });
+    }
+
+    #[gpui::test]
+    fn fetching_onto_a_file_that_is_already_there_asks_first(cx: &mut TestAppContext) {
+        // Choosing a folder that already holds the file used to answer
+        // "already up to date", which reads as a refusal. The platform asks
+        // now, and Cancel must leave the file completely alone.
+        init_theme(cx);
+        let session = session(Some(populated()), cx);
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |window, cx| VaultModal::new(session, WeakEntity::new_invalid(), window, cx)
+        });
+        cx.run_until_parked();
+
+        let occupied = std::env::temp_dir().join(format!(
+            "zode-env-occupied-{}-{}.env",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(&occupied, b"A=already here\n").expect("the fixture");
+        let entry = EntryId::parse(&"a1".repeat(16)).expect("a valid id");
+
+        session.update(cx, |session, cx| {
+            session.set_status_for_test(EnvStatus::Idle, cx)
+        });
+        modal.update_in(cx, |modal, window, cx| {
+            modal.pull_into(entry, occupied.clone(), window, cx)
+        });
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        session.update(cx, |session, _cx| {
+            assert_eq!(
+                session.status(),
+                &EnvStatus::Idle,
+                "cancelling must not start a fetch at all",
+            );
+        });
+        assert_eq!(
+            std::fs::read(&occupied).expect("the file survives"),
+            b"A=already here\n",
+            "cancelling must leave the file untouched",
+        );
+
+        // Replacing starts the fetch, which then stops on the missing key --
+        // the observable proof that it began.
+        modal.update_in(cx, |modal, window, cx| {
+            modal.pull_into(entry, occupied.clone(), window, cx)
+        });
+        cx.simulate_prompt_answer("Replace");
+        cx.run_until_parked();
+        session.update(cx, |session, _cx| {
+            assert_eq!(
+                session.status(),
+                &EnvStatus::NeedsRecoveryKey,
+                "replacing must actually start the fetch",
+            );
+        });
+
+        std::fs::remove_file(&occupied).ok();
     }
 
     #[gpui::test]
