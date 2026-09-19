@@ -229,6 +229,43 @@ impl Render for EnvDiffModal {
         let unverified_reveal = self.revealed && !self.support.is_available();
         let support_note = self.support.describe();
 
+        // A unified diff rendered in one colour asks the reader to parse the
+        // leading character of every line themselves. The sign still carries
+        // the meaning and the colour only repeats it, so the diff stays
+        // readable where colour does not.
+        // Nothing was written, and the file is still the old one. Shown
+        // beside the diff rather than only in a status bar, because this is
+        // the window the user is looking at when they press the button.
+        let write_failure = (outcome_color == Color::Error).then(|| outcome.clone());
+
+        let added_background = cx.theme().status().created_background;
+        let removed_background = cx.theme().status().deleted_background;
+        let mut diff_body = v_flex().w_full();
+        for line in body.lines() {
+            let (text, background) = match line.as_bytes().first() {
+                Some(b'+') => (Color::Created, Some(added_background)),
+                Some(b'-') => (Color::Deleted, Some(removed_background)),
+                _ if line.starts_with("@@") => (Color::Accent, None),
+                _ => (Color::Muted, None),
+            };
+            diff_body = diff_body.child(
+                div()
+                    .w_full()
+                    .px_2()
+                    .when_some(background, |this, background| this.bg(background))
+                    .child(
+                        Label::new(if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        })
+                        .size(LabelSize::Small)
+                        .color(text)
+                        .buffer_font(cx),
+                    ),
+            );
+        }
+
         shell.child(
             Modal::new("env-diff", None)
                 .header(
@@ -261,14 +298,32 @@ impl Render for EnvDiffModal {
                                 .id("env-diff-body")
                                 .w_full()
                                 .h(rems(22.))
-                                .p_2()
+                                .py_1()
                                 .rounded_sm()
                                 .border_1()
                                 .border_color(colors.border_variant)
                                 .bg(colors.editor_background)
                                 .overflow_y_scroll()
-                                .child(Label::new(body).size(LabelSize::Small).buffer_font(cx)),
+                                .child(diff_body),
                         )
+                        .when_some(write_failure, |this, reason| {
+                            // The window stays open for exactly this line.
+                            this.child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(IconName::XCircle)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Error),
+                                    )
+                                    .child(
+                                        Label::new(reason)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Error),
+                                    ),
+                            )
+                        })
                         .when(unverified_reveal, |this| {
                             this.child(
                                 h_flex()
@@ -349,10 +404,17 @@ impl Render for EnvDiffModal {
                                         .tooltip(Tooltip::text(
                                             "The current file is copied aside first, outside this project",
                                         ))
+                                        // Dismissed only on a real write: a
+                                        // failure keeps the window, because
+                                        // this is where the reason can be read
+                                        // and the file is still the old one.
                                         .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.session
-                                                .update(cx, |session, cx| session.apply_pending(cx));
-                                            cx.emit(DismissEvent);
+                                            let written = this.session.update(cx, |session, cx| {
+                                                session.apply_pending(cx)
+                                            });
+                                            if written {
+                                                cx.emit(DismissEvent);
+                                            }
                                         })),
                                 ),
                         ),

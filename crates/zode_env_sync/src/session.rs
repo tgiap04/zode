@@ -473,23 +473,36 @@ impl EnvSession {
     }
 
     /// Writes the held remote content over the local file.
-    pub fn apply_pending(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending.take() else {
-            return;
+    ///
+    /// Answers whether the file was actually replaced, and on failure KEEPS
+    /// the difference. Taking it either way is what made a failed write look
+    /// like a successful one: the window closed because nothing was pending
+    /// any more, and the reason went to a status line nobody was looking at
+    /// while the file sat unchanged.
+    pub fn apply_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(pending) = self.pending.as_ref() else {
+            return false;
         };
         let applied = env_sync::apply_remote(
             &pending.entry,
             &pending.local_path,
             paths::env_backups_dir(),
             &pending.remote,
-            pending.revision,
+            pending.revision.clone(),
             pending.seq,
             paths::env_state_file(),
         );
 
         match applied {
-            Ok(()) => self.set_status(EnvStatus::Done("written".into()), cx),
-            Err(error) => self.set_status(EnvStatus::Failed(format!("{error}").into()), cx),
+            Ok(()) => {
+                self.pending = None;
+                self.set_status(EnvStatus::Done("written".into()), cx);
+                true
+            }
+            Err(error) => {
+                self.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
+                false
+            }
         }
     }
 
@@ -1062,6 +1075,53 @@ mod tests {
                 "the recorded path still answers, so the caller can offer it a folder",
             );
         });
+    }
+
+    #[gpui::test]
+    fn a_write_that_cannot_happen_keeps_the_difference_and_records_why(cx: &mut TestAppContext) {
+        // The bug this locks down: applying took the pending difference before
+        // knowing whether the write succeeded, so a failure closed the only
+        // window that could explain it and left the file silently unchanged.
+        //
+        // A regular file standing where a directory must be is a write that
+        // cannot succeed. Nothing global is touched on this path: a local file
+        // that does not exist needs no backup, and the state file is only
+        // written after a successful write.
+        let session = session(cx);
+        let blocker =
+            std::env::temp_dir().join(format!("zode-env-apply-{}-{}", std::process::id(), line!()));
+        std::fs::write(&blocker, b"a file, not a directory").expect("the fixture");
+
+        session.update(cx, |session, cx| {
+            session.set_pending_for_test(
+                PendingEnvDivergence {
+                    entry: EntryId::parse(&"a1".repeat(16)).expect("a valid id"),
+                    local_path: blocker.join("inside").join(".env"),
+                    diff: zode_sync::diff::between("", "A=1\n"),
+                    remote: "A=1\n".into(),
+                    revision: "rev-1".into(),
+                    seq: 1,
+                    safe_to_apply: true,
+                },
+                cx,
+            );
+
+            assert!(
+                !session.apply_pending(cx),
+                "the write could not happen, so it must not report success",
+            );
+            assert!(
+                session.pending().is_some(),
+                "the difference must survive, or the window explaining it closes",
+            );
+            assert!(
+                matches!(session.status(), EnvStatus::Failed(_)),
+                "the reason must be recorded, got {:?}",
+                session.status(),
+            );
+        });
+
+        std::fs::remove_file(&blocker).ok();
     }
 
     #[gpui::test]
