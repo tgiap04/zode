@@ -12,7 +12,7 @@ use ui::{
 use workspace::{ModalView, Workspace};
 use zode_env_sync::{EntryId, EnvSession, EnvStatus, ProjectId};
 
-use crate::{ActiveEnvFile, WirePanel};
+use crate::{ActiveEnvFile, EnvDiffModal, WirePanel};
 
 /// Why the window is open, and therefore what a project row does when clicked.
 ///
@@ -231,6 +231,82 @@ impl VaultModal {
             cx.defer_in(window, move |workspace, window, cx| {
                 workspace.toggle_modal(window, cx, |_window, cx| {
                     WirePanel::new(session, wire, name, cx)
+                });
+            });
+        });
+    }
+
+    /// Brings a stored file down to this machine.
+    ///
+    /// The vault could list a file and delete it, and nothing else -- so a
+    /// fetch that landed here had no way to finish, which is what clicking a
+    /// row and watching nothing happen was.
+    fn fetch_entry(
+        &mut self,
+        project: ProjectId,
+        entry: EntryId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(local_path) = self.session.read(cx).local_path_for(project, entry) {
+            self.pull_into(entry, local_path, window, cx);
+            return;
+        }
+
+        // No checkout on this machine claims this project, so nothing knows
+        // where the file goes. Asked rather than guessed: a guess would write
+        // a production environment into a directory nobody named.
+        let Some(relative) = self.session.read(cx).relative_path_for(project, entry) else {
+            return;
+        };
+        let folders = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            show_hidden: true,
+            prompt: Some("Put the file here".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(mut chosen))) = folders.await else {
+                return;
+            };
+            let Some(folder) = chosen.pop() else {
+                return;
+            };
+            _ = this.update_in(cx, |this, window, cx| {
+                this.pull_into(entry, folder.join(&relative), window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Starts the fetch and hands off to the window that shows what it found.
+    fn pull_into(
+        &mut self,
+        entry: EntryId,
+        local_path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name: SharedString = local_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".env".into())
+            .into();
+
+        self.session
+            .update(cx, |session, cx| session.pull(entry, local_path, cx));
+
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let session = self.session.clone();
+        cx.emit(DismissEvent);
+        workspace.update(cx, |_workspace, cx| {
+            cx.defer_in(window, move |workspace, window, cx| {
+                workspace.toggle_modal(window, cx, |_window, cx| {
+                    EnvDiffModal::new(session, name, cx)
                 });
             });
         });
@@ -552,20 +628,42 @@ impl Render for VaultModal {
                             }),
                     )
                     .end_slot(
-                        IconButton::new(
-                            SharedString::from(format!("env-vault-forget-{}", entry_id.as_hex())),
-                            IconName::Trash,
-                        )
-                        .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text(
-                            "Removes it from your account. The file on this machine is left alone",
-                        ))
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.session
-                                    .update(cx, |session, cx| session.forget_entry(entry_id, cx));
-                            },
-                        )),
+                        h_flex()
+                            .gap_0p5()
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!(
+                                        "env-vault-fetch-{}",
+                                        entry_id.as_hex()
+                                    )),
+                                    IconName::CloudDownload,
+                                )
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text(
+                                    "Bring this file down. You see what changes before anything is written",
+                                ))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.fetch_entry(project_id, entry_id, window, cx)
+                                })),
+                            )
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!(
+                                        "env-vault-forget-{}",
+                                        entry_id.as_hex()
+                                    )),
+                                    IconName::Trash,
+                                )
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text(
+                                    "Removes it from your account. The file on this machine is left alone",
+                                ))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.session.update(cx, |session, cx| {
+                                        session.forget_entry(entry_id, cx)
+                                    });
+                                })),
+                            ),
                     ),
                 );
             }

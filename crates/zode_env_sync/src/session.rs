@@ -598,6 +598,31 @@ impl EnvSession {
         self.bindings.project_for(worktree_root)
     }
 
+    /// The path recorded alongside a stored entry, relative to its checkout.
+    pub fn relative_path_for(&self, project: crate::ProjectId, entry: EntryId) -> Option<String> {
+        Some(
+            self.manifest
+                .projects
+                .get(&project)?
+                .entries
+                .get(&entry)?
+                .path
+                .clone(),
+        )
+    }
+
+    /// Where a stored entry belongs on this machine, when a checkout says so.
+    ///
+    /// `None` is a real answer rather than a gap: without a binding there is
+    /// nothing that knows where the file goes, and inventing a directory would
+    /// write somebody's production environment somewhere they never named. The
+    /// caller asks instead.
+    pub fn local_path_for(&self, project: crate::ProjectId, entry: EntryId) -> Option<PathBuf> {
+        let relative = self.relative_path_for(project, entry)?;
+        let root = self.bindings.worktrees_for(project).into_iter().next()?;
+        Some(root.join(relative))
+    }
+
     /// Adds a file on disk to a project and answers with its new entry.
     ///
     /// The path recorded in the catalogue is relative to the checkout bound to
@@ -764,6 +789,12 @@ impl EnvSession {
 
     pub fn set_status_for_test(&mut self, status: EnvStatus, cx: &mut Context<Self>) {
         self.set_status(status, cx);
+    }
+
+    /// Binds in memory only. [`Self::bind`] also writes the bindings file,
+    /// which in a test means writing into the real configuration directory.
+    pub fn bind_for_test(&mut self, worktree_root: &std::path::Path, project: crate::ProjectId) {
+        self.bindings.bind(worktree_root, project);
     }
 }
 
@@ -975,6 +1006,62 @@ mod tests {
                 "{status:?} has nothing to say",
             );
         }
+    }
+
+    fn one_entry() -> (crate::ProjectId, EntryId, Manifest) {
+        let project = crate::ProjectId::parse(&"11".repeat(16)).expect("a valid id");
+        let entry = EntryId::parse(&"a1".repeat(16)).expect("a valid id");
+        let mut manifest = Manifest::new();
+        manifest.projects.insert(
+            project,
+            crate::manifest::ManifestProject {
+                name: "acme-api".into(),
+                entries: std::collections::BTreeMap::from([(
+                    entry,
+                    crate::manifest::ManifestEntry {
+                        path: "services/api/.env".into(),
+                        seq: 3,
+                    },
+                )]),
+            },
+        );
+        (project, entry, manifest)
+    }
+
+    #[gpui::test]
+    fn a_bound_checkout_says_where_a_stored_file_goes(cx: &mut TestAppContext) {
+        let session = session(cx);
+        let (project, entry, manifest) = one_entry();
+
+        session.update(cx, |session, cx| {
+            session.set_manifest_for_test(manifest, cx);
+            session.bind_for_test(&PathBuf::from("/work/acme"), project);
+
+            assert_eq!(
+                session.local_path_for(project, entry),
+                Some(PathBuf::from("/work/acme/services/api/.env")),
+                "the destination is the checkout joined with the recorded path",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn without_a_checkout_there_is_no_destination_to_invent(cx: &mut TestAppContext) {
+        // The caller has to ask instead. Guessing a directory would write
+        // somebody's production environment somewhere they never named.
+        let session = session(cx);
+        let (project, entry, manifest) = one_entry();
+
+        session.update(cx, |session, cx| {
+            session.set_manifest_for_test(manifest, cx);
+
+            assert_eq!(session.local_path_for(project, entry), None);
+            assert_eq!(
+                session.relative_path_for(project, entry).as_deref(),
+                Some("services/api/.env"),
+                "the recorded path still answers, so the caller can offer it a folder",
+            );
+        });
     }
 
     #[gpui::test]
