@@ -258,6 +258,7 @@ pub fn init(cx: &mut App) {
                     files: true,
                     directories: true,
                     multiple: false,
+                    show_hidden: false,
                     prompt: None,
                 },
                 DirectoryLister::Local(
@@ -1939,6 +1940,7 @@ fn open_local_project(
                 files: true,
                 directories: true,
                 multiple: true,
+                show_hidden: false,
                 prompt: None,
             },
             DirectoryLister::Local(

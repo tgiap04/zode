@@ -113,6 +113,7 @@ pub fn init(cx: &mut App) {
                         files: false,
                         directories: true,
                         multiple: false,
+                        show_hidden: false,
                         prompt: None,
                     },
                     DirectoryLister::Local(

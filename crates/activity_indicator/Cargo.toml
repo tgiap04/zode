@@ -27,6 +27,7 @@ smallvec.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
+zode_env_sync.workspace = true
 
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }

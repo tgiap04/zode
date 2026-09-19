@@ -45,7 +45,8 @@ pub mod sync;
 pub use dek::{DEK_LEN, Dek, KID_LEN};
 pub use diff::TextDiff;
 pub use envelope::{
-    ENVELOPE_VERSION, Envelope, Kind, SyncCryptoError, decrypt, encrypt, from_blob, to_blob,
+    ENVELOPE_VERSION, Envelope, Kind, Resource, SyncCryptoError, decrypt, decrypt_at, encrypt,
+    encrypt_at, from_blob, to_blob,
 };
 pub use extensions::ExtensionComparison;
 pub use recovery_key::RecoveryKeyError;

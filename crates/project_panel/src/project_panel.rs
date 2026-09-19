@@ -663,6 +663,50 @@ fn get_item_color(is_sticky: bool, cx: &App) -> ItemColors {
     }
 }
 
+/// Opens an environment file, then runs an action that acts on it.
+///
+/// The wait is the whole point. These actions resolve their subject from the
+/// active editor item, not from this panel's selection, so dispatching as soon
+/// as the open was *requested* would act on whatever happened to be open
+/// already -- a different `.env`, or nothing. Awaiting the open task is what
+/// makes "right-click this file, send this file" true.
+fn open_env_file_then(
+    panel: Entity<ProjectPanel>,
+    abs_path: PathBuf,
+    action: Box<dyn Action>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let open = panel.update(cx, |panel, cx| {
+        panel
+            .workspace
+            .update(cx, |workspace, cx| {
+                workspace.open_abs_path(
+                    abs_path,
+                    OpenOptions {
+                        visible: Some(OpenVisible::All),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .ok()
+    });
+    let Some(open) = open else {
+        return;
+    };
+
+    window
+        .spawn(cx, async move |cx| {
+            if open.await.log_err().is_none() {
+                return;
+            }
+            _ = cx.update(|window, cx| window.dispatch_action(action, cx));
+        })
+        .detach();
+}
+
 impl ProjectPanel {
     fn new(
         workspace: &mut Workspace,
@@ -1181,6 +1225,8 @@ impl ProjectPanel {
                     .is_some()
             };
 
+            let env_file_path = self.selected_env_file(cx);
+
             let has_pasteable_content = self.has_pasteable_content(cx);
             let entity = cx.entity();
             let context_menu = ContextMenu::build(window, cx, |menu, _, cx| {
@@ -1216,6 +1262,34 @@ impl ProjectPanel {
                             .when(should_show_compare, |menu| {
                                 menu.separator()
                                     .action("Compare Marked Files", Box::new(CompareMarkedFiles))
+                            })
+                            .when_some(env_file_path.clone(), |menu, abs_path| {
+                                let panel = entity.clone();
+                                menu.separator()
+                                    .entry("Send to Your Account\u{2026}", None, {
+                                        let panel = panel.clone();
+                                        let abs_path = abs_path.clone();
+                                        move |window, cx| {
+                                            open_env_file_then(
+                                                panel.clone(),
+                                                abs_path.clone(),
+                                                Box::new(zed_actions::env_sync::PushEnvFile),
+                                                window,
+                                                cx,
+                                            )
+                                        }
+                                    })
+                                    .entry("Fetch From Your Account\u{2026}", None, {
+                                        move |window, cx| {
+                                            open_env_file_then(
+                                                panel.clone(),
+                                                abs_path.clone(),
+                                                Box::new(zed_actions::env_sync::PullEnvFile),
+                                                window,
+                                                cx,
+                                            )
+                                        }
+                                    })
                             })
                             .separator()
                             .action("Cut", Box::new(Cut))
@@ -2061,6 +2135,25 @@ impl ProjectPanel {
         cx.notify();
         self.discard_edit_state(window, cx);
         window.focus(&self.focus_handle, cx);
+    }
+
+    /// The environment file the selection points at, if it is one.
+    ///
+    /// Answered by `is_path_private`, which the `private_files` setting drives,
+    /// so this menu and the editor's own sync button agree without a second
+    /// glob table drifting from the first. A remote worktree answers `None` --
+    /// the right answer rather than a gap, since sync runs only on the machine
+    /// that holds the encryption key.
+    fn selected_env_file(&self, cx: &App) -> Option<PathBuf> {
+        let (worktree, entry) = self.selected_sub_entry(cx)?;
+        if entry.is_dir() {
+            return None;
+        }
+        let worktree = worktree.read(cx);
+        worktree
+            .as_local()
+            .filter(|local| local.is_path_private(&entry.path))
+            .map(|_| worktree.absolutize(&entry.path))
     }
 
     fn open_entry(
@@ -3365,6 +3458,7 @@ impl ProjectPanel {
             files: false,
             directories: true,
             multiple: false,
+            show_hidden: false,
             prompt: Some("Download".into()),
         });
 

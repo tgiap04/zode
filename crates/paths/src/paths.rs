@@ -282,6 +282,39 @@ pub fn sync_state_file() -> &'static PathBuf {
     SYNC_STATE_FILE.get_or_init(|| config_dir().join("sync_state.json"))
 }
 
+/// Returns the path to the `env_bindings.json` file.
+///
+/// Which checkout on THIS machine corresponds to which cloud project. It is
+/// deliberately not synced and never sent: an absolute path is the one fact
+/// that would describe how a user's disk is laid out, and it is different on
+/// every machine anyway.
+pub fn env_bindings_file() -> &'static PathBuf {
+    static ENV_BINDINGS_FILE: OnceLock<PathBuf> = OnceLock::new();
+    ENV_BINDINGS_FILE.get_or_init(|| config_dir().join("env_bindings.json"))
+}
+
+/// Returns the path to the `env_state.json` file.
+///
+/// The env counterpart of `sync_state.json`: what this machine last agreed
+/// with the server about, per entry, including the highest `seq` it has
+/// applied. That last field is what makes a replayed blob detectable.
+pub fn env_state_file() -> &'static PathBuf {
+    static ENV_STATE_FILE: OnceLock<PathBuf> = OnceLock::new();
+    ENV_STATE_FILE.get_or_init(|| config_dir().join("env_state.json"))
+}
+
+/// Returns the directory environment files are copied into before they are
+/// overwritten.
+///
+/// **Outside any project.** `settings_backup.json` sits beside the file it
+/// protects, which is right for settings and wrong here: a `.env_backup`
+/// written next to a `.env` lands inside the user's repository, where
+/// `.gitignore` has no rule for it, and the safety net becomes the leak.
+pub fn env_backups_dir() -> &'static PathBuf {
+    static ENV_BACKUPS_DIR: OnceLock<PathBuf> = OnceLock::new();
+    ENV_BACKUPS_DIR.get_or_init(|| data_dir().join("env-backups"))
+}
+
 /// Returns the path to the `tasks.json` file.
 pub fn tasks_file() -> &'static PathBuf {
     static TASKS_FILE: OnceLock<PathBuf> = OnceLock::new();

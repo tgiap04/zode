@@ -45,6 +45,128 @@ impl std::fmt::Display for Kind {
     }
 }
 
+/// A slot on the sync service, and the identity the ciphertext is bound to.
+///
+/// Exists because the server grew a second shape. `/api/sync/:kind` holds one
+/// document per kind and there are exactly three of them; env sync holds one
+/// per file and there is no bound. Addressing both through [`Kind`] would mean
+/// either a `Kind` variant per env file — impossible, it is an enum — or a
+/// second client that drifts from this one.
+///
+/// The AAD fields are carried here rather than derived at the call site so
+/// there is one place where "what this ciphertext is bound to" is decided. A
+/// resource that forgets to bind its identity is a resource the server can
+/// swap for another, and the tag still verifies because the tag only covers
+/// the ciphertext.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resource {
+    /// Path under the API root, no leading slash: `sync/settings`, `env/<id>`.
+    path: String,
+    /// First AAD field after the user id.
+    aad_label: &'static str,
+    /// Trailing AAD field, for resources where the label alone does not say
+    /// which one this is. `None` for the three original kinds, and it must
+    /// stay `None` for them — an extra field would change bytes already
+    /// sitting on users' accounts.
+    discriminator: Option<String>,
+}
+
+impl Resource {
+    /// One of the three original artifacts.
+    pub fn sync(kind: Kind) -> Self {
+        Self {
+            path: format!("sync/{kind}"),
+            aad_label: kind.as_str(),
+            discriminator: None,
+        }
+    }
+
+    /// One env file.
+    ///
+    /// Takes the id as a string rather than a typed `EntryId` because that type
+    /// lives in `zode_env_sync`, which depends on this crate. The validation
+    /// that matters happens here either way.
+    pub fn env_entry(entry_id: &str) -> Result<Self, SyncCryptoError> {
+        let entry_id = validated_segment(entry_id)?;
+        Ok(Self {
+            path: format!("env/{entry_id}"),
+            aad_label: "env",
+            discriminator: Some(entry_id),
+        })
+    }
+
+    /// One of the env singletons: `env-key`, `env-manifest`.
+    pub fn env_singleton(name: &'static str) -> Result<Self, SyncCryptoError> {
+        validated_segment(name)?;
+        Ok(Self {
+            path: format!("sync/{name}"),
+            aad_label: name,
+            discriminator: None,
+        })
+    }
+
+    /// The collection of env entries, for the listing endpoint.
+    ///
+    /// Addressable but never sealed — nothing is encrypted under it, so its
+    /// AAD label is never used. It exists so the listing request goes through
+    /// the same validated-path type as everything else rather than round a
+    /// side door.
+    pub fn env_listing() -> Self {
+        Self {
+            path: "env".to_string(),
+            aad_label: "env",
+            discriminator: None,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn aad_label(&self) -> &str {
+        self.aad_label
+    }
+
+    pub fn aad_discriminator(&self) -> Option<&str> {
+        self.discriminator.as_deref()
+    }
+}
+
+impl From<Kind> for Resource {
+    fn from(kind: Kind) -> Self {
+        Self::sync(kind)
+    }
+}
+
+impl std::fmt::Display for Resource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.path)
+    }
+}
+
+/// Accepts one path segment, rejects anything that could reshape a URL.
+///
+/// Rejected rather than sanitised: stripping the bad characters out of
+/// `../../admin` leaves a different, valid-looking id, and a caller that
+/// handed us one is a caller with a bug worth surfacing.
+fn validated_segment(raw: &str) -> Result<String, SyncCryptoError> {
+    if raw.is_empty() || raw.len() > 64 {
+        return Err(SyncCryptoError::Malformed(format!(
+            "resource segment length {}",
+            raw.len()
+        )));
+    }
+    if !raw
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(SyncCryptoError::Malformed(
+            "a resource segment is lowercase letters, digits and dashes".into(),
+        ));
+    }
+    Ok(raw.to_string())
+}
+
 #[derive(Debug)]
 pub enum SyncCryptoError {
     /// The tag did not verify under a key with the right fingerprint. Either
@@ -100,15 +222,26 @@ pub struct Envelope {
 /// Without this the server could move a blob between kinds or between users
 /// and the client would decrypt it happily — the tag would still verify,
 /// because the tag only covers the ciphertext.
-fn aad(user_id: &str, kind: Kind, version: u32, kid: &[u8; KID_LEN]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(user_id.len() + kind.as_str().len() + KID_LEN + 16);
+fn aad(user_id: &str, resource: &Resource, version: u32, kid: &[u8; KID_LEN]) -> Vec<u8> {
+    let label = resource.aad_label();
+    let discriminator = resource.aad_discriminator();
+    let mut bytes = Vec::with_capacity(
+        user_id.len() + label.len() + KID_LEN + 16 + discriminator.map_or(0, |d| d.len() + 1),
+    );
     bytes.extend_from_slice(user_id.as_bytes());
     bytes.push(SEPARATOR);
-    bytes.extend_from_slice(kind.as_str().as_bytes());
+    bytes.extend_from_slice(label.as_bytes());
     bytes.push(SEPARATOR);
     bytes.extend_from_slice(version.to_string().as_bytes());
     bytes.push(SEPARATOR);
     bytes.extend_from_slice(kid);
+
+    // Appended only when the resource has one, which is what keeps the three
+    // original kinds byte-identical to what earlier builds wrote.
+    if let Some(discriminator) = discriminator {
+        bytes.push(SEPARATOR);
+        bytes.extend_from_slice(discriminator.as_bytes());
+    }
     bytes
 }
 
@@ -129,6 +262,21 @@ pub fn encrypt(
     kind: Kind,
     plaintext: &[u8],
 ) -> Result<Envelope, SyncCryptoError> {
+    encrypt_at(dek, user_id, &Resource::sync(kind), plaintext)
+}
+
+/// The same, for any resource.
+///
+/// [`encrypt`] is kept as the `Kind` front door rather than replaced, so every
+/// call site and every frozen test vector for the three shipped artifacts goes
+/// on compiling and passing untouched. That is the evidence that this
+/// generalisation changed nothing for them.
+pub fn encrypt_at(
+    dek: &Dek,
+    user_id: &str,
+    resource: &Resource,
+    plaintext: &[u8],
+) -> Result<Envelope, SyncCryptoError> {
     let kid = dek.kid();
     let mut nonce_bytes = [0u8; NONCE_LEN];
     SystemRandom::new()
@@ -139,7 +287,7 @@ pub fn encrypt(
     sealing_key(dek)?
         .seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce_bytes),
-            Aad::from(aad(user_id, kind, ENVELOPE_VERSION, &kid)),
+            Aad::from(aad(user_id, resource, ENVELOPE_VERSION, &kid)),
             &mut buffer,
         )
         .map_err(|_| SyncCryptoError::Malformed("sealing failed".into()))?;
@@ -158,6 +306,16 @@ pub fn decrypt(
     dek: &Dek,
     user_id: &str,
     kind: Kind,
+    envelope: &Envelope,
+) -> Result<Vec<u8>, SyncCryptoError> {
+    decrypt_at(dek, user_id, &Resource::sync(kind), envelope)
+}
+
+/// The same, for any resource.
+pub fn decrypt_at(
+    dek: &Dek,
+    user_id: &str,
+    resource: &Resource,
     envelope: &Envelope,
 ) -> Result<Vec<u8>, SyncCryptoError> {
     if envelope.v != ENVELOPE_VERSION {
@@ -196,7 +354,7 @@ pub fn decrypt(
     let opened = sealing_key(dek)?
         .open_in_place(
             Nonce::assume_unique_for_key(nonce_bytes),
-            Aad::from(aad(user_id, kind, envelope.v, &ours)),
+            Aad::from(aad(user_id, resource, envelope.v, &ours)),
             &mut buffer,
         )
         .map_err(|_| SyncCryptoError::WrongKey)?;
