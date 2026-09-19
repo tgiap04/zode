@@ -3,7 +3,27 @@ use std::sync::Arc;
 use credentials_provider::CredentialsProvider;
 use gpui::AsyncApp;
 
+use crate::account::AccountUser;
 use crate::tokens::StoredTokens;
+
+/// What the keychain entry holds.
+///
+/// The user rides along with the tokens so a start with no network can still
+/// say who is signed in. Remembering the account that owns the credential
+/// already in this entry is not extra disclosure — anyone who can read the
+/// entry holds the credential itself, which is worth far more than an email
+/// address.
+///
+/// `flatten` keeps the token fields at the top level, so an entry written
+/// before this type existed still reads (`user` defaults to absent), and an
+/// older build reading a newer entry ignores the field it does not know.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct StoredSession {
+    #[serde(flatten)]
+    pub tokens: StoredTokens,
+    #[serde(default)]
+    pub user: Option<AccountUser>,
+}
 
 /// The keychain entry this crate owns.
 ///
@@ -22,7 +42,7 @@ const KEYCHAIN_URL: &str = "zode://account";
 pub async fn read(
     credentials: &Arc<dyn CredentialsProvider>,
     cx: &AsyncApp,
-) -> Option<StoredTokens> {
+) -> Option<StoredSession> {
     let stored = match credentials.read_credentials(KEYCHAIN_URL, cx).await {
         Ok(stored) => stored,
         Err(error) => {
@@ -34,8 +54,8 @@ pub async fn read(
     };
 
     let (_user_id, payload) = stored?;
-    match serde_json::from_slice::<StoredTokens>(&payload) {
-        Ok(tokens) => Some(tokens),
+    match serde_json::from_slice::<StoredSession>(&payload) {
+        Ok(session) => Some(session),
         Err(error) => {
             log::warn!(
                 "the stored account session could not be parsed, treating it as absent: {error}"
@@ -49,13 +69,16 @@ pub async fn read(
 /// reads sensibly in Keychain Access / seahorse / credential manager.
 pub async fn write(
     credentials: &Arc<dyn CredentialsProvider>,
-    user_id: &str,
+    user: &AccountUser,
     tokens: &StoredTokens,
     cx: &AsyncApp,
 ) -> anyhow::Result<()> {
-    let payload = serde_json::to_vec(tokens)?;
+    let payload = serde_json::to_vec(&StoredSession {
+        tokens: tokens.clone(),
+        user: Some(user.clone()),
+    })?;
     credentials
-        .write_credentials(KEYCHAIN_URL, user_id, &payload, cx)
+        .write_credentials(KEYCHAIN_URL, &user.id, &payload, cx)
         .await
 }
 

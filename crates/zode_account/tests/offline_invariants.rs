@@ -29,6 +29,48 @@ impl StubCredentials {
             stored: Mutex::new(None),
         })
     }
+
+    /// A machine that signed in on an earlier run.
+    fn holding(user_id: &str, payload: serde_json::Value) -> Arc<dyn CredentialsProvider> {
+        Arc::new(Self {
+            stored: Mutex::new(Some((
+                user_id.to_string(),
+                serde_json::to_vec(&payload).expect("the fixture payload"),
+            ))),
+        })
+    }
+}
+
+/// The keychain payload as it is actually written, spelled out rather than
+/// built from the types.
+///
+/// Written by hand on purpose: this is an on-disk format that older builds
+/// also read, so a change to it should break a test rather than a user's saved
+/// session.
+fn saved_session(with_user: bool) -> serde_json::Value {
+    let expires_at = std::time::SystemTime::now() + Duration::from_secs(3_600);
+    let since_epoch = expires_at
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("a clock after 1970");
+
+    let mut payload = serde_json::json!({
+        "access_token": "stored-access",
+        "refresh_token": "stored-refresh",
+        "expires_at": {
+            "secs_since_epoch": since_epoch.as_secs(),
+            "nanos_since_epoch": since_epoch.subsec_nanos(),
+        },
+    });
+
+    if with_user {
+        payload["user"] = serde_json::json!({
+            "id": "1",
+            "email": "ada@example.com",
+            "name": null,
+            "avatar_url": null,
+        });
+    }
+    payload
 }
 
 impl CredentialsProvider for StubCredentials {
@@ -318,5 +360,74 @@ async fn two_callers_wanting_a_fresh_token_cause_one_refresh(cx: &mut TestAppCon
             account.status().is_signed_in(),
             "a server error is not a dead credential — the user stays signed in"
         );
+    });
+}
+
+/// Invariant 6 — a start with no network keeps the session it remembers.
+///
+/// The credential is good and the server merely unreachable. Appearing signed
+/// out here is wrong twice over: the session still works, and nothing polls,
+/// so there is no second chance to notice.
+#[gpui::test]
+async fn an_offline_start_still_names_the_account_it_saved(cx: &mut TestAppContext) {
+    let (http_client, requests) = counting_client();
+    let credentials = StubCredentials::holding("1", saved_session(true));
+
+    let account = cx.update(|cx| {
+        cx.new(|cx| {
+            let mut account =
+                Account::new(http_client, credentials, "https://zodekit.site/api".into());
+            account.restore(cx).detach();
+            account
+        })
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the token is still fresh, so only the identity call goes out"
+    );
+    account.read_with(cx, |account: &Account, _| {
+        let user = account
+            .status()
+            .user()
+            .expect("the remembered account must still be named");
+        assert_eq!(user.email, "ada@example.com");
+    });
+}
+
+/// The same entry written before it remembered anyone must still load.
+///
+/// An on-disk format older builds also wrote: a user who upgrades must not be
+/// signed out by the upgrade itself.
+#[gpui::test]
+async fn an_entry_saved_before_the_user_was_remembered_still_loads(cx: &mut TestAppContext) {
+    let (http_client, requests) = counting_client();
+    let credentials = StubCredentials::holding("1", saved_session(false));
+
+    let account = cx.update(|cx| {
+        cx.new(|cx| {
+            let mut account =
+                Account::new(http_client, credentials, "https://zodekit.site/api".into());
+            account.restore(cx).detach();
+            account
+        })
+    });
+    cx.run_until_parked();
+
+    // The request is the proof the entry parsed: a payload this build could
+    // not read makes `storage::read` answer None, and `restore` then returns
+    // before reaching the network at all. Asserting only the status would pass
+    // in both cases and measure nothing.
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the old entry must still be read and its token used"
+    );
+    // Nothing remembered, so nothing is claimed -- the behaviour this build
+    // had before, which is the right one when there is no name to fall back on.
+    account.read_with(cx, |account: &Account, _| {
+        assert_eq!(*account.status(), AccountStatus::SignedOut);
     });
 }

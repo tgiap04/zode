@@ -14,7 +14,10 @@ use crate::storage;
 use crate::tokens::StoredTokens;
 
 /// Who is signed in.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Serialisable because the keychain entry remembers it, so a start with no
+/// network can still name the account rather than looking signed out.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccountUser {
     pub id: SharedString,
     pub email: SharedString,
@@ -252,9 +255,13 @@ impl Account {
         let Some(tokens) = self.tokens.clone() else {
             return Task::ready(None);
         };
-        let Some(user_id) = self.status.user().map(|user| user.id.clone()) else {
+        // The whole user, not just the id: rewriting the entry after a
+        // refresh must not drop the name this machine falls back on when it
+        // starts with no network.
+        let Some(user) = self.status.user().cloned() else {
             return Task::ready(None);
         };
+        let user_id = user.id.clone();
 
         // A refresh already in flight is joined, never raced -- see the
         // `refreshing` field for why a second one signs the user out. A
@@ -283,7 +290,7 @@ impl Account {
                             // restart, and the old one is already spent — which
                             // the server reads as reuse and revokes the family.
                             if let Err(error) =
-                                storage::write(&credentials, &user_id, &fresh, cx).await
+                                storage::write(&credentials, &user, &fresh, cx).await
                             {
                                 log::warn!("refreshed the session but could not save it: {error}");
                             }
@@ -319,12 +326,13 @@ impl Account {
         let api_url = self.api_url.clone();
 
         cx.spawn(async move |this, cx| {
-            let Some(stored) = storage::read(&credentials, cx).await else {
+            let Some(session) = storage::read(&credentials, cx).await else {
                 return;
             };
+            let remembered = session.user;
 
             let refreshed =
-                Self::ensure_fresh(&http_client, &api_url, stored, SystemTime::now()).await;
+                Self::ensure_fresh(&http_client, &api_url, session.tokens, SystemTime::now()).await;
             match refreshed {
                 Ok(tokens) => {
                     let identity =
@@ -338,10 +346,19 @@ impl Account {
                             this.forget_locally(cx);
                         }
                         Err(IdentityError::Unreachable(_)) => {
-                            // No identity to show and no way to get one, but
-                            // the credential is still good. Stay signed out
-                            // visually rather than inventing a user.
+                            // The credential is good and the network is not.
+                            // Naming the account this entry was written for is
+                            // remembering, not inventing -- and the
+                            // alternative was looking signed out while holding
+                            // a perfectly valid session, with no way back,
+                            // since nothing here polls to try again. The first
+                            // real request corrects it either way: a
+                            // credential the server actually rejects signs the
+                            // user out then.
                             this.tokens = Some(tokens);
+                            if let Some(user) = remembered {
+                                this.set_status(AccountStatus::SignedIn(user), cx);
+                            }
                         }
                     });
                 }
@@ -405,7 +422,7 @@ impl Account {
 
             match fetch_identity(&http_client, &api_url, &tokens.access_token).await {
                 Ok(user) => {
-                    if let Err(error) = storage::write(&credentials, &user.id, &tokens, cx).await {
+                    if let Err(error) = storage::write(&credentials, &user, &tokens, cx).await {
                         // The session works for this run; it just will not
                         // survive a restart. Better than refusing the sign-in.
                         log::warn!("signed in, but the session could not be saved: {error}");
