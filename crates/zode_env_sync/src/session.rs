@@ -51,6 +51,27 @@ pub enum EnvStatus {
     Failed(SharedString),
 }
 
+impl EnvStatus {
+    /// One sentence for a status bar or a menu item.
+    ///
+    /// Every branch answers, so a new status cannot be added without deciding
+    /// what the user is told about it.
+    pub fn sentence(&self) -> SharedString {
+        match self {
+            EnvStatus::Idle => "ready".into(),
+            EnvStatus::Working => "Syncing environment file…".into(),
+            EnvStatus::Done(message) => message.clone(),
+            EnvStatus::NeedsRecoveryKey => "enter your recovery key first".into(),
+            EnvStatus::KeyMismatch => "encrypted with a different key".into(),
+            EnvStatus::Rollback { seen, got } => format!(
+                "the server offered version {got} of a file already at {seen} here — nothing was written"
+            )
+            .into(),
+            EnvStatus::Failed(message) => message.clone(),
+        }
+    }
+}
+
 pub struct EnvStatusChanged;
 
 struct GlobalEnvSession(Entity<EnvSession>);
@@ -469,6 +490,16 @@ impl EnvSession {
         match applied {
             Ok(()) => self.set_status(EnvStatus::Done("written".into()), cx),
             Err(error) => self.set_status(EnvStatus::Failed(format!("{error}").into()), cx),
+        }
+    }
+
+    /// Clears a finished message so a status bar stops carrying it.
+    ///
+    /// Refuses while work is in flight: the message would come straight back
+    /// on the next notification, and clearing it would only look broken.
+    pub fn acknowledge(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.status, EnvStatus::Working) {
+            self.set_status(EnvStatus::Idle, cx);
         }
     }
 
@@ -904,4 +935,70 @@ pub fn init(account: Entity<Account>, cx: &mut App) {
     use gpui::AppContext as _;
     let session = cx.new(|_| EnvSession::new(account));
     EnvSession::set_global(session, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, TestAppContext};
+    use zode_account::{AccountStatus, AccountUser};
+
+    fn session(cx: &mut TestAppContext) -> Entity<EnvSession> {
+        let account = cx.update(|cx| {
+            cx.new(|_| {
+                Account::for_test(AccountStatus::SignedIn(AccountUser {
+                    id: "1".into(),
+                    email: "ada@example.com".into(),
+                    name: None,
+                    avatar_url: None,
+                }))
+            })
+        });
+        cx.update(|cx| cx.new(|_| EnvSession::new(account)))
+    }
+
+    #[gpui::test]
+    fn every_status_has_a_sentence(_cx: &mut TestAppContext) {
+        // The status bar renders this directly, so a status with nothing to
+        // say would show an icon beside an empty line.
+        for status in [
+            EnvStatus::Idle,
+            EnvStatus::Working,
+            EnvStatus::Done("sent".into()),
+            EnvStatus::NeedsRecoveryKey,
+            EnvStatus::KeyMismatch,
+            EnvStatus::Rollback { seen: 9, got: 4 },
+            EnvStatus::Failed("the service is unreachable".into()),
+        ] {
+            assert!(
+                !status.sentence().is_empty(),
+                "{status:?} has nothing to say",
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn acknowledging_clears_a_finished_message_but_never_work_in_flight(cx: &mut TestAppContext) {
+        let session = session(cx);
+
+        session.update(cx, |session, cx| {
+            session.set_status_for_test(EnvStatus::Failed("the service is unreachable".into()), cx);
+            session.acknowledge(cx);
+            assert_eq!(
+                session.status(),
+                &EnvStatus::Idle,
+                "a finished message must be dismissable, or it sits in the bar forever",
+            );
+        });
+
+        session.update(cx, |session, cx| {
+            session.set_status_for_test(EnvStatus::Working, cx);
+            session.acknowledge(cx);
+            assert_eq!(
+                session.status(),
+                &EnvStatus::Working,
+                "clearing work in flight would only come straight back and look broken",
+            );
+        });
+    }
 }

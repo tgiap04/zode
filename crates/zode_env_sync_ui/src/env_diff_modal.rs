@@ -1,7 +1,7 @@
 use gpui::{App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window};
-use ui::{Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
+use ui::{CommonAnimationExt, Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
 use workspace::ModalView;
-use zode_env_sync::EnvSession;
+use zode_env_sync::{EnvSession, EnvStatus};
 
 use crate::masking;
 
@@ -17,7 +17,13 @@ use crate::masking;
 /// something; the one that overwrites nothing is where a stray Return lands.
 pub struct EnvDiffModal {
     session: Entity<EnvSession>,
+    file_name: SharedString,
     focus_handle: FocusHandle,
+    /// Set once a divergence has actually been shown.
+    ///
+    /// Without it, "nothing is pending" cannot be told apart from "the answer
+    /// has not arrived yet", and a fetch is always the second one first.
+    saw_pending: bool,
     /// Flipped only by the platform confirming who is at the keyboard, and
     /// never persisted: closing the window puts the values back.
     revealed: bool,
@@ -35,21 +41,62 @@ impl Focusable for EnvDiffModal {
 }
 
 impl EnvDiffModal {
-    pub fn new(session: Entity<EnvSession>, cx: &mut Context<Self>) -> Self {
-        // Closes itself once there is nothing left to decide — the session
-        // decides when the question is answered, not this window.
-        let observation = cx.observe(&session, |_this, session, cx| {
-            if session.read(cx).pending().is_none() {
+    pub fn new(
+        session: Entity<EnvSession>,
+        file_name: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Closes itself once the difference it was opened for has been
+        // decided -- but only once there was one. This used to dismiss on any
+        // notification that found nothing pending, and since a fetch is
+        // asynchronous, nothing is pending at the moment it starts: the window
+        // closed itself before the request had even been sent, which is
+        // exactly what "I fetched and nothing happened" looks like.
+        let observation = cx.observe(&session, |this: &mut Self, session, cx| {
+            if session.read(cx).pending().is_some() {
+                this.saw_pending = true;
+            } else if this.saw_pending {
                 cx.emit(DismissEvent);
             }
             cx.notify();
         });
         Self {
             session,
+            file_name: file_name.into(),
             focus_handle: cx.focus_handle(),
+            saw_pending: false,
             revealed: false,
             support: os_auth::support(),
             _observation: observation,
+        }
+    }
+
+    /// What the session has to say when there is no difference to show.
+    ///
+    /// A fetch that changes nothing is still an answer, and the window has to
+    /// give it. Every branch returns a sentence, so a new status cannot be
+    /// added without one.
+    fn outcome_line(&self, cx: &App) -> (SharedString, Color) {
+        match self.session.read(cx).status() {
+            EnvStatus::Working => ("Asking your account what it holds…".into(), Color::Muted),
+            EnvStatus::Done(message) => (message.clone(), Color::Muted),
+            EnvStatus::Idle => ("There is nothing waiting for this file.".into(), Color::Muted),
+            EnvStatus::NeedsRecoveryKey => (
+                "Enter your recovery key first — Account → Enter Recovery Key…".into(),
+                Color::Warning,
+            ),
+            EnvStatus::KeyMismatch => (
+                "This file was encrypted with a different key, probably rotated elsewhere.".into(),
+                Color::Error,
+            ),
+            EnvStatus::Rollback { seen, got } => (
+                format!(
+                    "The server offered version {got} of a file this machine already has at {seen}. Nothing was written."
+                )
+                .into(),
+                Color::Error,
+            ),
+            EnvStatus::Failed(message) => (message.clone(), Color::Error),
         }
     }
 
@@ -107,11 +154,61 @@ impl Render for EnvDiffModal {
                 cx.emit(DismissEvent);
             }));
 
+        let working = matches!(self.session.read(cx).status(), EnvStatus::Working);
+        let (outcome, outcome_color) = self.outcome_line(cx);
+        let file_name = self.file_name.clone();
+
         let session = self.session.read(cx);
         let Some(pending) = session.pending() else {
-            // A frame can land between the decision being taken and the
-            // dismiss above being processed.
-            return shell;
+            // Not an empty box. Either the answer has not arrived, or it
+            // arrived and changed nothing -- both are things to say, and
+            // saying neither is what made a fetch look like it did nothing.
+            return shell.child(
+                Modal::new("env-diff-outcome", None)
+                    .header(
+                        ModalHeader::new()
+                            .icon(
+                                Icon::new(IconName::CloudDownload)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .headline(format!("Fetching {file_name}"))
+                            .description(if working {
+                                "Nothing on this machine has been touched yet."
+                            } else {
+                                "Your account was asked. Nothing on this machine was changed."
+                            }),
+                    )
+                    .section(
+                        Section::new().child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .when(working, |this| {
+                                    this.child(
+                                        Icon::new(IconName::LoadCircle)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted)
+                                            .with_rotate_animation(3),
+                                    )
+                                })
+                                .child(
+                                    Label::new(outcome)
+                                        .size(LabelSize::Small)
+                                        .color(outcome_color),
+                                ),
+                        ),
+                    )
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            Button::new("env-diff-outcome-close", "Close")
+                                .label_size(LabelSize::Small)
+                                .on_click(
+                                    cx.listener(|_this, _, _window, cx| cx.emit(DismissEvent)),
+                                ),
+                        ),
+                    ),
+            );
         };
 
         let added = pending.diff.added;
@@ -267,8 +364,10 @@ impl Render for EnvDiffModal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use zode_account::{Account, AccountStatus, AccountUser};
     use zode_env_sync::{EntryId, PendingEnvDivergence};
 
@@ -319,7 +418,7 @@ mod tests {
     fn the_window_draws_a_safe_divergence(cx: &mut TestAppContext) {
         init_theme(cx);
         let session = session_with(Some(divergence(true)), cx);
-        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, cx));
+        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, ".env", cx));
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -329,10 +428,94 @@ mod tests {
     fn the_window_draws_a_conflict(cx: &mut TestAppContext) {
         init_theme(cx);
         let session = session_with(Some(divergence(false)), cx);
-        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, cx));
+        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, ".env", cx));
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// Watches for the window closing itself.
+    fn dismissals(modal: &Entity<EnvDiffModal>, cx: &mut VisualTestContext) -> Rc<Cell<usize>> {
+        let seen = Rc::new(Cell::new(0));
+        cx.update(|_window, cx| {
+            cx.subscribe(modal, {
+                let seen = seen.clone();
+                move |_modal, _: &DismissEvent, _cx| seen.set(seen.get() + 1)
+            })
+            .detach();
+        });
+        seen
+    }
+
+    #[gpui::test]
+    fn a_fetch_that_has_not_answered_yet_keeps_the_window_open(cx: &mut TestAppContext) {
+        // The bug this locks down: the window dismissed itself on any
+        // notification that found nothing pending. Fetching is asynchronous,
+        // so nothing IS pending when it starts -- the window closed before the
+        // request had even been sent, and a fetch looked like it did nothing.
+        init_theme(cx);
+        let session = session_with(None, cx);
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |_window, cx| EnvDiffModal::new(session, ".env", cx)
+        });
+        cx.run_until_parked();
+        let dismissed = dismissals(&modal, cx);
+
+        for status in [
+            EnvStatus::Working,
+            EnvStatus::Done("already up to date".into()),
+        ] {
+            session.update(cx, |session, cx| {
+                session.set_status_for_test(status.clone(), cx)
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                dismissed.get(),
+                0,
+                "{status:?} closed the window before anything had diverged",
+            );
+            modal.update(cx, |modal, cx| {
+                assert!(
+                    !modal.outcome_line(cx).0.is_empty(),
+                    "{status:?} leaves the window with nothing to say",
+                );
+            });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn the_window_closes_once_the_difference_it_showed_is_decided(cx: &mut TestAppContext) {
+        // The other half of the same contract: once a divergence HAS been
+        // shown, it going away means the user answered, and the window must go.
+        init_theme(cx);
+        let session = session_with(None, cx);
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |_window, cx| EnvDiffModal::new(session, ".env", cx)
+        });
+        cx.run_until_parked();
+        let dismissed = dismissals(&modal, cx);
+
+        session.update(cx, |session, cx| {
+            session.set_pending_for_test(divergence(true), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            dismissed.get(),
+            0,
+            "a difference to show is not a dismissal"
+        );
+
+        session.update(cx, |session, cx| session.dismiss_pending(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            dismissed.get(),
+            1,
+            "deciding the difference must close the window",
+        );
     }
 
     /// The frame between the decision landing and the window dismissing.
@@ -340,7 +523,7 @@ mod tests {
     fn the_window_draws_with_nothing_pending(cx: &mut TestAppContext) {
         init_theme(cx);
         let session = session_with(None, cx);
-        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, cx));
+        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, ".env", cx));
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
@@ -352,7 +535,7 @@ mod tests {
         // string that reaches the label.
         init_theme(cx);
         let session = session_with(Some(divergence(true)), cx);
-        let (modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, cx));
+        let (modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, ".env", cx));
         cx.run_until_parked();
 
         modal.update(cx, |modal, cx| {
@@ -369,7 +552,7 @@ mod tests {
     fn the_reveal_label_never_promises_a_check_that_will_not_happen(cx: &mut TestAppContext) {
         init_theme(cx);
         let session = session_with(Some(divergence(true)), cx);
-        let (modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, cx));
+        let (modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, ".env", cx));
         cx.run_until_parked();
 
         modal.update(cx, |modal, _cx| {

@@ -47,6 +47,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "zode_env_sync",
 ]
 
 [[package]]

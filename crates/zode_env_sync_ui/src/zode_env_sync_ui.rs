@@ -23,7 +23,7 @@ use gpui::{App, Entity, Window};
 use ui::prelude::*;
 use workspace::Workspace;
 use zode_account::Account;
-use zode_env_sync::{EnvSession, EnvStatus};
+use zode_env_sync::EnvSession;
 
 pub use env_diff_modal::EnvDiffModal;
 pub use toolbar_button::EnvSyncToolbar;
@@ -193,7 +193,7 @@ fn transfer(
             // A pull that finds a difference holds it rather than writing; this
             // is the window that shows what it would do.
             workspace.toggle_modal(window, cx, |_window, cx| {
-                EnvDiffModal::new(session.clone(), cx)
+                EnvDiffModal::new(session.clone(), name, cx)
             });
         }
     }
@@ -280,20 +280,4 @@ fn active_worktree_root(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
         .next()
         .is_none()
         .then(|| only.read(cx).abs_path().to_path_buf())
-}
-
-/// One sentence describing where environment sync stands, for a status bar or
-/// a menu item.
-pub fn status_sentence(status: &EnvStatus) -> SharedString {
-    match status {
-        EnvStatus::Idle => "ready".into(),
-        EnvStatus::Working => "working…".into(),
-        EnvStatus::Done(message) => message.clone(),
-        EnvStatus::NeedsRecoveryKey => "enter your recovery key first".into(),
-        EnvStatus::KeyMismatch => "encrypted with a different key".into(),
-        EnvStatus::Rollback { .. } => {
-            "the server offered an older version — nothing was written".into()
-        }
-        EnvStatus::Failed(message) => message.clone(),
-    }
 }

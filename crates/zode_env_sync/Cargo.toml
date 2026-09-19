@@ -36,6 +36,7 @@ zode_sync.workspace = true
 [dev-dependencies]
 base64.workspace = true
 futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 zode_account = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
