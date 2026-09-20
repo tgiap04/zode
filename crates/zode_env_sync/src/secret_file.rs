@@ -144,22 +144,31 @@ fn evict_old_backups(directory: &Path) -> io::Result<()> {
 /// an arbitrary file write with the editor's privileges, so it is refused at
 /// the point of use rather than trusted at the point of parsing.
 pub fn resolve_within(worktree_root: &Path, relative: &str) -> io::Result<PathBuf> {
-    let candidate = Path::new(relative);
-    let escapes = relative.is_empty()
-        || candidate.is_absolute()
-        || relative.contains(':')
-        || relative.starts_with('\\')
-        || !candidate
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)));
-
-    if escapes {
+    if !names_a_file_inside(relative) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{relative:?} does not name a file inside this project"),
         ));
     }
-    Ok(worktree_root.join(candidate))
+    Ok(worktree_root.join(Path::new(relative)))
+}
+
+/// Whether a recorded path names a file inside a project.
+///
+/// Split out of [`resolve_within`] so that anything which *produces* one of
+/// these paths — renaming an entry, say — is held to the same rule as the code
+/// that writes through it. Two copies of this test would eventually disagree,
+/// and the disagreement would be a path that is accepted when typed and
+/// refused when used.
+pub fn names_a_file_inside(relative: &str) -> bool {
+    let candidate = Path::new(relative);
+    !relative.is_empty()
+        && !candidate.is_absolute()
+        && !relative.contains(':')
+        && !relative.starts_with('\\')
+        && candidate
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 #[cfg(test)]

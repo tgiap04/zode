@@ -45,6 +45,37 @@ pub struct ManifestEntry {
 }
 
 impl Manifest {
+    /// A path no other entry in this project is already using.
+    ///
+    /// Collisions are ordinary rather than exotic: a file chosen from outside
+    /// any bound checkout keeps only its bare name, and so does the next one.
+    /// Two rows reading `.env` name nothing — and the path is also where a
+    /// pull writes, so the two would fight over one file on disk.
+    ///
+    /// Counting from 2, the way every file manager does, so the first
+    /// duplicate reads as the second copy.
+    pub fn unique_path(&self, project: ProjectId, wanted: &str, except: Option<EntryId>) -> String {
+        let Some(holder) = self.projects.get(&project) else {
+            return wanted.to_string();
+        };
+        let taken = |candidate: &str| {
+            holder
+                .entries
+                .iter()
+                .any(|(id, entry)| Some(*id) != except && entry.path == candidate)
+        };
+
+        if !taken(wanted) {
+            return wanted.to_string();
+        }
+        // Terminates: only finitely many names are taken, so some candidate is
+        // free. The fallback exists to satisfy the type, not the logic.
+        (2..)
+            .map(|index| format!("{wanted} ({index})"))
+            .find(|candidate| !taken(candidate))
+            .unwrap_or_else(|| wanted.to_string())
+    }
+
     pub fn new() -> Self {
         Self {
             v: MANIFEST_VERSION,
@@ -208,5 +239,68 @@ mod tests {
         assert_eq!(*id, project(0x11));
         assert_eq!(found.name, "acme-api");
         assert!(manifest.project_of(&entry(0xff)).is_none());
+    }
+
+    #[test]
+    fn a_name_already_in_the_project_gets_the_next_index() {
+        // Counting from 2 so the first duplicate reads as the second copy.
+        let mut manifest = sample();
+        let project = project(0x11);
+
+        assert_eq!(manifest.unique_path(project, ".env", None), ".env");
+
+        manifest
+            .projects
+            .get_mut(&project)
+            .expect("the sample project")
+            .entries
+            .insert(
+                entry(0xb1),
+                ManifestEntry {
+                    path: ".env".into(),
+                    seq: 0,
+                },
+            );
+        assert_eq!(manifest.unique_path(project, ".env", None), ".env (2)");
+
+        manifest
+            .projects
+            .get_mut(&project)
+            .expect("the sample project")
+            .entries
+            .insert(
+                entry(0xb2),
+                ManifestEntry {
+                    path: ".env (2)".into(),
+                    seq: 0,
+                },
+            );
+        assert_eq!(manifest.unique_path(project, ".env", None), ".env (3)");
+    }
+
+    #[test]
+    fn an_entry_does_not_collide_with_itself() {
+        // Renaming something to the name it already has must not walk it to
+        // `.env (2)` for colliding with itself.
+        let manifest = sample();
+        assert_eq!(
+            manifest.unique_path(
+                project(0x11),
+                "services/api/.env.production",
+                Some(entry(0xa1)),
+            ),
+            "services/api/.env.production",
+        );
+    }
+
+    #[test]
+    fn a_name_in_another_project_is_not_a_collision() {
+        // Projects are separate namespaces; two checkouts both having a `.env`
+        // is the normal case, not a clash.
+        let manifest = sample();
+        assert_eq!(
+            manifest.unique_path(project(0x22), "services/api/.env.production", None),
+            "services/api/.env.production",
+        );
     }
 }

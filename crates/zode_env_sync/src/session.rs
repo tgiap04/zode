@@ -688,6 +688,11 @@ impl EnvSession {
                     .unwrap_or_else(|| ".env".into())
             });
 
+        // Two files can honestly want the same name, and the vault would then
+        // show two rows nobody can tell apart -- worse, both would pull onto
+        // one file on disk.
+        let relative = self.manifest.unique_path(project, &relative, None);
+
         let entry = match EntryId::generate() {
             Ok(entry) => entry,
             Err(error) => {
@@ -713,6 +718,51 @@ impl EnvSession {
 
         self.save_manifest(cx);
         Some(entry)
+    }
+
+    /// Renames a stored file, answering whether the name was taken.
+    ///
+    /// The name is not a label: it is the path a pull writes to, on every
+    /// machine. So it is held to the same rule as the writer itself
+    /// (`names_a_file_inside`) rather than a looser one here — a name accepted
+    /// when typed and refused when used would be the worst of both — and it is
+    /// made unique within its project for the same reason adding is.
+    pub fn rename_entry(
+        &mut self,
+        project: crate::ProjectId,
+        entry: EntryId,
+        wanted: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let wanted = wanted.trim();
+        if !crate::secret_file::names_a_file_inside(wanted) {
+            self.set_status(
+                EnvStatus::Failed("that name does not describe a file inside a project".into()),
+                cx,
+            );
+            return false;
+        }
+
+        let unique = self.manifest.unique_path(project, wanted, Some(entry));
+        let Some(held) = self
+            .manifest
+            .projects
+            .get_mut(&project)
+            .and_then(|holder| holder.entries.get_mut(&entry))
+        else {
+            self.set_status(
+                EnvStatus::Failed("that file is no longer in your vault".into()),
+                cx,
+            );
+            return false;
+        };
+
+        if held.path == unique {
+            return true;
+        }
+        held.path = unique;
+        self.save_manifest(cx);
+        true
     }
 
     /// Creates an empty project in the catalogue.
@@ -1088,6 +1138,103 @@ mod tests {
                 session.relative_path_for(project, entry).as_deref(),
                 Some("services/api/.env"),
                 "the recorded path still answers, so the caller can offer it a folder",
+            );
+        });
+    }
+
+    fn empty_project() -> (crate::ProjectId, Manifest) {
+        let project = crate::ProjectId::parse(&"11".repeat(16)).expect("a valid id");
+        let mut manifest = Manifest::new();
+        manifest.projects.insert(
+            project,
+            crate::manifest::ManifestProject {
+                name: "acme-api".into(),
+                entries: Default::default(),
+            },
+        );
+        (project, manifest)
+    }
+
+    #[gpui::test]
+    fn two_files_with_the_same_name_stay_two_rows(cx: &mut TestAppContext) {
+        // Both come from outside any bound checkout, so both keep only their
+        // bare name. Left alone they would be two rows reading `.env` that
+        // nobody can tell apart, and both would pull onto one file on disk.
+        let session = session(cx);
+        let (project, manifest) = empty_project();
+
+        session.update(cx, |session, cx| {
+            session.set_manifest_for_test(manifest, cx);
+            let first = session
+                .add_file(project, PathBuf::from("/one/.env"), cx)
+                .expect("the first file");
+            let second = session
+                .add_file(project, PathBuf::from("/two/.env"), cx)
+                .expect("the second file");
+
+            assert_eq!(
+                session.relative_path_for(project, first).as_deref(),
+                Some(".env")
+            );
+            assert_eq!(
+                session.relative_path_for(project, second).as_deref(),
+                Some(".env (2)"),
+                "the second must not silently take the first one's place",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_name_that_leaves_the_project_is_refused(cx: &mut TestAppContext) {
+        // The name is the path a pull writes to, so a rename is a file write
+        // waiting to happen. Held to the same rule as the writer itself.
+        let session = session(cx);
+        let (project, manifest) = empty_project();
+
+        session.update(cx, |session, cx| {
+            session.set_manifest_for_test(manifest, cx);
+            let entry = session
+                .add_file(project, PathBuf::from("/one/.env"), cx)
+                .expect("the file");
+
+            for wanted in ["", "   ", "../elsewhere/.env", "/etc/passwd"] {
+                assert!(
+                    !session.rename_entry(project, entry, wanted, cx),
+                    "{wanted:?} must be refused",
+                );
+                assert_eq!(
+                    session.relative_path_for(project, entry).as_deref(),
+                    Some(".env"),
+                    "a refused rename must change nothing",
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn renaming_onto_a_name_a_sibling_holds_takes_the_next_index(cx: &mut TestAppContext) {
+        let session = session(cx);
+        let (project, manifest) = empty_project();
+
+        session.update(cx, |session, cx| {
+            session.set_manifest_for_test(manifest, cx);
+            let first = session
+                .add_file(project, PathBuf::from("/one/.env"), cx)
+                .expect("the first file");
+            let second = session
+                .add_file(project, PathBuf::from("/two/.env.local"), cx)
+                .expect("the second file");
+
+            assert!(session.rename_entry(project, second, ".env", cx));
+            assert_eq!(
+                session.relative_path_for(project, second).as_deref(),
+                Some(".env (2)"),
+                "the rename must not take a name a sibling already holds",
+            );
+            assert_eq!(
+                session.relative_path_for(project, first).as_deref(),
+                Some(".env"),
+                "and must not disturb the sibling",
             );
         });
     }

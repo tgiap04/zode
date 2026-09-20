@@ -45,6 +45,12 @@ pub struct VaultModal {
     /// The name being typed for a new project, and whether that row is open.
     name_input: Entity<Editor>,
     naming: bool,
+    /// The new name for a stored file, and which one is being renamed.
+    ///
+    /// Its own editor rather than sharing `name_input`: both rows can be open
+    /// at once, and one field holding two answers would show the wrong one.
+    rename_input: Entity<Editor>,
+    renaming: Option<(ProjectId, EntryId)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -113,6 +119,12 @@ impl VaultModal {
             editor
         });
 
+        let rename_input = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("services/api/.env", window, cx);
+            editor
+        });
+
         let mut subscriptions = vec![cx.observe(&session, |_this, _session, cx| cx.notify())];
         subscriptions.push(cx.subscribe(&name_input, |_this, _editor, event, cx| {
             if matches!(event, editor::EditorEvent::BufferEdited) {
@@ -145,6 +157,8 @@ impl VaultModal {
             purpose,
             name_input,
             naming: false,
+            rename_input,
+            renaming: None,
             _subscriptions: subscriptions,
         }
     }
@@ -358,6 +372,48 @@ impl VaultModal {
         });
     }
 
+    /// Opens the rename row on one stored file.
+    fn start_rename(
+        &mut self,
+        project: ProjectId,
+        entry: EntryId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .session
+            .read(cx)
+            .relative_path_for(project, entry)
+            .unwrap_or_default();
+        self.rename_input
+            .update(cx, |editor, cx| editor.set_text(current, window, cx));
+        self.renaming = Some((project, entry));
+        window.focus(&self.rename_input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((project, entry)) = self.renaming else {
+            return;
+        };
+        let wanted = self.rename_input.read(cx).text(cx);
+
+        // Refused names leave the row open: the status line says what is wrong
+        // with it, and closing would throw away what was typed along with the
+        // explanation.
+        if !self.session.update(cx, |session, cx| {
+            session.rename_entry(project, entry, &wanted, cx)
+        }) {
+            cx.notify();
+            return;
+        }
+
+        self.renaming = None;
+        self.rename_input
+            .update(cx, |editor, cx| editor.set_text("", window, cx));
+        cx.notify();
+    }
+
     fn create_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name_input.read(cx).text(cx).trim().to_string();
         if name.is_empty() {
@@ -495,6 +551,7 @@ impl Render for VaultModal {
             _ => None,
         };
         let picking = !matches!(self.purpose, Purpose::Browse);
+        let renaming = self.renaming;
 
         let session = self.session.read(cx);
         let unlocked = session.is_unlocked();
@@ -640,6 +697,7 @@ impl Render for VaultModal {
             for (entry_id, entry) in &project.entries {
                 let entry_id = *entry_id;
                 let missing = deleted_elsewhere.contains(&entry_id);
+                let being_renamed = renaming == Some((project_id, entry_id));
                 entries = entries.child(
                     ListItem::new(SharedString::from(format!(
                         "env-vault-entry-{}",
@@ -660,7 +718,38 @@ impl Render for VaultModal {
                             Color::Muted
                         }),
                     )
-                    .child(
+                    .child(if being_renamed {
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(colors.border_focused)
+                                    .bg(colors.editor_background)
+                                    .child(self.rename_input.clone()),
+                            )
+                            .child(
+                                Button::new(
+                                    SharedString::from(format!(
+                                        "env-vault-rename-save-{}",
+                                        entry_id.as_hex()
+                                    )),
+                                    "Save",
+                                )
+                                .style(ButtonStyle::Filled)
+                                .label_size(LabelSize::XSmall)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.commit_rename(window, cx)
+                                })),
+                            )
+                            .into_any_element()
+                    } else {
                         v_flex()
                             .child(Label::new(entry.path.clone()).size(LabelSize::Small))
                             .when(missing, |this| {
@@ -671,11 +760,30 @@ impl Render for VaultModal {
                                     .size(LabelSize::XSmall)
                                     .color(Color::Warning),
                                 )
-                            }),
-                    )
+                            })
+                            .into_any_element()
+                    })
                     .end_slot(
                         h_flex()
                             .gap_0p5()
+                            .when(!being_renamed, |this| {
+                                this.child(
+                                    IconButton::new(
+                                        SharedString::from(format!(
+                                            "env-vault-rename-{}",
+                                            entry_id.as_hex()
+                                        )),
+                                        IconName::Pencil,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(
+                                        "Rename it. The name is also where a fetch writes the file, on every machine",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.start_rename(project_id, entry_id, window, cx)
+                                    })),
+                                )
+                            })
                             .child(
                                 IconButton::new(
                                     SharedString::from(format!(
@@ -731,11 +839,20 @@ impl Render for VaultModal {
             .occlude()
             .w(rems(42.))
             .max_h(rems(40.))
-            .on_action(cx.listener(|_this, _: &menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
+                // The open row first, the window second. Escape closing
+                // everything would throw away a half-typed name to answer
+                // "never mind this one".
+                if this.renaming.take().is_some() {
+                    cx.notify();
+                    return;
+                }
                 cx.emit(DismissEvent);
             }))
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
-                if this.naming {
+                if this.renaming.is_some() {
+                    this.commit_rename(window, cx);
+                } else if this.naming {
                     this.create_project(window, cx);
                 }
             }))
@@ -1150,6 +1267,64 @@ mod tests {
         });
 
         std::fs::remove_file(&occupied).ok();
+    }
+
+    #[gpui::test]
+    fn renaming_a_file_draws_and_keeps_a_refused_name_on_screen(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(Some(populated()), cx);
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |window, cx| VaultModal::new(session, WeakEntity::new_invalid(), window, cx)
+        });
+        cx.run_until_parked();
+
+        let project = ProjectId::parse(&"11".repeat(16)).expect("a valid id");
+        let entry = EntryId::parse(&"a1".repeat(16)).expect("a valid id");
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.start_rename(project, entry, window, cx);
+            assert_eq!(modal.renaming, Some((project, entry)));
+            assert_eq!(
+                modal.rename_input.read(cx).text(cx),
+                "services/api/.env.production",
+                "the row must open on the name it is about to change",
+            );
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        // A name that leaves the project is refused, and the row stays open --
+        // closing it would throw away what was typed along with the reason.
+        modal.update_in(cx, |modal, window, cx| {
+            modal.rename_input.update(cx, |editor, cx| {
+                editor.set_text("../escape/.env", window, cx)
+            });
+            modal.commit_rename(window, cx);
+            assert_eq!(
+                modal.renaming,
+                Some((project, entry)),
+                "a refused name must leave the row open to fix",
+            );
+        });
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.rename_input.update(cx, |editor, cx| {
+                editor.set_text("services/api/.env", window, cx)
+            });
+            modal.commit_rename(window, cx);
+            assert_eq!(modal.renaming, None, "a good name closes the row");
+        });
+        cx.run_until_parked();
+
+        session.update(cx, |session, _cx| {
+            assert_eq!(
+                session.relative_path_for(project, entry).as_deref(),
+                Some("services/api/.env"),
+            );
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     }
 
     #[gpui::test]
