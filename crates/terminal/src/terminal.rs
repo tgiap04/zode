@@ -3403,10 +3403,11 @@ mod tests {
         let (terminal, completion_rx) =
             build_test_terminal(cx, "echo", &["test_output_before_kill; sleep 60"]).await;
 
-        // Wait a bit for the echo to execute and produce output
-        cx.background_executor
-            .timer(Duration::from_millis(200))
-            .await;
+        // Wait for the echo's output to reach the grid before killing. A fixed
+        // sleep races the same PTY drain `wait_for_terminal_content` exists for,
+        // and picks an arbitrary number to race it with; polling makes the kill
+        // genuinely happen after there is something to preserve.
+        wait_for_terminal_content(&terminal, "test_output_before_kill", cx).await;
 
         // Kill the active task
         terminal.update(cx, |term, _cx| {
@@ -3455,12 +3456,15 @@ mod tests {
             term.kill_active_task();
         });
 
-        // Content should still be there
-        let content = terminal.update(cx, |term, _| term.get_content());
-        assert!(
-            content.contains("done"),
-            "Output should still be present after no-op kill, got: {content}"
-        );
+        // Content should still be there. Polled rather than read once: the exit
+        // status above arrives when the child is reaped, which is not when its
+        // bytes reach the grid -- see `wait_for_terminal_content`. A read here
+        // times the two orderings against each other, and on Linux under a
+        // full-workspace run it loses.
+        //
+        // Waiting after the kill is also the stronger assertion: a kill that had
+        // wrongly discarded the output would leave this polling until it gives up.
+        wait_for_terminal_content(&terminal, "done", cx).await;
     }
 
     // Phase 5 (multi-project-window-switching): a real measurement, not
