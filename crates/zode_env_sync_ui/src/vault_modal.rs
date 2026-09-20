@@ -50,7 +50,7 @@ pub struct VaultModal {
     /// Its own editor rather than sharing `name_input`: both rows can be open
     /// at once, and one field holding two answers would show the wrong one.
     rename_input: Entity<Editor>,
-    renaming: Option<(ProjectId, EntryId)>,
+    renaming: Option<EntryId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -237,14 +237,13 @@ impl VaultModal {
             return;
         };
         let session = self.session.clone();
-        let name = file.display_name();
         cx.emit(DismissEvent);
         workspace.update(cx, |_workspace, cx| {
             // Deferred because `toggle_modal` would otherwise close the window
             // it just opened: this one is still being torn down.
             cx.defer_in(window, move |workspace, window, cx| {
-                workspace.toggle_modal(window, cx, |_window, cx| {
-                    WirePanel::new(session, wire, name, cx)
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    WirePanel::new(session, wire, entry, window, cx)
                 });
             });
         });
@@ -255,14 +254,8 @@ impl VaultModal {
     /// The vault could list a file and delete it, and nothing else -- so a
     /// fetch that landed here had no way to finish, which is what clicking a
     /// row and watching nothing happen was.
-    fn fetch_entry(
-        &mut self,
-        project: ProjectId,
-        entry: EntryId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(local_path) = self.session.read(cx).local_path_for(project, entry) {
+    fn fetch_entry(&mut self, entry: EntryId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(local_path) = self.session.read(cx).local_path_for(entry) {
             self.pull_into(entry, local_path, window, cx);
             return;
         }
@@ -270,7 +263,7 @@ impl VaultModal {
         // No checkout on this machine claims this project, so nothing knows
         // where the file goes. Asked rather than guessed: a guess would write
         // a production environment into a directory nobody named.
-        let Some(relative) = self.session.read(cx).relative_path_for(project, entry) else {
+        let Some(relative) = self.session.read(cx).relative_path_for(entry) else {
             return;
         };
         let folders = cx.prompt_for_paths(PathPromptOptions {
@@ -373,27 +366,21 @@ impl VaultModal {
     }
 
     /// Opens the rename row on one stored file.
-    fn start_rename(
-        &mut self,
-        project: ProjectId,
-        entry: EntryId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_rename(&mut self, entry: EntryId, window: &mut Window, cx: &mut Context<Self>) {
         let current = self
             .session
             .read(cx)
-            .relative_path_for(project, entry)
+            .relative_path_for(entry)
             .unwrap_or_default();
         self.rename_input
             .update(cx, |editor, cx| editor.set_text(current, window, cx));
-        self.renaming = Some((project, entry));
+        self.renaming = Some(entry);
         window.focus(&self.rename_input.focus_handle(cx), cx);
         cx.notify();
     }
 
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((project, entry)) = self.renaming else {
+        let Some(entry) = self.renaming else {
             return;
         };
         let wanted = self.rename_input.read(cx).text(cx);
@@ -401,9 +388,10 @@ impl VaultModal {
         // Refused names leave the row open: the status line says what is wrong
         // with it, and closing would throw away what was typed along with the
         // explanation.
-        if !self.session.update(cx, |session, cx| {
-            session.rename_entry(project, entry, &wanted, cx)
-        }) {
+        if !self
+            .session
+            .update(cx, |session, cx| session.rename_entry(entry, &wanted, cx))
+        {
             cx.notify();
             return;
         }
@@ -697,7 +685,7 @@ impl Render for VaultModal {
             for (entry_id, entry) in &project.entries {
                 let entry_id = *entry_id;
                 let missing = deleted_elsewhere.contains(&entry_id);
-                let being_renamed = renaming == Some((project_id, entry_id));
+                let being_renamed = renaming == Some(entry_id);
                 entries = entries.child(
                     ListItem::new(SharedString::from(format!(
                         "env-vault-entry-{}",
@@ -780,7 +768,7 @@ impl Render for VaultModal {
                                         "Rename it. The name is also where a fetch writes the file, on every machine",
                                     ))
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.start_rename(project_id, entry_id, window, cx)
+                                        this.start_rename(entry_id, window, cx)
                                     })),
                                 )
                             })
@@ -797,7 +785,7 @@ impl Render for VaultModal {
                                     "Bring this file down. You see what changes before anything is written",
                                 ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.fetch_entry(project_id, entry_id, window, cx)
+                                    this.fetch_entry(entry_id, window, cx)
                                 })),
                             )
                             .child(
@@ -1279,12 +1267,11 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let project = ProjectId::parse(&"11".repeat(16)).expect("a valid id");
         let entry = EntryId::parse(&"a1".repeat(16)).expect("a valid id");
 
         modal.update_in(cx, |modal, window, cx| {
-            modal.start_rename(project, entry, window, cx);
-            assert_eq!(modal.renaming, Some((project, entry)));
+            modal.start_rename(entry, window, cx);
+            assert_eq!(modal.renaming, Some(entry));
             assert_eq!(
                 modal.rename_input.read(cx).text(cx),
                 "services/api/.env.production",
@@ -1303,7 +1290,7 @@ mod tests {
             modal.commit_rename(window, cx);
             assert_eq!(
                 modal.renaming,
-                Some((project, entry)),
+                Some(entry),
                 "a refused name must leave the row open to fix",
             );
         });
@@ -1319,7 +1306,7 @@ mod tests {
 
         session.update(cx, |session, _cx| {
             assert_eq!(
-                session.relative_path_for(project, entry).as_deref(),
+                session.relative_path_for(entry).as_deref(),
                 Some("services/api/.env"),
             );
         });

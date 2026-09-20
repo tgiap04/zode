@@ -627,16 +627,13 @@ impl EnvSession {
     }
 
     /// The path recorded alongside a stored entry, relative to its checkout.
-    pub fn relative_path_for(&self, project: crate::ProjectId, entry: EntryId) -> Option<String> {
-        Some(
-            self.manifest
-                .projects
-                .get(&project)?
-                .entries
-                .get(&entry)?
-                .path
-                .clone(),
-        )
+    ///
+    /// The entry alone answers: ids are unique across the catalogue, and a
+    /// caller made to carry the project as well is a caller that can pass a
+    /// pair which disagrees.
+    pub fn relative_path_for(&self, entry: EntryId) -> Option<String> {
+        let (_, holder) = self.manifest.project_of(&entry)?;
+        Some(holder.entries.get(&entry)?.path.clone())
     }
 
     /// Where a stored entry belongs on this machine, when a checkout says so.
@@ -645,9 +642,10 @@ impl EnvSession {
     /// nothing that knows where the file goes, and inventing a directory would
     /// write somebody's production environment somewhere they never named. The
     /// caller asks instead.
-    pub fn local_path_for(&self, project: crate::ProjectId, entry: EntryId) -> Option<PathBuf> {
-        let relative = self.relative_path_for(project, entry)?;
-        let root = self.bindings.worktrees_for(project).into_iter().next()?;
+    pub fn local_path_for(&self, entry: EntryId) -> Option<PathBuf> {
+        let (project, holder) = self.manifest.project_of(&entry)?;
+        let relative = holder.entries.get(&entry)?.path.clone();
+        let root = self.bindings.worktrees_for(*project).into_iter().next()?;
         Some(root.join(relative))
     }
 
@@ -727,13 +725,7 @@ impl EnvSession {
     /// (`names_a_file_inside`) rather than a looser one here — a name accepted
     /// when typed and refused when used would be the worst of both — and it is
     /// made unique within its project for the same reason adding is.
-    pub fn rename_entry(
-        &mut self,
-        project: crate::ProjectId,
-        entry: EntryId,
-        wanted: &str,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub fn rename_entry(&mut self, entry: EntryId, wanted: &str, cx: &mut Context<Self>) -> bool {
         let wanted = wanted.trim();
         if !crate::secret_file::names_a_file_inside(wanted) {
             self.set_status(
@@ -742,6 +734,14 @@ impl EnvSession {
             );
             return false;
         }
+
+        let Some(project) = self.manifest.project_of(&entry).map(|(id, _)| *id) else {
+            self.set_status(
+                EnvStatus::Failed("that file is no longer in your vault".into()),
+                cx,
+            );
+            return false;
+        };
 
         let unique = self.manifest.unique_path(project, wanted, Some(entry));
         let Some(held) = self
@@ -1116,7 +1116,7 @@ mod tests {
             session.bind_for_test(&PathBuf::from("/work/acme"), project);
 
             assert_eq!(
-                session.local_path_for(project, entry),
+                session.local_path_for(entry),
                 Some(PathBuf::from("/work/acme/services/api/.env")),
                 "the destination is the checkout joined with the recorded path",
             );
@@ -1128,14 +1128,14 @@ mod tests {
         // The caller has to ask instead. Guessing a directory would write
         // somebody's production environment somewhere they never named.
         let session = session(cx);
-        let (project, entry, manifest) = one_entry();
+        let (_project, entry, manifest) = one_entry();
 
         session.update(cx, |session, cx| {
             session.set_manifest_for_test(manifest, cx);
 
-            assert_eq!(session.local_path_for(project, entry), None);
+            assert_eq!(session.local_path_for(entry), None);
             assert_eq!(
-                session.relative_path_for(project, entry).as_deref(),
+                session.relative_path_for(entry).as_deref(),
                 Some("services/api/.env"),
                 "the recorded path still answers, so the caller can offer it a folder",
             );
@@ -1172,12 +1172,9 @@ mod tests {
                 .add_file(project, PathBuf::from("/two/.env"), cx)
                 .expect("the second file");
 
+            assert_eq!(session.relative_path_for(first).as_deref(), Some(".env"));
             assert_eq!(
-                session.relative_path_for(project, first).as_deref(),
-                Some(".env")
-            );
-            assert_eq!(
-                session.relative_path_for(project, second).as_deref(),
+                session.relative_path_for(second).as_deref(),
                 Some(".env (2)"),
                 "the second must not silently take the first one's place",
             );
@@ -1199,11 +1196,11 @@ mod tests {
 
             for wanted in ["", "   ", "../elsewhere/.env", "/etc/passwd"] {
                 assert!(
-                    !session.rename_entry(project, entry, wanted, cx),
+                    !session.rename_entry(entry, wanted, cx),
                     "{wanted:?} must be refused",
                 );
                 assert_eq!(
-                    session.relative_path_for(project, entry).as_deref(),
+                    session.relative_path_for(entry).as_deref(),
                     Some(".env"),
                     "a refused rename must change nothing",
                 );
@@ -1225,14 +1222,14 @@ mod tests {
                 .add_file(project, PathBuf::from("/two/.env.local"), cx)
                 .expect("the second file");
 
-            assert!(session.rename_entry(project, second, ".env", cx));
+            assert!(session.rename_entry(second, ".env", cx));
             assert_eq!(
-                session.relative_path_for(project, second).as_deref(),
+                session.relative_path_for(second).as_deref(),
                 Some(".env (2)"),
                 "the rename must not take a name a sibling already holds",
             );
             assert_eq!(
-                session.relative_path_for(project, first).as_deref(),
+                session.relative_path_for(first).as_deref(),
                 Some(".env"),
                 "and must not disturb the sibling",
             );

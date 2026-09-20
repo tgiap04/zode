@@ -24,7 +24,7 @@ use notifications::status_toast::StatusToast;
 use ui::prelude::*;
 use workspace::Workspace;
 use zode_account::Account;
-use zode_env_sync::EnvSession;
+use zode_env_sync::{EnvSession, EnvStatus};
 
 pub use env_diff_modal::EnvDiffModal;
 pub use toolbar_button::EnvSyncToolbar;
@@ -202,12 +202,18 @@ fn transfer(
                 session.prepare(entry, file.absolute.clone(), cx)
             });
             let Some(wire) = session.read(cx).prepared().cloned() else {
-                // Nothing to send, or it failed to build. The session's status
-                // already says which.
+                // Nothing to send, or it failed to build. This used to return
+                // on the strength of "the status already says which" -- but no
+                // window opens on this path to carry it, and `Done` is
+                // deliberately absent from the status bar. Pushing an
+                // unchanged file a second time therefore produced the correct
+                // answer and showed it nowhere at all.
+                let outcome = session.read(cx).status().clone();
+                report(workspace, &outcome, cx);
                 return;
             };
-            workspace.toggle_modal(window, cx, |_window, cx| {
-                WirePanel::new(session.clone(), wire, name, cx)
+            workspace.toggle_modal(window, cx, |window, cx| {
+                WirePanel::new(session.clone(), wire, entry, window, cx)
             });
         }
         Direction::Pull => {
@@ -221,6 +227,35 @@ fn transfer(
             });
         }
     }
+}
+
+/// Says something that has no window of its own to appear in.
+///
+/// The push path either opens the window showing what would be sent, or it
+/// has nothing to open -- and that second case is still an answer.
+fn report(workspace: &mut Workspace, status: &EnvStatus, cx: &mut Context<Workspace>) {
+    let failed = matches!(
+        status,
+        EnvStatus::Failed(_)
+            | EnvStatus::KeyMismatch
+            | EnvStatus::Rollback { .. }
+            | EnvStatus::NeedsRecoveryKey
+    );
+    let sentence = status.sentence().to_string();
+
+    let toast = StatusToast::new(sentence, cx, move |this, _cx| {
+        this.icon(
+            Icon::new(if failed {
+                IconName::XCircle
+            } else {
+                IconName::Check
+            })
+            .size(IconSize::Small)
+            .color(if failed { Color::Error } else { Color::Muted }),
+        )
+        .dismiss_button(true)
+    });
+    workspace.toggle_status_toast(toast, cx);
 }
 
 /// An environment file open in the active editor.
