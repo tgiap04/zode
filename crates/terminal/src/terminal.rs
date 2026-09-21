@@ -126,6 +126,19 @@ pub fn insert_zed_terminal_env(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
+
+    // `alacritty_terminal` sets these unconditionally when it spawns the pty, but we only
+    // use it as a pty backend — Alacritty's built-in glyph renderer, which draws box
+    // drawing, block and sextant characters without font support, lives in the `alacritty`
+    // binary crate and is not part of Zed. Programs that key off `ALACRITTY_WINDOW_ID`
+    // therefore emit glyphs we cannot draw (Expo renders its QR code with
+    // U+1FB00..=U+1FB3B, which no bundled or system font covers). `WINDOWID` is wrong for
+    // a second reason: the id is a GPUI `WindowId`, a slotmap key, never an X11 XID.
+    //
+    // Blanking is the only lever available here: the pty applies this map after its own
+    // inserts, but `Command::env_remove` is not reachable through its API.
+    env.insert("ALACRITTY_WINDOW_ID".to_string(), String::new());
+    env.insert("WINDOWID".to_string(), String::new());
 }
 
 ///Upward flowing events, for changing the title and such
@@ -3060,6 +3073,22 @@ mod tests {
                 .any(|event| event == &Event::CloseTerminal),
             "Wrong shell command should update the title but not should not close the terminal to show the error message, but got events: {all_events:?}",
         );
+    }
+
+    #[test]
+    fn test_insert_zed_terminal_env_blanks_alacritty_identity() {
+        // The pty backend advertises an Alacritty window id that zode cannot live up to,
+        // and inherited values must not survive either.
+        let mut env = HashMap::from_iter([
+            ("ALACRITTY_WINDOW_ID".to_string(), "21474836553".to_string()),
+            ("WINDOWID".to_string(), "21474836553".to_string()),
+        ]);
+
+        insert_zed_terminal_env(&mut env, &"0.1.0");
+
+        assert_eq!(env.get("ALACRITTY_WINDOW_ID").map(String::as_str), Some(""));
+        assert_eq!(env.get("WINDOWID").map(String::as_str), Some(""));
+        assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("zed"));
     }
 
     #[test]
