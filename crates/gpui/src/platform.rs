@@ -1726,6 +1726,11 @@ pub struct PathPromptOptions {
     pub directories: bool,
     /// Should the prompt allow multiple files to be selected?
     pub multiple: bool,
+    /// Should the prompt show files and directories the OS hides by default?
+    ///
+    /// Needed by any picker whose subject is a dotfile — a `.env` picker that
+    /// cannot see `.env` is not a picker.
+    pub show_hidden: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
 }

@@ -90,6 +90,7 @@ pub(crate) fn prompt_for_logo(
         files: true,
         directories: false,
         multiple: false,
+        show_hidden: false,
         prompt: Some("Choose Logo".into()),
     });
     let multi_workspace = multi_workspace.clone();

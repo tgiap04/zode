@@ -361,6 +361,10 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     "Open File"
                 };
 
+                // `options.show_hidden` is deliberately not forwarded: the XDG
+                // file-chooser portal exposes no hidden-file flag. It hands the
+                // dialog to the host file chooser, where showing hidden entries is
+                // the user's own toggle (Ctrl+H in GTK), not the caller's to set.
                 let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
                     .modal(true)

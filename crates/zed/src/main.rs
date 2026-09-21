@@ -529,8 +529,13 @@ fn main() {
         // session, the account service — a machine that has never signed in
         // issues no request from here. See `zode_account`'s crate docs.
         let account = zode_account::init(cx);
-        zode_sync::init(account, cx);
+        zode_sync::init(account.clone(), cx);
         zode_account_ui::init(cx);
+        // Installs the global only. Reads no keychain and sends no request
+        // until the user opens the vault — starting the editor must not touch
+        // either for a feature nobody has asked for yet.
+        zode_env_sync::session::init(account, cx);
+        zode_env_sync_ui::init(cx);
         project::Project::init(&client, cx);
         debugger_ui::init(cx);
         debugger_tools::init(cx);

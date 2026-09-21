@@ -154,6 +154,8 @@
 # Account & Privacy
 
 - [Your Zode Account](./account.md)
+- [Environment sync protocol](./env-sync-protocol.md)
+- [Environment sync security](./env-sync-security.md)
 - [Roles](./roles.md)
 - [Worktree Trust](./worktree-trust.md)
 - [Telemetry](./telemetry.md)

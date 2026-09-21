@@ -212,6 +212,27 @@ pub mod account {
     );
 }
 
+pub mod env_sync {
+    use gpui::actions;
+
+    actions!(
+        env_sync,
+        [
+            /// Opens the list of environment files stored on your account.
+            OpenEnvVault,
+            /// Creates the environment key for an account that has none yet.
+            SetUpEnvSync,
+            /// Sends the environment file in the active editor.
+            PushEnvFile,
+            /// Fetches the stored copy of the environment file in the active
+            /// editor, showing what would change before anything is written.
+            PullEnvFile,
+            /// Links this checkout to a project on your account.
+            BindEnvProject
+        ]
+    );
+}
+
 pub mod dev {
     use gpui::actions;
 

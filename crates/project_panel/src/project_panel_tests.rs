@@ -10625,3 +10625,64 @@ async fn the_panels_button_moves_into_the_docks_own_header(cx: &mut gpui::TestAp
         dock_bounds.bottom()
     );
 }
+
+#[gpui::test]
+async fn test_only_private_files_are_offered_to_env_sync(cx: &mut gpui::TestAppContext) {
+    init_test_with_editor(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/root",
+        json!({
+            ".env": "TOKEN=placeholder",
+            ".env.local": "TOKEN=placeholder",
+            "main.rs": "fn main() {}",
+            "config": {
+                ".env.production": "TOKEN=placeholder"
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    // The gate is `private_files`, whose default carries `**/.env*` -- not a
+    // list kept here. A name that setting covers is offered wherever it sits;
+    // one it does not cover never is.
+    for path in [
+        "root/.env",
+        "root/.env.local",
+        "root/config/.env.production",
+    ] {
+        select_path(&panel, path, cx);
+        let offered = panel.update(cx, |panel, cx| panel.selected_env_file(cx));
+        let name = path.rsplit('/').next().expect("the path has a last part");
+        assert!(
+            offered.as_ref().is_some_and(|found| found.ends_with(name)),
+            "{path} is a private file and must be offered to sync, got {offered:?}",
+        );
+    }
+
+    select_path(&panel, "root/main.rs", cx);
+    assert_eq!(
+        panel.update(cx, |panel, cx| panel.selected_env_file(cx)),
+        None,
+        "an ordinary source file must not be offered to sync",
+    );
+
+    // A directory is never a file to send, not even one holding nothing but
+    // environment files.
+    select_path(&panel, "root/config", cx);
+    assert_eq!(
+        panel.update(cx, |panel, cx| panel.selected_env_file(cx)),
+        None,
+        "a directory must not be offered to sync",
+    );
+}

@@ -707,6 +707,7 @@ fn register_actions(
                     files: true,
                     directories: true,
                     multiple: true,
+                    show_hidden: false,
                     prompt: None,
                 },
                 action.create_new_window,
@@ -723,6 +724,7 @@ fn register_actions(
                     files: true,
                     directories,
                     multiple: true,
+                    show_hidden: false,
                     prompt: None,
                 },
                 true,
@@ -745,6 +747,7 @@ fn register_actions(
                     files: true,
                     directories: true,
                     multiple: true,
+                    show_hidden: false,
                     prompt: None,
                 },
                 DirectoryLister::Project(workspace.project().clone()),
@@ -1087,6 +1090,10 @@ fn initialize_pane(
             toolbar.add_item(quick_action_bar, window, cx);
             let diagnostic_editor_controls = cx.new(|_| diagnostics::ToolbarControls::new());
             toolbar.add_item(diagnostic_editor_controls, window, cx);
+            // Shows itself only while an environment file is open, decided by
+            // the same `private_files` setting that already marks them.
+            let env_sync_toolbar = cx.new(|_| zode_env_sync_ui::EnvSyncToolbar::new());
+            toolbar.add_item(env_sync_toolbar, window, cx);
             let project_search_bar = cx.new(|_| ProjectSearchBar::new());
             toolbar.add_item(project_search_bar, window, cx);
             let lsp_log_item = cx.new(|_| LspLogToolbarItemView::new());
@@ -5092,6 +5099,7 @@ mod tests {
                 "diagnostics",
                 "editor",
                 "encoding_selector",
+                "env_sync",
                 "feedback",
                 "file_finder",
                 "floating_pane",
