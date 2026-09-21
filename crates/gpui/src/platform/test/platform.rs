@@ -1,9 +1,10 @@
 use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels, DisplayWakeLock,
-    DummyKeyboardMapper, ForegroundExecutor, Keymap, NoopTextSystem, Platform, PlatformDisplay,
-    PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SourceMetadata,
-    Task, TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams, size,
+    DummyKeyboardMapper, ForegroundExecutor, Keymap, NoopTextSystem, Notification, Platform,
+    PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PromptButton, ScreenCaptureFrame, ScreenCaptureSource,
+    ScreenCaptureStream, SourceMetadata, Task, TestDisplay, TestWindow, ThermalState,
+    WindowAppearance, WindowParams, size,
 };
 use anyhow::Result;
 use collections::VecDeque;
@@ -45,6 +46,17 @@ pub(crate) struct TestPlatform {
     /// today -- so the policy layer's "this machine cannot" state is reachable
     /// from a test.
     pub display_wake_supported: RefCell<bool>,
+    /// Every notification posted through `post_notification` during this
+    /// test, oldest first. Standing in for the OS notification centre so a
+    /// test can assert on what was posted without one.
+    pub posted_notifications: RefCell<Vec<Notification>>,
+    /// Whether `post_notification` can do anything at all. Defaults to
+    /// `false`, the same "cannot" a platform with no implementation gives,
+    /// so a test that does not opt in is not silently posting notifications.
+    pub notifications_supported: RefCell<bool>,
+    /// The handler registered via `on_notification_activated`, invoked by
+    /// `TestAppContext::simulate_notification_click`.
+    pub notification_activated: RefCell<Option<Box<dyn FnMut(String)>>>,
     pub text_system: Arc<dyn PlatformTextSystem>,
     pub expect_restart: RefCell<Option<oneshot::Sender<Option<PathBuf>>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
@@ -145,6 +157,9 @@ impl TestPlatform {
             display_wake_reasons: Default::default(),
             on_battery: Default::default(),
             display_wake_supported: RefCell::new(true),
+            posted_notifications: Default::default(),
+            notifications_supported: RefCell::new(false),
+            notification_activated: Default::default(),
             text_system,
             headless_renderer_factory,
         })
@@ -263,6 +278,18 @@ impl Platform for TestPlatform {
 
     fn on_battery(&self) -> Option<bool> {
         *self.on_battery.borrow()
+    }
+
+    fn post_notification(&self, notification: Notification) {
+        self.posted_notifications.borrow_mut().push(notification);
+    }
+
+    fn can_post_notifications(&self) -> bool {
+        *self.notifications_supported.borrow()
+    }
+
+    fn on_notification_activated(&self, callback: Box<dyn FnMut(String)>) {
+        *self.notification_activated.borrow_mut() = Some(callback);
     }
 
     fn can_keep_display_awake(&self) -> bool {

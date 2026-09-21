@@ -238,6 +238,31 @@ pub trait Platform: 'static {
         None
     }
 
+    /// Posts a notification to the OS notification centre.
+    ///
+    /// Must not block the calling thread: there is nothing for the caller to
+    /// act on if this fails, so an implementation runs the real work on the
+    /// background executor and reports nothing back. The default body does
+    /// nothing, which is the correct behaviour for a platform that never
+    /// implements this rather than a stand-in for one that hasn't yet.
+    fn post_notification(&self, _notification: Notification) {}
+
+    /// Whether [`Platform::post_notification`] can ever do anything here.
+    ///
+    /// Asked before building anything that depends on it, so a platform with
+    /// no implementation costs nothing at all rather than a control that
+    /// cannot work. `false` is an ordinary answer, not a failure.
+    fn can_post_notifications(&self) -> bool {
+        false
+    }
+
+    /// Registers a handler invoked when the user activates (clicks) a posted
+    /// notification. The `String` is the [`Notification::id`] that was
+    /// posted, round-tripped back so the caller can look up what it was for.
+    /// The default body never calls back, matching a platform that cannot
+    /// post notifications in the first place.
+    fn on_notification_activated(&self, _callback: Box<dyn FnMut(String)>) {}
+
     fn compositor_name(&self) -> &'static str {
         ""
     }
@@ -311,6 +336,26 @@ pub enum ThermalState {
     Serious,
     /// System is critically constrained, minimize all resource usage
     Critical,
+}
+
+/// A single OS notification, owned so it can cross into a background task
+/// without borrowing anything.
+///
+/// `id` does double duty: it is the dedupe key the OS uses to replace a
+/// stale banner instead of stacking a new one (macOS `UNNotificationRequest`
+/// identifier, the freedesktop notification spec's replacement id, Windows
+/// toast `Tag`), and it is also the payload handed back to
+/// [`Platform::on_notification_activated`] on click, so the caller can look
+/// up what the click was about.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    /// Identifies this notification to the OS and comes back on click.
+    /// Reposting with the same id replaces the banner rather than stacking one.
+    pub id: SharedString,
+    /// The notification's title.
+    pub title: SharedString,
+    /// The notification's body text.
+    pub body: SharedString,
 }
 
 /// A request that the display stay lit, withdrawn when this value is dropped.

@@ -45,7 +45,7 @@ use crate::{
     ArenaBox, Asset, AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle,
     DispatchPhase, DisplayId, DisplayWakeLock, EventEmitter, FocusHandle, FocusMap,
     ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu,
-    MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
+    MenuItem, Notification, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
     PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
     PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
     ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task,
@@ -1174,6 +1174,27 @@ impl App {
     /// `None` means unknown, which callers must read as "not on battery".
     pub fn on_battery(&self) -> Option<bool> {
         self.platform.on_battery()
+    }
+
+    /// Posts a notification to the OS notification centre. Does not block --
+    /// see [`Platform::post_notification`].
+    pub fn post_notification(&self, notification: Notification) {
+        self.platform.post_notification(notification);
+    }
+
+    /// Whether [`App::post_notification`] can ever do anything on this platform.
+    pub fn can_post_notifications(&self) -> bool {
+        self.platform.can_post_notifications()
+    }
+
+    /// Register a handler to be invoked when the user activates (clicks) a
+    /// posted notification. The `String` is the notification's own `id`.
+    pub fn on_notification_activated<F>(&self, mut callback: F)
+    where
+        F: 'static + FnMut(String),
+    {
+        self.platform
+            .on_notification_activated(Box::new(callback));
     }
 
     /// Invokes a handler when the thermal state changes

@@ -2,8 +2,8 @@ use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
     BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DrawPhase, Drawable,
     Element, Empty, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Notification,
+    Pixels, Platform, Point, Render, Result, Size, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
     WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
 };
@@ -368,6 +368,32 @@ impl TestAppContext {
     /// stands in for a platform with no implementation.
     pub fn set_display_wake_supported(&self, supported: bool) {
         *self.test_platform.display_wake_supported.borrow_mut() = supported;
+    }
+
+    /// All the notifications posted through `cx.post_notification()` during
+    /// this test, oldest first.
+    pub fn posted_notifications(&self) -> Vec<Notification> {
+        self.test_platform.posted_notifications.borrow().clone()
+    }
+
+    /// Sets whether the platform can post notifications at all. `false`
+    /// stands in for a platform with no implementation.
+    pub fn set_notifications_supported(&self, supported: bool) {
+        *self.test_platform.notifications_supported.borrow_mut() = supported;
+    }
+
+    /// Simulates the user activating (clicking) the notification with the
+    /// given id, invoking the handler registered with
+    /// `cx.on_notification_activated()`.
+    pub fn simulate_notification_click(&self, id: &str) {
+        if let Some(callback) = self
+            .test_platform
+            .notification_activated
+            .borrow_mut()
+            .as_mut()
+        {
+            callback(id.to_string());
+        }
     }
 
     /// Simulates the user resizing the window to the new size.
@@ -1082,5 +1108,47 @@ impl AnyWindowHandle {
     ) -> Entity<V> {
         self.update(cx, |_, window, cx| cx.new(|cx| build_view(window, cx)))
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn default_reports_notifications_unsupported(cx: &mut TestAppContext) {
+        assert!(!cx.app.borrow().can_post_notifications());
+    }
+
+    #[gpui::test]
+    fn posting_a_notification_is_recorded(cx: &mut TestAppContext) {
+        cx.set_notifications_supported(true);
+        assert!(cx.app.borrow().can_post_notifications());
+
+        let notification = Notification {
+            id: "agent-finished".into(),
+            title: "Agent finished".into(),
+            body: "The task completed successfully.".into(),
+        };
+        cx.app.borrow().post_notification(notification.clone());
+
+        let posted = cx.posted_notifications();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].id, notification.id);
+        assert_eq!(posted[0].title, notification.title);
+        assert_eq!(posted[0].body, notification.body);
+    }
+
+    #[gpui::test]
+    fn simulated_click_invokes_the_registered_handler(cx: &mut TestAppContext) {
+        let clicked_id = Rc::new(RefCell::new(None));
+        let clicked_id_handler = clicked_id.clone();
+        cx.app
+            .borrow()
+            .on_notification_activated(move |id| *clicked_id_handler.borrow_mut() = Some(id));
+
+        cx.simulate_notification_click("agent-finished");
+
+        assert_eq!(clicked_id.borrow().as_deref(), Some("agent-finished"));
     }
 }
