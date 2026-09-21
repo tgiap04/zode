@@ -1,6 +1,7 @@
 mod dispatcher;
 mod headless;
 mod keyboard;
+mod notifications;
 mod platform;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod text_system;
@@ -15,6 +16,7 @@ mod xdg_desktop_portal;
 pub use dispatcher::*;
 pub(crate) use headless::*;
 pub(crate) use keyboard::*;
+pub(crate) use notifications::*;
 pub(crate) use platform::*;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) use text_system::*;
@@ -31,27 +33,21 @@ pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
     use anyhow::Context as _;
 
     if headless {
-        return Rc::new(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        });
+        return Rc::new(LinuxPlatform::new(HeadlessClient::new()));
     }
 
     match gpui::guess_compositor() {
         #[cfg(feature = "wayland")]
-        "Wayland" => Rc::new(LinuxPlatform {
-            inner: WaylandClient::new(),
-        }),
+        "Wayland" => Rc::new(LinuxPlatform::new(WaylandClient::new())),
 
         #[cfg(feature = "x11")]
-        "X11" => Rc::new(LinuxPlatform {
-            inner: X11Client::new()
+        "X11" => Rc::new(LinuxPlatform::new(
+            X11Client::new()
                 .context("Failed to initialize X11 client.")
                 .unwrap(),
-        }),
+        )),
 
-        "Headless" => Rc::new(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        }),
+        "Headless" => Rc::new(LinuxPlatform::new(HeadlessClient::new())),
         _ => unreachable!(),
     }
 }
