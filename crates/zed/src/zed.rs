@@ -364,6 +364,15 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     workspace::panel_size_prune::prune_orphaned_panel_sizes(app_state.fs.clone(), cx)
         .detach_and_log_err(cx);
 
+    // Gated on the capability rather than the setting: an unsupported platform
+    // then never builds the watcher entity at all, so it costs nothing -- no
+    // subscriptions, no timers -- for the life of the process. The setting
+    // itself is read live inside the entity, so toggling it still takes
+    // effect immediately once the capability is present.
+    if cx.can_post_notifications() {
+        agent_notify::init(cx);
+    }
+
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
