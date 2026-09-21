@@ -162,6 +162,7 @@
 - [Agent Usage Indicator](./agent-usage.md)
 - [Agent Sessions Across Restarts](./agent-sessions.md)
 - [Keeping the Display Awake](./keep-display-awake.md)
+- [Agent Finished Notifications](./agent-finished-notifications.md)
 - [Project Footprint Indicator](./project-footprint-indicator.md)
 
 # Developing Zode
