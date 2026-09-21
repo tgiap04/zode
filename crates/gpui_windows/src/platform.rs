@@ -64,6 +64,7 @@ pub(crate) struct WindowsPlatformState {
     // NOTE: standard cursor handles don't need to close.
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
     directx_devices: RefCell<Option<DirectXDevices>>,
+    notifications: NotificationState,
 }
 
 #[derive(Default)]
@@ -75,6 +76,7 @@ struct PlatformCallbacks {
     will_open_app_menu: Cell<Option<Box<dyn FnMut()>>>,
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
+    notification_activated: Cell<Option<Box<dyn FnMut(String)>>>,
 }
 
 impl WindowsPlatformState {
@@ -89,6 +91,7 @@ impl WindowsPlatformState {
             current_cursor: Cell::new(current_cursor),
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
+            notifications: NotificationState::new(),
         }
     }
 }
@@ -430,6 +433,32 @@ impl Platform for WindowsPlatform {
                 log::warn!("could not restore the previous execution state");
             }
         }))
+    }
+
+    fn post_notification(&self, notification: Notification) {
+        self.inner.state.notifications.post(
+            &notification,
+            self.handle.into(),
+            self.inner.validation_number,
+        );
+    }
+
+    fn can_post_notifications(&self) -> bool {
+        // A dev/unpackaged build launched without a Start Menu shortcut has
+        // no registered AppUserModelID; `ToastNotifier::Show` then returns
+        // `Ok(())` and nothing renders, with no error anywhere that could
+        // detect this in advance. `true` here is honest for an installed
+        // build -- it is not a claim that a toast has ever been observed
+        // from a build running on this machine.
+        true
+    }
+
+    fn on_notification_activated(&self, callback: Box<dyn FnMut(String)>) {
+        self.inner
+            .state
+            .callbacks
+            .notification_activated
+            .set(Some(callback));
     }
 
     fn on_battery(&self) -> Option<bool> {
@@ -902,7 +931,8 @@ impl WindowsPlatformInner {
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
-            | WM_GPUI_GPU_DEVICE_LOST => self.handle_gpui_events(msg, wparam, lparam),
+            | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_NOTIFICATION_EVENT => self.handle_gpui_events(msg, wparam, lparam),
             _ => None,
         };
         if let Some(result) = handled {
@@ -915,6 +945,16 @@ impl WindowsPlatformInner {
     fn handle_gpui_events(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         if wparam.0 != self.validation_number {
             log::error!("Wrong validation number while processing message: {message}");
+            // A rejected notification message still carries a `Box::into_raw`
+            // payload, and this early return is the one exit that skips the
+            // handler which would otherwise reclaim it.
+            if message == WM_GPUI_NOTIFICATION_EVENT {
+                // SAFETY: same pointer contract as `handle_notification_event`
+                // -- produced by `Box::into_raw` in
+                // `notifications::forward_to_foreground`, reclaimed once here
+                // because the handler will not run for this message.
+                drop(unsafe { Box::from_raw(lparam.0 as *mut NotificationEvent) });
+            }
             return None;
         }
         match message {
@@ -926,6 +966,7 @@ impl WindowsPlatformInner {
             WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_NOTIFICATION_EVENT => self.handle_notification_event(lparam),
             _ => unreachable!(),
         }
     }
@@ -1045,6 +1086,21 @@ impl WindowsPlatformInner {
         self.state.directx_devices.borrow_mut().take();
         *self.state.directx_devices.borrow_mut() = Some(directx_devices.clone());
 
+        Some(0)
+    }
+
+    fn handle_notification_event(&self, lparam: LPARAM) -> Option<isize> {
+        // SAFETY: this pointer was produced by `Box::into_raw` in
+        // `notifications::forward_to_foreground` and this is the only place
+        // that reclaims it, exactly once, on the thread that owns `self.state`.
+        let event = unsafe { Box::from_raw(lparam.0 as *mut NotificationEvent) };
+        self.state.notifications.forget(event.id.as_ref());
+        if event.activated {
+            self.with_callback(
+                |callbacks| &callbacks.notification_activated,
+                |callback| callback(event.id.as_ref().to_owned()),
+            );
+        }
         Some(0)
     }
 }
