@@ -161,6 +161,10 @@ pub struct SettingsContent {
     /// Default: true
     pub keep_display_awake: Option<bool>,
 
+    /// Whether to post an OS notification when an agent finishes answering or
+    /// its CLI exits.
+    pub agent_finished_notification: Option<AgentFinishedNotificationContent>,
+
     /// Whether to show the combined CPU and RAM footprint of each tracked
     /// project's child processes in the status bar.
     ///
@@ -1197,6 +1201,32 @@ pub struct ReplSettingsContent {
     ///
     /// Default: 0
     pub output_max_height_lines: Option<usize>,
+}
+
+/// Settings for OS notifications when an agent finishes answering.
+///
+/// One object rather than two flat keys: `quiet_period_ms` alone means
+/// nothing without `enabled` beside it, and alphabetical key order would file
+/// the two far apart in both `default.json` and the generated settings docs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct AgentFinishedNotificationContent {
+    /// Whether to post an OS notification when an agent finishes answering or
+    /// its CLI exits. Posted regardless of window focus.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+    /// How long an agent must stay quiet after its last output before the
+    /// "finished answering" notification fires.
+    ///
+    /// This is a debounce sitting on top of another debounce, not a
+    /// guarantee: an agent that pauses longer than this while running a tool
+    /// or waiting on a model reads as finished and notifies early. There is
+    /// no protocol-level "reply finished" signal to read instead -- raise
+    /// this value if early notifications happen often. Floored at 2000 --
+    /// anything lower would fire on every pause inside a single reply.
+    ///
+    /// Default: 12000
+    pub quiet_period_ms: Option<u64>,
 }
 
 /// Settings for configuring the which-key popup behaviour.

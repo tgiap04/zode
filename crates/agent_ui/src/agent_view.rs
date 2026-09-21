@@ -294,6 +294,14 @@ impl AgentView {
     pub fn is_agent(&self, agent: &AgentId) -> bool {
         &self.agent == agent
     }
+
+    /// The workspace this tab lives in.
+    ///
+    /// Public for `agent_notify`, which needs it so a clicked notification can
+    /// bring the right tab forward through [`Self::activate_for_agent`].
+    pub fn workspace(&self) -> WeakEntity<Workspace> {
+        self.workspace.clone()
+    }
 }
 
 impl EventEmitter<AgentViewEvent> for AgentView {}

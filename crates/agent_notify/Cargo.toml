@@ -1,0 +1,46 @@
+[package]
+name = "agent_notify"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+# No `test-support` feature, for the same reason `keep_awake` has none: this
+# crate reaches the OS only through `App::post_notification` /
+# `App::can_post_notifications`, and every test runs against `TestPlatform`,
+# so there is no real I/O to gate off.
+
+[lib]
+path = "src/agent_notify.rs"
+doctest = false
+
+[dependencies]
+# `agent_ui` is a deliberate dependency, exactly as it is in `keep_awake`:
+# this crate's whole question is "did an agent tab just finish answering, or
+# did its CLI just exit", and `AgentView` is the only thing that knows either.
+agent_ui.workspace = true
+gpui.workspace = true
+project.workspace = true
+settings.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# For `SettingsStore::test` and `update_user_settings`: the setting is a
+# user-facing switch, so the tests read it through a real store rather than
+# through the `try_get` fallback.
+settings = { workspace = true, features = ["test-support"] }
+# For a real agent tab in a real workspace -- the click-routing test needs an
+# actual `AgentView` to activate, and the quiet-timer tests need a real
+# `EntityId` for the tab even though they drive the answering signal by hand
+# (see the note at the top of `agent_notify_tests`).
+workspace = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+fs = { workspace = true, features = ["test-support"] }
+theme = { workspace = true, features = ["test-support"] }
+theme_settings = { workspace = true, features = ["test-support"] }
+editor = { workspace = true, features = ["test-support"] }
