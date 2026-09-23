@@ -837,6 +837,7 @@ mod terminals {
     use super::*;
     use crate::terminal::TerminalIntent;
     use container::ResourceKind;
+    use terminal_view::terminal_panel::TerminalPanel;
 
     /// The buttons are drawn only where the engine has a command for them.
     #[gpui::test]
@@ -928,6 +929,60 @@ mod terminals {
                  somewhere to open"
             );
         });
+    }
+
+    /// Clicking either terminal button must not re-enter the workspace.
+    ///
+    /// `TerminalPanel::spawn_task` reads the workspace entity, so driving it
+    /// from inside `workspace.update(..)` leaves that entity leased and GPUI
+    /// panics on the read rather than opening anything. The two tests above
+    /// both walk past this: one has no workspace at all, so the call returns
+    /// before it can happen, and the other only checks that the handle is
+    /// there without ever clicking.
+    ///
+    /// Nothing is asserted about the terminal itself, on purpose. The fake
+    /// engine's program is `fake`, which is not a binary, so the spawn fails
+    /// for its own honest reason -- reaching the end of the call is the whole
+    /// proof, because the defect is a panic.
+    #[gpui::test]
+    async fn clicking_a_terminal_button_does_not_re_enter_the_workspace(cx: &mut TestAppContext) {
+        // `spawn_task` ends in a real PTY spawn, which parks.
+        cx.executor().allow_parking();
+        init_test(cx);
+        cx.update(|cx| terminal_view::init(cx));
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        // Built directly rather than through `TerminalPanel::load`: that path is
+        // async and wants a key-value store this test has no reason to stand up.
+        let terminal_panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(terminal_panel, window, cx)
+        });
+
+        let tab = tab_in_workspace(&workspace, vec![Arc::new(FakeBackend::docker())], cx);
+        cx.run_until_parked();
+
+        for intent in [TerminalIntent::Shell, TerminalIntent::FollowLogs] {
+            tab.update_in(cx, |panel, window, cx| {
+                panel.open_terminal(intent, "c0ffee".into(), "fake-postgres".into(), window, cx);
+            });
+            cx.run_until_parked();
+        }
+
+        assert!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .panel::<TerminalPanel>(cx)
+                .is_some()),
+            "the terminal panel must really be in the workspace, or the clicks \
+             above proved nothing"
+        );
     }
 }
 

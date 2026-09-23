@@ -543,6 +543,11 @@ impl TerminalPanel {
             .detach_and_log_err(cx);
     }
 
+    /// # Panics
+    ///
+    /// Reads the workspace entity below, so calling this from inside
+    /// `workspace.update(..)` finds it already leased and panics. Callers take
+    /// the panel handle out of the workspace first.
     pub fn spawn_task(
         &mut self,
         task: &SpawnInTerminal,
