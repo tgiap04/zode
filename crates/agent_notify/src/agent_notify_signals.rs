@@ -142,6 +142,8 @@ pub(crate) fn needs_reread(awaited: Option<EntityId>, current: Option<EntityId>)
 /// Recovers the watched tab's `EntityId` from a notification id built as
 /// `"{entity_id}-answer"` or `"{entity_id}-exit"`.
 fn parse_notification_id(id: &str) -> Option<EntityId> {
-    let raw = id.strip_suffix("-answer").or_else(|| id.strip_suffix("-exit"))?;
+    let raw = id
+        .strip_suffix("-answer")
+        .or_else(|| id.strip_suffix("-exit"))?;
     raw.parse::<u64>().ok().map(EntityId::from)
 }

@@ -7,8 +7,8 @@ use windows::{
     Data::Xml::Dom::XmlDocument,
     Foundation::TypedEventHandler,
     UI::Notifications::{
-        ToastDismissedEventArgs, ToastFailedEventArgs, ToastNotification,
-        ToastNotificationManager, ToastTemplateType,
+        ToastDismissedEventArgs, ToastFailedEventArgs, ToastNotification, ToastNotificationManager,
+        ToastTemplateType,
     },
     Win32::{
         Foundation::{LPARAM, WPARAM},
@@ -99,9 +99,9 @@ fn post_toast(
 
     match build_and_show(notification, platform_window, validation_number) {
         Ok(toast) => remember_toast(live_toasts, notification.id.clone(), toast),
-        Err(error) => log::error!(
-            "post_notification: WinRT toast call failed, no toast is visible: {error}"
-        ),
+        Err(error) => {
+            log::error!("post_notification: WinRT toast call failed, no toast is visible: {error}")
+        }
     }
 }
 
@@ -156,19 +156,42 @@ fn build_and_show(
     // `Activated` hands back `IInspectable` rather than the documented
     // `ToastActivatedEventArgs` -- a known windows-rs gap for this event.
     let id = notification.id.clone();
-    toast.Activated(&TypedEventHandler::<ToastNotification, windows::core::IInspectable>::new(
-        move |_, _| Ok(forward_to_foreground(platform_window, validation_number, &id, true)),
-    ))?;
+    toast.Activated(&TypedEventHandler::<
+        ToastNotification,
+        windows::core::IInspectable,
+    >::new(move |_, _| {
+        Ok(forward_to_foreground(
+            platform_window,
+            validation_number,
+            &id,
+            true,
+        ))
+    }))?;
 
     let id = notification.id.clone();
-    toast.Dismissed(&TypedEventHandler::<ToastNotification, ToastDismissedEventArgs>::new(
-        move |_, _| Ok(forward_to_foreground(platform_window, validation_number, &id, false)),
-    ))?;
+    toast.Dismissed(&TypedEventHandler::<
+        ToastNotification,
+        ToastDismissedEventArgs,
+    >::new(move |_, _| {
+        Ok(forward_to_foreground(
+            platform_window,
+            validation_number,
+            &id,
+            false,
+        ))
+    }))?;
 
     let id = notification.id.clone();
-    toast.Failed(&TypedEventHandler::<ToastNotification, ToastFailedEventArgs>::new(
-        move |_, _| Ok(forward_to_foreground(platform_window, validation_number, &id, false)),
-    ))?;
+    toast.Failed(
+        &TypedEventHandler::<ToastNotification, ToastFailedEventArgs>::new(move |_, _| {
+            Ok(forward_to_foreground(
+                platform_window,
+                validation_number,
+                &id,
+                false,
+            ))
+        }),
+    )?;
 
     // No-argument `CreateToastNotifier` takes the process's implicit AUMID
     // from the shortcut it was launched from. The AUMID string itself lives

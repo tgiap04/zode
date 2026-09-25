@@ -33,7 +33,10 @@ fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
     cx.update(|cx| {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
-                content.agent_finished_notification.get_or_insert_default().enabled = Some(enabled);
+                content
+                    .agent_finished_notification
+                    .get_or_insert_default()
+                    .enabled = Some(enabled);
             });
         });
     });
@@ -156,7 +159,11 @@ async fn exiting_while_a_quiet_timer_is_armed_notifies_only_the_exit(cx: &mut Te
     cx.run_until_parked();
 
     let posted = cx.posted_notifications();
-    assert_eq!(posted.len(), 1, "the exit must cancel the armed answer timer");
+    assert_eq!(
+        posted.len(),
+        1,
+        "the exit must cancel the armed answer timer"
+    );
     assert_eq!(posted[0].body.as_ref(), "Session ended");
 }
 

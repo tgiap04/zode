@@ -2,9 +2,9 @@ use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels, DisplayWakeLock,
     DummyKeyboardMapper, ForegroundExecutor, Keymap, NoopTextSystem, Notification, Platform,
     PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper,
-    PlatformTextSystem, PromptButton, ScreenCaptureFrame, ScreenCaptureSource,
-    ScreenCaptureStream, SourceMetadata, Task, TestDisplay, TestWindow, ThermalState,
-    WindowAppearance, WindowParams, size,
+    PlatformTextSystem, PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
+    SourceMetadata, Task, TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams,
+    size,
 };
 use anyhow::Result;
 use collections::VecDeque;

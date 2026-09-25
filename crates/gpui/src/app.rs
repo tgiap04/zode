@@ -1193,8 +1193,7 @@ impl App {
     where
         F: 'static + FnMut(String),
     {
-        self.platform
-            .on_notification_activated(Box::new(callback));
+        self.platform.on_notification_activated(Box::new(callback));
     }
 
     /// Invokes a handler when the thermal state changes
