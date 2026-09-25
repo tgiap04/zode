@@ -2376,7 +2376,7 @@ Example:
 
 ## Keep Display Awake
 
-- Description: Whether to keep the display lit while an agent's CLI is still working. Released automatically while running on battery, and whenever no agent is working. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
+- Description: Whether to keep the display lit while a terminal — agent, task, or shell — is actively producing output. Released automatically while running on battery, and whenever nothing is producing output. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
 - Setting: `keep_display_awake`
 - Default: `true`
 

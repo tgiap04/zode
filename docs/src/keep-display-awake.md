@@ -1,9 +1,11 @@
 # Keeping the Display Awake
 
-While an agent's CLI is working, Zode asks the operating system to keep the
-display lit. A long refactor, a test run or a fan-out of subagents can go many
-minutes without printing anything, and a machine that dims and locks in the
-middle of one is a machine you have to come back and wake up.
+While a terminal is actively producing output, Zode asks the operating system
+to keep the display lit. This covers agent CLIs, task terminals run from the
+terminal dock, and ordinary shell terminals alike — a long refactor, a test
+run or a fan-out of subagents can go many minutes without printing anything,
+and a machine that dims and locks in the middle of one is a machine you have
+to come back and wake up.
 
 This is on by default:
 
@@ -15,12 +17,30 @@ This is on by default:
 
 ## What holds it
 
-An agent tab whose CLI is **still running**. Not an agent tab that is merely
-open — once the CLI ends, whether the tab then shows a shell or keeps the
-terminal the agent failed in, it holds nothing.
+The rule is a **rate**, not liveness: a terminal that is producing output
+fast enough holds the display; one that has gone quiet does not, whether or
+not its process is still running.
 
-Subagents need no special handling. A subagent runs inside the agent's own
-process, so while it works the CLI has not exited and the hold stands.
+- Output arriving faster than roughly eight writes a second holds the
+  display. That rate has to keep up — the hold lets go about a minute after
+  the last such burst, so a build that pauses between steps keeps the display
+  lit, while one that has finished does not.
+- A dev server that has finished booting and now sits idle — or a `tail -f`
+  with nothing new to print — **will** let the display sleep once that minute
+  passes. That is deliberate, not a bug.
+- A slow repaint — `top`, `htop`, a prompt clock, a `tmux` status line —
+  redraws once or twice a second, under the threshold, so it does not hold
+  the display either.
+- A shell sitting at its prompt writes nothing and holds nothing.
+- Typing at a prompt can cross the threshold, but it changes nothing in
+  practice: the operating system already resets its own idle timer on
+  keystrokes.
+- An idle editor with terminals open costs nothing to watch: the poll behind
+  this does not start until a terminal writes something, and stops itself
+  again once every terminal has been quiet for a minute.
+
+Subagents need no special handling in an agent tab: a subagent runs inside
+the agent's own CLI process, so its output counts as that tab's output.
 
 ## The status bar switch
 
@@ -28,26 +48,31 @@ There is a bolt icon on the status bar. It is lit while the display is being
 held and dimmed when it is not, and clicking it opens a menu with the switch and
 one line saying what is actually happening:
 
-| The menu says                   | Meaning                                            |
-| ------------------------------- | -------------------------------------------------- |
-| The display is being held awake | An agent is working and the hold is in place       |
-| No agent is working             | Nothing to hold it for                             |
-| Paused - running on battery     | An agent is working, but the machine is on battery |
-| The system refused the request  | Everything says yes and the OS still said no       |
+| The menu says                    | Meaning                                                       |
+| --------------------------------- | -------------------------------------------------------------- |
+| The display is being held awake  | Something is producing output and the hold is in place       |
+| Nothing is producing output      | Nothing to hold it for                                        |
+| Paused - running on battery      | Something is producing output, but the machine is on battery |
+| The system refused the request   | Everything says yes and the OS still said no                  |
 
-The line exists because three of those four states are the same dimmed icon. The
-tooltip names the agent responsible when there is one.
+The line exists because three of those four states are the same dimmed icon.
+The tooltip names the tab responsible when there is one — an agent's label or
+a terminal's title.
 
-There is no "turned off" row in that table: switching the feature off does not
-dim this icon, it removes it — see [What lets it go](#what-lets-it-go).
+The status behind that line actually has five values, not four: the fifth is
+"turned off," and it has no row in the table above because switching the
+feature off does not dim the icon, it removes it entirely — see [What lets it
+go](#what-lets-it-go).
 
 ## What lets it go
 
-- Every working agent finishes, or you close its tab.
+- Every terminal producing output goes quiet — its command finishes, or its
+  output rate drops below the threshold for a minute (see [What holds
+  it](#what-holds-it)) — or you close its tab.
 - The machine starts running on battery. The hold returns when you plug back in;
   the power source is re-checked about once a minute, so expect up to a minute
   of lag either way.
-- You set `keep_display_awake` to `false` — by hand, from the Settings Editor,
+- You set `keep_display_awake` to `false` — by hand-editing `settings.json`,
   or by right-clicking an empty part of the status bar and switching off
   **Keep Display Awake** in the menu that opens (see [Status Bar
   settings](./visual-customization.md#status-bar)). This takes effect
@@ -62,8 +87,8 @@ dim this icon, it removes it — see [What lets it go](#what-lets-it-go).
 feature working as asked, and it is also the risk: an editor left in a shared
 office or a café stays readable to whoever walks past. The battery guard covers
 a laptop on the move, but a desktop has no battery, so on a desktop nothing
-ends a hold except the agent finishing, the tab closing, or the setting going
-off. There is no time limit.
+ends a hold except the producing terminal going quiet, the tab closing, or
+the setting going off. There is no time limit.
 
 If that trade is wrong for where you work, set `keep_display_awake` to `false`
 and lock the machine yourself, or lock it manually before you walk away —
@@ -76,7 +101,7 @@ hold the display, and noticing the machine is on battery.
 
 | Platform | Holds the display                                                                                           | Detects battery |
 | -------- | ----------------------------------------------------------------------------------------------------------- | --------------- |
-| macOS    | Yes — an IOKit assertion, visible in `pmset -g assertions` and named after the agent                        | Yes             |
+| macOS    | Yes — an IOKit assertion, visible in `pmset -g assertions` and named after the tab producing output         | Yes             |
 | Windows  | Yes — `SetThreadExecutionState` with `ES_DISPLAY_REQUIRED`                                                  | Yes             |
 | Linux    | Yes — an `org.freedesktop.ScreenSaver` inhibit on the session bus, the same call under both X11 and Wayland | Yes             |
 
