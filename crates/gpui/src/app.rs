@@ -646,6 +646,12 @@ pub struct App {
     pub(crate) name: Option<&'static str>,
     pub(crate) text_rendering_mode: Rc<Cell<TextRenderingMode>>,
 
+    /// Outstanding [`App::keep_display_awake`] callers and the single platform
+    /// lock they share. Refcounted here so N callers collapse to one OS
+    /// assertion instead of the platform layer stacking (or, on Windows,
+    /// silently clobbering) one lock per caller.
+    display_wake_lock: Rc<RefCell<(usize, Option<DisplayWakeLock>)>>,
+
     pub(crate) window_update_stack: Vec<WindowId>,
     pub(crate) mode: GpuiMode,
     flushing_effects: bool,
@@ -738,6 +744,7 @@ impl App {
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,
+                display_wake_lock: Rc::new(RefCell::new((0, None))),
                 element_arena: RefCell::new(Arena::new(1024 * 1024)),
                 event_arena: Arena::new(1024 * 1024),
 
@@ -1161,8 +1168,56 @@ impl App {
     ///
     /// `None` when the platform cannot make the request. See
     /// [`DisplayWakeLock`] for why the handle releases on drop.
+    ///
+    /// Every outstanding caller shares one platform-level assertion: `App`
+    /// refcounts calls to this method so a second, third, ... caller merely
+    /// increments, and only the last one dropping tells the platform to
+    /// release. This is load-bearing on Windows, where `SetThreadExecutionState`
+    /// overwrites rather than nests -- without this refcount, two independent
+    /// holders racing their drops can silently kill each other's hold. `reason`
+    /// is recorded only for the first caller to reach zero; it is what the OS
+    /// (and any platform-level UI showing it) sees for as long as the hold
+    /// lasts, matching the existing stance that the assertion is not churned
+    /// just to refresh a debug string.
     pub fn keep_display_awake(&self, reason: &str) -> Option<DisplayWakeLock> {
-        self.platform.keep_display_awake(reason)
+        let mut state = self.display_wake_lock.borrow_mut();
+        let (count, lock) = &mut *state;
+        if *count > 0 {
+            *count += 1;
+            drop(state);
+            return Some(self.display_wake_lock_handle());
+        }
+
+        let Some(platform_lock) = self.platform.keep_display_awake(reason) else {
+            return None;
+        };
+        *lock = Some(platform_lock);
+        *count = 1;
+        drop(state);
+        Some(self.display_wake_lock_handle())
+    }
+
+    /// Builds the handle returned to a `keep_display_awake` caller. The
+    /// closure captures a `Weak` rather than the `Rc` itself: a strong capture
+    /// here would be a reference cycle (the cell would own a value that in
+    /// turn owns a strong ref back into the cell), which never frees. If the
+    /// `App` has already been torn down, upgrading fails and the closure does
+    /// nothing -- the process is ending in that case, so there is nothing left
+    /// to release.
+    fn display_wake_lock_handle(&self) -> DisplayWakeLock {
+        let weak_state = Rc::downgrade(&self.display_wake_lock);
+        DisplayWakeLock::new(move || {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            let released_lock = {
+                let mut state = state.borrow_mut();
+                let (count, lock) = &mut *state;
+                *count = count.saturating_sub(1);
+                if *count == 0 { lock.take() } else { None }
+            };
+            drop(released_lock);
+        })
     }
 
     /// Whether [`App::keep_display_awake`] can ever succeed on this platform.
@@ -2729,5 +2784,75 @@ mod test {
         });
 
         assert_eq!(*observation_count.borrow(), 2);
+    }
+
+    #[test]
+    fn display_wake_two_locks_reach_the_platform_once() {
+        let cx = TestAppContext::single();
+        let (first, second) = cx.update(|cx| {
+            (
+                cx.keep_display_awake("first"),
+                cx.keep_display_awake("second"),
+            )
+        });
+        assert!(first.is_some());
+        assert!(second.is_some());
+
+        let reasons = cx.display_wake_reasons();
+        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons[0], "first");
+    }
+
+    #[test]
+    fn display_wake_dropping_one_of_two_leaves_the_hold_in_place() {
+        let cx = TestAppContext::single();
+        let (first, second) = cx.update(|cx| {
+            (
+                cx.keep_display_awake("first"),
+                cx.keep_display_awake("second"),
+            )
+        });
+
+        drop(first);
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+
+        drop(second);
+    }
+
+    #[test]
+    fn display_wake_dropping_the_last_releases_it() {
+        let cx = TestAppContext::single();
+        let (first, second) = cx.update(|cx| {
+            (
+                cx.keep_display_awake("first"),
+                cx.keep_display_awake("second"),
+            )
+        });
+
+        drop(first);
+        drop(second);
+
+        assert!(cx.display_wake_reasons().is_empty());
+    }
+
+    #[test]
+    fn display_wake_a_refusal_leaves_no_count_behind() {
+        let cx = TestAppContext::single();
+        cx.set_display_wake_supported(false);
+
+        let (first, second) = cx.update(|cx| {
+            (
+                cx.keep_display_awake("first"),
+                cx.keep_display_awake("second"),
+            )
+        });
+        assert!(first.is_none());
+        assert!(second.is_none());
+        assert!(cx.display_wake_reasons().is_empty());
+
+        cx.set_display_wake_supported(true);
+        let third = cx.update(|cx| cx.keep_display_awake("third"));
+        assert!(third.is_some());
+        assert_eq!(cx.display_wake_reasons(), vec!["third".to_string()]);
     }
 }

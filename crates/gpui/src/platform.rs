@@ -212,6 +212,12 @@ pub trait Platform: 'static {
     /// is working at all. `None` means this platform cannot make the request,
     /// which is an ordinary answer rather than a failure: the caller carries on
     /// without a lock.
+    ///
+    /// [`crate::App::keep_display_awake`] is the entry point callers actually use: it
+    /// refcounts calls to this method so at most one call is ever outstanding
+    /// here at a time, regardless of how many callers hold a handle. A platform
+    /// implementation may rely on that as an invariant rather than guard
+    /// against concurrent callers itself.
     fn keep_display_awake(&self, _reason: &str) -> Option<DisplayWakeLock> {
         None
     }

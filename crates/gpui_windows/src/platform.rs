@@ -406,7 +406,10 @@ impl Platform for WindowsPlatform {
         // setting `ES_CONTINUOUS`, is what keeps this from stamping on a hold
         // somebody else established: the state is per-thread and this API
         // overwrites rather than nesting, so there is no reference count to lean
-        // on.
+        // on here. `App::keep_display_awake` is where that reference count now
+        // lives -- it collapses every caller down to at most one live call into
+        // this method at a time, so the single-owner assumption this drop relies
+        // on is an invariant `gpui` enforces, not a hope this file makes alone.
         //
         // Per-thread also means the release has to happen on the thread that took
         // it. Nothing in the type can enforce that. It holds here because the
