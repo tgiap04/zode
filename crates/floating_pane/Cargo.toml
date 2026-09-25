@@ -14,21 +14,33 @@ path = "src/floating_pane.rs"
 [dependencies]
 agent_ui.workspace = true
 anyhow.workspace = true
+container_ui.workspace = true
+database_ui.workspace = true
+debugger_ui.workspace = true
 editor.workspace = true
+git_ui.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true
 project.workspace = true
+project_panel.workspace = true
 terminal_view.workspace = true
 ui.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 
 [dev-dependencies]
+container_ui = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
+# `remote`'s `test-support` adds the `Mock` variant to `RemoteConnectionOptions`,
+# but the match arm for it in `remote_connection` is gated on *that* crate's own
+# `test-support`. Pulling `git_ui` in as a plain dependency turns the first on
+# without the second, and the match stops being exhaustive. `git_ui` and
+# `project_panel` keep the two in step the same way for their own test builds.
+remote_connection = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 theme.workspace = true
 theme_settings.workspace = true

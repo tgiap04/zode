@@ -62,9 +62,67 @@ async fn a_painted_window(
 
 mod dispatch {
     use super::*;
-    use gpui::{Modifiers, MouseButton};
+    use gpui::{Modifiers, MouseButton, MouseDownEvent};
 
     use crate::host::Grab;
+
+    /// A move is a pure window-space delta, independent of the floating
+    /// layer's own position on screen.
+    ///
+    /// `a_painted_window` cannot catch the bug this proves: as its own root
+    /// view the layer origin is `(0,0)`, so the window-space and layer-space
+    /// arithmetic coincide there whether or not `grab`/`follow` mix the two
+    /// spaces correctly. A non-zero `layer_origin` -- standing in for the
+    /// title-bar height and left-dock width a real workspace adds -- is the
+    /// only way to tell the fix from the bug it replaced: before the fix this
+    /// assertion lands at `placement.origin + delta - layer_origin` instead.
+    #[gpui::test]
+    async fn a_move_ignores_the_layers_window_space_origin(cx: &mut TestAppContext) {
+        let (pane, cx) = super::a_window(cx).await;
+        let container = size(px(1200.), px(800.));
+        let placement = pane.read_with(cx, |pane, _| pane.bounds_within(container));
+
+        let press = placement.origin
+            + Point {
+                x: px(10.),
+                y: px(20.),
+            };
+        let delta = Point {
+            x: px(40.),
+            y: px(25.),
+        };
+        // Stands in for the title bar and left dock a real workspace adds
+        // around the floating layer -- non-zero, and different on each axis
+        // so a fix that only fixed one axis would still be caught.
+        let layer_origin = Point {
+            x: px(96.),
+            y: px(48.),
+        };
+
+        pane.update(cx, |pane, _| {
+            pane.grab(
+                Grab::Move,
+                &MouseDownEvent {
+                    position: press,
+                    modifiers: Modifiers::default(),
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                placement,
+            );
+            pane.follow(press + delta, layer_origin, container);
+        });
+
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(
+                pane.position,
+                Some(placement.origin + delta),
+                "the window must stay under the pointer regardless of where \
+                 the floating layer itself sits in the window"
+            );
+        });
+    }
 
     /// Every edge and every corner claims its own press.
     ///
@@ -1119,7 +1177,14 @@ mod splitting {
         let mut found = false;
         let x = last_fixed_entry.center().x;
         let mut y = last_fixed_entry.bottom() + gpui::px(4.);
-        for _ in 0..60 {
+        // Everything between this anchor and the Split submenu is variable in
+        // length -- one row per installed agent, per container engine and per
+        // panel -- so the sweep is sized from that list rather than from a
+        // number read off whatever menu existed the day it was written. Four
+        // pixels a step, and far more steps per row than a row is tall, so it
+        // outruns the list however long the list grows.
+        let steps = crate::entries::Entry::all().len() * 16 + 32;
+        for _ in 0..steps {
             cx.simulate_mouse_move(gpui::Point { x, y }, None, Modifiers::default());
             cx.run_until_parked();
             if cx.debug_bounds("MENU_ITEM-Split Right").is_some() {
@@ -1853,5 +1918,216 @@ mod dropping {
             "dispatching SplitRight through the real workspace must split the active pane, \
              narrowing it and moving its own `+` button left"
         );
+    }
+}
+
+/// The rows beyond the fixed three in the one list `entries.rs` builds:
+/// Database, and one row per container engine.
+mod new_entries {
+    use crate::entries::Entry;
+
+    /// `Entry` is private to this crate, so this is the only place that can
+    /// pin the "three surfaces, one list" invariant `render.rs`'s own doc
+    /// insists on: `Entry::all()` must carry exactly one `Database` and one
+    /// `Engine` per `container_ui::engine_marks()` entry, since every surface
+    /// that offers this window's contents reads that one list and nothing
+    /// else.
+    #[test]
+    fn the_list_gains_a_database_row_and_one_row_per_engine() {
+        let engines: Vec<_> = container_ui::engine_marks().collect();
+        assert!(
+            !engines.is_empty(),
+            "there must be at least one engine for this pin to mean anything"
+        );
+
+        let entries = Entry::all();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Database))
+                .count(),
+            1,
+            "the list must offer Database exactly once"
+        );
+
+        let engine_indices: Vec<usize> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Engine(index, _, _) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            engine_indices.len(),
+            engines.len(),
+            "one Engine entry must exist per engine_marks() entry"
+        );
+        for (index, _, label) in engines {
+            assert!(
+                engine_indices.contains(&index),
+                "engine {index} ({label}) must have its own row in the list"
+            );
+        }
+    }
+
+    /// The defect this panel has already shipped once: a container tab built
+    /// with no workspace draws, but its terminals and confirm modals silently
+    /// do nothing. `open_containers` must not reproduce it -- a floating
+    /// *pane* can always reach the workspace it lives in, unlike the OS
+    /// window this panel was first built for.
+    #[gpui::test]
+    async fn open_containers_adds_one_item_with_a_workspace_attached(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, cx) = super::a_window(cx).await;
+        // Without this, `ContainerPanel::standalone` would ask a real engine
+        // -- see `container_ui::EnginesForTest`'s own doc for why that turns
+        // this test into one that runs `docker`.
+        cx.update(|_window, cx| container_ui::use_fake_engines_for_test(cx));
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.open_containers(0, window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the container tab must open"
+            );
+            let panel = window
+                .active_pane
+                .read(cx)
+                .active_item()
+                .and_then(|item| item.downcast::<container_ui::ContainerPanel>())
+                .expect("the opened tab must be a ContainerPanel");
+            assert!(
+                container_ui::has_workspace_for_test(panel.read(cx)),
+                "a floating pane's container panel must be given a workspace, or its \
+                 terminals and confirm modals silently do nothing"
+            );
+        });
+    }
+
+    /// `open_database` needs no engine to fake: `DatabasePanel::standalone`
+    /// reads its languages and settings straight out of memory, so nothing
+    /// here can reach for a real process the way the container path can.
+    #[gpui::test]
+    async fn open_database_adds_one_item(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.open_database(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the database tab must open"
+            );
+        });
+    }
+
+    /// A second, independent `GitPanel` -- not the dock's -- must still open
+    /// as an ordinary tab and must not panic the app doing it. What it will
+    /// *not* do -- respond to a workspace action aimed at the dock's own
+    /// copy -- is `PanelItem`'s documented limit, not something a test here
+    /// can prove one way or the other.
+    #[gpui::test]
+    async fn open_git_panel_adds_one_item(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.open_git_panel(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the git panel tab must open"
+            );
+        });
+    }
+
+    /// See `open_git_panel_adds_one_item` -- same guarantee, same limit, for
+    /// the project panel.
+    #[gpui::test]
+    async fn open_project_panel_adds_one_item(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.open_project_panel(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the project panel tab must open"
+            );
+        });
+    }
+
+    /// See `open_git_panel_adds_one_item` -- same guarantee, same limit, for
+    /// the debug panel.
+    #[gpui::test]
+    async fn open_debug_panel_adds_one_item(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_window(cx).await;
+
+        window.update_in(cx, |window, window_handle, cx| {
+            window.toggle(window_handle, cx);
+            window.open_debug_panel(window_handle, cx);
+        });
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert_eq!(
+                window.active_pane.read(cx).items_len(),
+                1,
+                "the debug panel tab must open"
+            );
+        });
+    }
+
+    /// `NewMarkdownNote` and `OpenMarkdownNote` are declared in `zed_actions`
+    /// but were registered nowhere -- reachable only through the `+` menu's
+    /// own click handler, the same gap this crate's own doc points at for
+    /// `zed_actions::floating_pane`'s two note actions. Reachability rather
+    /// than a full dispatch: `OpenMarkdownNote` ends in a system file dialog,
+    /// which the test platform has no double for (`prompt_for_paths` is
+    /// `unimplemented!()` there), so a real dispatch of it would panic for a
+    /// reason that has nothing to do with whether the action reaches its
+    /// handler.
+    #[gpui::test]
+    async fn new_and_open_markdown_note_actions_reach_registered_handlers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        super::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (_multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            assert!(
+                window.is_action_available(&zed_actions::floating_pane::NewMarkdownNote, cx),
+                "NewMarkdownNote must reach a registered handler"
+            );
+            assert!(
+                window.is_action_available(&zed_actions::floating_pane::OpenMarkdownNote, cx),
+                "OpenMarkdownNote must reach a registered handler"
+            );
+        });
     }
 }

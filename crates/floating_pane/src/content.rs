@@ -61,7 +61,7 @@ impl FloatingPane {
                 move |_pane, _window, _cx| {
                     (
                         Some(crate::render::tab_bar_split_button(this.clone())),
-                        Some(crate::render::tab_bar_menu(this.clone())),
+                        Some(crate::entries::tab_bar_menu(this.clone())),
                     )
                 }
             });
@@ -252,6 +252,125 @@ impl FloatingPane {
 
             if let Err(error) = outcome {
                 log::error!("could not open that note in the floating window: {error}");
+            }
+        }));
+    }
+
+    /// The database view, as a tab of this window.
+    ///
+    /// Built synchronously, unlike the terminal and the notes: `standalone`
+    /// reads its languages and settings straight from what is already in
+    /// memory, so there is nothing here to await.
+    pub(crate) fn open_database(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let pane = self.active_pane.clone();
+        let languages = self.project.read(cx).languages().clone();
+        let view =
+            cx.new(|cx| database_ui::DatabasePanel::standalone(workspace, languages, window, cx));
+        pane.update(cx, |pane, cx| {
+            pane.add_item(Box::new(view), true, true, None, window, cx);
+        });
+    }
+
+    /// One of the container engines, pre-selected, as a tab of this window.
+    ///
+    /// `self.workspace.clone()` is passed through rather than left `None`:
+    /// `ContainerPanel.workspace` is `None` only for the OS window, which
+    /// cannot reach a workspace to build itself in. A floating *pane* lives
+    /// inside one, and without this its terminals and confirm modals would
+    /// silently do nothing -- the defect this panel has already shipped once.
+    pub(crate) fn open_containers(
+        &mut self,
+        engine: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let pane = self.active_pane.clone();
+        let view = cx.new(|cx| container_ui::standalone_in_workspace(engine, workspace, cx));
+        pane.update(cx, |pane, cx| {
+            pane.add_item(Box::new(view), true, true, None, window, cx);
+        });
+    }
+
+    /// A fresh git panel, as a tab of this window.
+    ///
+    /// Built through `GitPanel::load`, the same constructor the dock uses, so
+    /// it reads the workspace's real git state instead of a bespoke copy that
+    /// would drift the moment upstream added a field. This is a second,
+    /// independent `GitPanel` entity -- see `PanelItem`'s doc comment for what
+    /// that costs.
+    pub(crate) fn open_git_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let pane = self.active_pane.clone();
+
+        self.opening = Some(cx.spawn_in(window, async move |this, cx| {
+            let panel = git_ui::git_panel::GitPanel::load(workspace, cx.clone()).await;
+            let outcome = this.update_in(cx, |_this, window, cx| match panel {
+                Ok(panel) => {
+                    let view = cx.new(|_cx| crate::panel_item::PanelItem::new(panel, "Git Panel"));
+                    pane.update(cx, |pane, cx| {
+                        pane.add_item(Box::new(view), true, true, None, window, cx);
+                    });
+                }
+                Err(error) => {
+                    log::error!("could not open a git panel in the floating window: {error}")
+                }
+            });
+            if let Err(error) = outcome {
+                log::error!("the floating window went while its git panel opened: {error}");
+            }
+        }));
+    }
+
+    /// A fresh project panel, as a tab of this window. See `open_git_panel`
+    /// for why the dock's own constructor is reused rather than duplicated.
+    pub(crate) fn open_project_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let pane = self.active_pane.clone();
+
+        self.opening = Some(cx.spawn_in(window, async move |this, cx| {
+            let panel = project_panel::ProjectPanel::load(workspace, cx.clone()).await;
+            let outcome = this.update_in(cx, |_this, window, cx| match panel {
+                Ok(panel) => {
+                    let view =
+                        cx.new(|_cx| crate::panel_item::PanelItem::new(panel, "Project Panel"));
+                    pane.update(cx, |pane, cx| {
+                        pane.add_item(Box::new(view), true, true, None, window, cx);
+                    });
+                }
+                Err(error) => {
+                    log::error!("could not open a project panel in the floating window: {error}")
+                }
+            });
+            if let Err(error) = outcome {
+                log::error!("the floating window went while its project panel opened: {error}");
+            }
+        }));
+    }
+
+    /// A fresh debug panel, as a tab of this window. See `open_git_panel` for
+    /// why the dock's own constructor is reused rather than duplicated.
+    pub(crate) fn open_debug_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let pane = self.active_pane.clone();
+
+        self.opening = Some(cx.spawn_in(window, async move |this, cx| {
+            let panel = debugger_ui::debugger_panel::DebugPanel::load(workspace, cx).await;
+            let outcome = this.update_in(cx, |_this, window, cx| match panel {
+                Ok(panel) => {
+                    let view =
+                        cx.new(|_cx| crate::panel_item::PanelItem::new(panel, "Debug Panel"));
+                    pane.update(cx, |pane, cx| {
+                        pane.add_item(Box::new(view), true, true, None, window, cx);
+                    });
+                }
+                Err(error) => {
+                    log::error!("could not open a debug panel in the floating window: {error}")
+                }
+            });
+            if let Err(error) = outcome {
+                log::error!("the floating window went while its debug panel opened: {error}");
             }
         }));
     }

@@ -5,14 +5,12 @@
 //! the outer element is `absolute` and `size_full`, and everything inside it is
 //! positioned by hand.
 //!
-//! Everything here is "how the floating window draws itself", which is why the
-//! Split button sits beside the `+` it draws next to rather than in a file of
-//! its own. If this file passes ~700 lines in a later change, the seam to cut
-//! is `Entry`, `entry_items` and the two menus into their own module -- that
-//! leaves the window chrome (title bar, grips, drags) behind, which is the part
-//! that has no other natural home.
-
-use std::sync::LazyLock;
+//! Everything here is "how the floating window draws itself". `Entry`,
+//! `entry_items` and the tab-bar/title-bar `+` menus that read it live in
+//! `entries.rs` instead -- the seam this file's own note once named for a later
+//! change, cut once the list of things a window can hold grew past the three it
+//! started with. What stayed is the window chrome: the title bar, the grips, the
+//! two drags, and the Split menu, which has no other natural home.
 
 use gpui::{
     Anchor, Bounds, ClickEvent, DragMoveEvent, MouseButton, MouseDownEvent, Pixels, Point, Size,
@@ -26,144 +24,11 @@ use workspace::{
     SwapPaneLeft, SwapPaneRight, SwapPaneUp,
 };
 
+use crate::entries::{Entry, entry_items};
 use crate::host::{DraggedFloatingPane, Dragging, FloatingPane, Grab, Grip};
 
 /// The grab strip along the top of the window, and the corner handles.
 const TITLE_BAR_HEIGHT: Pixels = px(34.);
-/// Everything the window can be asked to hold.
-///
-/// One list, read by both the `+` menu and the empty state. Two lists would be
-/// two places to add the next entry, and the one used less would be the one that
-/// fell behind.
-#[derive(Clone, Copy)]
-enum Entry {
-    Terminal,
-    NewNote,
-    OpenNote,
-    Agent(&'static str, IconName, &'static str),
-}
-
-/// Built once, not on every render: `render_menu` and `render_empty_state`
-/// both call `Entry::all()` on every frame, and `Entry` is `Copy`, so there is
-/// nothing to gain from a fresh `Vec` each time.
-static ENTRIES: LazyLock<Vec<Entry>> = LazyLock::new(|| {
-    let mut entries = vec![Entry::Terminal, Entry::NewNote, Entry::OpenNote];
-    entries.extend(
-        agent_ui::agent_marks().map(|(agent, icon, label)| Entry::Agent(agent, icon, label)),
-    );
-    entries
-});
-
-impl Entry {
-    fn all() -> &'static [Entry] {
-        &ENTRIES
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Entry::Terminal => "New Terminal",
-            Entry::NewNote => "New Markdown Note",
-            Entry::OpenNote => "Open Markdown Note",
-            Entry::Agent(_, _, label) => label,
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            Entry::Terminal => IconName::Terminal,
-            Entry::NewNote => IconName::Notepad,
-            Entry::OpenNote => IconName::FileMarkdown,
-            Entry::Agent(_, icon, _) => icon,
-        }
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Entry::Terminal => "floating-pane-new-terminal",
-            Entry::NewNote => "floating-pane-new-note",
-            Entry::OpenNote => "floating-pane-open-note",
-            Entry::Agent(agent, _, _) => agent,
-        }
-    }
-
-    /// Whether a separator belongs above this entry.
-    ///
-    /// The agents are a different kind of thing from the three above them, and
-    /// the first of them is where the list changes subject.
-    fn opens_a_group(self) -> bool {
-        matches!(self, Entry::Agent(agent, _, _) if agent_ui::agent_marks().next().is_some_and(|(first, _, _)| first == agent))
-    }
-
-    fn run(self, pane: &mut FloatingPane, window: &mut Window, cx: &mut Context<FloatingPane>) {
-        match self {
-            Entry::Terminal => pane.open_terminal(window, cx),
-            Entry::NewNote => pane.new_markdown_note(window, cx),
-            Entry::OpenNote => pane.open_markdown_note(window, cx),
-            Entry::Agent(agent, _, _) => pane.open_agent(agent, window, cx),
-        }
-    }
-}
-
-/// The one list, as menu entries.
-///
-/// Shared so the window's own `+`, the tab bar's `+` and the empty state can
-/// never offer three different sets. That was the whole reason `Entry` exists.
-fn entry_items(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
-    for entry in Entry::all() {
-        if entry.opens_a_group() {
-            menu = menu.separator().header("Agent");
-        }
-        let this = this.clone();
-        menu = menu.item(
-            ContextMenuEntry::new(entry.label())
-                .icon(entry.icon())
-                .handler(move |window, cx| {
-                    this.update(cx, |pane, cx| entry.run(pane, window, cx)).ok();
-                }),
-        );
-    }
-    menu
-}
-
-/// The `+` at the end of this window's tab bar.
-///
-/// A pane draws one by default, and the default offers New File, New Terminal
-/// and the agents as *workspace* actions -- which resolve against the active
-/// pane of the editor. This pane is not one of those, so every entry on that
-/// menu opened in the editor behind the window. It only showed once a tab
-/// existed, because until then the empty state is what fills the pane.
-pub(crate) fn tab_bar_menu(this: WeakEntity<FloatingPane>) -> AnyElement {
-    // Wrapped so a test can tell this `+` from the one in the window's title
-    // bar: `IconButton` names its debug selector after the icon, and both are
-    // a plus.
-    h_flex()
-        .debug_selector(|| "floating-pane-tab-bar-add".into())
-        .child(menu_for(this))
-        .into_any_element()
-}
-
-fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
-    PopoverMenu::new("floating-pane-tab-bar-menu")
-        .trigger_with_tooltip(
-            IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-            Tooltip::text("New\u{2026}"),
-        )
-        .anchor(Anchor::TopRight)
-        .menu(move |window, cx| {
-            let this = this.clone();
-            Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                let menu = entry_items(menu, &this);
-                // Not in `Entry`/`entry_items`: that list also feeds the empty
-                // state, and splitting a window with nothing in it would
-                // produce two empty halves.
-                menu.separator()
-                    .submenu_with_icon("Split", IconName::Split, move |menu, _, _| {
-                        split_entries(menu, &this)
-                    })
-            }))
-        })
-        .into_any_element()
-}
 
 /// The four directions a pane can be split, paired with a label and an icon.
 ///
@@ -183,8 +48,10 @@ const SPLIT_DIRECTIONS: [(SplitDirection, &str, IconName); 4] = [
 /// `SPLIT_DIRECTIONS`, as menu entries against one window.
 ///
 /// Shared by the tab bar's Split button and the `+` menu's Split submenu, so
-/// the two lists cannot drift apart.
-fn split_entries(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
+/// the two lists cannot drift apart. `pub(crate)` because the `+` menu's own
+/// Split submenu is built from `entries.rs` now, alongside the rest of that
+/// menu.
+pub(crate) fn split_entries(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
     for (direction, label, icon) in SPLIT_DIRECTIONS {
         let this = this.clone();
         menu = menu.item(
@@ -307,42 +174,60 @@ impl Render for FloatingPane {
 }
 
 impl FloatingPane {
-    /// Applies one frame of a drag.
-    ///
-    /// The container's bounds come from the event rather than from a field: this
-    /// element is the floating layer, so its bounds *are* the area the window
-    /// may occupy, and reading them here means a resized editor window needs no
-    /// invalidation anywhere.
+    /// Dispatch shim: pulls the window-space pointer and the layer's own
+    /// window-space origin out of the event and hands them to [`Self::follow`],
+    /// which is the part a test can reach -- `DragMoveEvent`'s fields are
+    /// private, so nothing outside gpui can build one to call this directly.
     fn follow_the_pointer(
         &mut self,
         event: &DragMoveEvent<DraggedFloatingPane>,
         cx: &mut Context<Self>,
     ) {
+        self.follow(event.event.position, event.bounds.origin, event.bounds.size);
+        cx.notify();
+    }
+
+    /// Applies one frame of a drag, given the pointer in window space and the
+    /// floating layer's own origin in that same window space.
+    ///
+    /// The two grabs read the layer origin differently on purpose. A resize
+    /// grabs a corner of the window and needs it converted into the layer-space
+    /// `bounds_within` already works in, so it subtracts the layer origin out.
+    /// A move instead reads `dragging.anchor`, which already carries that
+    /// origin baked into a constant that cancels it (see the field's doc
+    /// comment on `Dragging`) -- so the move arm never touches `layer_origin`
+    /// at all. That asymmetry, stated in the two arms below, is what keeps a
+    /// title-bar drag from jumping by the layer's own position on screen.
+    pub(crate) fn follow(
+        &mut self,
+        pointer_in_window: Point<Pixels>,
+        layer_origin: Point<Pixels>,
+        container: Size<Pixels>,
+    ) {
         let Some(dragging) = self.dragging else {
             return;
         };
-        let container = event.bounds.size;
-        let pointer = event.event.position - event.bounds.origin;
         match dragging.grab {
-            Grab::Move => self.move_to(pointer - dragging.offset, container),
-            Grab::Resize(corner) => self.resize_to(corner, pointer, container),
+            Grab::Move => self.move_to(dragging.anchor + pointer_in_window, container),
+            Grab::Resize(corner) => {
+                self.resize_to(corner, pointer_in_window - layer_origin, container)
+            }
         }
-        cx.notify();
     }
 
     /// Records what a press grabbed, before the drag begins.
     ///
-    /// On mouse-down rather than in `on_drag`'s constructor, because the offset
+    /// On mouse-down rather than in `on_drag`'s constructor, because the anchor
     /// needs `&mut Self` to store and the constructor only lends `&mut App`.
-    /// Without the offset the window's corner jumps to the pointer on the first
-    /// move, however far in from the edge the press landed.
-    fn grab(&mut self, grab: Grab, event: &MouseDownEvent, bounds: Bounds<Pixels>) {
-        let offset = match grab {
-            Grab::Move => event.position - bounds.origin,
+    /// Without it the window's corner jumps to the pointer on the first move,
+    /// however far in from the edge the press landed.
+    pub(crate) fn grab(&mut self, grab: Grab, event: &MouseDownEvent, bounds: Bounds<Pixels>) {
+        let anchor = match grab {
+            Grab::Move => bounds.origin - event.position,
             // A resize does not need one: the corner goes where the pointer is.
             Grab::Resize(_) => Point::default(),
         };
-        self.dragging = Some(Dragging { grab, offset });
+        self.dragging = Some(Dragging { grab, anchor });
     }
 
     fn render_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

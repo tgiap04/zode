@@ -101,16 +101,23 @@ impl Grip {
     }
 }
 
-/// A drag that has started, with the pointer's offset inside the thing it
-/// grabbed.
+/// A drag that has started, with the anchor a move rebuilds its position from.
 ///
-/// The offset is what stops the window jumping: without it the window's corner
-/// snaps to the pointer on the first move, however far in from the edge the
-/// press landed.
+/// Only `Grab::Move` reads this; a resize starts from `Point::default()` and
+/// never touches it. It holds `placement.origin - press_position` -- a
+/// layer-space corner minus a window-space pointer, deliberately mixed. That
+/// difference is a constant (the floating layer's own window-space origin) for
+/// the life of one drag, so adding a later window-space pointer back to it
+/// cancels the constant and returns a layer-space position without ever
+/// reading the layer's origin again. Reading it as "the same value in two
+/// spaces" is the bug this replaced: `event.position` (window-space) and
+/// `bounds.origin` (layer-space) may not be subtracted as if they shared an
+/// origin except right here, where the subtraction is undone before either
+/// space is trusted alone.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Dragging {
     pub(crate) grab: Grab,
-    pub(crate) offset: Point<Pixels>,
+    pub(crate) anchor: Point<Pixels>,
 }
 
 /// The payload dragged, carrying nothing.

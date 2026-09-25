@@ -16,7 +16,9 @@
 //! a minute -- a command, a question, a note -- and then dismiss.
 
 mod content;
+mod entries;
 mod host;
+mod panel_item;
 mod render;
 mod split;
 
@@ -77,6 +79,25 @@ pub fn init(cx: &mut App) {
             let view = view.downgrade();
             move |_workspace, _: &zed_actions::floating_pane::NewTerminal, window, cx| {
                 view.update(cx, |this, cx| this.open_terminal(window, cx))
+                    .ok();
+            }
+        });
+        // Declared alongside `NewTerminal` in `zed_actions` but never wired to
+        // anything -- reachable only through the `+` menu's own click handler.
+        // `NewMarkdownNote` and `OpenMarkdownNote` for a keybinding to bind
+        // under the `FloatingPane` context, the same way every other action
+        // here is.
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::NewMarkdownNote, window, cx| {
+                view.update(cx, |this, cx| this.new_markdown_note(window, cx))
+                    .ok();
+            }
+        });
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace, _: &zed_actions::floating_pane::OpenMarkdownNote, window, cx| {
+                view.update(cx, |this, cx| this.open_markdown_note(window, cx))
                     .ok();
             }
         });
