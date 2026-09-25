@@ -915,6 +915,12 @@ pub struct Terminal {
     ///
     /// Capped at [`PTY_OUTPUT_HISTORY`], so a fast writer costs a fixed
     /// sixteen timestamps rather than one per write.
+    ///
+    /// Stamped from `background_executor.now()`, not `Instant::now()`, so this
+    /// reads the same clock the scheduler runs on. Production behaviour is
+    /// unchanged -- the real scheduler's `now()` is `Instant::now()` -- but a
+    /// test can move the executor's clock without moving the wall clock, so
+    /// the write-rate window can actually be proven to expire.
     recent_pty_output: VecDeque<Instant>,
     last_hyperlink_search_position: Option<Point<Pixels>>,
     mouse_down_hyperlink: Option<(String, bool, Match)>,
@@ -2305,7 +2311,8 @@ impl Terminal {
         if self.recent_pty_output.len() == PTY_OUTPUT_HISTORY {
             self.recent_pty_output.pop_front();
         }
-        self.recent_pty_output.push_back(Instant::now());
+        self.recent_pty_output
+            .push_back(self.background_executor.now());
     }
 
     /// How many separate writes the pty has made within `window`.
@@ -2314,9 +2321,10 @@ impl Terminal {
     /// steadily", and past that many writes in a window the answer no longer
     /// changes.
     pub fn pty_writes_within(&self, window: Duration) -> usize {
+        let now = self.background_executor.now();
         self.recent_pty_output
             .iter()
-            .filter(|at| at.elapsed() < window)
+            .filter(|at| now.saturating_duration_since(**at) < window)
             .count()
     }
 
@@ -3944,6 +3952,27 @@ mod tests {
                     "the count saturates rather than growing with the writer"
                 );
                 assert_eq!(terminal.recent_pty_output.len(), PTY_OUTPUT_HISTORY);
+            });
+        }
+
+        /// The window is stamped from the executor's clock, not the wall
+        /// clock, so a test can expire it without waiting in real time.
+        #[gpui::test]
+        async fn writes_age_out_on_the_executor_clock(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                for _ in 0..5 {
+                    terminal.record_pty_output();
+                }
+                assert_eq!(terminal.pty_writes_within(Duration::from_secs(1)), 5);
+            });
+            cx.executor().advance_clock(Duration::from_secs(2));
+            terminal.update(cx, |terminal, _| {
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::from_secs(1)),
+                    0,
+                    "advancing the executor's clock must expire the window"
+                );
             });
         }
     }

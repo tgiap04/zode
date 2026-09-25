@@ -345,7 +345,10 @@ impl TerminalPanel {
     ) {
         match event {
             pane::Event::ActivateItem { .. } => self.serialize(cx),
-            pane::Event::RemovedItem { .. } => self.serialize(cx),
+            pane::Event::RemovedItem { .. } => {
+                self.serialize(cx);
+                cx.emit(TerminalPanelEvent::TerminalsChanged);
+            }
             pane::Event::Remove { focus_on_pane } => {
                 let pane_count_before_removal = self.center.panes().len();
                 let _removal_result = self.center.remove(pane, cx);
@@ -385,6 +388,7 @@ impl TerminalPanel {
                     })
                 }
                 self.serialize(cx);
+                cx.emit(TerminalPanelEvent::TerminalsChanged);
             }
             &pane::Event::Split { direction, mode } => {
                 match mode {
@@ -1368,6 +1372,18 @@ impl workspace::Item for FailedToSpawnTerminal {
 }
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
+
+/// The workspace's own `ItemAdded` fires from exactly one place,
+/// `Workspace::handle_pane_event`, which never sees this panel's own panes —
+/// `TerminalPanel` keeps and dispatches its own `Pane`s, so a dock terminal
+/// appearing or disappearing has no other way to reach an observer. This event
+/// is that seam: fired with no payload because its only handler re-enumerates
+/// the panel's panes from scratch rather than reading the item out of the event.
+pub enum TerminalPanelEvent {
+    TerminalsChanged,
+}
+
+impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

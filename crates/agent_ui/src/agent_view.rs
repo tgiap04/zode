@@ -27,7 +27,12 @@ use util::ResultExt as _;
 /// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
 /// being produced. Split out so the threshold can be held against the two
 /// rates it has to separate -- see the tests.
-fn responding_at(writes_in_window: usize) -> bool {
+///
+/// Public because `keep_awake` needs the identical "is it producing output"
+/// test this crate applies to agents, and copying the threshold into a second
+/// crate would let the two rules drift apart. This is the one place the rule
+/// is allowed to live.
+pub fn responding_at(writes_in_window: usize) -> bool {
     writes_in_window >= RESPONDING_WRITES
 }
 
@@ -52,7 +57,7 @@ fn answering_now(working: bool, responding: bool, a_subagent_is_running: bool) -
 }
 
 /// The window the agent's pty writes are counted over.
-const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+pub const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// How many writes inside [`RESPONDING_WINDOW`] mean the agent is answering.
 ///
@@ -66,7 +71,7 @@ const RESPONDING_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 /// timer, so even a spinner being animated while the model thinks clears this
 /// easily. Eight is comfortably above the idle rate and comfortably below the
 /// working one, which is the only property it needs.
-const RESPONDING_WRITES: usize = 8;
+pub const RESPONDING_WRITES: usize = 8;
 
 /// How often a live tab re-asks whether its agent is answering.
 ///
