@@ -246,8 +246,15 @@ struct StandaloneWindow {
 
 impl Render for StandaloneWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The text colour is set here for the same reason the surface is:
+        // `Workspace::render` sets it on its own root, so in a dock or an
+        // editor tab this view inherits it. A window of its own has no such
+        // ancestor. Anything that draws text without naming a colour -- the
+        // table's header row hands `Table` bare strings, where the cells hand
+        // it `Label`s -- then falls back to black on the dark surface below.
         div()
             .size_full()
+            .text_color(cx.theme().colors().text)
             .bg(cx.theme().colors().panel_background)
             .child(self.panel.clone())
     }
