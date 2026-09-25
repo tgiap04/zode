@@ -191,6 +191,24 @@ fn an_image_offers_no_lifecycle_action() {
     );
 }
 
+/// The seam itself: an engine with no config file to choose says so plainly,
+/// through the same trait Kubernetes answers.
+#[test]
+fn docker_and_podman_have_no_config_to_aim() {
+    for backend in [DockerBackend::docker(), DockerBackend::podman()] {
+        assert!(
+            backend.config_source().is_none(),
+            "{:?} reads no config file a picker could offer",
+            backend.kind()
+        );
+        assert!(
+            backend.aimed_at(None, None).is_none(),
+            "{:?} has nothing to aim, so aimed_at must answer None",
+            backend.kind()
+        );
+    }
+}
+
 #[test]
 fn act_records_what_it_was_asked_and_refuses_what_it_does_not_hold() {
     let backend = FakeBackend::docker();
@@ -557,6 +575,118 @@ mod kubernetes {
                  -- that sends somebody hunting a cluster that was never the problem"
             ),
         }
+    }
+
+    /// `kubeconfig::command` scopes to the chosen file rather than the
+    /// `$KUBECONFIG` merge -- checked by hand against a real `kubectl` before
+    /// this was written; see the module doc on `kubeconfig.rs` for what that
+    /// probe showed.
+    #[test]
+    fn kubeconfig_command_puts_the_chosen_file_ahead_of_the_subcommand() {
+        let path = std::path::Path::new("/tmp/zode-test-kubeconfig");
+        let command = kubeconfig::command("kubectl", Some(path));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--kubeconfig",
+                "/tmp/zode-test-kubeconfig",
+                "config",
+                "view",
+                "-o",
+                "json"
+            ]
+        );
+
+        let bare = kubeconfig::command("kubectl", None);
+        let bare_args: Vec<String> = bare
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            bare_args,
+            vec!["config", "view", "-o", "json"],
+            "no path chosen means no flag added -- the ordinary $KUBECONFIG merge"
+        );
+    }
+
+    /// `KubernetesBackend::command`, the bypass `kubeconfig::command` warns
+    /// about corrected: both builders must agree on which file is read.
+    #[test]
+    fn kubernetes_backend_command_puts_the_chosen_file_ahead_of_the_subcommand() {
+        let backend = KubernetesBackend::with_kubeconfig(
+            Some(std::path::PathBuf::from("/tmp/zode-test-kubeconfig")),
+            None,
+        );
+        let command = backend.command(&["get", "pods", "-o", "json"]);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--kubeconfig",
+                "/tmp/zode-test-kubeconfig",
+                "get",
+                "pods",
+                "-o",
+                "json"
+            ]
+        );
+    }
+
+    /// A watch needs something chosen to watch, or it would follow whatever
+    /// `kubectl` thinks is current -- the same reason `list` reads the
+    /// kubeconfig before asking.
+    #[test]
+    fn watch_needs_a_target_to_run_at_all() {
+        assert!(
+            KubernetesBackend::new().watch().is_none(),
+            "no scope means nothing chosen to watch"
+        );
+        let scoped = KubernetesBackend::with_scope(Scope {
+            context: "prod".into(),
+            namespace: None,
+        });
+        assert!(
+            scoped.watch().is_some(),
+            "a scope is enough to start the watch, whatever the cluster answers"
+        );
+    }
+
+    /// `aimed_at` maps a chosen file and a chosen target back into the scope
+    /// `KubernetesBackend` actually runs with -- the round trip the picker
+    /// depends on.
+    #[test]
+    fn aimed_at_round_trips_a_target_into_a_scope() {
+        let backend = KubernetesBackend::new();
+        let target = crate::kubeconfig::ConfigTarget {
+            name: "prod".into(),
+            detail: Some("apps".into()),
+        };
+        let aimed = backend
+            .aimed_at(
+                Some(std::path::PathBuf::from("/tmp/zode-test-kubeconfig")),
+                Some(target),
+            )
+            .expect("kubernetes has something to aim at");
+        let source = aimed
+            .config_source()
+            .expect("the new backend still answers config_source");
+        assert_eq!(
+            source.path.as_deref(),
+            Some(std::path::Path::new("/tmp/zode-test-kubeconfig")),
+            "the chosen file must carry over"
+        );
+        assert_eq!(
+            source.target.as_deref(),
+            Some("prod"),
+            "and the chosen context, as the scope it was built from"
+        );
     }
 
     #[test]

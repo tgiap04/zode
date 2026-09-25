@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, EventEmitter, Pixels, SharedString, TitlebarOptions, Window, WindowBounds,
-    WindowKind, WindowOptions, px, size,
+    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, px, size,
 };
 use ui::prelude::*;
 use workspace::Workspace;
@@ -204,24 +204,20 @@ pub(crate) fn open_in_editor_tab(
     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
 }
 
-pub(crate) fn open_in_floating_window(
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    // Read before `open_window` -- that closure runs in a *different* window's
-    // context, where a second `&Workspace` cannot be borrowed alongside the `App`
-    // creating the entity.
-    let (backends, active) = backends_for_a_new_view(workspace, cx);
-    let _ = window;
-
-    // `AlwaysOnTop`, for the reasons `database_ui::standalone` paid to learn:
-    // `PopUp` never takes keyboard focus, `Floating` is absent from window
-    // cycling and Mission Control so there is no way back to it but the mouse,
-    // and `Normal` sits under whatever you switch to. `AlwaysOnTop` is an
-    // ordinary window at a floating level -- findable *and* raised. On Linux and
-    // Windows it degrades to an ordinary window.
-    let options = WindowOptions {
+/// `AlwaysOnTop`, for the reasons `database_ui::standalone` paid to learn:
+/// `PopUp` never takes keyboard focus, `Floating` is absent from window
+/// cycling and Mission Control so there is no way back to it but the mouse,
+/// and `Normal` sits under whatever you switch to. `AlwaysOnTop` is an
+/// ordinary window at a floating level -- findable *and* raised. On Linux and
+/// Windows it degrades to an ordinary window.
+///
+/// `window_background` is read from `cx` *before* `cx.open_window` -- the
+/// closure passed to it runs in a *different* window's context, where the
+/// active theme cannot be read the same way. Without it the window falls back
+/// to `WindowBackgroundAppearance::Opaque`, which macOS paints as a black
+/// `NSWindow` behind whatever the root view draws.
+fn window_options(cx: &App) -> WindowOptions {
+    WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
             size(px(900.), px(600.)),
@@ -233,11 +229,56 @@ pub(crate) fn open_in_floating_window(
         }),
         kind: WindowKind::AlwaysOnTop,
         window_min_size: Some(size(px(420.), px(280.))),
+        window_background: cx.theme().window_background_appearance(),
         ..Default::default()
-    };
+    }
+}
 
-    if let Err(error) = cx.open_window(options, |_window, cx| {
-        cx.new(|cx| ContainerPanel::standalone(backends, active, cx))
+/// The surface the dock would otherwise have drawn.
+///
+/// `ContainerPanel` renders the same in a dock, an editor tab and here, and the
+/// first two sit inside a card something else painted. Painting one in its
+/// `Render` would put a second card inside those two, so the window that is
+/// actually missing one grows its own.
+struct StandaloneWindow {
+    panel: Entity<ContainerPanel>,
+}
+
+impl Render for StandaloneWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(cx.theme().colors().panel_background)
+            .child(self.panel.clone())
+    }
+}
+
+impl Focusable for StandaloneWindow {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.panel.focus_handle(cx)
+    }
+}
+
+pub(crate) fn open_in_floating_window(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    // Read before `open_window` -- that closure runs in a *different* window's
+    // context, where a second `&Workspace` cannot be borrowed alongside the `App`
+    // creating the entity.
+    let (backends, active) = backends_for_a_new_view(workspace, cx);
+    let _ = window;
+
+    let options = window_options(cx);
+
+    if let Err(error) = cx.open_window(options, |window, cx| {
+        let panel = cx.new(|cx| ContainerPanel::standalone(backends, active, cx));
+        let standalone_window = cx.new(|_cx| StandaloneWindow {
+            panel: panel.clone(),
+        });
+        panel.focus_handle(cx).focus(window, cx);
+        standalone_window
     }) {
         log::error!("could not open the containers in a window of their own: {error}");
     }
@@ -267,5 +308,37 @@ mod tests {
             WIDE_ENOUGH_FOR_EVERY_COLUMN - px(1.)
         )));
         assert!(!has_room_for_every_column(Some(px(0.))));
+    }
+
+    /// The half of the black-window defect this crate can check by machine:
+    /// `window_options` must carry the theme's own `window_background_appearance`
+    /// through to `WindowOptions`, rather than the struct's own
+    /// `WindowBackgroundAppearance::Opaque` default -- which is what
+    /// `..Default::default()` silently produced before this fix, and what the
+    /// fallback theme used in this test also happens to be. So the theme is
+    /// forced to something else here to prove the value is actually read, not
+    /// coincidentally equal to a hardcoded one.
+    ///
+    /// Whether `StandaloneWindow` actually paints a surface over that
+    /// background is a visual check -- GPUI tests cannot read back a drawn
+    /// colour.
+    #[gpui::test]
+    fn window_options_reads_the_background_from_the_active_theme(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+
+            let mut theme = (**cx.theme()).clone();
+            theme.styles.window_background_appearance = gpui::WindowBackgroundAppearance::Blurred;
+            theme::GlobalTheme::update_theme(cx, std::sync::Arc::new(theme));
+
+            let options = window_options(cx);
+            assert_eq!(
+                options.window_background,
+                gpui::WindowBackgroundAppearance::Blurred,
+                "window_options must read window_background from the active theme"
+            );
+        });
     }
 }
