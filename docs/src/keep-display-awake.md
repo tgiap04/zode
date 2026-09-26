@@ -48,12 +48,12 @@ There is a bolt icon on the status bar. It is lit while the display is being
 held and dimmed when it is not, and clicking it opens a menu with the switch and
 one line saying what is actually happening:
 
-| The menu says                    | Meaning                                                       |
-| --------------------------------- | -------------------------------------------------------------- |
-| The display is being held awake  | Something is producing output and the hold is in place       |
-| Nothing is producing output      | Nothing to hold it for                                        |
-| Paused - running on battery      | Something is producing output, but the machine is on battery |
-| The system refused the request   | Everything says yes and the OS still said no                  |
+| The menu says                   | Meaning                                                      |
+| ------------------------------- | ------------------------------------------------------------ |
+| The display is being held awake | Something is producing output and the hold is in place       |
+| Nothing is producing output     | Nothing to hold it for                                       |
+| Paused - running on battery     | Something is producing output, but the machine is on battery |
+| The system refused the request  | Everything says yes and the OS still said no                 |
 
 The line exists because three of those four states are the same dimmed icon.
 The tooltip names the tab responsible when there is one — an agent's label or

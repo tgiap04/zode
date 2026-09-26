@@ -61,11 +61,11 @@ reason nothing from the conversation ever reaches the OS layer.
 
 ## Platform support
 
-| Platform | Delivery mechanism | Verification |
-| -------- | ------------------- | ------------- |
-| macOS | `UNUserNotificationCenter` | Bundle-identity, bundle-location, and permission-timing behavior measured directly against the real framework (below) via a standalone probe. **No banner has been visually confirmed by a human** -- an API-level accept is not an observation |
-| Linux | `org.freedesktop.Notifications` over the session bus (zbus), the same call under X11 and Wayland | **Compile-verified only.** Type-checked against the real crates for the Linux target and built in CI. No one has run this and watched a notification appear |
-| Windows | WinRT `ToastNotification` | **Compile-verified only,** same as Linux. No toast from this feature has been observed by any person building it |
+| Platform | Delivery mechanism                                                                               | Verification                                                                                                                                                                                                                                    |
+| -------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS    | `UNUserNotificationCenter`                                                                       | Bundle-identity, bundle-location, and permission-timing behavior measured directly against the real framework (below) via a standalone probe. **No banner has been visually confirmed by a human** -- an API-level accept is not an observation |
+| Linux    | `org.freedesktop.Notifications` over the session bus (zbus), the same call under X11 and Wayland | **Compile-verified only.** Type-checked against the real crates for the Linux target and built in CI. No one has run this and watched a notification appear                                                                                     |
+| Windows  | WinRT `ToastNotification`                                                                        | **Compile-verified only,** same as Linux. No toast from this feature has been observed by any person building it                                                                                                                                |
 
 No notification from this feature has been observed by a human on any of the three platforms.
 

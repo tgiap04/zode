@@ -24,12 +24,14 @@ The evidence chain:
 1. **The `?` is CoreText LastResort** — macOS's fallback when no font on the system has a glyph. A few solid light-grey bars **did** render correctly, which means those characters exist somewhere. The `?` means they do not.
 
 2. **The bundled font is JetBrains Mono.** Its `cmap` table was parsed and inspected:
+
    - Contains `U+2588` (FULL BLOCK), `U+258C` (LEFT HALF BLOCK), `U+2590` (RIGHT HALF BLOCK) — all **rendered correctly** in the output.
    - Contains **zero** codepoints from `U+1FB00..=U+1FB3B` (Symbols for Legacy Computing — "sextants"). Those are the 60 missing glyphs.
 
 3. **No macOS system font covers the sextant block either.** The entire Unicode block is missing from every standard macOS font.
 
 4. **Expo CLI's QR renderer** (`@expo/cli/build/src/utils/qr.js`) has two rendering paths:
+
    - `supportsSextants()` returns true when `TERM_PROGRAM` is `ghostty` or `WezTerm`, or when `KITTY_WINDOW_ID` or `ALACRITTY_WINDOW_ID` is non-empty.
    - When true, it emits sextants (`U+1FB00..=U+1FB3B`) — 3 pixels per cell, 6 per row.
    - When false, it emits safe half-blocks (`▀` `▄` `█`) — 2 pixels per cell, 4 per row.
@@ -51,6 +53,7 @@ The evidence chain:
 5. Checked if real Alacritty can draw sextants: yes, in `builtin_font.rs` — not present in zode.
 
 Three options were presented to the user:
+
 - Stop claiming the Alacritty identity (blank the env var).
 - Bundle a font covering the sextant block.
 - Port Alacritty's `builtin_font.rs` into zode.
@@ -73,7 +76,7 @@ The deeper pattern: **a terminal identity should be audited against what it can 
 
 ## Trade-off Accepted
 
-The QR is now correct but rendered larger: ~39 cells wide by ~20 rows instead of ~20 by ~13. Some consumers test mere *presence* of the `ALACRITTY_WINDOW_ID` env var rather than *non-emptiness*. No such consumer exists in this repository.
+The QR is now correct but rendered larger: ~39 cells wide by ~20 rows instead of ~20 by ~13. Some consumers test mere _presence_ of the `ALACRITTY_WINDOW_ID` env var rather than _non-emptiness_. No such consumer exists in this repository.
 
 ## Verification
 

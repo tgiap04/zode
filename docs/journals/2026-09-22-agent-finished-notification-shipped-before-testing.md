@@ -90,6 +90,7 @@ Without `export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"`, `clang -framew
 ## What Went Wrong
 
 **Cross-platform type-checking without execution proved necessary.** Measured:
+
 - `cargo check -p gpui_linux --target x86_64-unknown-linux-gnu` → exit 101, `failed to find tool "x86_64-linux-gnu-gcc"`
 - `cargo check -p gpui_windows --target x86_64-pc-windows-msvc` → exit 101, `failed to find tool "lib.exe"`
 

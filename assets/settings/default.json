@@ -138,7 +138,7 @@
   // early notifications happen often.
   "agent_finished_notification": {
     "enabled": true,
-    "quiet_period_ms": 12000
+    "quiet_period_ms": 12000,
   },
   // Whether to show the combined CPU and RAM footprint of every tracked
   // project's child processes -- its language servers and its terminals --
