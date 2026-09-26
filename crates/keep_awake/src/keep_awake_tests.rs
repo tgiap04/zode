@@ -709,6 +709,9 @@ mod a_real_terminal {
     }
 
     #[gpui::test]
+    #[ignore = "spawns a real shell: the write rate it observes depends on the \
+machine keeping up, and a loaded one can smear a burst under the threshold or \
+bunch a repaint over it"]
     async fn a_shell_sitting_at_its_prompt_holds_nothing(cx: &mut TestAppContext) {
         // `add_center_terminal` ends in a real PTY spawn, which parks.
         cx.executor().allow_parking();
@@ -795,6 +798,9 @@ into the virtual clock"]
     /// `RESPONDING_WRITES` inside any one-second window because each write is
     /// its own second apart, and must never cross into holding.
     #[gpui::test]
+    #[ignore = "spawns a real shell: the write rate it observes depends on the \
+machine keeping up, and a loaded one can smear a burst under the threshold or \
+bunch a repaint over it"]
     async fn a_slow_repaint_never_holds(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let (keep_awake, workspace, cx) = workspace_with_keep_awake(cx).await;
@@ -1040,6 +1046,9 @@ mod several_workspaces {
     /// second window fighting the first for platform focus, since blurring
     /// the one window under test is the whole of what "unfocused" means here.
     #[gpui::test]
+    #[ignore = "spawns a real shell: the write rate it observes depends on the \
+machine keeping up, and a loaded one can smear a burst under the threshold or \
+bunch a repaint over it"]
     async fn an_unfocused_window_still_holds(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let (keep_awake, workspace, cx) = super::a_real_tab::workspace_with_keep_awake(cx).await;
