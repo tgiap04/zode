@@ -1,6 +1,10 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
+use crate::kubeconfig::{ConfigSource, ConfigTarget};
 use crate::resource::{Resource, ResourceAction, ResourceKind};
 
 /// Which engine is answering.
@@ -103,6 +107,45 @@ pub trait ContainerBackend: Send + Sync {
     /// What may be done to a resource of this kind. An image does not start; a
     /// pod does not restart.
     fn supported_actions(&self, kind: ResourceKind) -> &'static [ResourceAction];
+
+    /// A file on disk naming what this engine can be aimed at.
+    ///
+    /// `None` is the default, and what keeps Docker and Podman out of this --
+    /// neither reads a config file the panel can offer a picker over. `None` is
+    /// also what keeps the view from asking which engine it holds: it asks this
+    /// instead, and draws a picker only when the answer is `Some`.
+    fn config_source(&self) -> Option<ConfigSource> {
+        None
+    }
+
+    /// What `path` offers to be aimed at, if this engine reads one.
+    ///
+    /// `path` is `None` when the caller wants whatever this engine reads by
+    /// default (its own current file, unchosen). The default implementation
+    /// answers with nothing to choose from, which is correct for every engine
+    /// that has no such file.
+    async fn config_targets(
+        &self,
+        path: Option<&Path>,
+    ) -> Result<Vec<ConfigTarget>, ContainerError> {
+        let _ = path;
+        Ok(Vec::new())
+    }
+
+    /// A new backend aimed at `path` and `target`, or `None` when this engine has
+    /// nothing to aim.
+    ///
+    /// A new value rather than a mutation: the panel holds its backends behind
+    /// `Arc<dyn ContainerBackend>`, which offers no `&mut`, and interior
+    /// mutability here would put a lock in the path of every `list`.
+    fn aimed_at(
+        &self,
+        path: Option<PathBuf>,
+        target: Option<ConfigTarget>,
+    ) -> Option<Arc<dyn ContainerBackend>> {
+        let _ = (path, target);
+        None
+    }
 
     async fn list(&self, kind: ResourceKind) -> Result<Vec<Resource>, ContainerError>;
 

@@ -415,6 +415,68 @@ mod engines {
         });
     }
 
+    /// Refresh must say it is working the instant it is asked, and stop saying
+    /// so the instant the answer lands.
+    ///
+    /// `reloading` is the flag under test, not `ListState` -- see
+    /// `refresh_does_not_blank_the_list` for why the two must stay apart.
+    #[gpui::test]
+    async fn refresh_says_it_is_working(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> = Arc::new(FakeBackend::docker());
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(matches!(panel.state, ListState::Ready(_)));
+            assert!(!panel.reloading, "settled after the first load");
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.reload(cx);
+            assert!(
+                panel.reloading,
+                "the flag must be true on the same frame as the click, before \
+                 the new answer has had any chance to arrive"
+            );
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(!panel.reloading, "cleared once the new answer lands");
+        });
+    }
+
+    /// Refreshing a `Ready` list must not blank it while the new answer is
+    /// still in flight.
+    ///
+    /// Pins the distinction the trap warns about: `reloading` is a separate
+    /// question from `ListState::Loading`, and collapsing the two back into one
+    /// flag would make the list disappear on every refresh.
+    #[gpui::test]
+    async fn refresh_does_not_blank_the_list(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> = Arc::new(FakeBackend::docker());
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(matches!(panel.state, ListState::Ready(_)));
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.reload(cx);
+            assert!(
+                matches!(panel.state, ListState::Ready(_)),
+                "what is on screen is still true while it is being re-asked, so \
+                 it must stay on screen -- not fall back to the Loading state"
+            );
+            assert!(panel.reloading);
+        });
+    }
+
     /// An index past the end must be ignored rather than panic or blank the view.
     #[gpui::test]
     async fn an_engine_index_out_of_range_is_ignored(cx: &mut TestAppContext) {
@@ -837,6 +899,7 @@ mod terminals {
     use super::*;
     use crate::terminal::TerminalIntent;
     use container::ResourceKind;
+    use terminal_view::terminal_panel::TerminalPanel;
 
     /// The buttons are drawn only where the engine has a command for them.
     #[gpui::test]
@@ -928,6 +991,60 @@ mod terminals {
                  somewhere to open"
             );
         });
+    }
+
+    /// Clicking either terminal button must not re-enter the workspace.
+    ///
+    /// `TerminalPanel::spawn_task` reads the workspace entity, so driving it
+    /// from inside `workspace.update(..)` leaves that entity leased and GPUI
+    /// panics on the read rather than opening anything. The two tests above
+    /// both walk past this: one has no workspace at all, so the call returns
+    /// before it can happen, and the other only checks that the handle is
+    /// there without ever clicking.
+    ///
+    /// Nothing is asserted about the terminal itself, on purpose. The fake
+    /// engine's program is `fake`, which is not a binary, so the spawn fails
+    /// for its own honest reason -- reaching the end of the call is the whole
+    /// proof, because the defect is a panic.
+    #[gpui::test]
+    async fn clicking_a_terminal_button_does_not_re_enter_the_workspace(cx: &mut TestAppContext) {
+        // `spawn_task` ends in a real PTY spawn, which parks.
+        cx.executor().allow_parking();
+        init_test(cx);
+        cx.update(|cx| terminal_view::init(cx));
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        // Built directly rather than through `TerminalPanel::load`: that path is
+        // async and wants a key-value store this test has no reason to stand up.
+        let terminal_panel = workspace.update_in(cx, |workspace, window, cx| {
+            cx.new(|cx| TerminalPanel::new(workspace, window, cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(terminal_panel, window, cx)
+        });
+
+        let tab = tab_in_workspace(&workspace, vec![Arc::new(FakeBackend::docker())], cx);
+        cx.run_until_parked();
+
+        for intent in [TerminalIntent::Shell, TerminalIntent::FollowLogs] {
+            tab.update_in(cx, |panel, window, cx| {
+                panel.open_terminal(intent, "c0ffee".into(), "fake-postgres".into(), window, cx);
+            });
+            cx.run_until_parked();
+        }
+
+        assert!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .panel::<TerminalPanel>(cx)
+                .is_some()),
+            "the terminal panel must really be in the workspace, or the clicks \
+             above proved nothing"
+        );
     }
 }
 
@@ -1412,5 +1529,423 @@ mod removal {
              was shown"
         );
         let _ = DestructivePlan::remove(ResourceKind::Container, Vec::new());
+    }
+}
+
+/// Choosing a kubeconfig file, then a context inside it.
+///
+/// Exercised against a small backend of its own rather than `FakeBackend`,
+/// because the trait's config methods are defaulted to "nothing to choose" and
+/// `FakeBackend` never overrides them -- a fake standing in for a real engine
+/// that offers a file has to say so itself.
+mod config_picker {
+    use super::*;
+    use container::backend::{BackendEvent, ContainerError};
+    use container::kubeconfig::{ConfigSource, ConfigTarget};
+    use container::{DestructivePlan, PruneScope, Resource, ResourceAction};
+    use futures::stream::BoxStream;
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
+    use std::pin::Pin;
+
+    /// Answers `config_targets` from a list the test chose, and everything
+    /// else by forwarding to an ordinary Kubernetes-shaped fake -- the parts
+    /// of the trait this suite is not about.
+    ///
+    /// Written out by hand against the shape `#[async_trait]` gives
+    /// `ContainerBackend`'s async methods, rather than with the macro itself:
+    /// this crate has no `async-trait` dependency of its own, and reaching for
+    /// a test double is not reason enough to add one.
+    struct ConfigurableFakeBackend {
+        inner: FakeBackend,
+        targets: Vec<ConfigTarget>,
+        failure: Option<ContainerError>,
+    }
+
+    impl ConfigurableFakeBackend {
+        fn with_targets(targets: Vec<ConfigTarget>) -> Self {
+            Self {
+                inner: FakeBackend::empty(BackendKind::Kubernetes, &[ResourceKind::Pod]),
+                targets,
+                failure: None,
+            }
+        }
+
+        /// A file the engine refuses to read -- what a user meets by picking the
+        /// wrong file out of the dialog.
+        fn that_cannot_read_the_file() -> Self {
+            Self {
+                failure: Some(ContainerError::Parse {
+                    detail: "not a kubeconfig".into(),
+                }),
+                ..Self::with_targets(Vec::new())
+            }
+        }
+    }
+
+    impl ContainerBackend for ConfigurableFakeBackend {
+        fn kind(&self) -> BackendKind {
+            self.inner.kind()
+        }
+        fn supported_kinds(&self) -> &'static [ResourceKind] {
+            self.inner.supported_kinds()
+        }
+        fn supported_actions(&self, kind: ResourceKind) -> &'static [ResourceAction] {
+            self.inner.supported_actions(kind)
+        }
+        fn config_source(&self) -> Option<ConfigSource> {
+            Some(ConfigSource {
+                label: "Kubeconfig File",
+                path: None,
+                target: None,
+            })
+        }
+        fn config_targets<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _path: Option<&'life1 Path>,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<ConfigTarget>, ContainerError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            let targets = self.targets.clone();
+            let failure = self.failure.clone();
+            Box::pin(async move {
+                match failure {
+                    Some(error) => Err(error),
+                    None => Ok(targets),
+                }
+            })
+        }
+        fn aimed_at(
+            &self,
+            path: Option<PathBuf>,
+            target: Option<ConfigTarget>,
+        ) -> Option<Arc<dyn ContainerBackend>> {
+            Some(Arc::new(AimedFakeBackend { path, target }))
+        }
+        fn list<'life0, 'async_trait>(
+            &'life0 self,
+            kind: ResourceKind,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<Resource>, ContainerError>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            self.inner.list(kind)
+        }
+        fn act<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            kind: ResourceKind,
+            action: ResourceAction,
+            id: &'life1 str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ContainerError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            self.inner.act(kind, action, id)
+        }
+        fn watch(&self) -> Option<BoxStream<'static, BackendEvent>> {
+            self.inner.watch()
+        }
+        fn prune_targets<'life0, 'async_trait>(
+            &'life0 self,
+            scope: PruneScope,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Option<Result<Vec<Resource>, ContainerError>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            self.inner.prune_targets(scope)
+        }
+        fn destroy<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            plan: &'life1 DestructivePlan,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ContainerError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            self.inner.destroy(plan)
+        }
+        fn logs_command(&self, kind: ResourceKind, id: &str) -> Option<(String, Vec<String>)> {
+            self.inner.logs_command(kind, id)
+        }
+        fn exec_command(&self, kind: ResourceKind, id: &str) -> Option<(String, Vec<String>)> {
+            self.inner.exec_command(kind, id)
+        }
+    }
+
+    /// What `ConfigurableFakeBackend::aimed_at` hands back -- a backend that
+    /// remembers the file and target it was built with, so a test can prove
+    /// the swap really carried them.
+    struct AimedFakeBackend {
+        path: Option<PathBuf>,
+        target: Option<ConfigTarget>,
+    }
+
+    impl ContainerBackend for AimedFakeBackend {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Kubernetes
+        }
+        fn supported_kinds(&self) -> &'static [ResourceKind] {
+            &[ResourceKind::Pod]
+        }
+        fn supported_actions(&self, _kind: ResourceKind) -> &'static [ResourceAction] {
+            &[]
+        }
+        fn config_source(&self) -> Option<ConfigSource> {
+            Some(ConfigSource {
+                label: "Kubeconfig File",
+                path: self.path.clone(),
+                target: self.target.as_ref().map(|target| target.name.clone()),
+            })
+        }
+        fn list<'life0, 'async_trait>(
+            &'life0 self,
+            _kind: ResourceKind,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<Resource>, ContainerError>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn act<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _kind: ResourceKind,
+            _action: ResourceAction,
+            _id: &'life1 str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ContainerError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+        fn watch(&self) -> Option<BoxStream<'static, BackendEvent>> {
+            None
+        }
+        fn prune_targets<'life0, 'async_trait>(
+            &'life0 self,
+            _scope: PruneScope,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Option<Result<Vec<Resource>, ContainerError>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            Box::pin(async { None })
+        }
+        fn destroy<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            _plan: &'life1 DestructivePlan,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ContainerError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+        fn logs_command(&self, _kind: ResourceKind, _id: &str) -> Option<(String, Vec<String>)> {
+            None
+        }
+        fn exec_command(&self, _kind: ResourceKind, _id: &str) -> Option<(String, Vec<String>)> {
+            None
+        }
+    }
+
+    /// Two targets: stored, and nothing chosen for the caller -- the menu is
+    /// what asks, not this call.
+    #[gpui::test]
+    async fn choosing_a_file_with_two_targets_stores_both_and_selects_neither(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> =
+            Arc::new(ConfigurableFakeBackend::with_targets(vec![
+                ConfigTarget {
+                    name: "a".into(),
+                    detail: None,
+                },
+                ConfigTarget {
+                    name: "b".into(),
+                    detail: None,
+                },
+            ]));
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        cx.run_until_parked();
+
+        panel.update(cx, |panel, cx| {
+            panel.choose_config_file(PathBuf::from("/tmp/zode-two-targets"), cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.config_targets.len(), 2, "both must be offered");
+            assert!(
+                panel
+                    .backend()
+                    .and_then(|backend| backend.config_source())
+                    .and_then(|source| source.target)
+                    .is_none(),
+                "two targets is ambiguous, so nothing may be chosen automatically"
+            );
+        });
+    }
+
+    /// One target and nothing else to choose between is not a choice --
+    /// `choose_config_file` must make it, mirroring `Kubeconfig::effective`.
+    #[gpui::test]
+    async fn choosing_a_file_with_one_target_selects_it(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> =
+            Arc::new(ConfigurableFakeBackend::with_targets(vec![ConfigTarget {
+                name: "only".into(),
+                detail: None,
+            }]));
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        cx.run_until_parked();
+
+        panel.update(cx, |panel, cx| {
+            panel.choose_config_file(PathBuf::from("/tmp/zode-one-target"), cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.config_targets.len(), 1);
+            assert_eq!(
+                panel
+                    .backend()
+                    .and_then(|backend| backend.config_source())
+                    .and_then(|source| source.target),
+                Some("only".to_string()),
+                "one unambiguous target must be chosen without being asked"
+            );
+        });
+    }
+
+    /// A file that cannot be read must leave the view something to say.
+    ///
+    /// The picker is a deliberate action, so failing it in silence is the same
+    /// defect the refresh button carried: the user acts, nothing visibly
+    /// happens, and nothing tells them why.
+    #[gpui::test]
+    async fn a_file_that_cannot_be_read_says_so(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> =
+            Arc::new(ConfigurableFakeBackend::that_cannot_read_the_file());
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        cx.run_until_parked();
+
+        panel.update(cx, |panel, cx| {
+            panel.choose_config_file(PathBuf::from("/tmp/zode-not-a-kubeconfig"), cx);
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.config_error.is_some(),
+                "a file that cannot be read must leave the banner something to show"
+            );
+            assert!(
+                panel.config_targets.is_empty(),
+                "and it must not leave stale targets behind it"
+            );
+        });
+    }
+
+    /// Choosing a target swaps the active backend for the one `aimed_at`
+    /// returned, and leaves the list `Loading` -- copying the tail of
+    /// `choose_backend`.
+    #[gpui::test]
+    async fn choosing_a_target_swaps_the_backend_and_reloads(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> =
+            Arc::new(ConfigurableFakeBackend::with_targets(Vec::new()));
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+
+        panel.update(cx, |panel, cx| {
+            panel.choose_config_target(
+                ConfigTarget {
+                    name: "prod".into(),
+                    detail: None,
+                },
+                cx,
+            );
+            assert!(
+                matches!(panel.state, ListState::Loading),
+                "a newly aimed backend's list is not true yet, the same as a \
+                 switched engine's"
+            );
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel
+                    .backend()
+                    .and_then(|backend| backend.config_source())
+                    .and_then(|source| source.target),
+                Some("prod".to_string()),
+                "the active backend must be the one aimed_at returned, not the \
+                 one that was asked"
+            );
+        });
+    }
+
+    /// Whatever `render_config_picker` gates on, exercised directly: an engine
+    /// with no config file must answer `None`, which is what keeps the picker
+    /// off the header entirely.
+    #[gpui::test]
+    async fn no_picker_is_offered_when_the_engine_has_no_config_source(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> = Arc::new(FakeBackend::docker());
+        let (panel, cx) =
+            cx.add_window_view(|_window, cx| ContainerPanel::with_backend(backend, cx));
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel
+                    .backend()
+                    .and_then(|backend| backend.config_source())
+                    .is_none(),
+                "docker reads no config file, so the picker draws nothing for it"
+            );
+        });
     }
 }

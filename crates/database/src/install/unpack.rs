@@ -13,6 +13,33 @@ use std::path::{Path, PathBuf};
 
 use crate::install::store;
 
+/// Refuses an `entry` that would name something outside the staging directory.
+///
+/// `entry` arrives from the manifest, and `Path::join` is not a containment
+/// operation: an absolute value discards the directory it is joined to
+/// outright, and a `..` component walks out of it. That reaches
+/// `store::make_executable`, which would then chmod a file of the manifest's
+/// choosing.
+///
+/// The manifest is served over the same origin the driver itself comes from,
+/// so nothing here defends against a host that is already trusted to hand over
+/// an executable. It is checked because the URL that manifest is fetched from
+/// became configurable -- and because a value that names a path should be
+/// proven to name one inside the directory it is about to be joined to,
+/// whoever supplied it.
+fn ensure_entry_stays_inside_staging(entry: &str) -> Result<()> {
+    use std::path::Component;
+
+    let path = Path::new(entry);
+    anyhow::ensure!(
+        path.components()
+            .all(|component| matches!(component, Component::Normal(_))),
+        "the driver manifest names {entry:?} inside the archive, which is not a \
+         path within it; refusing to unpack"
+    );
+    Ok(())
+}
+
 /// Unpacks `archive` and moves the driver's executable into place.
 ///
 /// `entry` is the executable's path inside the archive; `destination` is the
@@ -23,6 +50,8 @@ pub async fn install_archive(
     destination: &Path,
     executable_name: &str,
 ) -> Result<PathBuf> {
+    ensure_entry_stays_inside_staging(entry)?;
+
     let staging = staging_dir(destination);
     // A staging directory left by a previous attempt that died mid-unpack must
     // not contribute files to this one.
@@ -224,6 +253,51 @@ mod tests {
                 .await
                 .expect_err("unpacking rubbish must fail");
             assert!(!destination.exists());
+        });
+    }
+
+    /// `Path::join` is not containment: joining an absolute path discards
+    /// what it was joined to, and `..` walks out. Either would carry the
+    /// manifest's choice of path into `store::make_executable`.
+    #[test]
+    fn an_entry_naming_somewhere_outside_the_archive_is_refused() {
+        for entry in [
+            "/etc/passwd",
+            "../../../../etc/passwd",
+            "..",
+            "nested/../../escape",
+        ] {
+            assert!(
+                ensure_entry_stays_inside_staging(entry).is_err(),
+                "{entry:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_entry_is_accepted() {
+        for entry in ["zode-db-mysql", "zode-db-mysql.exe", "nested/zode-db-mysql"] {
+            ensure_entry_stays_inside_staging(entry)
+                .unwrap_or_else(|error| panic!("{entry:?} must be accepted: {error}"));
+        }
+    }
+
+    /// The check has to run before anything touches the filesystem -- a
+    /// refusal that happens after the archive is already unpacked has
+    /// already done the work it was meant to prevent.
+    #[test]
+    fn a_traversing_entry_is_refused_before_anything_is_unpacked() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = write(root.path(), "driver.tar.gz", b"not gzip");
+            let destination = root.path().join("mysql").join("0.1.1");
+
+            let error = install_archive(&archive, "../escape", &destination, "zode-db-mysql")
+                .await
+                .expect_err("a traversing entry must be refused");
+
+            assert!(error.to_string().contains("refusing to unpack"), "{error}");
+            assert!(!staging_dir(&destination).exists());
         });
     }
 }

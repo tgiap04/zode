@@ -17,10 +17,12 @@
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt as _};
 use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use util::command::Command;
 
 use crate::backend::{BackendEvent, BackendKind, ContainerBackend, ContainerError};
-use crate::kubeconfig::{self, Kubeconfig};
+use crate::kubeconfig::{self, ConfigSource, ConfigTarget, Kubeconfig};
 use crate::kubernetes_types::PodList;
 use crate::resource::{Resource, ResourceAction, ResourceKind};
 
@@ -37,6 +39,10 @@ const POD_ACTIONS: &[ResourceAction] = &[];
 
 pub struct KubernetesBackend {
     program: String,
+    /// Which file `kubectl` is told to read. `None` means "whatever
+    /// `$KUBECONFIG` or the default path says", the same as running `kubectl`
+    /// by hand with nothing set.
+    kubeconfig_path: Option<PathBuf>,
     /// Which context and namespace a list is taken from. `None` means "whatever
     /// the kubeconfig says is current", which is what a person running `kubectl`
     /// by hand would get.
@@ -53,6 +59,7 @@ impl KubernetesBackend {
     pub fn new() -> Self {
         Self {
             program: "kubectl".into(),
+            kubeconfig_path: None,
             scope: None,
         }
     }
@@ -60,7 +67,21 @@ impl KubernetesBackend {
     pub fn with_scope(scope: Scope) -> Self {
         Self {
             program: "kubectl".into(),
+            kubeconfig_path: None,
             scope: Some(scope),
+        }
+    }
+
+    /// A backend aimed at a chosen file and, once picked, a context inside it.
+    ///
+    /// The one path `ContainerBackend::aimed_at` builds: a file with nothing
+    /// chosen inside it yet is still a valid state (the caller is offering the
+    /// contexts it found), so `scope` stays independently optional here.
+    pub fn with_kubeconfig(kubeconfig_path: Option<PathBuf>, scope: Option<Scope>) -> Self {
+        Self {
+            program: "kubectl".into(),
+            kubeconfig_path,
+            scope,
         }
     }
 
@@ -70,6 +91,7 @@ impl KubernetesBackend {
     pub(crate) fn with_program(program: &str) -> Self {
         Self {
             program: program.into(),
+            kubeconfig_path: None,
             scope: None,
         }
     }
@@ -78,12 +100,26 @@ impl KubernetesBackend {
     /// running `kubectl config use-context` in a terminal beside the editor
     /// expects the panel to keep up.
     pub async fn kubeconfig(&self) -> Result<Kubeconfig, ContainerError> {
-        let stdout = self.stdout(kubeconfig::command(&self.program)).await?;
+        let stdout = self
+            .stdout(kubeconfig::command(
+                &self.program,
+                self.kubeconfig_path.as_deref(),
+            ))
+            .await?;
         kubeconfig::parse(&stdout)
     }
 
-    fn command(&self, args: &[&str]) -> Command {
+    /// `pub(crate)` rather than private so the shape of the built command --
+    /// where `--kubeconfig` lands relative to the subcommand -- can be asserted
+    /// directly from `tests.rs` through [`util::command::Command::get_args`]
+    /// without spawning anything.
+    pub(crate) fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(&self.program);
+        // Ahead of everything else, so it scopes every subcommand this backend
+        // ever builds -- `list`, `act` and `watch` all funnel through here.
+        if let Some(path) = &self.kubeconfig_path {
+            command.arg("--kubeconfig").arg(path);
+        }
         command.args(args);
         if let Some(scope) = &self.scope {
             command.args(["--context", &scope.context]);
@@ -92,6 +128,33 @@ impl KubernetesBackend {
             }
         }
         command
+    }
+
+    /// `--kubeconfig` and `--context`/`--namespace`, as bare argument words
+    /// rather than applied to a [`Command`].
+    ///
+    /// For [`Self::logs_command`] and [`Self::exec_command`], which return
+    /// `(String, Vec<String>)` for a terminal to run rather than building a
+    /// [`Command`] of their own -- and which, unlike [`Self::command`], end
+    /// their own words with a `--` separator before the resource name. Placed
+    /// first rather than last for that reason: kubectl's `--` ends flag
+    /// parsing for everything after it, so a flag added past that separator
+    /// would be read as a second positional argument, not as itself.
+    fn global_flags(&self) -> Vec<String> {
+        let mut flags = Vec::new();
+        if let Some(path) = &self.kubeconfig_path {
+            flags.push("--kubeconfig".to_string());
+            flags.push(path.to_string_lossy().into_owned());
+        }
+        if let Some(scope) = &self.scope {
+            flags.push("--context".to_string());
+            flags.push(scope.context.clone());
+            if let Some(namespace) = &scope.namespace {
+                flags.push("--namespace".to_string());
+                flags.push(namespace.clone());
+            }
+        }
+        flags
     }
 
     /// Runs a command and hands back stdout, classifying the ways it can fail.
@@ -189,6 +252,50 @@ impl ContainerBackend for KubernetesBackend {
 
     fn supported_actions(&self, _kind: ResourceKind) -> &'static [ResourceAction] {
         POD_ACTIONS
+    }
+
+    fn config_source(&self) -> Option<ConfigSource> {
+        Some(ConfigSource {
+            label: "Kubeconfig File",
+            path: self.kubeconfig_path.clone(),
+            target: self.scope.as_ref().map(|scope| scope.context.clone()),
+        })
+    }
+
+    /// The contexts `path` offers -- or, with `path` unset, whatever file this
+    /// backend already reads. The bypass the module doc warns about: this goes
+    /// through [`kubeconfig::command`] directly rather than through
+    /// [`Self::command`], because listing contexts is not itself scoped to a
+    /// context.
+    async fn config_targets(
+        &self,
+        path: Option<&Path>,
+    ) -> Result<Vec<ConfigTarget>, ContainerError> {
+        let path = path.or(self.kubeconfig_path.as_deref());
+        let stdout = self
+            .stdout(kubeconfig::command(&self.program, path))
+            .await?;
+        let config = kubeconfig::parse(&stdout)?;
+        Ok(config
+            .contexts
+            .into_iter()
+            .map(|context| ConfigTarget {
+                name: context.name,
+                detail: context.namespace,
+            })
+            .collect())
+    }
+
+    fn aimed_at(
+        &self,
+        path: Option<PathBuf>,
+        target: Option<ConfigTarget>,
+    ) -> Option<Arc<dyn ContainerBackend>> {
+        let scope = target.map(|target| Scope {
+            context: target.name,
+            namespace: target.detail,
+        });
+        Some(Arc::new(KubernetesBackend::with_kubeconfig(path, scope)))
     }
 
     async fn list(&self, kind: ResourceKind) -> Result<Vec<Resource>, ContainerError> {
@@ -294,7 +401,7 @@ impl ContainerBackend for KubernetesBackend {
         Ok(())
     }
 
-    /// `kubectl logs -f -n <namespace> <pod>`.
+    /// `kubectl [--kubeconfig p] [--context c] logs -f -n <namespace> <pod>`.
     ///
     /// The id carries both halves (`namespace/name`) because a pod name is unique
     /// only within a namespace; it is split back apart here rather than being
@@ -305,7 +412,9 @@ impl ContainerBackend for KubernetesBackend {
             return None;
         }
         let (namespace, name) = split_id(id);
-        let mut args = vec!["logs".to_string(), "-f".to_string()];
+        let mut args = self.global_flags();
+        args.push("logs".to_string());
+        args.push("-f".to_string());
         if let Some(namespace) = namespace {
             args.push("-n".into());
             args.push(namespace);
@@ -315,7 +424,7 @@ impl ContainerBackend for KubernetesBackend {
         Some((self.program.clone(), args))
     }
 
-    /// `kubectl exec -it -n <namespace> <pod> -- sh`.
+    /// `kubectl [--kubeconfig p] [--context c] exec -it -n <namespace> <pod> -- sh`.
     ///
     /// No `-c <container>`: a pod with several containers needs one chosen, and
     /// choosing silently would open a shell in whichever happened to be first.
@@ -326,7 +435,9 @@ impl ContainerBackend for KubernetesBackend {
             return None;
         }
         let (namespace, name) = split_id(id);
-        let mut args = vec!["exec".to_string(), "-it".to_string()];
+        let mut args = self.global_flags();
+        args.push("exec".to_string());
+        args.push("-it".to_string());
         if let Some(namespace) = namespace {
             args.push("-n".into());
             args.push(namespace);

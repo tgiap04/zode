@@ -1,12 +1,13 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+    SessionSummary, summary::millis_to_time,
 };
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 /// Codex's threads live in a sqlite database whose **filename carries the schema
@@ -89,6 +90,19 @@ impl CodexProvider {
             return false;
         };
         path.starts_with(root)
+    }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        // Only the rollout transcript, and only while it really sits inside the
+        // Codex directory: `rollout_path` comes out of a database this editor does
+        // not own, and a doctored row must not turn into a delete somewhere else.
+        // The thread row itself stays — writing to Codex's database is not ours.
+        session
+            .log_path
+            .iter()
+            .filter(|path| self.contains(path))
+            .cloned()
+            .collect()
     }
 
     /// Runs `read` against the thread store.
@@ -188,7 +202,7 @@ impl SessionProvider for CodexProvider {
         }
     }
 
-    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
         // `codex resume` takes an id that already exists; there is no flag to
         // start a session *under* an id of our choosing. Returning `None` is what
         // keeps the caller from assigning an id Codex will never write down —
@@ -211,31 +225,26 @@ impl SessionProvider for CodexProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         // `codex resume <id>` continues a thread. There is no fork — the CLI has
         // no flag for it — so the caller disables that control rather than
         // building a command that would not do what its label says.
         if fork == Fork::New {
             return None;
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "codex".to_string(),
             args: vec!["resume".to_string(), session.id.to_string()],
             cwd: session.cwd.clone(),
         })
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        // Only the rollout transcript, and only while it really sits inside the
-        // Codex directory: `rollout_path` comes out of a database this editor does
-        // not own, and a doctored row must not turn into a delete somewhere else.
-        // The thread row itself stays — writing to Codex's database is not ours.
-        session
-            .log_path
-            .iter()
-            .filter(|path| self.contains(path))
-            .cloned()
-            .collect()
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        let paths = self.paths_to_trash(session);
+        if paths.is_empty() {
+            return Deletion::Nothing;
+        }
+        Deletion::Trash(paths)
     }
 }
 
@@ -333,13 +342,6 @@ fn copy_database(path: &Path, into: &Path) -> Result<PathBuf> {
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
-}
-
-fn millis_to_time(millis: i64) -> SystemTime {
-    if millis <= 0 {
-        return UNIX_EPOCH;
-    }
-    UNIX_EPOCH + Duration::from_millis(millis as u64)
 }
 
 #[cfg(test)]
@@ -665,5 +667,47 @@ mod tests {
         // Nothing there at all: nothing to trash, and nothing to guess about.
         session.log_path = Some(codex.join("sessions").join("gone.jsonl"));
         assert!(provider.paths_to_trash(&session).is_empty());
+    }
+}
+
+/// `deletion()` is new in phase 04's refactor; kept in its own module so the
+/// port of `paths_to_trash` above stays provably untouched -- `git diff` on
+/// `mod tests` is the check, and it must show nothing.
+#[cfg(test)]
+mod deletion_wrapping {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Codex,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path,
+            log_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_rollout_path_is_nothing() {
+        let provider = CodexProvider::new(PathBuf::from("/does/not/exist"));
+        let session = bare_session("none", None);
+        assert_eq!(provider.deletion(&session), Deletion::Nothing);
+    }
+
+    #[test]
+    fn a_rollout_path_inside_the_store_is_a_nonempty_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("rollout.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let provider = CodexProvider::new(root.path().to_path_buf());
+        let session = bare_session("s", Some(log.clone()));
+        assert_eq!(provider.deletion(&session), Deletion::Trash(vec![log]));
     }
 }

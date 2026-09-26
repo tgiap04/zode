@@ -2428,6 +2428,20 @@ impl Snapshot {
             .map(SanitizedPath::cast_arc_ref)
     }
 
+    /// The repository this worktree belongs to, named by a path: the main
+    /// checkout's root for a linked worktree, and the worktree's own root for a
+    /// plain checkout or for a folder outside git.
+    ///
+    /// The common dir holds a repository's shared state, so it is `<root>/.git`
+    /// for a plain checkout but the *main* checkout's `.git` for a linked
+    /// worktree. Its parent is the main repository root in both cases -- which
+    /// is what lets every worktree of one repository answer with one path.
+    pub fn main_worktree_abs_path(&self) -> &Path {
+        self.root_repo_common_dir()
+            .and_then(|common_dir| common_dir.parent())
+            .unwrap_or(self.abs_path().as_ref())
+    }
+
     fn build_initial_update(&self, project_id: u64, worktree_id: u64) -> proto::UpdateWorktree {
         let mut updated_entries = self
             .entries_by_path

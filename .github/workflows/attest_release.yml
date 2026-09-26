@@ -1,0 +1,54 @@
+# Hand-written, and it has to be.
+#
+# Every other workflow here is generated from `tooling/xtask/src/tasks/workflows/`
+# and must be edited there. This one cannot be: build provenance needs
+# `attestations: write`, and the `Permissions` type in the pinned `gh-workflow`
+# DSL has no such field — there is no way to express this job through the
+# generator. `cargo xtask workflows` only writes the files it knows by name, so
+# this one survives regeneration.
+#
+# It runs AFTER the release is published rather than inside the build job, for
+# the same reason. What that buys, precisely: an attestation signed by GitHub
+# saying these exact bytes were seen by this public workflow at this commit in
+# this repository. What it does not buy: a binding between the build and its
+# output, which only an in-job attestation gives. `docs/src/env-sync-security.md`
+# states the difference rather than rounding it up.
+name: attest release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to attest
+        required: true
+
+permissions: {}
+
+jobs:
+  attest:
+    if: github.repository_owner == 'tgiap04'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download the published assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets --pattern '*'
+          # A release with no assets would otherwise attest nothing and pass,
+          # which is the shape of a green check that means nothing.
+          test -n "$(ls -A assets)"
+          ls -l assets
+
+      - name: Attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: assets/*

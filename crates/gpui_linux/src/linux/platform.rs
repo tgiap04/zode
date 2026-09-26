@@ -21,13 +21,16 @@ use util::command::{new_command, new_std_command};
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
-use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
+use crate::linux::{
+    LinuxDispatcher, NotificationState, PriorityQueueCalloopReceiver, deliver_notification,
+    register_notification_activated_callback,
+};
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
-    DisplayWakeLock, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
-    WindowButtonLayout, WindowParams,
+    DisplayWakeLock, ForegroundExecutor, Keymap, Menu, MenuItem, Notification, OwnedMenu,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, RunnableVariant, Task, ThermalState,
+    WindowAppearance, WindowButtonLayout, WindowParams,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use gpui::{Pixels, Point, px};
@@ -154,6 +157,16 @@ impl LinuxCommon {
 
 pub(crate) struct LinuxPlatform<P> {
     pub(crate) inner: P,
+    notifications: NotificationState,
+}
+
+impl<P> LinuxPlatform<P> {
+    pub(crate) fn new(inner: P) -> Self {
+        Self {
+            inner,
+            notifications: NotificationState::default(),
+        }
+    }
 }
 
 impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
@@ -207,6 +220,33 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn on_battery(&self) -> Option<bool> {
         read_mains_online()
+    }
+
+    fn post_notification(&self, notification: Notification) {
+        deliver_notification(
+            &self.notifications,
+            notification,
+            self.background_executor(),
+        );
+    }
+
+    fn can_post_notifications(&self) -> bool {
+        // `true` without probing, for the same reason `can_keep_display_awake`
+        // above declares rather than probes: `DBUS_SESSION_BUS_ADDRESS` is not
+        // reliably set even where a bus exists, so a probe would hide the
+        // feature on machines where it works. A refused post is logged by
+        // `deliver_notification` and otherwise disappears, which is the
+        // honest outcome for a call with nothing to report back to its caller.
+        true
+    }
+
+    fn on_notification_activated(&self, callback: Box<dyn FnMut(String)>) {
+        register_notification_activated_callback(
+            &self.notifications,
+            callback,
+            self.background_executor(),
+            self.foreground_executor(),
+        );
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
@@ -361,6 +401,10 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     "Open File"
                 };
 
+                // `options.show_hidden` is deliberately not forwarded: the XDG
+                // file-chooser portal exposes no hidden-file flag. It hands the
+                // dialog to the host file chooser, where showing hidden entries is
+                // the user's own toggle (Ctrl+H in GTK), not the caller's to set.
                 let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
                     .modal(true)

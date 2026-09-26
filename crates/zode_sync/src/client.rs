@@ -4,7 +4,7 @@ use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, Request};
 use serde::{Deserialize, Serialize};
 
-use crate::envelope::Kind;
+use crate::envelope::Resource;
 
 /// One stored artifact as the server describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,9 +78,35 @@ pub async fn fetch(
     http_client: &Arc<dyn HttpClient>,
     api_url: &str,
     access_token: &str,
-    kind: Kind,
+    resource: &Resource,
 ) -> Result<Option<RemoteDocument>, ClientError> {
-    let request = build(api_url, access_token, kind, "GET")?
+    let Some(body) = fetch_body(http_client, api_url, access_token, resource).await? else {
+        return Ok(None);
+    };
+
+    let parsed: DocumentResponse = serde_json::from_str(&body).map_err(|_| {
+        ClientError::Rejected("the sync service answered with unusable JSON".into())
+    })?;
+    Ok(Some(RemoteDocument {
+        blob: parsed.blob,
+        revision: parsed.revision,
+    }))
+}
+
+/// GETs a resource and hands back the raw body.
+///
+/// Split out of [`fetch`] because not every addressable resource is a
+/// document: the env listing answers with a collection, and the caller that
+/// understands that shape lives in another crate. What does NOT move with it
+/// is the error classification — a 401 must mean the same thing on every
+/// route, and a second copy of `classify` is a second chance to disagree.
+pub async fn fetch_body(
+    http_client: &Arc<dyn HttpClient>,
+    api_url: &str,
+    access_token: &str,
+    resource: &Resource,
+) -> Result<Option<String>, ClientError> {
+    let request = build(api_url, access_token, resource, "GET")?
         .body(AsyncBody::default())
         .map_err(|_| ClientError::Unreachable("the request could not be built".into()))?;
 
@@ -90,14 +116,7 @@ pub async fn fetch(
         return Ok(None);
     }
     classify(status, &body)?;
-
-    let parsed: DocumentResponse = serde_json::from_str(&body).map_err(|_| {
-        ClientError::Rejected("the sync service answered with unusable JSON".into())
-    })?;
-    Ok(Some(RemoteDocument {
-        blob: parsed.blob,
-        revision: parsed.revision,
-    }))
+    Ok(Some(body))
 }
 
 /// Stores one artifact, conditional on what the caller believes is there.
@@ -109,7 +128,7 @@ pub async fn store(
     http_client: &Arc<dyn HttpClient>,
     api_url: &str,
     access_token: &str,
-    kind: Kind,
+    resource: &Resource,
     blob: &str,
     precondition: Precondition<'_>,
 ) -> Result<WriteOutcome, ClientError> {
@@ -117,7 +136,7 @@ pub async fn store(
         .map_err(|_| ClientError::Unreachable("the request could not be built".into()))?;
 
     let builder =
-        build(api_url, access_token, kind, "PUT")?.header("Content-Type", "application/json");
+        build(api_url, access_token, resource, "PUT")?.header("Content-Type", "application/json");
     let builder = match precondition {
         Precondition::Create => builder.header("If-None-Match", "*"),
         Precondition::Replace(revision) => builder.header("If-Match", revision),
@@ -156,9 +175,9 @@ pub async fn forget(
     http_client: &Arc<dyn HttpClient>,
     api_url: &str,
     access_token: &str,
-    kind: Kind,
+    resource: &Resource,
 ) -> Result<(), ClientError> {
-    let request = build(api_url, access_token, kind, "DELETE")?
+    let request = build(api_url, access_token, resource, "DELETE")?
         .body(AsyncBody::default())
         .map_err(|_| ClientError::Unreachable("the request could not be built".into()))?;
 
@@ -172,12 +191,16 @@ pub async fn forget(
 fn build(
     api_url: &str,
     access_token: &str,
-    kind: Kind,
+    resource: &Resource,
     method: &str,
 ) -> Result<http_client::http::request::Builder, ClientError> {
     Ok(Request::builder()
         .method(method)
-        .uri(format!("{api_url}/sync/{kind}"))
+        // `Resource` already carries the `sync/` or `env/` prefix, and it is
+        // the only thing that may build one — the segments are validated on
+        // construction, so nothing reaches this line that could reshape the
+        // URL.
+        .uri(format!("{api_url}/{resource}"))
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {access_token}")))
 }

@@ -1,11 +1,11 @@
-use database::install::{DriverInstaller, ReleaseCoordinates, store};
+use database::install::{DriverEndpoint, DriverInstaller, store};
 use database::registry::{
     DriverDescriptor, DriverOrigin, DriverRegistry, DriverSource, DriverState,
 };
 use database::transport::DriverBinary;
 use extension::{ExtensionDatabaseDriver, ExtensionDatabaseDriverProxy, ExtensionHostProxy};
 use gpui::{App, AppContext as _, Entity, Global, SharedString};
-use release_channel::{AppVersion, RELEASE_REPO};
+use release_channel::AppVersion;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -40,8 +40,10 @@ const BUILT_IN: &[(&str, &str)] = &[
 ///    back into the bundle restores the old behaviour with no code change.
 /// 2. **The download store**, under `paths::database_drivers_dir()`, keyed by
 ///    the running app's version. This is where a driver fetched on demand lands,
-///    and where someone with no route to GitHub can put one by hand.
-/// 3. **A bare name on `PATH`**, for anyone who put a driver there deliberately.
+///    and where someone with no route to the API can put one by hand.
+/// 3. **Whatever `ZODE_DB_<ID>` names** -- a full path to a file, not a name
+///    resolved on `PATH`. See [`path_override`], which is what actually
+///    decides this and requires the value to be an existing file.
 /// 4. **Nowhere** -- [`DriverState::NotInstalled`].
 ///
 /// That fourth answer did not exist before. `driver_path` always returned a
@@ -362,11 +364,18 @@ pub fn refresh(id: &str, cx: &mut App) -> bool {
 /// windows asking for the same driver must join a single download rather than
 /// fetch tens of megabytes twice, and that de-duplication lives inside the
 /// installer's own in-flight map.
+///
+/// The base comes from `zode_account::api_url()` -- Zode's own API, not a
+/// GitHub release -- because `crates/database` is deliberately kept ignorant
+/// of accounts and gpui, and something in the gpui world has to resolve it.
+/// `api_url()` is a free function that needs no signed-in `Account`, which is
+/// the point: a driver is a public asset, and someone who has not logged in
+/// yet must still be able to fetch one.
 pub fn installer(cx: &mut App) -> Arc<DriverInstaller> {
     if !cx.has_global::<GlobalDriverInstaller>() {
-        let release = ReleaseCoordinates::new(RELEASE_REPO, driver_version(cx));
+        let endpoint = DriverEndpoint::new(zode_account::api_url(), driver_version(cx));
         let root = store_root(cx);
-        let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), release, root));
+        let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), endpoint, root));
         cx.set_global(GlobalDriverInstaller(installer));
     }
     cx.global::<GlobalDriverInstaller>().0.clone()
@@ -389,17 +398,25 @@ struct GlobalDriverStore(PathBuf);
 
 impl Global for GlobalDriverStore {}
 
-/// Points the installer at a release a test serves, and a store it owns.
+/// A base a test's `DriverEndpoint` can be built on without ever reaching the
+/// network. `.invalid` is a reserved TLD that never resolves, so a test that
+/// somehow escapes its fake http client fails loudly instead of quietly
+/// calling out to the real world.
+#[cfg(test)]
+const TEST_API_BASE: &str = "https://api.test.invalid/api";
+
+/// Points the installer at a base a test serves, and a store it owns.
 ///
 /// All three matter. Without the root, a test would download into the running
 /// user's real data directory; without the http client it would reach for
-/// github.com; and without setting the root *before* the registry reads it, the
-/// resolver would keep looking somewhere the installer never wrote.
+/// `TEST_API_BASE` for real; and without setting the root *before* the registry
+/// reads it, the resolver would keep looking somewhere the installer never
+/// wrote.
 #[cfg(test)]
 pub(crate) fn set_installer_for_test(root: PathBuf, version: &str, cx: &mut App) {
     cx.set_global(GlobalDriverStore(root.clone()));
-    let release = ReleaseCoordinates::new(RELEASE_REPO, version);
-    let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), release, root));
+    let endpoint = DriverEndpoint::new(TEST_API_BASE, version);
+    let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), endpoint, root));
     cx.set_global(GlobalDriverInstaller(installer));
 }
 

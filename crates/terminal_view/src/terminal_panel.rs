@@ -345,7 +345,10 @@ impl TerminalPanel {
     ) {
         match event {
             pane::Event::ActivateItem { .. } => self.serialize(cx),
-            pane::Event::RemovedItem { .. } => self.serialize(cx),
+            pane::Event::RemovedItem { .. } => {
+                self.serialize(cx);
+                cx.emit(TerminalPanelEvent::TerminalsChanged);
+            }
             pane::Event::Remove { focus_on_pane } => {
                 let pane_count_before_removal = self.center.panes().len();
                 let _removal_result = self.center.remove(pane, cx);
@@ -385,6 +388,7 @@ impl TerminalPanel {
                     })
                 }
                 self.serialize(cx);
+                cx.emit(TerminalPanelEvent::TerminalsChanged);
             }
             &pane::Event::Split { direction, mode } => {
                 match mode {
@@ -543,6 +547,11 @@ impl TerminalPanel {
             .detach_and_log_err(cx);
     }
 
+    /// # Panics
+    ///
+    /// Reads the workspace entity below, so calling this from inside
+    /// `workspace.update(..)` finds it already leased and panics. Callers take
+    /// the panel handle out of the workspace first.
     pub fn spawn_task(
         &mut self,
         task: &SpawnInTerminal,
@@ -1364,6 +1373,18 @@ impl workspace::Item for FailedToSpawnTerminal {
 
 impl EventEmitter<PanelEvent> for TerminalPanel {}
 
+/// The workspace's own `ItemAdded` fires from exactly one place,
+/// `Workspace::handle_pane_event`, which never sees this panel's own panes —
+/// `TerminalPanel` keeps and dispatches its own `Pane`s, so a dock terminal
+/// appearing or disappearing has no other way to reach an observer. This event
+/// is that seam: fired with no payload because its only handler re-enumerates
+/// the panel's panes from scratch rather than reading the item out of the event.
+pub enum TerminalPanelEvent {
+    TerminalsChanged,
+}
+
+impl EventEmitter<TerminalPanelEvent> for TerminalPanel {}
+
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let registrar = cx
@@ -1996,6 +2017,61 @@ mod tests {
             center_items_after, center_items_before,
             "Center pane should not gain a new terminal"
         );
+    }
+
+    /// The mirror of the test above, and the one the checkout menu rests on: a
+    /// terminal asked for by `NewCenterTerminal` belongs in the pane the editors
+    /// are in, not the dock. Both places hold terminals, which is exactly how an
+    /// entry meaning "open a tab" can land in the wrong one and still look like
+    /// it worked.
+    ///
+    /// The directory is passed but not asserted on. `Terminal::working_directory`
+    /// reads the live PTY process, so waiting on it would be timing a test
+    /// against a shell starting up. Placement is what this pins, because
+    /// placement is what no reading of the code settles.
+    #[gpui::test]
+    async fn a_center_terminal_opens_in_the_editor_pane_not_the_dock(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+
+        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
+
+        window_handle
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    TerminalView::deploy(
+                        workspace,
+                        &workspace::NewCenterTerminal {
+                            local: false,
+                            working_directory: Some(std::env::temp_dir()),
+                        },
+                        window,
+                        cx,
+                    );
+                })
+            })
+            .expect("Failed to dispatch deploy");
+
+        cx.run_until_parked();
+
+        let panel_items =
+            terminal_panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len());
+        let center_items = window_handle
+            .read_with(cx, |multi_workspace, cx| {
+                multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_pane()
+                    .read(cx)
+                    .items_len()
+            })
+            .expect("Failed to read center pane items");
+
+        assert_eq!(
+            center_items, 1,
+            "a center terminal belongs in the pane the editors are in"
+        );
+        assert_eq!(panel_items, 0, "and not in the terminal dock");
     }
 
     #[gpui::test]

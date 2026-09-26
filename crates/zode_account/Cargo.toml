@@ -41,6 +41,9 @@ zed_credentials_provider.workspace = true
 zed_env_vars.workspace = true
 
 [dev-dependencies]
+# Its own test-support, so an integration test can park an account in a state
+# without standing up a device grant to get there.
+zode_account = { path = ".", features = ["test-support"] }
 futures.workspace = true
 serde_json.workspace = true
 gpui = { workspace = true, features = ["test-support"] }

@@ -48,6 +48,31 @@ else
   ZODE_LOGS :=
 endif
 
+# The macOS SDK every compiler in this build links against.
+#
+# Pinned because the sysroot and the linker are chosen by two different
+# mechanisms that are free to disagree. A bare `cc` takes its default sysroot
+# from whichever Command Line Tools are installed; `xcode-select` decides which
+# `ld` runs. On macOS 27 with Xcode 26.4 active those are two different
+# installs: the default lands on CLT's SDK 27.0, whose .tbd files declare the
+# `arm64e.x1` target triple, and Xcode 26.4's ld-1266.8 cannot parse it. The
+# build then dies inside `aws-lc-sys`'s build script with
+# `ld: tapi error: malformed file ... unknown architecture`, and nothing further
+# down corrects it -- the `cc` crate passes no `-isysroot` for a host build.
+#
+# `--sdk macosx` rather than the bare `--show-sdk-path`: it resolves inside the
+# developer directory that is currently active, so the SDK and the linker always
+# come out of the same install. Right for Xcode and for Command Line Tools
+# alike -- CLT's own ld-27037.1 reads its SDK 27.0 without complaint.
+#
+# `?=` so an SDKROOT already in the environment still wins; the guard so a
+# failed `xcrun` leaves it unset rather than exporting an empty one, which is
+# not the same thing to clang.
+MACOS_SDK := $(if $(filter Darwin,$(UNAME_S)),$(shell xcrun --sdk macosx --show-sdk-path 2>/dev/null))
+ifneq ($(MACOS_SDK),)
+  export SDKROOT ?= $(MACOS_SDK)
+endif
+
 # zode watches this directory at runtime (crates/zed/src/main.rs watch_themes)
 # and reloads on any change — that is what makes theme edits rebuild-free.
 THEME := assets/themes/vscode-2026/vscode-2026.json

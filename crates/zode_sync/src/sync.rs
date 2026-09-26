@@ -125,7 +125,7 @@ pub async fn pull_content(
         &context.http_client,
         &context.api_url,
         &context.credential.access_token,
-        kind,
+        &crate::envelope::Resource::sync(kind),
     )
     .await?
     else {
@@ -349,7 +349,7 @@ async fn store(
         &context.http_client,
         &context.api_url,
         &context.credential.access_token,
-        kind,
+        &crate::envelope::Resource::sync(kind),
         &blob,
         precondition,
     )

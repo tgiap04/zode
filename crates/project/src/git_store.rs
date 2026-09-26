@@ -1569,7 +1569,9 @@ impl GitStore {
                         .insert(worktree_id);
                     existing.update(cx, |existing, cx| {
                         existing.snapshot.work_directory_abs_path = new_work_directory_abs_path;
-                        existing.schedule_scan(updates_tx.clone(), cx);
+                        // Fire and forget: this bulk path wants disk re-read eventually,
+                        // and has nothing to report progress to.
+                        drop(existing.schedule_scan(updates_tx.clone(), cx));
                     });
                 } else {
                     if let Some(worktree_ids) = self.worktree_ids.get_mut(&repo_id) {
@@ -1620,7 +1622,7 @@ impl GitStore {
                             .unbounded_send(DownstreamUpdate::UpdateRepository(repo.snapshot()))
                             .ok();
                     }
-                    repo.schedule_scan(updates_tx.clone(), cx);
+                    drop(repo.schedule_scan(updates_tx.clone(), cx));
                     repo
                 });
                 self._subscriptions
@@ -1860,9 +1862,32 @@ impl GitStore {
     /// through its usual `RepositoryEvent`s, so this never blocks the
     /// caller.
     pub fn refresh_all_repositories(&mut self, cx: &mut Context<Self>) {
-        for repository in self.repositories.values() {
-            repository.update(cx, |repository, cx| repository.schedule_scan(None, cx));
-        }
+        self.refresh_all_repositories_and_wait(cx).detach();
+    }
+
+    /// [`Self::refresh_all_repositories`], but resolves once every scan it started has
+    /// finished -- for a caller that shows the user something spinning and has to know when
+    /// to stop.
+    pub fn refresh_all_repositories_and_wait(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let scans: Vec<_> = self
+            .repositories
+            .values()
+            .map(|repository| {
+                repository.update(cx, |repository, cx| repository.schedule_scan(None, cx))
+            })
+            .collect();
+
+        cx.background_spawn(async move {
+            for scan in scans {
+                match scan.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => log::warn!("git repository scan failed: {error:#}"),
+                    // Superseded by a newer scan of the same repository; that one is still
+                    // queued, so the state this caller waits for is on its way regardless.
+                    Err(oneshot::Canceled) => {}
+                }
+            }
+        })
     }
 
     /// Returns the original (main) repository working directory for the given worktree.
@@ -7070,13 +7095,21 @@ impl Repository {
         self.pending_ops = updated;
     }
 
+    /// Queues a re-read of this repository from disk.
+    ///
+    /// The returned receiver resolves when that scan finishes. Callers that only want the
+    /// state eventually current can drop it; a caller showing progress needs it, because no
+    /// repository event marks the end of a scan -- `compute_snapshot` emits
+    /// `GitWorktreeListChanged` (and its siblings) only when a value actually changed, so a
+    /// scan that finds nothing different is silent. A `Canceled` receiver means the keyed
+    /// queue dropped this scan in favour of a newer one, which is the scan to wait on.
     fn schedule_scan(
         &mut self,
         updates_tx: Option<mpsc::UnboundedSender<DownstreamUpdate>>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> oneshot::Receiver<Result<()>> {
         let this = cx.weak_entity();
-        let _ = self.send_keyed_job(
+        self.send_keyed_job(
             Some(GitJobKey::ReloadGitState),
             None,
             |state, mut cx| async move {
@@ -7099,7 +7132,7 @@ impl Repository {
                 }
                 Ok(())
             },
-        );
+        )
     }
 
     fn spawn_local_git_worker(

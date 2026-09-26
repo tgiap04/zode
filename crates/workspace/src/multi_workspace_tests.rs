@@ -7,6 +7,7 @@ use super::*;
 use crate::item::test::TestItem;
 use crate::multi_workspace::{MemoryPressureFuseToast, MemoryPressureReader};
 use crate::notifications::NotificationId;
+use crate::project_logo::{MAX_LOGO_BYTES, project_avatars_dir};
 use client::proto;
 use fs::{FakeFs, Fs};
 use gpui::{TestAppContext, UpdateGlobal, VisualTestContext};
@@ -2286,6 +2287,7 @@ async fn a_project_can_be_moved_and_the_order_is_remembered(cx: &mut TestAppCont
                 expanded: true,
                 initials: None,
                 colour: None,
+                logo: None,
             })
             .collect()
     });
@@ -2378,7 +2380,7 @@ async fn a_project_carries_its_own_initials_and_colour(cx: &mut TestAppContext) 
     multi_workspace.read_with(cx, |mw, _cx| {
         assert_eq!(
             mw.project_presentation(&key),
-            (None, None),
+            ProjectPresentation::default(),
             "a project starts with neither, which is what makes it fall back to \
              initials from its name"
         );
@@ -2391,7 +2393,9 @@ async fn a_project_carries_its_own_initials_and_colour(cx: &mut TestAppContext) 
     });
 
     multi_workspace.read_with(cx, |mw, _cx| {
-        let (initials, colour) = mw.project_presentation(&key);
+        let ProjectPresentation {
+            initials, colour, ..
+        } = mw.project_presentation(&key);
         assert_eq!(
             initials.as_ref().map(|initials| initials.as_ref()),
             Some("ab"),
@@ -2407,7 +2411,10 @@ async fn a_project_carries_its_own_initials_and_colour(cx: &mut TestAppContext) 
         mw.set_project_colour(&key, None, cx);
     });
     multi_workspace.read_with(cx, |mw, _cx| {
-        assert_eq!(mw.project_presentation(&key), (None, None));
+        assert_eq!(
+            mw.project_presentation(&key),
+            ProjectPresentation::default()
+        );
     });
 
     // A key this window does not hold is ignored rather than panicking: the menu
@@ -2418,7 +2425,10 @@ async fn a_project_carries_its_own_initials_and_colour(cx: &mut TestAppContext) 
         mw.set_project_colour(&stranger, Some(blue), cx);
     });
     multi_workspace.read_with(cx, |mw, _cx| {
-        assert_eq!(mw.project_presentation(&stranger), (None, None));
+        assert_eq!(
+            mw.project_presentation(&stranger),
+            ProjectPresentation::default()
+        );
     });
 }
 
@@ -2452,6 +2462,7 @@ async fn a_restored_group_still_carries_the_windows_own_workspace(cx: &mut TestA
                 expanded: true,
                 initials: None,
                 colour: None,
+                logo: None,
             }],
             cx,
         );
@@ -2552,4 +2563,791 @@ async fn test_outgoing_workspace_is_dropped_when_retention_is_off(cx: &mut TestA
             "retention off must still detach the project that lost focus"
         );
     });
+}
+
+/// A logo upload copies the source into `project_avatars_dir()` and leaves
+/// the user's own file exactly as it was.
+#[gpui::test]
+async fn a_logo_is_copied_and_the_original_is_left_alone(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    let source = PathBuf::from(path!("/uploads/logo.png"));
+    multi_workspace
+        .update(cx, |mw, cx| mw.set_project_logo(&key, source.clone(), cx))
+        .await;
+    cx.run_until_parked();
+
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("a successful upload must set the logo");
+    assert!(
+        logo.starts_with(project_avatars_dir()),
+        "the stored copy must live under project_avatars_dir(), got {logo:?}"
+    );
+    assert!(
+        fs.files().contains(&logo.to_path_buf()),
+        "the copy must exist on disk"
+    );
+    assert_eq!(
+        fs.read_file_sync(&source).unwrap(),
+        b"logo-bytes",
+        "the user's original file must be untouched"
+    );
+}
+
+/// Uploading a second logo deletes the copy the first upload made.
+#[gpui::test]
+async fn replacing_a_logo_deletes_the_copy_it_replaces(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/first.png"), b"first".to_vec())
+        .await;
+    fs.insert_file(path!("/uploads/second.png"), b"second".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key, PathBuf::from(path!("/uploads/first.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let first_logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("the first upload must set a logo");
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key, PathBuf::from(path!("/uploads/second.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let second_logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("the second upload must set a logo");
+
+    assert_ne!(
+        first_logo, second_logo,
+        "each upload gets a fresh, collision-free name"
+    );
+    assert!(
+        !fs.files().contains(&first_logo.to_path_buf()),
+        "the replaced copy must be deleted"
+    );
+    assert!(
+        fs.files().contains(&second_logo.to_path_buf()),
+        "the new copy must be present"
+    );
+}
+
+/// `clear_project_logo` unsets the record and deletes the file it named.
+#[gpui::test]
+async fn removing_a_logo_deletes_the_copy(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("the upload must set a logo");
+
+    multi_workspace.update(cx, |mw, cx| mw.clear_project_logo(&key, cx));
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(mw.project_logo(&key), None, "the logo must be cleared");
+    });
+    assert!(
+        !fs.files().contains(&logo.to_path_buf()),
+        "the copy must be deleted from disk"
+    );
+}
+
+/// The regression this phase exists for: `remove_project_group` splices the
+/// group out of the stored list *before* it awaits the close, and puts it
+/// back if the close is cancelled. Deleting the logo file at splice-out time
+/// would destroy the file of a removal the user backed out of.
+#[gpui::test]
+async fn a_cancelled_removal_keeps_the_logo_file(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/group-a"), json!({ "one": "" }))
+        .await;
+    fs.insert_tree(path!("/group-b"), json!({ "two": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+
+    let project_a = Project::test(fs.clone(), [path!("/group-a").as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), [path!("/group-b").as_ref()], cx).await;
+    let multi_workspace_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    cx.run_until_parked();
+
+    multi_workspace_handle
+        .update(cx, |mw, _window, cx| {
+            mw.test_enable_background_retention(cx)
+        })
+        .unwrap();
+
+    let workspace_b = multi_workspace_handle
+        .update(cx, |mw, window, cx| {
+            mw.test_add_workspace(project_b.clone(), window, cx)
+        })
+        .unwrap();
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    multi_workspace_handle
+        .update(cx, |mw, window, cx| {
+            mw.activate(workspace_b.clone(), None, window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    multi_workspace_handle
+        .update(cx, |mw, _window, cx| {
+            mw.set_project_logo(&key_b, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .unwrap()
+        .await;
+    cx.run_until_parked();
+
+    let logo = multi_workspace_handle
+        .read_with(cx, |mw, _cx| mw.project_logo(&key_b))
+        .unwrap()
+        .expect("the upload must set a logo");
+
+    let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
+
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace_b.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx)
+    });
+
+    let removal = multi_workspace_handle
+        .update(cx, |mw, window, cx| {
+            mw.remove_project_group(&key_b, window, cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+
+    let removed = removal.await.unwrap();
+    assert!(!removed, "a cancelled close removes nothing");
+
+    multi_workspace_handle
+        .read_with(cx, |mw, _cx| {
+            assert_eq!(
+                mw.project_logo(&key_b),
+                Some(logo.clone()),
+                "the group came back and must still carry its logo"
+            );
+        })
+        .unwrap();
+    assert!(
+        fs.files().contains(&logo.to_path_buf()),
+        "a cancelled removal must not delete the file"
+    );
+}
+
+/// The ordinary case: a removal with nothing to cancel it deletes the group's
+/// logo along with the group itself.
+#[gpui::test]
+async fn a_removal_that_stands_deletes_the_logo_file(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/group-a"), json!({ "one": "" }))
+        .await;
+    fs.insert_tree(path!("/group-b"), json!({ "two": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+
+    let project_a = Project::test(fs.clone(), [path!("/group-a").as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), [path!("/group-b").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx);
+    });
+    cx.run_until_parked();
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key_b, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key_b))
+        .expect("the upload must set a logo");
+
+    let removed = multi_workspace
+        .update_in(cx, |mw, window, cx| {
+            mw.remove_project_group(&key_b, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    assert!(
+        removed,
+        "an uncontested removal must report the group removed"
+    );
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(mw.project_logo(&key_b), None, "the group is gone for good");
+    });
+    assert!(
+        !fs.files().contains(&logo.to_path_buf()),
+        "a removal that stands must delete the file"
+    );
+}
+
+/// The `!closing` early return -- a group with no live workspace behind it,
+/// such as one only ever restored from a previous session -- has no restore
+/// branch to catch a leaked file, so it must delete right there.
+#[gpui::test]
+async fn a_project_removed_with_no_workspaces_still_loses_its_file(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    // A group stored on disk but never opened in this window: nothing in
+    // `retained_workspaces` names it, and it is not the active project.
+    let orphan_key = ProjectGroupKey::new(None, crate::PathList::new(&[path!("/orphan")]));
+    multi_workspace.update(cx, |mw, cx| {
+        mw.restore_project_groups(
+            vec![SerializedProjectGroupState {
+                key: orphan_key.clone(),
+                expanded: true,
+                initials: None,
+                colour: None,
+                logo: None,
+            }],
+            cx,
+        );
+    });
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&orphan_key, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&orphan_key))
+        .expect("the upload must set a logo even for an unopened stored group");
+
+    multi_workspace
+        .update_in(cx, |mw, window, cx| {
+            mw.remove_project_group(&orphan_key, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_logo(&orphan_key),
+            None,
+            "the orphan group is gone"
+        );
+    });
+    assert!(
+        !fs.files().contains(&logo.to_path_buf()),
+        "the !closing early return must not leak the file forever"
+    );
+}
+
+/// Moving a project to a new window drops its logo, matching the initials
+/// and colour it already drops on this same path -- there is nothing left
+/// referencing it and nothing left to clean it up otherwise.
+#[gpui::test]
+async fn moving_a_project_to_a_new_window_takes_its_logo_with_it(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/group-a"), json!({ "one": "" }))
+        .await;
+    fs.insert_tree(path!("/group-b"), json!({ "two": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+
+    let project_a = Project::test(fs.clone(), [path!("/group-a").as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), [path!("/group-b").as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b.clone(), window, cx);
+    });
+    cx.run_until_parked();
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key_b, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key_b))
+        .expect("the upload must set a logo");
+
+    multi_workspace
+        .update_in(cx, |mw, window, cx| {
+            mw.open_project_group_in_new_window(&key_b, window, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    assert!(
+        !fs.files().contains(&logo.to_path_buf()),
+        "the file must not be left behind when the project moves to its own window"
+    );
+}
+
+/// A source `set_project_logo` cannot draw is refused before anything is
+/// touched on disk.
+#[gpui::test]
+async fn a_source_that_is_not_an_image_is_refused(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/doc.pdf"), b"not-an-image".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key, PathBuf::from(path!("/uploads/doc.pdf")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_logo(&key),
+            None,
+            "a non-image source must be refused"
+        );
+    });
+    assert!(
+        fs.files()
+            .iter()
+            .all(|path| !path.starts_with(project_avatars_dir())),
+        "nothing should be written into project_avatars_dir()"
+    );
+}
+
+/// A source larger than `MAX_LOGO_BYTES` is refused the same way.
+#[gpui::test]
+async fn an_oversized_source_is_refused(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(
+        path!("/uploads/huge.png"),
+        vec![0u8; (MAX_LOGO_BYTES + 1) as usize],
+    )
+    .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key, PathBuf::from(path!("/uploads/huge.png")), cx)
+        })
+        .await;
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            mw.project_logo(&key),
+            None,
+            "an oversized source must be refused"
+        );
+    });
+    assert!(
+        fs.files()
+            .iter()
+            .all(|path| !path.starts_with(project_avatars_dir())),
+        "nothing should be written into project_avatars_dir()"
+    );
+}
+
+/// The end-to-end proof of phases 01 through 04: a logo set through
+/// `set_project_logo` survives the exact serialize/restore round trip a real
+/// restart takes, and still names a file that is really on disk afterward.
+#[gpui::test]
+async fn a_logo_survives_a_restart(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    multi_workspace
+        .update(cx, |mw, cx| {
+            mw.set_project_logo(&key, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .await;
+
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("the upload must set a logo");
+
+    // The exact round trip a real restart takes: the live state through
+    // `from_group`, the wire record through `into_restored_state`, and back in
+    // through the same `restore_project_groups` a session load uses.
+    let restored_state = multi_workspace.read_with(cx, |mw, _cx| {
+        let group = mw
+            .group_state_by_key(&key)
+            .expect("the group must still be on the rail");
+        crate::persistence::model::SerializedProjectGroup::from_group(group).into_restored_state()
+    });
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.restore_project_groups(vec![restored_state], cx);
+    });
+    cx.run_until_parked();
+
+    let restored_logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("the logo must survive the round trip");
+    assert_eq!(
+        restored_logo, logo,
+        "the restored record must name the same file the upload wrote"
+    );
+    assert!(
+        fs.files().contains(&restored_logo.to_path_buf()),
+        "the file itself must still be on disk, not just remembered"
+    );
+}
+
+/// Files left under `project_avatars_dir()`, in the order the fake disk holds
+/// them.
+fn stored_avatars(fs: &std::sync::Arc<FakeFs>) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs
+        .files()
+        .into_iter()
+        .filter(|path| path.starts_with(project_avatars_dir()))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Two uploads started before either finishes leave one live logo and no
+/// file behind it.
+///
+/// The shape a double click makes. The copy runs on the background executor,
+/// so the second upload can start while the first is still copying; both then
+/// land. Writing the field unconditionally on arrival means the later-finishing
+/// copy takes it and the other file stays on disk with nothing naming it --
+/// invisible, permanent, and repeatable every time someone clicks twice. The
+/// existing replace test cannot see this: it awaits the first upload before
+/// starting the second, so the two never overlap.
+#[gpui::test]
+async fn two_uploads_racing_leave_exactly_one_file(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/first.png"), b"first".to_vec())
+        .await;
+    fs.insert_file(path!("/uploads/second.png"), b"second".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    // Both asked for before either is awaited -- that is the whole point.
+    let first = multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_logo(&key, PathBuf::from(path!("/uploads/first.png")), cx)
+    });
+    let second = multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_logo(&key, PathBuf::from(path!("/uploads/second.png")), cx)
+    });
+    first.await;
+    second.await;
+    cx.run_until_parked();
+
+    let logo = multi_workspace
+        .read_with(cx, |mw, _cx| mw.project_logo(&key))
+        .expect("the project must still carry a logo");
+    assert_eq!(
+        stored_avatars(&fs),
+        vec![logo.to_path_buf()],
+        "exactly the logo the project names may survive -- the copy that lost \
+         the race must not be left on disk"
+    );
+}
+
+/// An upload that lands after "Remove Logo" does not put the logo back.
+///
+/// The user starts an upload, changes their mind, and clears it while the copy
+/// is still running. If the copy writes the field on arrival regardless, the
+/// logo reappears a moment after the user removed it, and the file it names
+/// outlives the removal too.
+#[gpui::test]
+async fn a_clear_during_an_upload_is_not_undone_by_it(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    let upload = multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_logo(&key, PathBuf::from(path!("/uploads/logo.png")), cx)
+    });
+    // The mind changed while the copy is still in flight.
+    multi_workspace.update(cx, |mw, cx| mw.clear_project_logo(&key, cx));
+    upload.await;
+    cx.run_until_parked();
+
+    assert_eq!(
+        multi_workspace.read_with(cx, |mw, _cx| mw.project_logo(&key)),
+        None,
+        "a copy that lands after a clear must not put the logo back"
+    );
+    assert!(
+        stored_avatars(&fs).is_empty(),
+        "and must not leave its copy on disk either"
+    );
+}
+
+/// A logo file two projects name survives one of them being removed.
+///
+/// Two records can legitimately name one file -- a record copied by hand is
+/// the way there -- and `restore_project_groups` already refuses to drop a
+/// file for exactly that reason. Removal has to carry the same carve-out, or
+/// taking one project off the rail pulls the logo out from under another that
+/// is still on it, which then falls back to initials with nothing to explain
+/// why.
+#[gpui::test]
+async fn a_logo_two_projects_share_survives_one_removal(cx: &mut TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/group-a"), json!({ "one": "" }))
+        .await;
+    fs.insert_tree(path!("/group-b"), json!({ "two": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+
+    let project_a = Project::test(fs.clone(), [path!("/group-a").as_ref()], cx).await;
+    let project_b = Project::test(fs.clone(), [path!("/group-b").as_ref()], cx).await;
+    let multi_workspace_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+    cx.run_until_parked();
+
+    multi_workspace_handle
+        .update(cx, |mw, _window, cx| {
+            mw.test_enable_background_retention(cx)
+        })
+        .unwrap();
+    multi_workspace_handle
+        .update(cx, |mw, window, cx| {
+            mw.test_add_workspace(project_b.clone(), window, cx)
+        })
+        .unwrap();
+
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    multi_workspace_handle
+        .update(cx, |mw, _window, cx| {
+            mw.set_project_logo(&key_a, PathBuf::from(path!("/uploads/logo.png")), cx)
+        })
+        .unwrap()
+        .await;
+    cx.run_until_parked();
+
+    let shared = multi_workspace_handle
+        .read_with(cx, |mw, _cx| mw.project_logo(&key_a))
+        .unwrap()
+        .expect("the first project must carry a logo");
+
+    // The second record names the same file -- the shape a hand-copied record
+    // leaves behind.
+    multi_workspace_handle
+        .update(cx, |mw, _window, _cx| {
+            mw.group_state_by_key_mut(&key_b)
+                .expect("the second project is on the rail")
+                .logo = Some(shared.clone());
+        })
+        .unwrap();
+
+    let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
+    multi_workspace_handle
+        .update(cx, |mw, window, cx| {
+            mw.remove_project_group(&key_b, window, cx)
+        })
+        .unwrap()
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    assert!(
+        fs.files().contains(&shared.to_path_buf()),
+        "the file must survive: the other project on the rail still names it"
+    );
+    assert_eq!(
+        multi_workspace_handle
+            .read_with(cx, |mw, _cx| mw.project_logo(&key_a))
+            .unwrap(),
+        Some(shared),
+        "and the project that still names it keeps its logo"
+    );
+}
+
+/// Closing the window mid-upload does not leave the copy behind.
+///
+/// The copy runs on the background executor and lands after the window is
+/// gone. The entity that would normally delete it no longer exists, so the
+/// cleanup has to run off the `fs` handle cloned before the spawn -- otherwise
+/// an ordinary "close the window while a logo is copying" leaves a file that
+/// nothing ever collects.
+#[gpui::test]
+async fn closing_the_window_mid_upload_leaves_no_copy_behind(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+        .await;
+    fs.create_dir(std::path::Path::new(path!("/uploads")))
+        .await
+        .unwrap();
+    fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root_a").as_ref()], cx).await;
+    let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+    let upload = multi_workspace.update(cx, |mw, cx| {
+        mw.set_project_logo(&key, PathBuf::from(path!("/uploads/logo.png")), cx)
+    });
+    // The window goes while the copy is still running, and the last strong
+    // handle with it -- `set_project_logo` holds only a weak one.
+    multi_workspace.update_in(cx, |_, window, _| window.remove_window());
+    drop(multi_workspace);
+
+    upload.await;
+
+    assert!(
+        stored_avatars(&fs).is_empty(),
+        "the copy must not outlive the window it was made for, got {:?}",
+        stored_avatars(&fs)
+    );
 }

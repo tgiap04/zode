@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Deletes driver assets (`zode-db-*.tar.gz` and `zode-db-drivers-manifest.json`)
+# from every ALREADY-PUBLISHED GitHub release.
+#
+# Do not run this until:
+#   1. The web backend from this plan is deployed and its DriversModule is live.
+#   2. `curl <base>/drivers/<a-real-published-version>/zode-db-drivers-manifest.json`
+#      returns 200 with a real, non-empty manifest -- i.e. at least one real
+#      release has already been re-published through `script/publish-drivers-to-web`.
+# Running it before that leaves every existing release with nowhere at all to
+# fetch a driver from -- neither GitHub (stripped) nor the web (not live yet).
+#
+# THIS IS IRREVERSIBLE THROUGH THIS SCRIPT. `gh release delete-asset` has no
+# undo. The only way back is to rebuild the driver archives for that exact
+# tag and `gh release upload` them again by hand.
+#
+# It is also irreversible in a way no rebuild fixes: every app already
+# installed from one of these releases has that release's GitHub download URL
+# compiled into its own binary (this was the behaviour before this plan's
+# phase 01). Such an app never asks the web backend -- it only ever asks
+# GitHub, at the URL it shipped with. Stripping a release's driver assets
+# permanently removes the Download button for every copy of Zode built from
+# that release; the only fix for a user on one of those copies is to update
+# to a version built after phase 01, which fetches from the web instead.
+# See plan.md's "Quyết định bổ sung" table -- this consequence was accepted
+# knowingly, not overlooked.
+#
+#   script/strip-driver-assets-from-releases                # dry run (default)
+#   script/strip-driver-assets-from-releases --dry-run       # dry run, explicit
+#   script/strip-driver-assets-from-releases --execute       # lists, then asks
+#                                                             # for a typed
+#                                                             # confirmation,
+#                                                             # then deletes
+#
+# Requires `gh`, authenticated against this repository.
+
+set -euo pipefail
+
+CONFIRMATION_PHRASE="delete driver assets"
+
+mode="dry-run"
+case "${1:-}" in
+    "" | --dry-run)
+        mode="dry-run"
+        ;;
+    --execute)
+        mode="execute"
+        ;;
+    *)
+        echo "usage: $0 [--dry-run|--execute]" >&2
+        exit 1
+        ;;
+esac
+
+if ! command -v gh >/dev/null 2>&1; then
+    echo "error: gh (GitHub CLI) is required" >&2
+    exit 1
+fi
+
+is_driver_asset() {
+    case "$1" in
+        zode-db-*.tar.gz | zode-db-drivers-manifest.json)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+echo "Reading releases and their assets..."
+release_tags=$(gh release list --limit 1000 --json tagName -q '.[].tagName')
+
+if [[ -z "${release_tags}" ]]; then
+    echo "no releases found"
+    exit 0
+fi
+
+# Each row: "<tag> <asset name>", built once and reused for both the printed
+# list and the delete pass, so what is shown is exactly what gets deleted.
+plan=()
+while IFS= read -r tag; do
+    [[ -z "${tag}" ]] && continue
+    assets=$(gh release view "${tag}" --json assets -q '.assets[].name')
+    while IFS= read -r asset; do
+        [[ -z "${asset}" ]] && continue
+        if is_driver_asset "${asset}"; then
+            plan+=("${tag} ${asset}")
+        fi
+    done <<<"${assets}"
+done <<<"${release_tags}"
+
+if [[ ${#plan[@]} -eq 0 ]]; then
+    echo "no driver assets found on any release -- nothing to do"
+    exit 0
+fi
+
+echo
+echo "The following ${#plan[@]} driver asset(s) would be deleted:"
+for row in "${plan[@]}"; do
+    echo "  ${row}"
+done
+echo
+
+if [[ "${mode}" == "dry-run" ]]; then
+    echo "dry run: nothing was deleted. Re-run with --execute to delete the assets above."
+    exit 0
+fi
+
+echo "This cannot be undone through this script (see the header comment)."
+read -r -p "Type \"${CONFIRMATION_PHRASE}\" to proceed: " typed
+if [[ "${typed}" != "${CONFIRMATION_PHRASE}" ]]; then
+    echo "confirmation did not match -- aborting, nothing was deleted" >&2
+    exit 1
+fi
+
+echo
+for row in "${plan[@]}"; do
+    tag="${row%% *}"
+    asset="${row#* }"
+    echo "deleting ${asset} from ${tag}"
+    gh release delete-asset "${tag}" "${asset}" --yes
+done
+
+echo "done: deleted ${#plan[@]} driver asset(s)"

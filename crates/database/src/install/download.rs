@@ -10,13 +10,13 @@ use collections::HashMap;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, channel::mpsc};
 use http_client::HttpClient;
-use http_client::github::ensure_release_host_is_trusted;
 use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::install::manifest::{DriverManifest, ReleaseCoordinates, current_target, parse_sha256};
+use crate::install::endpoint::DriverEndpoint;
+use crate::install::manifest::{DriverManifest, current_target, parse_sha256};
 use crate::install::{store, unpack};
 
 /// How far along an install is, for a progress bar that means something.
@@ -41,7 +41,7 @@ type SharedInstall = Shared<BoxFuture<'static, InstallResult>>;
 
 pub struct DriverInstaller {
     http: Arc<dyn HttpClient>,
-    release: ReleaseCoordinates,
+    endpoint: DriverEndpoint,
     root: PathBuf,
     manifest: Mutex<Option<Arc<DriverManifest>>>,
     in_flight: Mutex<HashMap<String, SharedInstall>>,
@@ -49,18 +49,14 @@ pub struct DriverInstaller {
 }
 
 impl DriverInstaller {
-    pub fn new(http: Arc<dyn HttpClient>, release: ReleaseCoordinates) -> Self {
-        Self::with_root(http, release, store::root().to_path_buf())
+    pub fn new(http: Arc<dyn HttpClient>, endpoint: DriverEndpoint) -> Self {
+        Self::with_root(http, endpoint, store::root().to_path_buf())
     }
 
-    pub fn with_root(
-        http: Arc<dyn HttpClient>,
-        release: ReleaseCoordinates,
-        root: PathBuf,
-    ) -> Self {
+    pub fn with_root(http: Arc<dyn HttpClient>, endpoint: DriverEndpoint, root: PathBuf) -> Self {
         Self {
             http,
-            release,
+            endpoint,
             root,
             manifest: Mutex::default(),
             in_flight: Mutex::default(),
@@ -139,21 +135,26 @@ impl DriverInstaller {
             let published = manifest.targets_for(id);
             if published.is_empty() {
                 format!(
-                    "release v{} publishes no `{id}` driver ({})",
-                    self.release.version,
-                    self.release.release_url()
+                    "version {} publishes no `{id}` driver. In a development build, run \
+                     `script/build-database-drivers` (or `make drivers`) instead, or install \
+                     the driver by hand into {}",
+                    self.endpoint.version(),
+                    self.root.display()
                 )
             } else {
                 format!(
-                    "release v{} has no `{id}` driver for {target} (it publishes: {})",
-                    self.release.version,
-                    published.join(", ")
+                    "version {} has no `{id}` driver for {target} (it publishes: {}). In a \
+                     development build, run `script/build-database-drivers` (or `make drivers`) \
+                     instead, or install the driver by hand into {}",
+                    self.endpoint.version(),
+                    published.join(", "),
+                    self.root.display()
                 )
             }
         })?;
         let expected = parse_sha256(&asset.asset, &asset.sha256)?;
 
-        let directory = store::version_dir_in(&self.root, id, &self.release.version);
+        let directory = store::version_dir_in(&self.root, id, self.endpoint.version());
         smol::fs::create_dir_all(directory.parent().unwrap_or(&self.root))
             .await
             .with_context(|| format!("creating {}", self.root.display()))?;
@@ -164,7 +165,7 @@ impl DriverInstaller {
         let downloaded = self
             .download_to(
                 id,
-                &self.release.asset_url(&asset.asset),
+                &self.endpoint.asset_url(&asset.asset),
                 &archive,
                 asset.size,
             )
@@ -175,7 +176,7 @@ impl DriverInstaller {
             self.report(id, InstallProgress::Verifying);
             anyhow::ensure!(
                 actual == expected,
-                "the downloaded `{id}` driver does not match the checksum the release publishes \
+                "the downloaded `{id}` driver does not match the checksum the manifest publishes \
                  (expected {expected}, got {actual}); it has been discarded"
             );
             self.report(id, InstallProgress::Unpacking);
@@ -194,7 +195,7 @@ impl DriverInstaller {
         let _ = smol::fs::remove_file(&archive).await;
         let installed = result?;
 
-        store::prune_other_versions_in(&self.root, id, &self.release.version)?;
+        store::prune_other_versions_in(&self.root, id, self.endpoint.version())?;
         Ok(installed)
     }
 
@@ -210,10 +211,10 @@ impl DriverInstaller {
         destination: &PathBuf,
         expected_size: u64,
     ) -> Result<String> {
-        ensure_release_host_is_trusted(url)?;
+        self.endpoint.ensure_trusted(url)?;
         let mut response = self
             .http
-            .get(url, Default::default(), true)
+            .get(url, Default::default(), false)
             .await
             .with_context(|| format!("downloading the `{id}` driver from {url}"))?;
         anyhow::ensure!(
@@ -251,28 +252,28 @@ impl DriverInstaller {
         Ok(hex(hasher.finalize().as_slice()))
     }
 
-    /// The release's driver manifest, fetched once per process.
+    /// The driver manifest for this version, fetched once per process.
     ///
     /// Cached because it is asked for again on every driver a person installs
     /// in one sitting, and it cannot change underneath a running app: the
-    /// release it names is the one this build came from.
+    /// version it names is the one this build came from.
     pub async fn manifest(&self) -> Result<Arc<DriverManifest>> {
         if let Some(manifest) = self.manifest.lock().clone() {
             return Ok(manifest);
         }
 
-        let url = self.release.manifest_url();
-        ensure_release_host_is_trusted(&url)?;
+        let url = self.endpoint.manifest_url();
+        self.endpoint.ensure_trusted(&url)?;
         let mut response = self
             .http
-            .get(&url, Default::default(), true)
+            .get(&url, Default::default(), false)
             .await
             .with_context(|| format!("fetching the driver manifest from {url}"))?;
         anyhow::ensure!(
             response.status().is_success(),
-            "release v{} publishes no driver manifest (fetching it returned {}). \
+            "version {} publishes no driver manifest (fetching it returned {}). \
              In a development build, run `script/build-database-drivers` instead.",
-            self.release.version,
+            self.endpoint.version(),
             response.status()
         );
 
@@ -343,7 +344,7 @@ mod tests {
     fn installer(http: Arc<dyn HttpClient>, root: &std::path::Path) -> Arc<DriverInstaller> {
         Arc::new(DriverInstaller::with_root(
             http,
-            ReleaseCoordinates::new("tgiap04/zode", VERSION),
+            DriverEndpoint::new("https://api.test.invalid/api", VERSION),
             root.to_path_buf(),
         ))
     }
@@ -475,6 +476,43 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("no driver manifest"), "{message}");
             assert!(message.contains("build-database-drivers"), "{message}");
+        });
+    }
+
+    /// A configured base that cannot be trusted -- here, one that does not even
+    /// parse -- must stop the install before the manifest is fetched at all.
+    /// Fails closed the same way an origin mismatch would, and proves it with
+    /// the fake client's request count staying at zero.
+    #[test]
+    fn an_untrusted_origin_is_refused_before_any_request() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let http = {
+                let requests = requests.clone();
+                FakeHttpClient::create(move |_| {
+                    let requests = requests.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        Ok(Response::builder().status(200).body(Default::default())?)
+                    }
+                })
+            };
+            let installer = Arc::new(DriverInstaller::with_root(
+                http,
+                DriverEndpoint::new("not a url", VERSION),
+                root.path().to_path_buf(),
+            ));
+
+            installer.install("postgres").await.expect_err(
+                "an unparsable configured base cannot be compared against, so it must be refused",
+            );
+
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                0,
+                "an untrusted origin must be refused before a request is made"
+            );
         });
     }
 

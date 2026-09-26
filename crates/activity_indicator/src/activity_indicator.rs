@@ -28,6 +28,7 @@ use ui::{
 };
 use util::truncate_and_trailoff;
 use workspace::{StatusItemView, Workspace, item::ItemHandle};
+use zode_env_sync::EnvStatus;
 
 const GIT_OPERATION_DELAY: Duration = Duration::from_millis(0);
 
@@ -123,6 +124,10 @@ impl ActivityIndicator {
 
             if let Some(updater) = AutoUpdater::get(cx) {
                 cx.observe(&updater, |_, _, cx| cx.notify()).detach();
+            }
+
+            if let Some(session) = zode_env_sync::EnvSession::global(cx) {
+                cx.observe(&session, |_, _, cx| cx.notify()).detach();
             }
 
             cx.subscribe(
@@ -362,6 +367,44 @@ impl ActivityIndicator {
                 tooltip_message: None,
             });
         }
+        // Environment sync, which is always something the user just asked
+        // for and is waiting on. The failure states are sticky here on
+        // purpose: by the time a push fails, the window that showed the bytes
+        // has already closed, so this is the only place left that can say so.
+        // `Done` is deliberately not shown -- nothing clears it until the next
+        // sync, so it would sit in the bar for the rest of the session.
+        if let Some(session) = zode_env_sync::EnvSession::global(cx) {
+            let status = session.read(cx).status().clone();
+            let icon = match &status {
+                EnvStatus::Working => Some(
+                    Icon::new(IconName::ArrowCircle)
+                        .size(IconSize::Small)
+                        .with_rotate_animation(2)
+                        .into_any_element(),
+                ),
+                EnvStatus::Failed(_) | EnvStatus::KeyMismatch | EnvStatus::Rollback { .. } => Some(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::Small)
+                        .into_any_element(),
+                ),
+                EnvStatus::Idle | EnvStatus::Done(_) | EnvStatus::NeedsRecoveryKey => None,
+            };
+
+            if let Some(icon) = icon {
+                let dismissable = !matches!(status, EnvStatus::Working);
+                return Some(Content {
+                    icon: Some(icon),
+                    message: status.sentence().to_string(),
+                    on_click: Some(Arc::new(|_this, _window, cx| {
+                        if let Some(session) = zode_env_sync::EnvSession::global(cx) {
+                            session.update(cx, |session, cx| session.acknowledge(cx));
+                        }
+                    })),
+                    tooltip_message: dismissable.then(|| "Click to dismiss".to_string()),
+                });
+            }
+        }
+
         // Show any language server has pending activity.
         {
             let mut pending_work = self.pending_language_server_work(cx);
@@ -719,6 +762,24 @@ impl ActivityIndicator {
                         message: "Checking for updates…".to_string(),
                         on_click: None,
                         tooltip_message: None,
+                    });
+                }
+                AutoUpdateStatus::UpdateAvailable { version } => {
+                    return Some(Content {
+                        icon: Some(
+                            Icon::new(IconName::Download)
+                                .size(IconSize::Small)
+                                .into_any_element(),
+                        ),
+                        message: format!("Zode {} available", describe(&version)),
+                        on_click: Some(Arc::new(|_, _, cx| {
+                            if let Some(updater) = AutoUpdater::get(cx) {
+                                updater.update(cx, |updater, cx| {
+                                    updater.download_update(cx);
+                                });
+                            }
+                        })),
+                        tooltip_message: Some("Click to download and install".to_string()),
                     });
                 }
                 AutoUpdateStatus::Downloading { version } => {

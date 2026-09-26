@@ -17,6 +17,12 @@ use std::collections::BTreeSet;
 /// Each needs a reason. "It was already like that" is not one -- an entry here
 /// is a claim that the app or the harness is right to differ.
 const ALLOWED_TO_DIFFER: &[(&str, &str)] = &[
+    // Initialised one level below the flat startup list, which the scan below
+    // follows only as literal text.
+    (
+        "agent_notify",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
     // The harness builds its own `AppState` and drives windows itself, so the
     // app's startup-only wiring has no counterpart in it.
     (

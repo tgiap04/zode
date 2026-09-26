@@ -81,6 +81,16 @@ pub struct SerializedProjectGroup {
     /// might edit by hand and an unparsable value has to be refusable.
     #[serde(default)]
     pub colour: Option<String>,
+    /// The bare file name of Zode's own copy of this project's logo, or
+    /// `None` for initials and colour instead.
+    ///
+    /// A name, never a path: this value is the argument to a future
+    /// `Fs::remove_file`, and a hand-edited or corrupted record naming a full
+    /// path could point that removal at any file on the machine. Resolved
+    /// back to a path only through `project_logo::logo_path_for`, which
+    /// admits a single plain path component and nothing else.
+    #[serde(default)]
+    pub logo: Option<String>,
 }
 
 fn default_expanded() -> bool {
@@ -102,6 +112,10 @@ impl SerializedProjectGroup {
             expanded: group.expanded,
             initials: group.initials.as_ref().map(|initials| initials.to_string()),
             colour: group.colour.map(crate::project_appearance::colour_to_hex),
+            logo: group
+                .logo
+                .as_deref()
+                .and_then(crate::project_logo::logo_file_name),
         }
     }
 
@@ -136,6 +150,15 @@ impl SerializedProjectGroup {
                 })
                 .map(SharedString::from),
             colour,
+            logo: self.logo.as_deref().and_then(|name| {
+                let resolved = crate::project_logo::logo_path_for(name);
+                if resolved.is_none() {
+                    log::warn!(
+                        "project group has an unusable logo {name:?}; falling back to initials"
+                    );
+                }
+                resolved
+            }),
         }
     }
 }
@@ -521,13 +544,13 @@ impl Column for SerializedItem {
 mod project_group_record_tests {
     use super::*;
 
-    /// A record in the shape written before the avatar had its own initials and
-    /// colour.
+    /// A record in the shape written before the avatar had its own initials,
+    /// colour, and logo.
     ///
-    /// Built by serializing a real record and then *removing* the two new keys,
-    /// rather than by hand-writing JSON: a hand-written shape can be wrong in a
-    /// way that makes the test pass for the wrong reason, and this shape is
-    /// provably the one on disk.
+    /// Built by serializing a real record and then *removing* the three new
+    /// keys, rather than by hand-writing JSON: a hand-written shape can be
+    /// wrong in a way that makes the test pass for the wrong reason, and this
+    /// shape is provably the one on disk.
     fn record_without_the_new_fields() -> String {
         let group = SerializedProjectGroup {
             path_list: PathList::new(&["/tmp/project"]).serialize(),
@@ -535,11 +558,14 @@ mod project_group_record_tests {
             expanded: true,
             initials: None,
             colour: None,
+            logo: None,
         };
         let mut value = serde_json::to_value(&group).expect("a record serializes");
         let object = value.as_object_mut().expect("a record is a JSON object");
         assert!(
-            object.remove("initials").is_some() && object.remove("colour").is_some(),
+            object.remove("initials").is_some()
+                && object.remove("colour").is_some()
+                && object.remove("logo").is_some(),
             "the keys being removed must actually be there, or this test proves nothing"
         );
         value.to_string()
@@ -554,10 +580,12 @@ mod project_group_record_tests {
             .expect("an older record must still deserialize");
         assert_eq!(group.initials, None);
         assert_eq!(group.colour, None);
+        assert_eq!(group.logo, None);
 
         let restored = group.into_restored_state();
         assert_eq!(restored.initials, None);
         assert_eq!(restored.colour, None);
+        assert_eq!(restored.logo, None);
         assert!(restored.expanded);
     }
 
@@ -571,6 +599,7 @@ mod project_group_record_tests {
             expanded: true,
             initials: Some("ABCDE".to_string()),
             colour: Some("not-a-colour".to_string()),
+            logo: None,
         };
         let restored = group.into_restored_state();
         assert_eq!(restored.colour, None, "the colour is refused");
@@ -579,6 +608,28 @@ mod project_group_record_tests {
             Some("AB"),
             "and over-long initials from disk are capped like typed ones"
         );
+        assert!(
+            !restored.key.path_list().paths().is_empty(),
+            "the project itself survives"
+        );
+    }
+
+    /// A logo name edited by hand into something that escapes the avatars
+    /// directory costs the logo, not the project -- the same shape as the
+    /// colour case above, and the security property `logo_path_for` exists
+    /// to guarantee.
+    #[test]
+    fn an_unreadable_logo_name_is_dropped_rather_than_fatal() {
+        let group = SerializedProjectGroup {
+            path_list: PathList::new(&["/tmp/project"]).serialize(),
+            location: SerializedWorkspaceLocation::Local,
+            expanded: true,
+            initials: None,
+            colour: None,
+            logo: Some("../../evil".to_string()),
+        };
+        let restored = group.into_restored_state();
+        assert_eq!(restored.logo, None, "an escaping name is refused");
         assert!(
             !restored.key.path_list().paths().is_empty(),
             "the project itself survives"
@@ -595,6 +646,7 @@ mod project_group_record_tests {
             expanded: false,
             initials: Some("ZO".to_string()),
             colour: Some(crate::project_appearance::colour_to_hex(colour)),
+            logo: None,
         };
         let json = serde_json::to_string(&group).unwrap();
         let restored = serde_json::from_str::<SerializedProjectGroup>(&json)

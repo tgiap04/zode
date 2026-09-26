@@ -1,52 +1,15 @@
-//! What the release says about the drivers it published.
+//! What a version says about the drivers it published.
 //!
-//! A release carries one small JSON asset naming every driver binary it
+//! Every version carries one small JSON asset naming every driver binary it
 //! shipped, with the checksum of each. Reading it is one request against a
-//! fixed URL; discovering the same thing through the GitHub API would take a
-//! token, a page of release metadata, and a guess at asset naming.
+//! fixed URL; discovering the same thing any other way would take a guess at
+//! asset naming.
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// The name the manifest is published under, in every release.
+/// The name the manifest is published under, at every version.
 pub const MANIFEST_ASSET: &str = "zode-db-drivers-manifest.json";
-
-/// Where a build looks for its drivers.
-///
-/// The version is the app's own. A driver speaks a pinned protocol
-/// (`crate::PROTOCOL_VERSION`), and the release that shipped this app is the
-/// one whose drivers were built against it -- so an app never fetches from a
-/// release other than its own, and never runs a driver left by another.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReleaseCoordinates {
-    /// `owner/repo`, from `release_channel::RELEASE_REPO`.
-    pub repo: String,
-    /// The app version, which is also the release tag without its `v`.
-    pub version: String,
-}
-
-impl ReleaseCoordinates {
-    pub fn new(repo: impl Into<String>, version: impl Into<String>) -> Self {
-        Self {
-            repo: repo.into(),
-            version: version.into(),
-        }
-    }
-
-    pub fn asset_url(&self, asset: &str) -> String {
-        let Self { repo, version } = self;
-        format!("https://github.com/{repo}/releases/download/v{version}/{asset}")
-    }
-
-    pub fn manifest_url(&self) -> String {
-        self.asset_url(MANIFEST_ASSET)
-    }
-
-    pub fn release_url(&self) -> String {
-        let Self { repo, version } = self;
-        format!("https://github.com/{repo}/releases/tag/v{version}")
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DriverManifest {
@@ -194,19 +157,6 @@ mod tests {
             ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
         );
         assert!(manifest.targets_for("mongodb").is_empty());
-    }
-
-    #[test]
-    fn urls_are_built_from_the_tag_that_matches_the_app() {
-        let release = ReleaseCoordinates::new("tgiap04/zode", "0.1.1");
-        assert_eq!(
-            release.manifest_url(),
-            "https://github.com/tgiap04/zode/releases/download/v0.1.1/zode-db-drivers-manifest.json"
-        );
-        assert_eq!(
-            release.asset_url("zode-db-postgres-aarch64-apple-darwin.tar.gz"),
-            "https://github.com/tgiap04/zode/releases/download/v0.1.1/zode-db-postgres-aarch64-apple-darwin.tar.gz"
-        );
     }
 
     /// Fails closed. A digest that cannot be parsed cannot be compared, and

@@ -1,7 +1,8 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
+    AgentCommand, AgentKind, Availability, CompletedSubagents, Deletion, Fork, SessionCounts,
+    SessionProvider, SessionSummary, SubagentSummary,
     claude_log::{self, HeadFacts, TailFacts},
-    provider::is_safe_component,
+    provider::{Untitled, is_safe_component},
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -15,9 +16,12 @@ use std::{
 /// `ai-title`. Grown in steps rather than read whole: the largest transcript on
 /// the author's machine is 13 MB and the title is normally in the last few KB.
 const TAIL_STEPS: &[u64] = &[256 * 1024, 1024 * 1024];
-/// Enough of the beginning to reach the first user message past the handful of
-/// `mode` / `permission-mode` lines every session opens with.
-const HEAD_BYTES: u64 = 16 * 1024;
+/// How much of the beginning to read looking for the first thing the user said.
+/// The first step clears the handful of `mode` / `permission-mode` lines every
+/// session opens with; the second exists because a session opened by a slash
+/// command carries that command's expanded body before the user gets a word in,
+/// and one such body measured 122 KB.
+const HEAD_STEPS: &[u64] = &[16 * 1024, 256 * 1024];
 
 /// Claude Code's transcripts: `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`,
 /// with a sidecar directory of the same stem holding `subagents/` and
@@ -41,7 +45,7 @@ impl ClaudeProvider {
         util::paths::home_dir().join(".claude").join("projects")
     }
 
-    fn summary_for(&self, log_path: &Path) -> Result<Option<SessionSummary>> {
+    fn summary_for(&self, log_path: &Path, untitled: Untitled) -> Result<Option<SessionSummary>> {
         let id = log_path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -56,11 +60,10 @@ impl ClaudeProvider {
 
         let mut file = File::open(log_path)?;
         let tail = read_tail_until_title(&mut file, len)?;
-        let head = read_head(&mut file, len)?;
-        let head = claude_log::parse_head(&head);
+        let head = read_head_until_prompt(&mut file, len)?;
 
-        // A session nobody spoke in is a session nobody is looking for.
         let TailFacts {
+            custom_title,
             title,
             preview,
             preview_speaker,
@@ -72,13 +75,21 @@ impl ClaudeProvider {
             first_user_message,
             cwd: head_cwd,
         } = head;
-        if preview.is_none() && first_user_message.is_none() {
-            return Ok(None);
-        }
 
-        let title = title
-            .or_else(|| first_user_message.clone())
-            .unwrap_or_else(|| id.clone());
+        // Not a name the user typed, not one the CLI generated, not a first word
+        // they never said.
+        let title = custom_title
+            .or(title)
+            .or_else(|| first_user_message.clone());
+        let title = match (title, untitled) {
+            (Some(title), _) => title,
+            // A session nobody spoke in is a session nobody is browsing for.
+            (None, Untitled::Drop) => {
+                log::debug!("a session with nothing to name it is not listed: {id}");
+                return Ok(None);
+            }
+            (None, Untitled::KeepAsId) => id.clone(),
+        };
         // The head's cwd is the session's original one; the tail's is where it
         // ended up. They differ only if the user moved the directory mid-session,
         // in which case the later one is the one that still exists.
@@ -104,6 +115,17 @@ impl ClaudeProvider {
     fn sidecar_dir(session: &SessionSummary) -> Option<PathBuf> {
         let log_path = session.log_path.as_ref()?;
         Some(log_path.parent()?.join(session.id.as_ref()))
+    }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(sidecar) = Self::sidecar_dir(session) {
+            paths.push(sidecar);
+        }
+        if let Some(log) = session.log_path.clone() {
+            paths.push(log);
+        }
+        paths
     }
 }
 
@@ -143,7 +165,7 @@ impl SessionProvider for ClaudeProvider {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                     continue;
                 }
-                match self.summary_for(&path) {
+                match self.summary_for(&path, Untitled::Drop) {
                     Ok(Some(summary)) => sessions.push(summary),
                     Ok(None) => {}
                     // One unreadable transcript must not cost the whole list.
@@ -184,7 +206,7 @@ impl SessionProvider for ClaudeProvider {
             if !candidate.is_file() {
                 continue;
             }
-            return match self.summary_for(&candidate) {
+            return match self.summary_for(&candidate, Untitled::KeepAsId) {
                 Ok(summary) => Ok(summary),
                 // The file is there but unreadable. Answering "not held" would
                 // send the caller off to start a fresh session on top of a
@@ -195,11 +217,11 @@ impl SessionProvider for ClaudeProvider {
         Ok(None)
     }
 
-    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, id: &str, cwd: &Path) -> Option<AgentCommand> {
         // Verified against the installed CLI: the transcript lands at
         // `~/.claude/projects/<encoded-cwd>/<id>.jsonl` under exactly this id,
         // which is what makes `find` above able to recognise it later.
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "claude".to_string(),
             args: vec!["--session-id".to_string(), id.to_string()],
             cwd: cwd.to_path_buf(),
@@ -222,33 +244,51 @@ impl SessionProvider for ClaudeProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn subagents(&self, session: &SessionSummary) -> Result<Vec<SubagentSummary>> {
+        let Some(sidecar) = Self::sidecar_dir(session) else {
+            return Ok(Vec::new());
+        };
+        Ok(read_subagents(&sidecar.join("subagents")))
+    }
+
+    fn completed_subagents(
+        &self,
+        session: &SessionSummary,
+        from: u64,
+    ) -> Result<CompletedSubagents> {
+        let Some(log_path) = session.log_path.as_ref() else {
+            return Ok(CompletedSubagents {
+                tool_use_ids: Vec::new(),
+                scanned_to: from,
+            });
+        };
+        read_completed_tool_uses(log_path, from)
+    }
+
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         let mut args = vec!["--resume".to_string(), session.id.to_string()];
         if fork == Fork::New {
             args.push("--fork-session".to_string());
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "claude".to_string(),
             args,
             cwd: session.cwd.clone(),
         })
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        if let Some(sidecar) = Self::sidecar_dir(session) {
-            paths.push(sidecar);
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        let paths = self.paths_to_trash(session);
+        if paths.is_empty() {
+            return Deletion::Nothing;
         }
-        if let Some(log) = session.log_path.clone() {
-            paths.push(log);
-        }
-        paths
+        Deletion::Trash(paths)
     }
 }
 
-/// Read growing slices of the end of the file until one contains an `ai-title`,
-/// or the steps run out. Falling short is not an error — the caller falls back
-/// to the first user message.
+/// Read growing slices of the end of the file until one contains a title, or the
+/// steps run out. Falling short is not an error — the caller falls back to the
+/// first user message.
 fn read_tail_until_title(file: &mut File, len: u64) -> Result<TailFacts> {
     let mut best = TailFacts::default();
     for step in TAIL_STEPS {
@@ -264,15 +304,26 @@ fn read_tail_until_title(file: &mut File, len: u64) -> Result<TailFacts> {
             text.as_str()
         };
         best = claude_log::parse_tail(text);
-        if best.title.is_some() || want == len {
+        if best.custom_title.is_some() || best.title.is_some() || want == len {
             break;
         }
     }
     Ok(best)
 }
 
-fn read_head(file: &mut File, len: u64) -> Result<String> {
-    read_at(file, 0, HEAD_BYTES.min(len) as usize)
+/// Read growing slices of the beginning of the file until one holds something
+/// the user actually said. Only a session with no title of any kind pays for the
+/// second step, and only that session's row depends on the answer.
+fn read_head_until_prompt(file: &mut File, len: u64) -> Result<HeadFacts> {
+    let mut best = HeadFacts::default();
+    for step in HEAD_STEPS {
+        let want = (*step).min(len);
+        best = claude_log::parse_head(&read_at(file, 0, want as usize)?);
+        if best.first_user_message.is_some() || want == len {
+            break;
+        }
+    }
+    Ok(best)
 }
 
 /// Lossy on purpose: a byte window into a UTF-8 file will cut a character, and a
@@ -421,6 +472,148 @@ mod tests {
         let provider = ClaudeProvider::new(root.path().to_path_buf());
         let sessions = provider.list().unwrap();
         assert_eq!(sessions[0].title, "just this once");
+    }
+
+    #[test]
+    fn a_session_of_nothing_but_local_commands_is_not_listed() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "housekeeping",
+            &[
+                r#"{"type":"mode","mode":"default"}"#,
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name> <command-args></command-args>"},"cwd":"/w/one"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":"No response requested."},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "switching model is not a conversation, and the caveat above it is not its title"
+        );
+    }
+
+    #[test]
+    fn a_session_opened_by_a_slash_command_is_titled_by_its_arguments() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "commanded",
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-message>debug-code</command-message> <command-name>/debug-code</command-name> <command-args>the titles are wrong</command-args>"},"cwd":"/w/one"}"#,
+                r#"{"type":"assistant","message":{"role":"assistant","content":"looking"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(sessions[0].title, "/debug-code the titles are wrong");
+    }
+
+    #[test]
+    fn the_title_the_user_typed_is_the_one_shown() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "renamed",
+            &[
+                r#"{"type":"user","message":{"role":"user","content":"do the thing"},"cwd":"/w/one"}"#,
+                r#"{"type":"ai-title","aiTitle":"Doing the thing"}"#,
+                r#"{"type":"custom-title","customTitle":"Renamed by hand"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(
+            sessions[0].title, "Renamed by hand",
+            "a name the user typed outranks one generated for them"
+        );
+    }
+
+    /// A session whose opening scaffolding runs past the first read step. The
+    /// window has to grow to reach the prompt, and the row would otherwise be
+    /// dropped for having no name.
+    #[test]
+    fn a_prompt_past_the_first_window_is_still_found() {
+        let root = projects_dir();
+        let filler = "x".repeat(20 * 1024);
+        let padded = format!(
+            r#"{{"type":"user","isMeta":true,"message":{{"role":"user","content":"{filler}"}},"cwd":"/w/one"}}"#
+        );
+        session(
+            &root.path().join("-w-one"),
+            "deep",
+            &[
+                &padded,
+                r#"{"type":"user","message":{"role":"user","content":"here is the real question"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(sessions[0].title, "here is the real question");
+    }
+
+    /// The counterpart to the test above. `list` and `find` ask different
+    /// questions of the same file, and only one of them is allowed to answer
+    /// "gone": a tab whose session cannot be found is started fresh *under the
+    /// same id*, which would put a second session on top of this transcript.
+    #[test]
+    fn a_session_the_list_hides_is_still_found_by_id() {
+        let root = projects_dir();
+        session(
+            &root.path().join("-w-one"),
+            "housekeeping",
+            &[
+                r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
+                r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name> <command-args></command-args>"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(provider.list().unwrap().is_empty());
+        let found = provider
+            .find("housekeeping")
+            .unwrap()
+            .expect("the transcript is on disk, so the id still names a session");
+        assert_eq!(
+            found.title, "housekeeping",
+            "listed under its id, for want of anything better"
+        );
+    }
+
+    /// The accepted loss at the far end of the growing head read: scaffolding
+    /// deeper than every step, and no title ever generated. The row goes, and
+    /// `find` still holds the id so the transcript cannot be written over.
+    #[test]
+    fn a_prompt_past_every_window_costs_the_row_but_not_the_id() {
+        let root = projects_dir();
+        let filler = "x".repeat(300 * 1024);
+        let padded = format!(
+            r#"{{"type":"user","isMeta":true,"message":{{"role":"user","content":"{filler}"}},"cwd":"/w/one"}}"#
+        );
+        session(
+            &root.path().join("-w-one"),
+            "buried",
+            &[
+                &padded,
+                r#"{"type":"user","message":{"role":"user","content":"here is the real question"},"cwd":"/w/one"}"#,
+            ],
+            0,
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "300 KB of scaffolding before the first word is past every step the head grows to"
+        );
+        assert!(
+            provider.find("buried").unwrap().is_some(),
+            "the transcript exists, and saying otherwise invites a second session on top of it"
+        );
     }
 
     #[test]
@@ -644,6 +837,235 @@ mod tests {
         assert_eq!(counts.messages, Some(1981), "grep -c of user|assistant");
         assert_eq!(counts.subagents, 13, "ls subagents/*.meta.json | wc -l");
     }
+
+    /// A sidecar written the way Claude writes one, read off a live session:
+    /// `{"agentType":"reviewer","description":"…","toolUseId":"toolu_…","spawnDepth":1}`.
+    fn sidecar(dir: &Path, id: &str, meta: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.meta.json")), meta).unwrap();
+    }
+
+    #[test]
+    fn a_subagent_row_comes_from_its_sidecar_newest_first() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("subagents");
+        sidecar(
+            &dir,
+            "agent-older",
+            r#"{"agentType":"tester","description":"Run the suites","toolUseId":"toolu_a","spawnDepth":1}"#,
+        );
+        // Ordering is by the sidecar's own mtime, so the two have to be written
+        // far enough apart for a filesystem to tell them apart at all.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sidecar(
+            &dir,
+            "agent-newer",
+            r#"{"agentType":"reviewer","description":"Review the diff","toolUseId":"toolu_b","spawnDepth":1}"#,
+        );
+        // No tool call, so nothing could ever report it finished.
+        sidecar(&dir, "agent-mute", r#"{"agentType":"doc-writer"}"#);
+
+        let subagents = read_subagents(&dir);
+        let names: Vec<&str> = subagents.iter().map(|one| &*one.kind).collect();
+        assert_eq!(
+            names,
+            vec!["reviewer", "tester"],
+            "newest first, and a sidecar that can never be marked finished is \
+             left out rather than pinned as running forever"
+        );
+        assert_eq!(&*subagents[0].description, "Review the diff");
+        assert_eq!(&*subagents[0].tool_use_id, "toolu_b");
+        assert_eq!(&*subagents[0].id, "agent-newer");
+    }
+
+    #[test]
+    fn a_sidecar_naming_no_type_still_gets_a_row() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("subagents");
+        sidecar(&dir, "agent-x", r#"{"toolUseId":"toolu_x"}"#);
+
+        let subagents = read_subagents(&dir);
+        assert_eq!(subagents.len(), 1);
+        assert_eq!(&*subagents[0].kind, "agent");
+        assert_eq!(&*subagents[0].description, "");
+    }
+
+    #[test]
+    fn a_missing_sidecar_directory_is_no_subagents_not_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_subagents(&root.path().join("nothing-here")).is_empty());
+    }
+
+    /// The claim the incremental scan lives or dies on.
+    ///
+    /// A transcript is appended to while it is read, so a pass regularly ends
+    /// mid-line. Counting that partial line as read would drop whatever result
+    /// it turns out to carry once the rest of it lands — and a result that is
+    /// missed once is missed forever, leaving a finished subagent marked as
+    /// running for the life of the session.
+    #[test]
+    fn a_half_written_line_is_left_for_the_next_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let finished = |id: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}"}}]}}}}"#
+            )
+        };
+
+        // Ends without a newline, exactly as a live transcript does.
+        std::fs::write(
+            &log,
+            format!("{}\n{}", finished("toolu_a"), finished("toolu_b")),
+        )
+        .unwrap();
+        let first = read_completed_tool_uses(&log, 0).unwrap();
+        assert_eq!(
+            first
+                .tool_use_ids
+                .iter()
+                .map(|id| &**id)
+                .collect::<Vec<_>>(),
+            vec!["toolu_a"],
+            "the unterminated second line has not finished arriving"
+        );
+
+        let complete_line_bytes = finished("toolu_a").len() as u64 + 1;
+        assert_eq!(
+            first.scanned_to, complete_line_bytes,
+            "the pass must stop at the last newline, not at the end of the file"
+        );
+
+        // The rest of that line lands.
+        std::fs::write(
+            &log,
+            format!("{}\n{}\n", finished("toolu_a"), finished("toolu_b")),
+        )
+        .unwrap();
+        let second = read_completed_tool_uses(&log, first.scanned_to).unwrap();
+        assert_eq!(
+            second
+                .tool_use_ids
+                .iter()
+                .map(|id| &**id)
+                .collect::<Vec<_>>(),
+            vec!["toolu_b"],
+            "the second pass reads the line it skipped, and not the one it already had"
+        );
+    }
+
+    /// A shorter file is a different file. Resuming into it would read from the
+    /// middle of a line that belongs to someone else's session.
+    #[test]
+    fn a_transcript_that_shrank_is_read_from_the_start() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        std::fs::write(
+            &log,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_only\"}]}}\n",
+        )
+        .unwrap();
+
+        let pass = read_completed_tool_uses(&log, 10_000).unwrap();
+        assert_eq!(
+            pass.tool_use_ids.iter().map(|id| &**id).collect::<Vec<_>>(),
+            vec!["toolu_only"]
+        );
+    }
+}
+
+/// Every subagent the sidecar directory names, newest first.
+///
+/// Reads each file where [`count_meta_files`] only counts names. Both stay:
+/// the history row wants a number and would be paying twenty-five file reads
+/// for it, and this wants the names and cannot get them from a count.
+///
+/// One unreadable or reshaped file costs its own row and nothing else — the
+/// rule the whole crate follows for formats it does not own. A sidecar with no
+/// `toolUseId` is dropped rather than shown, because that id is the only way to
+/// learn the subagent ever finished, and a row that can only ever say "running"
+/// is worse than no row at all.
+fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut subagents: Vec<SubagentSummary> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_name()?.to_str()?.strip_suffix(".meta.json")?;
+            let text = std::fs::read_to_string(&path).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let tool_use_id = meta.get("toolUseId").and_then(serde_json::Value::as_str)?;
+            Some(SubagentSummary {
+                id: Arc::from(id),
+                // A sidecar naming no type still describes a real subagent, so
+                // it keeps its row under a neutral word rather than vanishing.
+                kind: Arc::from(
+                    meta.get("agentType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("agent"),
+                ),
+                description: Arc::from(
+                    meta.get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                ),
+                tool_use_id: Arc::from(tool_use_id),
+                // An assumption about a format this editor does not own, and the
+                // one claim here no test can settle: every sidecar observed was
+                // written once, at spawn, and never touched again, so its own
+                // mtime is the start time. If Claude Code ever writes to it a
+                // second time — to record a completion, say — this field and the
+                // newest-first order built on it both go quietly wrong. A
+                // subagent list in a nonsensical order is the symptom that sends
+                // a reader back here.
+                //
+                // The transcript beside it is the file that keeps moving, and it
+                // is deliberately not consulted — see
+                // `claude_log::completed_tool_uses`.
+                spawned_at: entry.metadata().ok()?.modified().ok()?,
+            })
+        })
+        .collect();
+    subagents.sort_by(|a, b| b.spawned_at.cmp(&a.spawned_at));
+    subagents
+}
+
+/// Reads `path` from `from` to its end and reports the tool results in it.
+///
+/// Reports the offset of the last complete line rather than the file's length.
+/// A transcript being appended to right now ends mid-line, and counting that
+/// partial line as read would lose whatever result it turns out to carry once
+/// the rest of it lands.
+fn read_completed_tool_uses(path: &Path, from: u64) -> Result<CompletedSubagents> {
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    // A transcript only ever grows. Shorter than where the last pass stopped
+    // means a different file stands at this path now, so resuming would read
+    // into the middle of someone else's line. Start again instead.
+    let from = if from > length { 0 } else { from };
+    file.seek(SeekFrom::Start(from))?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+        return Ok(CompletedSubagents {
+            tool_use_ids: Vec::new(),
+            scanned_to: from,
+        });
+    };
+    // Lossy on the complete portion only, and the offset computed from the raw
+    // bytes: a replacement character is a different length from what it stands
+    // in for, so counting the converted string would drift the resume point.
+    let complete = String::from_utf8_lossy(&bytes[..=last_newline]);
+    Ok(CompletedSubagents {
+        tool_use_ids: claude_log::completed_tool_uses(&complete)
+            .into_iter()
+            .map(Arc::from)
+            .collect(),
+        scanned_to: from + last_newline as u64 + 1,
+    })
 }
 
 fn count_meta_files(dir: &Path) -> usize {
@@ -659,4 +1081,47 @@ fn count_meta_files(dir: &Path) -> usize {
                 .is_some_and(|name| name.ends_with(".meta.json"))
         })
         .count()
+}
+
+/// `deletion()` is new in phase 04's refactor; kept in its own module so the
+/// port of `paths_to_trash` above stays provably untouched -- `git diff` on
+/// `mod tests` is the check, and it must show nothing.
+#[cfg(test)]
+mod deletion_wrapping {
+    use super::*;
+
+    fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+            log_path,
+            log_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_session_with_nothing_to_take_is_nothing() {
+        let provider = ClaudeProvider::new(PathBuf::from("/does/not/exist"));
+        let session = bare_session("none", None);
+        assert_eq!(provider.deletion(&session), Deletion::Nothing);
+    }
+
+    #[test]
+    fn a_session_with_a_log_path_is_a_nonempty_trash() {
+        let provider = ClaudeProvider::new(PathBuf::from("/does/not/exist"));
+        let log = PathBuf::from("/does/not/exist/-w-one/s.jsonl");
+        let session = bare_session("s", Some(log.clone()));
+        let sidecar = log.parent().unwrap().join("s");
+        assert_eq!(
+            provider.deletion(&session),
+            Deletion::Trash(vec![sidecar, log])
+        );
+    }
 }

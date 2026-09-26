@@ -25,8 +25,8 @@ use ui::{ButtonLike, PopoverMenu, Tooltip};
 use workspace::{MultiWorkspace, StatusItemView, Workspace};
 
 use super::footprint_popover::{
-    CPU_ICON, RSS_ICON, build_popover, collect_roots, footprint_parts, footprints_render_the_same,
-    is_discovery_tick, merge_known_pids, wants_polling,
+    CPU_ICON, MEMORY_ICON, build_popover, collect_roots, footprint_parts,
+    footprints_render_the_same, is_discovery_tick, merge_known_pids, wants_polling,
 };
 use super::{
     Footprints, Pid, ProcessSampler, ProjectFootprint, ProjectFootprintSetting,
@@ -42,7 +42,8 @@ pub struct ProjectFootprintIndicator {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     /// CPU deltas depend on a sampler that outlives one tick, but only the
     /// background executor may ever touch it -- **never lock this on the
-    /// foreground**, or a frame stalls for the 12-15ms discovery pass. The
+    /// foreground**, or a frame stalls for the discovery pass (12-15 ms
+    /// measured on a 10-core macOS box, never re-measured elsewhere). The
     /// poll loop is the only task that locks it, so the lock is uncontended
     /// by construction.
     sampler: Arc<Mutex<Box<dyn ProcessSampler>>>,
@@ -246,19 +247,19 @@ impl ProjectFootprintIndicator {
 impl Render for ProjectFootprintIndicator {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let combined = self.footprints.combined();
-        if combined.rss_bytes.is_none() && combined.cpu_percent.is_none() {
+        if combined.memory_bytes.is_none() && combined.cpu_percent.is_none() {
             // Renders nothing rather than reserving space: a status-bar item
             // returning a flex box while empty shifts every neighbour over.
             return div();
         }
 
         let count = self.footprints.0.len();
-        let (rss, cpu) = footprint_parts(&combined);
+        let (memory, cpu) = footprint_parts(&combined);
         // Spells out which half is which: the two icons are stand-ins (this
         // repo ships no CPU or memory glyph), so the words live here rather
         // than relying on a reader to decode a bolt and a database.
         let tooltip: SharedString = format!(
-            "RAM {rss} and CPU {cpu} — language servers and terminals for {count} project{}",
+            "RAM {memory} and CPU {cpu} — language servers and terminals for {count} project{}",
             if count == 1 { "" } else { "s" }
         )
         .into();
@@ -280,12 +281,12 @@ impl Render for ProjectFootprintIndicator {
                                     h_flex()
                                         .gap_0p5()
                                         .child(
-                                            Icon::new(RSS_ICON)
+                                            Icon::new(MEMORY_ICON)
                                                 .size(IconSize::XSmall)
                                                 .color(Color::Muted),
                                         )
                                         .child(
-                                            Label::new(rss)
+                                            Label::new(memory)
                                                 .size(LabelSize::Small)
                                                 .color(Color::Muted),
                                         ),

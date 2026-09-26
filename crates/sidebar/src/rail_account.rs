@@ -85,6 +85,11 @@ impl Sidebar {
                             )
                             .separator()
                             .action(
+                                "Environment Files\u{2026}",
+                                Box::new(zed_actions::env_sync::OpenEnvVault),
+                            )
+                            .separator()
+                            .action(
                                 "Account on the Web",
                                 Box::new(zed_actions::account::OpenAccountOnWeb),
                             )

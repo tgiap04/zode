@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Compile-check items lifted verbatim from a real source file against a real
+target triple, without needing that whole crate to cross-compile.
+
+Exists because gpui_linux and gpui_windows are entirely
+`#![cfg(target_os = ...)]`-gated out on macOS, so `./script/clippy` proves
+nothing about them, and whole-crate cross-checks are independently blocked
+here (no cross linker/sysroot). Extraction happens by parsing the file at run
+time -- never a hand-copied snippet -- so the probe cannot drift from what
+ships. This checks that the item's own body type-checks against what you
+supply via --prelude, not that the real crate compiles or runs. CI remains
+the authoritative gate for all three platforms."""
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+EPILOG = """\
+known-good invocations (both must stay green; copy-paste for a new probe):
+
+  script/check-platform-fn crates/gpui_linux/src/linux/platform.rs \\
+      inhibit_screensaver ScreenSaver --target x86_64-unknown-linux-gnu \\
+      --deps 'zbus = { version = "5.13", default-features = false, features = ["async-io"] }' \\
+      --deps 'smol = "2.0"' --deps 'log = "0.4.16"' \\
+      --prelude 'use std::time::Duration;
+struct BackgroundExecutor;
+impl BackgroundExecutor {
+    fn clone(&self) -> Self { BackgroundExecutor }
+    async fn timer(&self, _d: Duration) {}
+    fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(&self, _f: F) -> Task { Task }
+}
+struct Task;
+impl Task { fn detach(self) {} }
+struct DisplayWakeLock;
+impl DisplayWakeLock { fn new(_release: impl FnOnce() + 'static) -> Self { DisplayWakeLock } }'
+
+  script/check-platform-fn crates/gpui_windows/src/platform.rs \\
+      keep_display_awake --target x86_64-pc-windows-msvc \\
+      --deps 'windows = { version = "0.61", features = ["Win32_System_Power"] }' \\
+      --deps 'log = "0.4.16"' \\
+      --prelude 'use windows::Win32::System::Power::*;
+struct DisplayWakeLock;
+impl DisplayWakeLock { fn new(_release: impl FnOnce() + 'static) -> Self { DisplayWakeLock } }'
+"""
+
+ITEM_RE_TEMPLATE = (
+    r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(fn|trait|struct|const|enum|impl)\s+{name}\b"
+)
+
+def read_toolchain(repo_root: Path) -> str:
+    toolchain_file = repo_root / "rust-toolchain.toml"
+    match = re.search(r'channel\s*=\s*"([^"]+)"', toolchain_file.read_text())
+    if not match:
+        sys.exit(f"error: no `channel = \"...\"` found in {toolchain_file}")
+    return match.group(1)
+
+def skip_noncode(text: str, i: int) -> int:
+    """Skip a `//`, `/* */` (non-nested) or `"..."` literal starting at i and
+    return the index past it, else return i unchanged. Raw strings and char
+    literals aren't handled -- not needed for this repo's platform code."""
+    if text.startswith("//", i):
+        end = text.find("\n", i)
+        return len(text) if end == -1 else end
+    if text.startswith("/*", i):
+        end = text.find("*/", i + 2)
+        return len(text) if end == -1 else end + 2
+    if text[i] == '"':
+        j = i + 1
+        while j < len(text) and text[j] != '"':
+            j += 2 if text[j] == "\\" else 1
+        return min(j + 1, len(text))
+    return i
+
+def find_item_end(text: str, search_from: int) -> int:
+    """From just after an item's name, find its terminator: a top-level `;`
+    (const/type alias) or the `}` closing the first `{` seen, skipping
+    comments/strings so a brace inside `format!("{x}")` doesn't unbalance it."""
+    depth, i = 0, search_from
+    while i < len(text):
+        skipped_to = skip_noncode(text, i)
+        if skipped_to != i:
+            i = skipped_to
+            continue
+        char = text[i]
+        if char == ";" and depth == 0:
+            return i + 1
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    sys.exit("error: reached end of file while brace-matching an extracted item")
+
+def find_doc_start(lines: list[str], item_line: int) -> int:
+    """Walk upward absorbing the doc comments and attributes (single- or
+    multi-line, via `#[` .. `]` balance) that belong to this item."""
+    i = item_line - 1
+    while i >= 0:
+        stripped = lines[i].strip()
+        if stripped == "":
+            break
+        if stripped.startswith(("///", "//!", "//", "#[")):
+            i -= 1
+            continue
+        if stripped.endswith("]"):
+            j = i
+            while j >= 0 and not lines[j].strip().startswith("#["):
+                j -= 1
+            if j >= 0:
+                i = j - 1
+                continue
+        break
+    return i + 1
+
+def extract_item(source_text: str, source_file: Path, name: str) -> str:
+    pattern = re.compile(ITEM_RE_TEMPLATE.format(name=re.escape(name)))
+    match = pattern.search(source_text)
+    if not match:
+        sys.exit(f"error: no fn/trait/struct/const/enum/impl named '{name}' in {source_file}")
+    end = find_item_end(source_text, match.end())
+    lines = source_text.splitlines()
+    item_line = source_text.count("\n", 0, match.start())
+    doc_start = find_doc_start(lines, item_line)
+    end_line = source_text.count("\n", 0, end)
+    return "\n".join(lines[doc_start : end_line + 1])
+
+def is_self_method(name: str, extracted: str) -> bool:
+    pattern = rf"\bfn\s+{re.escape(name)}\s*\(\s*(&\s*(mut\s+)?)?self\b"
+    return re.search(pattern, extracted[:400]) is not None
+
+def build_probe_crate(args, repo_root: Path) -> Path:
+    source_file = Path(args.source_file)
+    source_file = source_file if source_file.is_absolute() else repo_root / source_file
+    source_text = source_file.read_text()
+
+    top_items, methods = [], []
+    for name in args.names:
+        extracted = extract_item(source_text, source_file, name)
+        (methods if is_self_method(name, extracted) else top_items).append(extracted)
+
+    # A self-taking method needs an impl to live in; a helper it calls (say a
+    # #[zbus::proxy] trait) sits at module level exactly as in the real file.
+    body = ["#![allow(dead_code, unused_variables, unused_imports, unused_mut)]", "", *args.prelude, "", *top_items]
+    if methods:
+        body += ["", "struct Probe;", "", "impl Probe {", *methods, "}"]
+    lib_rs = "\n\n".join(body) + "\n"
+
+    manifest_head = '[package]\nname = "check-platform-fn-probe"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n'
+    cargo_toml = manifest_head + "\n[workspace]\n\n[dependencies]\n" + "\n".join(args.deps) + "\n"
+
+    # A stable slug (not mkdtemp) so CARGO_TARGET_DIR caches across runs; the
+    # empty [workspace] above keeps this from being absorbed into zode's own.
+    crate_dir = Path(tempfile.gettempdir()) / "check-platform-fn-probes" / ("-".join(args.names) + "-" + args.target)
+    (crate_dir / "src").mkdir(parents=True, exist_ok=True)
+    (crate_dir / "Cargo.toml").write_text(cargo_toml)
+    (crate_dir / "src" / "lib.rs").write_text(lib_rs)
+    return crate_dir
+
+def main() -> int:
+    fmt = argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(prog="check-platform-fn", description=__doc__, epilog=EPILOG, formatter_class=fmt)
+    parser.add_argument("source_file", help="path to the real source file, e.g. crates/gpui_linux/src/linux/platform.rs")
+    parser.add_argument("names", nargs="+", metavar="fn-name", help="one or more fn/trait/struct/const/enum names to extract")
+    parser.add_argument("--target", required=True, help="a rustc target triple, e.g. x86_64-pc-windows-msvc")
+    parser.add_argument("--deps", action="append", default=[], help="an inline Cargo.toml dependency line; repeatable")
+    parser.add_argument("--prelude", action="append", default=[], help="`use` lines / stub types the item needs; repeatable")
+    args = parser.parse_args()
+
+    if shutil.which("cargo") is None:
+        sys.exit("error: cargo not found on PATH")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    toolchain = read_toolchain(repo_root)
+    crate_dir = build_probe_crate(args, repo_root)
+
+    print(f"check-platform-fn: probing {args.names} from {args.source_file} for {args.target} in {crate_dir}", file=sys.stderr)
+
+    env = {**os.environ, "RUSTUP_TOOLCHAIN": toolchain, "CARGO_TARGET_DIR": str(crate_dir / "target")}
+    # Host build scripts link for the host regardless of --target; same fix as
+    # the Makefile's SDKROOT pin. Always recomputed: an inherited SDKROOT was
+    # observed stale in one agent sandbox on this machine.
+    if sys.platform == "darwin":
+        sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"], capture_output=True, text=True)
+        if sdk.returncode == 0 and sdk.stdout.strip():
+            env["SDKROOT"] = sdk.stdout.strip()
+
+    cargo_cmd = ["cargo", "check", "--target", args.target, "--manifest-path", str(crate_dir / "Cargo.toml")]
+    return subprocess.run(cargo_cmd, env=env).returncode
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,4 +1,4 @@
-use auto_update::{AutoUpdater, release_notes_url};
+use auto_update::{AutoUpdateStatus, AutoUpdater, VersionCheckType, release_notes_url};
 use editor::{Editor, MultiBuffer};
 use gpui::{App, DismissEvent, Entity, Window, actions, prelude::*};
 use markdown_preview::markdown_preview_view::{MarkdownPreviewMode, MarkdownPreviewView};
@@ -23,6 +23,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     notify_if_app_was_updated(cx);
+    notify_when_update_is_available(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(|workspace, _: &ViewReleaseNotesLocally, window, cx| {
             view_release_notes_locally(workspace, window, cx);
@@ -155,6 +156,54 @@ fn view_release_notes_locally(
                 .update_in(cx, notify_release_notes_failed_to_show)
                 .log_err();
         }
+    })
+    .detach();
+}
+
+struct UpdateAvailableNotification;
+
+/// Asks before spending the bandwidth. A check that turns up a newer release stops there and
+/// leaves the updater holding it; this puts that offer in front of the person with a button
+/// that starts the download, so nothing over a hundred megabytes moves unasked.
+fn notify_when_update_is_available(cx: &mut App) {
+    let Some(updater) = AutoUpdater::get(cx) else {
+        return;
+    };
+
+    // The updater notifies on every status change, and a dismissed notification must stay
+    // dismissed, so each version is only ever offered once per session.
+    let mut offered: Option<VersionCheckType> = None;
+    cx.observe(&updater, move |updater, cx| {
+        let AutoUpdateStatus::UpdateAvailable { version } = updater.read(cx).status() else {
+            return;
+        };
+        if offered.as_ref() == Some(&version) {
+            return;
+        }
+        offered = Some(version.clone());
+
+        let VersionCheckType::Semantic(version) = version;
+        let app_name = ReleaseChannel::global(cx).display_name();
+        show_app_notification(
+            NotificationId::unique::<UpdateAvailableNotification>(),
+            cx,
+            move |cx| {
+                cx.new(|cx| {
+                    MessageNotification::new(
+                        format!("{app_name} {version} is available to download"),
+                        cx,
+                    )
+                    .primary_message("Download")
+                    .primary_on_click(move |_, cx| {
+                        if let Some(updater) = AutoUpdater::get(cx) {
+                            updater.update(cx, |updater, cx| updater.download_update(cx));
+                        }
+                        cx.emit(DismissEvent);
+                    })
+                    .show_suppress_button(false)
+                })
+            },
+        );
     })
     .detach();
 }

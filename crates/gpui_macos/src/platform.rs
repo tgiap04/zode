@@ -1,6 +1,6 @@
 use crate::{
     BoolExt, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
-    events::key_to_native, ns_string, pasteboard::Pasteboard, renderer,
+    events::key_to_native, notifications, ns_string, pasteboard::Pasteboard, renderer,
 };
 use anyhow::{Context as _, anyhow};
 use block::ConcreteBlock;
@@ -28,9 +28,10 @@ use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayWakeLock,
-    ForegroundExecutor, KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowParams,
+    ForegroundExecutor, KeyContext, Keymap, Menu, MenuItem, Notification, OsMenu, OwnedMenu,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task, ThermalState,
+    WindowAppearance, WindowParams,
 };
 use itertools::Itertools;
 use objc::{
@@ -150,12 +151,27 @@ unsafe fn build_classes() {
                 on_thermal_state_change as extern "C" fn(&mut Object, Sel, id),
             );
 
+            // UNUserNotificationCenterDelegate methods. Registered unconditionally --
+            // harmless on an unbundled process since nothing ever sets this object as
+            // the center's delegate unless `notifications::supported()` is true (see
+            // `run()`).
+            decl.add_method(
+                sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:),
+                notifications::will_present_notification
+                    as extern "C" fn(&mut Object, Sel, id, id, id),
+            );
+            decl.add_method(
+                sel!(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:),
+                notifications::did_receive_notification_response
+                    as extern "C" fn(&mut Object, Sel, id, id, id),
+            );
+
             decl.register()
         }
     }
 }
 
-pub struct MacPlatform(Mutex<MacPlatformState>);
+pub struct MacPlatform(pub(crate) Mutex<MacPlatformState>);
 
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
@@ -178,6 +194,7 @@ pub(crate) struct MacPlatformState {
     dock_menu: Option<id>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
+    pub(crate) on_notification_activated: Option<Box<dyn FnMut(String)>>,
 }
 
 impl MacPlatform {
@@ -214,6 +231,7 @@ impl MacPlatform {
             on_thermal_state_change: None,
             menus: None,
             keyboard_mapper,
+            on_notification_activated: None,
         }))
     }
 
@@ -484,6 +502,15 @@ impl Platform for MacPlatform {
             (*app).set_ivar(MAC_PLATFORM_IVAR, self_ptr);
             (*app_delegate).set_ivar(MAC_PLATFORM_IVAR, self_ptr);
 
+            // Reaching `currentNotificationCenter` at all is what can abort an
+            // unbundled process (see notifications.rs), so this is gated on
+            // `supported()` rather than attempted unconditionally.
+            if notifications::supported() {
+                let center: id =
+                    msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+                let _: () = msg_send![center, setDelegate: app_delegate];
+            }
+
             let pool = NSAutoreleasePool::new(nil);
             app.run();
             pool.drain();
@@ -491,6 +518,18 @@ impl Platform for MacPlatform {
             (*app).set_ivar(MAC_PLATFORM_IVAR, null_mut::<c_void>());
             (*NSWindow::delegate(app)).set_ivar(MAC_PLATFORM_IVAR, null_mut::<c_void>());
         }
+    }
+
+    fn post_notification(&self, notification: Notification) {
+        notifications::post(notification);
+    }
+
+    fn can_post_notifications(&self) -> bool {
+        notifications::supported()
+    }
+
+    fn on_notification_activated(&self, callback: Box<dyn FnMut(String)>) {
+        self.0.lock().on_notification_activated = Some(callback);
     }
 
     fn quit(&self) {
@@ -714,6 +753,8 @@ impl Platform for MacPlatform {
                     panel.setCanChooseDirectories_(options.directories.to_objc());
                     panel.setCanChooseFiles_(options.files.to_objc());
                     panel.setAllowsMultipleSelection_(options.multiple.to_objc());
+                    let _: () =
+                        msg_send![panel, setShowsHiddenFiles: options.show_hidden.to_objc()];
 
                     panel.setCanCreateDirectories(true.to_objc());
                     panel.setResolvesAliases_(false.to_objc());
@@ -1227,7 +1268,7 @@ unsafe fn path_from_objc(path: id) -> PathBuf {
     PathBuf::from(path)
 }
 
-unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
+pub(crate) unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
     unsafe {
         let platform_ptr: *mut c_void = *object.get_ivar(MAC_PLATFORM_IVAR);
         assert!(!platform_ptr.is_null());

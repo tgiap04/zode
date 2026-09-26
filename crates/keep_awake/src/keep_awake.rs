@@ -11,9 +11,20 @@
 //! The second, and the one that survived the first fix: a CLI sitting at its
 //! prompt waiting for you to type is alive and doing nothing. Holding the
 //! display for it means walking away from an idle agent and coming back to a
-//! screen that never slept. So the lock follows
-//! [`AgentView::is_responding`](agent_ui::AgentView::is_responding) -- output
-//! actually arriving -- and not merely a live process.
+//! screen that never slept. So the lock follows output actually arriving, and
+//! not merely a live process.
+//!
+//! That question is [`AgentView::is_answering`](agent_ui::AgentView::is_answering)'s
+//! to answer, and this module asks it rather than reassembling it. The
+//! distinction matters: the raw
+//! [`is_responding`](agent_ui::AgentView::is_responding) beside it counts pty
+//! writes only, and an agent that hands its work to subagents goes quiet while
+//! they think -- a CLI waiting on one repaints a spinner once or twice a second,
+//! under that threshold, so the display used to sleep in the middle of work the
+//! user was waiting for. `is_answering` already folds a running subagent in, and
+//! already gates it on the CLI being alive so a subagent record stranded by a
+//! killed process cannot pin the display on. Reading the settled answer keeps
+//! that rule in one place instead of two crates deriving it separately.
 //!
 //! That answer is sampled rather than announced, so it is polled, and only
 //! while some tab has a live CLI. A tab with none costs nothing: no timer, no
@@ -28,16 +39,43 @@
 //! That timer is tied to working agents rather than to holding the lock,
 //! because on battery there is a working agent and no lock, and something still
 //! has to notice the charger going back in.
+//!
+//! A plain terminal tab -- centre or dock, with no agent behind it -- obeys the
+//! same output rule rather than a liveness one, and deliberately has no
+//! substitute for "is the foreground process still running". A shell sitting at
+//! its prompt has no `TaskStatus` and writes nothing, so it already fails the
+//! rate test on its own; adding a foreground-process-group check would cost real
+//! complexity for a case the output rule already gets right. Three cases were
+//! checked before settling on this:
+//!
+//! - **Typing echo.** Roughly eight characters a second is a fast typist's
+//!   pace, and crossing the threshold while typing changes nothing: the OS
+//!   already resets its own idle timer on keystrokes, and the hold still
+//!   expires [`RESPONDING_GRACE`] after the last one.
+//! - **Idle repaint.** An `RPROMPT` clock, a `tmux` status line, `top`, `htop`
+//!   repaint at one or two hertz -- under the threshold, so they rightly decline
+//!   to hold. A TUI animating above that rate does hold, and it is genuinely
+//!   producing output.
+//! - **A process-group liveness check would be stale exactly when it matters.**
+//!   The information such a check would read only refreshes when output is
+//!   already flowing -- precisely when the rate rule has already answered, and
+//!   stale the rest of the time. It would add a second source of truth that
+//!   agrees with the first when correct and lies when it disagrees.
+//!
+//! A later change must not reach for that heuristic to "fix" a case the rate
+//! rule already covers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use agent_ui::AgentView;
+use agent_ui::{AgentView, RESPONDING_WINDOW, responding_at};
 use gpui::{
     Anchor, App, Context, DisplayWakeLock, Entity, EntityId, IntoElement, Render, SharedString,
-    Subscription, Task, Window, div,
+    Subscription, Task, WeakEntity, Window, div,
 };
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
+use terminal_view::TerminalView;
+use terminal_view::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 use ui::prelude::*;
 use ui::{ButtonLike, ContextMenu, IconPosition, PopoverMenu, Tooltip};
 use workspace::{StatusItemView, Workspace};
@@ -70,9 +108,9 @@ impl KeepDisplayAwakeSetting {
 /// explanation is the thing people file bugs about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
-    /// A lock is held for at least one working agent.
+    /// A lock is held for at least one tab producing output.
     Holding,
-    /// No agent is answering, so there is nothing to hold it for.
+    /// Nothing is producing output, so there is nothing to hold it for.
     Idle,
     /// An agent is working, but the machine is on battery.
     OnBattery,
@@ -133,6 +171,9 @@ pub struct KeepAwake {
     holds: Holds,
     watched: HashMap<EntityId, Watched>,
     _workspace: Subscription,
+    /// Bound once `workspace::Event::PanelAdded` names the terminal dock --
+    /// `None` until then, since the panel does not exist when `new` runs.
+    _terminal_panel: Option<Subscription>,
     _settings: Subscription,
     /// Re-reads the power source while a lock is held, and does not exist
     /// otherwise -- an idle editor must not wake for this.
@@ -169,26 +210,53 @@ struct Holds {
     last_failed_at: Option<Instant>,
 }
 
-/// What is kept alive per agent tab.
+/// What is kept alive per watched tab.
 struct Watched {
-    /// The tab itself, so the activity poll can ask it whether it is answering.
-    /// Weak: the workspace owns the tab, and a strong handle here would keep a
-    /// closed one alive.
-    view: gpui::WeakEntity<AgentView>,
-    /// Fires when the tab's state changes. An agent begins as `State::Starting`
-    /// and only later holds a terminal, so the terminal has to be picked up on a
-    /// later notification rather than when the tab is added.
-    _view: Subscription,
-    /// Which terminal `completion` is waiting on. Identity, not a flag, because
-    /// `AgentView::restart` puts a brand new terminal in the same tab.
-    terminal: Option<EntityId>,
-    /// Awaits this tab's CLI exiting. `None` until a running terminal is seen, so
-    /// a tab that never starts one costs nothing.
-    completion: Option<Task<()>>,
-    /// When this tab was last seen answering. `None` for a tab that has not
-    /// answered since its CLI started -- which is every tab that is merely
+    /// What kind of tab this is, and what following it takes.
+    source: Source,
+    /// When this tab was last seen producing output. `None` for a tab that has
+    /// not answered since it started -- which is every tab that is merely
     /// sitting at its prompt.
     last_answered: Option<Instant>,
+}
+
+/// The two kinds of tab this module holds the display awake for, and what each
+/// one takes to follow.
+///
+/// An agent's CLI can exit out from under an open tab, so that source awaits a
+/// completion the way `agent_ui` already tracks it. A terminal has no such
+/// signal to await -- see the module doc's note on the foreground-pgid
+/// heuristic -- so its source is nothing more than the tab to poll.
+enum Source {
+    /// An agent tab.
+    Agent {
+        /// The tab itself, so the activity poll can ask it whether it is
+        /// answering. Weak: the workspace owns the tab, and a strong handle
+        /// here would keep a closed one alive.
+        view: WeakEntity<AgentView>,
+        /// Fires when the tab's state changes. An agent begins as
+        /// `State::Starting` and only later holds a terminal, so the terminal
+        /// has to be picked up on a later notification rather than when the
+        /// tab is added.
+        _view: Subscription,
+        /// Which terminal `completion` is waiting on. Identity, not a flag,
+        /// because `AgentView::restart` puts a brand new terminal in the same
+        /// tab.
+        terminal: Option<EntityId>,
+        /// Awaits this tab's CLI exiting. `None` until a running terminal is
+        /// seen, so a tab that never starts one costs nothing.
+        completion: Option<Task<()>>,
+    },
+    /// A terminal tab, centre or dock.
+    Terminal {
+        /// Weak for the same reason as `Agent::view`: the workspace or the
+        /// panel owns the tab.
+        view: WeakEntity<TerminalView>,
+        /// Arms the poll the instant output starts, rather than waiting for a
+        /// tick of a poll that does not exist yet. Only starts it -- `settled`
+        /// is the one place that decides whether it keeps running.
+        _wakeup: Subscription,
+    },
 }
 
 /// Whether a tab needs to be looked at again, given what is being awaited.
@@ -310,9 +378,9 @@ impl Holds {
     fn reason(&self) -> String {
         let count = self.running.len();
         match (self.running.values().next(), count) {
-            (Some(name), 1) => format!("{name} is answering"),
-            (Some(_), count) => format!("{count} agents are answering"),
-            (None, _) => "an agent is answering".to_string(),
+            (Some(name), 1) => format!("{name} is producing output"),
+            (Some(_), count) => format!("{count} tabs are producing output"),
+            (None, _) => "a tab is producing output".to_string(),
         }
     }
 }
@@ -326,13 +394,38 @@ impl KeepAwake {
     /// borrow already in hand is the only way to look at the existing tabs; the
     /// handle is for subscribing, which does not read.
     pub fn new(workspace: &Workspace, handle: &Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.subscribe(handle, |this, _, event, cx| match event {
+        let subscription = cx.subscribe(handle, |this, workspace, event, cx| match event {
             workspace::Event::ItemAdded { item } => {
                 if let Some(view) = item.act_as::<AgentView>(cx) {
                     this.watch(view, cx);
                 }
+                // A terminal landing in a centre pane comes through here too --
+                // `TerminalPanel` keeps its own panes and never reaches this
+                // event, but the workspace's own panes do. Re-scanning rather
+                // than reading `item` again also picks up any tab this event
+                // does not itself describe.
+                this.rescan(&workspace, cx);
             }
-            workspace::Event::ItemRemoved { item_id } => this.forget(*item_id, cx),
+            workspace::Event::ItemRemoved { item_id } => {
+                this.forget(*item_id, cx);
+                this.rescan(&workspace, cx);
+            }
+            workspace::Event::PanelAdded(panel) => {
+                // The dock's own terminals have no other way to reach this
+                // module -- see the module doc on `TerminalPanelEvent`. The
+                // panel does not exist yet when `new` runs, so this is the
+                // only place its own subscription can be taken.
+                if let Ok(panel) = panel.clone().downcast::<TerminalPanel>() {
+                    let workspace = workspace.downgrade();
+                    this._terminal_panel = Some(cx.subscribe(&panel, move |this, _, event, cx| {
+                        let TerminalPanelEvent::TerminalsChanged = event;
+                        if let Some(workspace) = workspace.upgrade() {
+                            this.rescan(&workspace, cx);
+                        }
+                    }));
+                }
+                this.rescan(&workspace, cx);
+            }
             _ => {}
         });
 
@@ -347,15 +440,22 @@ impl KeepAwake {
             holds: Holds::default(),
             watched: HashMap::default(),
             _workspace: subscription,
+            _terminal_panel: None,
             _settings: settings,
             power_check: None,
             activity_check: None,
         };
         // Tabs restored from the last session exist before this entity does, so
-        // the subscription above would never hear about them.
+        // the subscription above would never hear about them. The dock's own
+        // panel is not one of them -- it is registered after this runs, and its
+        // own `PanelAdded` arm picks it up once it exists.
         let existing: Vec<_> = workspace.items_of_type::<AgentView>(cx).collect();
         for view in existing {
             this.watch(view, cx);
+        }
+        let terminals: Vec<_> = workspace.items_of_type::<TerminalView>(cx).collect();
+        for view in terminals {
+            this.watch_terminal(view, cx);
         }
         this
     }
@@ -382,21 +482,40 @@ impl KeepAwake {
     /// runs here -- the paths that end a tab's CLI cancel the timer on their
     /// own.
     fn sample_activity(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        // The executor's clock, not the wall clock: `settled`'s eligibility and
+        // this grace both have to move together under `advance_clock`, or a
+        // test can expire one and not the other.
+        let now = cx.background_executor().now();
         let mut answering: Vec<(EntityId, SharedString)> = Vec::new();
         let mut quiet: Vec<EntityId> = Vec::new();
 
         for (id, watched) in &mut self.watched {
-            let Some(view) = watched.view.upgrade() else {
-                quiet.push(*id);
-                continue;
+            let label = match &watched.source {
+                Source::Agent { view, .. } => {
+                    let Some(view) = view.upgrade() else {
+                        quiet.push(*id);
+                        continue;
+                    };
+                    let agent = view.read(cx);
+                    if agent.is_answering() {
+                        watched.last_answered = Some(now);
+                    }
+                    agent.tab_label()
+                }
+                Source::Terminal { view, .. } => {
+                    let Some(view) = view.upgrade() else {
+                        quiet.push(*id);
+                        continue;
+                    };
+                    let terminal = view.read(cx).terminal().read(cx);
+                    if responding_at(terminal.pty_writes_within(RESPONDING_WINDOW)) {
+                        watched.last_answered = Some(now);
+                    }
+                    terminal.title(true).into()
+                }
             };
-            let agent = view.read(cx);
-            if agent.is_responding(cx) {
-                watched.last_answered = Some(now);
-            }
             if still_answering(watched.last_answered, now) {
-                answering.push((*id, agent.tab_label()));
+                answering.push((*id, label));
             } else {
                 quiet.push(*id);
             }
@@ -417,6 +536,30 @@ impl KeepAwake {
         }
     }
 
+    /// Whether some watched tab still has something that could start producing
+    /// output, which is what keeps the activity poll running.
+    ///
+    /// A tab that is alive and quiet holds nothing, and it is exactly the one
+    /// the poll has to keep asking about, so this is not "is a tab holding" --
+    /// that question is `holds.running`. An agent's surrogate is its CLI being
+    /// alive; a terminal has no such signal (see the module doc), so its
+    /// surrogate is recent output, which falls to zero on its own once
+    /// [`RESPONDING_GRACE`] elapses -- the same clock the lock's own grace
+    /// uses, so the poll and the lock expire together rather than one outliving
+    /// the other.
+    fn any_live(&self, cx: &App) -> bool {
+        self.watched.values().any(|w| match &w.source {
+            Source::Agent { completion, .. } => completion.is_some(),
+            Source::Terminal { view, .. } => view.upgrade().is_some_and(|view| {
+                view.read(cx)
+                    .terminal()
+                    .read(cx)
+                    .pty_writes_within(RESPONDING_GRACE)
+                    > 0
+            }),
+        })
+    }
+
     /// Applies a change in `holds`, keeping the power-check timer's existence tied
     /// to whether any agent is working. Every caller that touches `holds` goes
     /// through here, so there is one place where the timer can leak or go missing.
@@ -427,11 +570,7 @@ impl KeepAwake {
     /// on the lock, the watcher would die with the release it performed and the
     /// hold would never come back.
     fn settled(&mut self, changed: bool, cx: &mut Context<Self>) {
-        // Tied to tabs with a live CLI, not to the lock: a tab that is alive and
-        // quiet holds nothing, and it is exactly the one the poll has to keep
-        // asking about.
-        let any_live = self.watched.values().any(|w| w.completion.is_some());
-        if !any_live {
+        if !self.any_live(cx) {
             self.activity_check = None;
         } else if self.activity_check.is_none() {
             self.activity_check = Some(cx.spawn(async move |this, cx| {
@@ -441,7 +580,18 @@ impl KeepAwake {
                         .await;
                     let live = this.update(cx, |this, cx| {
                         this.sample_activity(cx);
-                        this.watched.values().any(|w| w.completion.is_some())
+                        let live = this.any_live(cx);
+                        // Cleared here, on the loop's own way out, rather than
+                        // left for a later `settled` to notice: a `Task` still
+                        // sitting in this field after its loop already
+                        // returned would read as "still polling" to
+                        // `is_polling`, and would stop `settled` from ever
+                        // spawning a replacement once something worth polling
+                        // shows up again.
+                        if !live {
+                            this.activity_check = None;
+                        }
+                        live
                     });
                     if !matches!(live, Ok(true)) {
                         break;
@@ -488,14 +638,79 @@ impl KeepAwake {
         self.watched.insert(
             id,
             Watched {
-                view: view.downgrade(),
-                _view: subscription,
-                terminal: None,
-                completion: None,
+                source: Source::Agent {
+                    view: view.downgrade(),
+                    _view: subscription,
+                    terminal: None,
+                    completion: None,
+                },
                 last_answered: None,
             },
         );
         self.reread(view, cx);
+    }
+
+    /// Picks up one terminal tab, centre or dock. Unlike an agent tab, there is
+    /// nothing to await here -- see the module doc on why a terminal has no
+    /// liveness signal beyond its own output -- so this only arms the poll the
+    /// moment output starts.
+    fn watch_terminal(&mut self, view: Entity<TerminalView>, cx: &mut Context<Self>) {
+        let id = view.entity_id();
+        if self.watched.contains_key(&id) {
+            return;
+        }
+        let terminal = view.read(cx).terminal().clone();
+        let wakeup = cx.subscribe(&terminal, |this, _terminal, event, cx| {
+            if matches!(event, terminal::Event::Wakeup) && this.activity_check.is_none() {
+                this.settled(false, cx);
+            }
+        });
+        self.watched.insert(
+            id,
+            Watched {
+                source: Source::Terminal {
+                    view: view.downgrade(),
+                    _wakeup: wakeup,
+                },
+                last_answered: None,
+            },
+        );
+    }
+
+    /// Re-enumerates every terminal tab, centre and dock, adding any new one and
+    /// dropping any that no longer exists.
+    ///
+    /// A full sweep rather than reading the triggering event's own payload: the
+    /// dock's `TerminalsChanged` carries none on purpose (see its own doc), and
+    /// re-enumerating both sides from scratch is simpler than two bespoke paths
+    /// that have to agree.
+    fn rescan(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let mut views: Vec<Entity<TerminalView>> = workspace
+            .read(cx)
+            .items_of_type::<TerminalView>(cx)
+            .collect();
+        if let Some(panel) = workspace.read(cx).panel::<TerminalPanel>(cx) {
+            for pane in panel.read(cx).panes() {
+                views.extend(pane.read(cx).items_of_type::<TerminalView>());
+            }
+        }
+
+        let live: HashSet<EntityId> = views.iter().map(Entity::entity_id).collect();
+        for view in views {
+            self.watch_terminal(view, cx);
+        }
+
+        let stale: Vec<EntityId> = self
+            .watched
+            .iter()
+            .filter(|(id, watched)| {
+                matches!(watched.source, Source::Terminal { .. }) && !live.contains(id)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            self.forget(id, cx);
+        }
     }
 
     fn forget(&mut self, id: EntityId, cx: &mut Context<Self>) {
@@ -519,7 +734,13 @@ impl KeepAwake {
             .map(|terminal_view| terminal_view.read(cx).terminal().clone());
         let terminal_id = terminal.as_ref().map(|terminal| terminal.entity_id());
 
-        let awaited = self.watched.get(&id).and_then(|watched| watched.terminal);
+        let awaited = self
+            .watched
+            .get(&id)
+            .and_then(|watched| match &watched.source {
+                Source::Agent { terminal, .. } => *terminal,
+                Source::Terminal { .. } => None,
+            });
         if !needs_rereading(awaited, terminal_id) {
             return;
         }
@@ -534,9 +755,18 @@ impl KeepAwake {
 
         // Dropping any previous completion cancels the waiter on the terminal that
         // has just been replaced.
-        if let Some(watched) = self.watched.get_mut(&id) {
-            watched.completion = None;
-            watched.terminal = terminal_id;
+        if let Some(Watched {
+            source:
+                Source::Agent {
+                    completion,
+                    terminal,
+                    ..
+                },
+            ..
+        }) = self.watched.get_mut(&id)
+        {
+            *completion = None;
+            *terminal = terminal_id;
         }
 
         let Some(terminal) = terminal.filter(|_| working) else {
@@ -551,18 +781,31 @@ impl KeepAwake {
             this.update(cx, |this, cx| {
                 // Cleared so a later restart in this same tab is picked up rather
                 // than mistaken for the terminal already being awaited.
-                if let Some(watched) = this.watched.get_mut(&id) {
-                    watched.completion = None;
-                    watched.terminal = None;
-                    watched.last_answered = None;
+                if let Some(Watched {
+                    source:
+                        Source::Agent {
+                            completion,
+                            terminal,
+                            ..
+                        },
+                    last_answered,
+                }) = this.watched.get_mut(&id)
+                {
+                    *completion = None;
+                    *terminal = None;
+                    *last_answered = None;
                 }
                 let changed = this.holds.clear(id, cx);
                 this.settled(changed, cx);
             })
             .ok();
         });
-        if let Some(watched) = self.watched.get_mut(&id) {
-            watched.completion = Some(task);
+        if let Some(Watched {
+            source: Source::Agent { completion, .. },
+            ..
+        }) = self.watched.get_mut(&id)
+        {
+            *completion = Some(task);
         }
         // A live CLI makes this tab eligible, and nothing more. Whether it is
         // *answering* is what the lock follows, and only the poll can see that:
@@ -572,12 +815,22 @@ impl KeepAwake {
     }
 }
 
+#[cfg(test)]
+impl KeepAwake {
+    /// Whether the activity poll is currently running. An accessor rather than
+    /// a `pub(crate)` field, so a test proves the poll stopped through the same
+    /// question `settled` itself asks rather than reaching past it.
+    fn is_polling(&self) -> bool {
+        self.activity_check.is_some()
+    }
+}
+
 impl Status {
     /// The one line the menu shows under the toggle.
     fn explanation(self) -> &'static str {
         match self {
             Status::Holding => "The display is being held awake",
-            Status::Idle => "No agent is answering",
+            Status::Idle => "Nothing is producing output",
             Status::OnBattery => "Paused - running on battery",
             Status::Disabled => "Turned off in settings",
             Status::Unsupported => "The system refused the request",
@@ -603,7 +856,7 @@ impl Render for KeepAwake {
                 format!("Keeping the display awake while {one} works").into()
             }
             (Status::Holding, several) => format!(
-                "Keeping the display awake while {} agents work",
+                "Keeping the display awake while {} tabs work",
                 several.len()
             )
             .into(),
@@ -645,7 +898,7 @@ impl KeepAwake {
             // draws `Icon::new(icon.unwrap_or(IconName::Check))`, so passing one
             // would *replace* the checkmark rather than join it.
             menu.toggleable_entry(
-                "Keep display awake while an agent answers",
+                "Keep display awake while a tab is producing output",
                 enabled,
                 IconPosition::Start,
                 None,

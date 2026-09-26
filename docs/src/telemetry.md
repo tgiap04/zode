@@ -18,7 +18,11 @@ reporter were all removed rather than disabled:
 - No crash reports or [minidumps](https://learn.microsoft.com/en-us/windows/win32/debug/minidump-files)
   are captured or uploaded. Hang traces are still written, but only to a local file
   under your own data directory, and nothing reads them but you.
-- There is no account, so nothing can be attributed to a user in the first place.
+- The optional Zode account exists only to sync your own `settings.json` and
+  `keymap.json`, and it is off until you sign in. It records nothing about how you
+  use the editor, and what it does store is encrypted on your machine with a key
+  the server never receives — `legal/privacy-policy.md` in the repository has the
+  mechanism in full.
 - There is no third-party analytics or crash-reporting service in the dependency
   tree.
 
@@ -45,6 +49,13 @@ makes deliberate outbound requests, and it is worth being precise about them:
 - **Extension downloads**, when you browse or install an extension.
 - **Language server downloads**, when a language you open needs a server that is
   not already on your machine.
+- **Database driver downloads**, the first time you connect to a database engine.
+  The request carries the driver name and version — not your connection string,
+  your credentials, or your queries.
+- **The update check**, when you run _Check for Updates_. It reads this
+  repository's published releases and sends no identifier.
+- **Settings sync**, if you signed in and turned it on. It uploads your
+  `settings.json` and `keymap.json` as ciphertext the server cannot read.
 - **Remote development**, when you connect to a host you chose yourself.
 
 These are downloads and connections you initiate, and none of them carry usage

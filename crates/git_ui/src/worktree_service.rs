@@ -407,12 +407,19 @@ pub fn handle_create_worktree(
     let (git_repos, non_git_paths) = classify_worktrees(project.read(cx), cx);
 
     if git_repos.is_empty() {
-        show_error_toast(
-            cx.entity(),
-            "worktree create",
-            anyhow!("No git repositories found in the project"),
-            cx,
-        );
+        // Deferred: `show_error_toast` updates the workspace, and this function
+        // holds `&mut Workspace`, so the entity is already leased -- reaching it
+        // again here aborts the process rather than failing. The toast runs once
+        // the lease is released.
+        let workspace_entity = cx.entity();
+        cx.defer(move |cx| {
+            show_error_toast(
+                workspace_entity,
+                "worktree create",
+                anyhow!("No git repositories found in the project"),
+                cx,
+            );
+        });
         return;
     }
 
@@ -422,12 +429,15 @@ pub fn handle_create_worktree(
             .remote_client()
             .is_some_and(|client| client.read(cx).is_disconnected());
         if is_disconnected {
-            show_error_toast(
-                cx.entity(),
-                "worktree create",
-                anyhow!("Cannot create worktree: remote connection is not active"),
-                cx,
-            );
+            let workspace_entity = cx.entity();
+            cx.defer(move |cx| {
+                show_error_toast(
+                    workspace_entity,
+                    "worktree create",
+                    anyhow!("Cannot create worktree: remote connection is not active"),
+                    cx,
+                );
+            });
             return;
         }
     }
@@ -464,9 +474,17 @@ pub fn handle_create_worktree(
             workspace_handle
                 .update(cx, |workspace, cx| {
                     workspace.set_active_worktree_creation(None, false, cx);
-                    show_error_toast(cx.entity(), "worktree create", anyhow!("{err:#}"), cx);
                 })
                 .ok();
+            // Outside the update above, not inside it: `show_error_toast`
+            // updates the workspace, and doing that while this closure still
+            // holds it aborts the process instead of showing the error.
+            if let Some(workspace) = workspace_handle.upgrade() {
+                cx.update(|_window, cx| {
+                    show_error_toast(workspace, "worktree create", anyhow!("{err:#}"), cx);
+                })
+                .ok();
+            }
         }
 
         result
@@ -566,9 +584,17 @@ pub fn handle_switch_worktree(
             workspace_handle
                 .update(cx, |workspace, cx| {
                     workspace.set_active_worktree_creation(None, false, cx);
-                    show_error_toast(cx.entity(), "worktree switch", anyhow!("{err:#}"), cx);
                 })
                 .ok();
+            // Outside the update above, not inside it: `show_error_toast`
+            // updates the workspace, and doing that while this closure still
+            // holds it aborts the process instead of showing the error.
+            if let Some(workspace) = workspace_handle.upgrade() {
+                cx.update(|_window, cx| {
+                    show_error_toast(workspace, "worktree switch", anyhow!("{err:#}"), cx);
+                })
+                .ok();
+            }
         }
 
         result
@@ -755,33 +781,43 @@ async fn open_worktree_workspace(
             let active_workspace = multi_workspace.workspace().clone();
             let modal_workspace = active_workspace.clone();
 
+            // Carried on both paths, not creation alone. A checkout nobody has
+            // opened yet has no layout of its own, so arriving at one shut the
+            // docks the reader was working in -- the layout they are leaving is
+            // the only starting point that is not a guess.
+            //
+            // A starting point rather than an override: a checkout that *has*
+            // been opened before carries a record of its own, and
+            // `Workspace::load_workspace` overwrites both fields this sets
+            // while restoring it. So a dock deliberately shut over there stays
+            // shut, and only a checkout with nothing recorded inherits.
+            let dock_structure = previous_state.dock_structure;
+            let dock_stacks = previous_state.dock_stacks;
+            // Always `None` on the switch path: `do_switch_worktree` passes no
+            // agent, because a switch starts its agent once the switch has
+            // landed rather than while the workspace is still being built.
+            let agent = agent.clone();
             let init: Option<
                 Box<
                     dyn FnOnce(&mut Workspace, &mut gpui::Window, &mut gpui::Context<Workspace>)
                         + Send,
                 >,
-            > = if is_creating_new_worktree {
-                let dock_structure = previous_state.dock_structure;
-                let agent = agent.clone();
-                Some(Box::new(
-                    move |workspace: &mut Workspace,
-                          window: &mut gpui::Window,
-                          cx: &mut gpui::Context<Workspace>| {
-                        workspace.set_dock_structure(dock_structure, window, cx);
-                        if let Some(agent) = agent {
-                            agent_ui::AgentView::open_tracked(
-                                workspace,
-                                &agent,
-                                Default::default(),
-                                window,
-                                cx,
-                            );
-                        }
-                    },
-                ))
-            } else {
-                None
-            };
+            > = Some(Box::new(
+                move |workspace: &mut Workspace,
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::Context<Workspace>| {
+                    workspace.set_dock_layout(dock_structure, dock_stacks, window, cx);
+                    if let Some(agent) = agent {
+                        agent_ui::AgentView::open_tracked(
+                            workspace,
+                            &agent,
+                            Default::default(),
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            ));
 
             let task = multi_workspace.find_or_create_workspace_with_source_workspace(
                 path_list,

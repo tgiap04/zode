@@ -129,6 +129,17 @@
   // screen -- an editor left in a public place stays readable. Released
   // automatically while running on battery, and whenever no agent is working.
   "keep_display_awake": true,
+  // Whether to post an OS notification when an agent finishes answering or its
+  // CLI exits -- posted regardless of window focus. `quiet_period_ms` is how
+  // long the agent must stay quiet after its last output before the
+  // "finished answering" notification fires; it is a debounce, not a
+  // guarantee, since an agent can legitimately pause longer than this while
+  // running a tool or waiting on a model. Floored at 2000ms. Raise it if
+  // early notifications happen often.
+  "agent_finished_notification": {
+    "enabled": true,
+    "quiet_period_ms": 12000,
+  },
   // Whether to show the combined CPU and RAM footprint of every tracked
   // project's child processes -- its language servers and its terminals --
   // in the status bar. Click the badge for a per-project breakdown.
@@ -358,6 +369,9 @@
   // Whether to display inline and alongside documentation for items in the
   // completions menu
   "show_completion_documentation": true,
+  // Whether to show the remainder of the selected completion as dimmed
+  // inline ghost text at the cursor.
+  "show_completion_preview": true,
   // Whether to colorize brackets in the editor.
   // (also known as "rainbow brackets")
   //
@@ -1023,8 +1037,11 @@
     // Where to dock the branch panel. Can be 'left' or 'right'. Defaults to the
     // rail's own side so its button appears in the rail rather than the status bar.
     "dock": "left",
-    // Default width of the branch panel.
-    "default_width": 280,
+    // Default width of the branch panel. Matches the git panel deliberately:
+    // the branch panel holds the lowest activation_priority on the left edge,
+    // so it governs that whole column's width and git and outline follow it.
+    // Lower this alone and the left dock narrows for every panel in it.
+    "default_width": 360,
     // Whether the branch panel should open on startup.
     "starts_open": false,
   },

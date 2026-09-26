@@ -212,6 +212,27 @@ pub mod account {
     );
 }
 
+pub mod env_sync {
+    use gpui::actions;
+
+    actions!(
+        env_sync,
+        [
+            /// Opens the list of environment files stored on your account.
+            OpenEnvVault,
+            /// Creates the environment key for an account that has none yet.
+            SetUpEnvSync,
+            /// Sends the environment file in the active editor.
+            PushEnvFile,
+            /// Fetches the stored copy of the environment file in the active
+            /// editor, showing what would change before anything is written.
+            PullEnvFile,
+            /// Links this checkout to a project on your account.
+            BindEnvProject
+        ]
+    );
+}
+
 pub mod dev {
     use gpui::actions;
 
@@ -532,11 +553,35 @@ pub mod agent {
         Terminal,
     }
 
+    /// Whether a launch was asked to skip the agent's permission prompts,
+    /// independently of what the checkout it runs in is set to.
+    ///
+    /// Not a `bool`, for the reason `project::agent_bypass::BypassCheck` is not
+    /// one: the value that switches a safety control off has to be the one a
+    /// caller names, never the one it gets by leaving a parameter behind. That
+    /// the default is `AsConfigured` is also what makes this safe to add to an
+    /// action people already have keybindings for.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PermissionPrompts {
+        /// Whatever the checkout is set to -- which is to keep asking, unless
+        /// somebody turned that off for that checkout.
+        #[default]
+        AsConfigured,
+        /// This one launch skips them, and nothing is written down. Still
+        /// refused unless the agent's flag is confirmed present in the CLI that
+        /// is actually installed, exactly as the per-checkout setting is.
+        SkipOnce,
+    }
+
     /// Opens an agent beside the editor.
     ///
-    /// This lives here rather than in `agent_ui` so the sidebar can dispatch it
-    /// without depending on `agent_ui` — which from phase 04 onwards pulls in the
-    /// whole ACP stack, and the rail has no business linking against that.
+    /// This lives here, and not in `agent_ui`, because an action type belongs
+    /// with the other action types rather than in the crate that happens to
+    /// handle it — the same reason every other action in this crate sits apart
+    /// from its handler. `sidebar` already depends on `agent_ui` directly (it
+    /// draws `agent_ui::AgentView`), so that dependency is not what this split
+    /// avoids.
     #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
     #[action(namespace = agent)]
     #[serde(deny_unknown_fields)]
@@ -580,6 +625,10 @@ pub mod agent {
         /// used in.
         #[serde(default)]
         pub mode: Option<AgentViewMode>,
+        /// Whether this session skips the agent's permission prompts, whatever
+        /// the checkout it runs in is set to.
+        #[serde(default)]
+        pub permission_prompts: PermissionPrompts,
     }
 
     actions!(
@@ -900,6 +949,23 @@ pub mod floating_pane {
             NewMarkdownNote,
             /// Opens an existing markdown file as a tab in the floating window.
             OpenMarkdownNote,
+            /// Splits the floating window's active pane to the right.
+            ///
+            /// `pane::SplitRight` already reaches the same `Event::Split` once
+            /// focus sits inside a pane, so this is not a second code path —
+            /// it is a window-scoped name a user can bind under the
+            /// `FloatingPane` context without touching the editor's own split
+            /// bindings, matching the five siblings above.
+            SplitRight,
+            /// Splits the floating window's active pane to the left. See
+            /// `SplitRight` for why this exists alongside `pane::SplitLeft`.
+            SplitLeft,
+            /// Splits the floating window's active pane upward. See
+            /// `SplitRight` for why this exists alongside `pane::SplitUp`.
+            SplitUp,
+            /// Splits the floating window's active pane downward. See
+            /// `SplitRight` for why this exists alongside `pane::SplitDown`.
+            SplitDown,
         ]
     );
 }

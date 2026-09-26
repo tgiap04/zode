@@ -1148,6 +1148,7 @@ impl CompletionsMenu {
                             this.set_filter_results(matches, provider, window, cx);
                         }
                     });
+                    editor.update_completion_preview(cx);
                 })
                 .ok();
         });

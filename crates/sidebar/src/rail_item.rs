@@ -12,15 +12,13 @@ use crate::rail::RAIL_WIDTH;
 use gpui::{AnyElement, Context, SharedString};
 use ui::{Tooltip, prelude::*, right_click_menu};
 use workspace::DraggedProject;
-use workspace::project_appearance::label_colour_for;
 
 const RAIL_ITEM_SIZE: Pixels = px(48.0);
-const RAIL_SQUARE_SIZE: Pixels = px(32.0);
 
 /// One or two letters standing in for the project, Discord-style. Word
 /// boundaries win over raw prefix characters so `my-cool-app` reads `MA`
 /// rather than `MY`.
-fn project_initials(label: &str) -> SharedString {
+pub(crate) fn project_initials(label: &str) -> SharedString {
     let mut initials = String::new();
     for word in label.split(|c: char| !c.is_alphanumeric()) {
         let Some(first) = word.chars().next() else {
@@ -65,12 +63,16 @@ impl Sidebar {
         // Set by hand through this item's own menu, and it wins: the point of
         // choosing a colour is to pick this square out of a column of squares,
         // which the active-state background would undo.
-        let (custom_initials, custom_colour) = self
+        let workspace::ProjectPresentation {
+            initials: custom_initials,
+            colour: custom_colour,
+            logo,
+        } = self
             .multi_workspace
             .read_with(cx, |multi_workspace, _| {
                 multi_workspace.project_presentation(&entry.key)
             })
-            .unwrap_or((None, None));
+            .unwrap_or_default();
         // A picker that is open wins over what is stored, so the avatar is the
         // preview. Nothing has been written yet at this point.
         let custom_colour = self
@@ -85,19 +87,9 @@ impl Sidebar {
             None => colors.element_background,
         };
         let initials = custom_initials.unwrap_or_else(|| project_initials(&entry.label));
-        let label_colour = match custom_colour {
-            // A colour someone picked can be anything, so the text over it is
-            // computed rather than themed -- white on a pale yellow is not a
-            // style choice, it is unreadable.
-            Some(colour) => Color::Custom(label_colour_for(colour)),
-            None if is_active => Color::Default,
-            None => Color::Muted,
-        };
         // Copied out one by one: `cx.theme().colors()` hands back a reference
         // borrowed from `cx`, and the trigger closure below outlives this call.
-        let accent = colors.text_accent;
-        let border_selected = colors.border_selected;
-        let border_transparent = colors.border_transparent;
+        let accent = ui::brand_accent(cx);
         let element_hover = colors.element_hover;
         let sidebar = cx.entity().downgrade();
         let key = entry.key.clone();
@@ -106,6 +98,18 @@ impl Sidebar {
         let label = entry.label.clone();
         let tooltip = rail_tooltip(entry);
         let is_reindexing = entry.is_reindexing;
+        // One read of the presentation feeds both the avatar and the drag
+        // payload below -- it must not be read twice.
+        let avatar = self.render_rail_avatar(
+            ix,
+            initials.clone(),
+            custom_colour,
+            square_bg,
+            logo.clone(),
+            is_active,
+            is_hibernated,
+            cx,
+        );
 
         // Right-click, because that is the gesture anyone tries on an avatar.
         // Left-click still switches project: `right_click_menu` does not touch
@@ -153,6 +157,7 @@ impl Sidebar {
                             label: label_for_drag.clone(),
                             initials: initials.clone(),
                             colour: custom_colour,
+                            logo: logo.clone(),
                         },
                         |dragged, _, _, cx| {
                             cx.new(|_| DraggedProject {
@@ -160,6 +165,7 @@ impl Sidebar {
                                 label: dragged.label.clone(),
                                 initials: dragged.initials.clone(),
                                 colour: dragged.colour,
+                                logo: dragged.logo.clone(),
                             })
                         },
                     )
@@ -193,32 +199,11 @@ impl Sidebar {
                                 .h(px(24.0))
                                 .w(px(3.0))
                                 .rounded_sm()
-                                .bg(accent),
+                                .bg(accent)
+                                .debug_selector(move || format!("project-rail-item-pill:{ix}")),
                         )
                     })
-                    .child(
-                        div()
-                            .size(RAIL_SQUARE_SIZE)
-                            .rounded_md()
-                            .bg(square_bg)
-                            .border_1()
-                            .map(|el| {
-                                if is_active {
-                                    el.border_color(border_selected)
-                                } else {
-                                    el.border_color(border_transparent)
-                                }
-                            })
-                            .when(is_hibernated && !is_active, |el| el.opacity(0.6))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Label::new(initials.clone())
-                                    .size(LabelSize::Small)
-                                    .color(label_colour),
-                            ),
-                    )
+                    .child(avatar)
                     // FR7 parity with the panel rows: a project mid-reindex after
                     // waking gets a corner dot, since the rail has no room for the
                     // panel's icon-plus-tooltip treatment.
@@ -230,7 +215,10 @@ impl Sidebar {
                                 .right(px(6.0))
                                 .size(px(6.0))
                                 .rounded_full()
-                                .bg(warning),
+                                .bg(warning)
+                                .debug_selector(move || {
+                                    format!("project-rail-item-reindex-dot:{ix}")
+                                }),
                         )
                     })
                     .hover(move |s| s.bg(element_hover))
@@ -272,12 +260,13 @@ mod tests {
 mod menu_tests {
     use crate::Sidebar;
     use crate::sidebar_tests::init_test;
-    use fs::FakeFs;
+    use fs::{FakeFs, Fs};
     use gpui::{
         AppContext as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext,
     };
     use project::Project;
     use serde_json::json;
+    use std::path::PathBuf;
     use util::path;
     use workspace::MultiWorkspace;
 
@@ -359,6 +348,7 @@ mod menu_tests {
             "MENU_ITEM-Copy Project Path",
             "MENU_ITEM-Change Initials…",
             "MENU_ITEM-Change Colour…",
+            "MENU_ITEM-Change Logo…",
             "MENU_ITEM-Remove Project",
         ] {
             assert!(
@@ -372,6 +362,99 @@ mod menu_tests {
             cx.debug_bounds("MENU_ITEM-Open Project in New Window")
                 .is_none(),
             "with a single project there is no second window to move it to"
+        );
+        // No logo has been set yet, so there is nothing for "Remove Logo" to
+        // undo, and the entry must be left out rather than drawn disabled.
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Remove Logo").is_none(),
+            "with no logo set there is nothing to remove"
+        );
+    }
+
+    /// "Remove Logo" is left out when there is no logo, and present once one
+    /// is set — the same distinction `can_move` draws for a second window.
+    ///
+    /// The picker itself is unreachable from a test
+    /// (`TestPlatform::prompt_for_paths` is `unimplemented!()`), so the logo
+    /// is set directly through `MultiWorkspace`, exactly as the menu's own
+    /// façade would have done after a real pick.
+    #[gpui::test]
+    async fn the_logo_entries_appear_only_when_they_mean_something(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root_a"), json!({ "a.txt": "" }))
+            .await;
+        fs.create_dir(std::path::Path::new(path!("/uploads")))
+            .await
+            .unwrap();
+        fs.insert_file(path!("/uploads/logo.png"), b"logo-bytes".to_vec())
+            .await;
+        let project = Project::test(fs, [path!("/root_a").as_ref()], cx).await;
+        let key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            let mw_entity = cx.entity();
+            let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+            mw.register_sidebar(sidebar, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let open_menu = |cx: &mut gpui::VisualTestContext| {
+            let avatar = cx
+                .debug_bounds("project-rail-item:0")
+                .expect("the window's own project must draw a square on the rail");
+            cx.simulate_event(MouseDownEvent {
+                position: avatar.center(),
+                modifiers: Modifiers::default(),
+                button: MouseButton::Right,
+                click_count: 1,
+                first_mouse: false,
+            });
+            cx.simulate_event(MouseUpEvent {
+                position: avatar.center(),
+                modifiers: Modifiers::default(),
+                button: MouseButton::Right,
+                click_count: 1,
+            });
+            cx.run_until_parked();
+        };
+
+        open_menu(cx);
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Change Logo…").is_some(),
+            "the entry to set a logo is always offered"
+        );
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Remove Logo").is_none(),
+            "with no logo set there is nothing to remove"
+        );
+
+        // Dismiss the open menu before driving state directly, and set the
+        // logo the way `prompt_for_logo` would have after a real pick.
+        cx.simulate_click(
+            gpui::point(gpui::px(1.), gpui::px(1.)),
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+        multi_workspace
+            .update(cx, |mw, cx| {
+                mw.set_project_logo(&key, PathBuf::from(path!("/uploads/logo.png")), cx)
+            })
+            .await;
+        cx.run_until_parked();
+
+        open_menu(cx);
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Change Logo…").is_some(),
+            "the entry to change a logo is offered whether or not one is set"
+        );
+        assert!(
+            cx.debug_bounds("MENU_ITEM-Remove Logo").is_some(),
+            "with a logo set, removing it must now be offered"
         );
     }
 }

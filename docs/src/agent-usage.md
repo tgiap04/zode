@@ -1,6 +1,6 @@
 ---
 title: Agent Usage Indicator
-description: What the status bar shows about your Claude Code and Codex subscription quota, the panel and menu it opens, where the numbers come from, when it goes blank, and why Antigravity and Copilot are absent from it.
+description: What the status bar shows about your Claude Code and Codex subscription quota, the panel and menu it opens, where the numbers come from, when it goes blank, and why Antigravity, Copilot and opencode are absent from it.
 ---
 
 # Agent Usage Indicator
@@ -66,10 +66,11 @@ Open the panel for the specific reason — it keeps a row for a silent agent and
 
 This includes **Claude answering `429`**: after the retries described in [Polling](#polling) are exhausted, the indicator keeps whatever numbers it already had rather than going quiet, and the panel reports that the account is being rate limited rather than one of the reasons above. Being asked too often says nothing about whether those numbers are still true.
 
-## Why Antigravity and Copilot have no numbers
+## Why Antigravity, Copilot and opencode have no numbers
 
-The rail offers four agents; this indicator reports on two. That is not an oversight
-waiting on implementation — it is what probing the other two CLIs turned up.
+The rail offers five agents; this indicator reports on two. Antigravity's and
+Copilot's absence is what probing their CLIs turned up. opencode's is simpler —
+it has no subscription window to probe for in the first place.
 
 **Copilot** publishes no route to subscription quota that this editor could read:
 
@@ -101,6 +102,14 @@ reachable only with the credential the CLI holds.
 That is the same wall Copilot hits, for a different reason: not a missing method, but a
 missing local store. Reading it would mean this editor borrowing a Google credential, which
 is the trade the Codex route exists to avoid.
+
+**opencode** is bring-your-own-key: a user supplies their own provider credentials
+(Anthropic, OpenAI, or whichever model they've configured) directly to opencode, so there is
+no opencode subscription and no subscription window behind it to publish. That is a different
+absence from Copilot's and Antigravity's above — they each have a subscription this editor
+could not find a way to read; opencode has no subscription to read in the first place. This
+build does not hold or read a user's provider credentials on opencode's behalf, and it will
+not.
 
 ## Polling
 

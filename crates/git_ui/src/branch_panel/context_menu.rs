@@ -101,6 +101,19 @@ impl BranchPanel {
     /// The subscription rides in the same tuple as the menu, so dropping one
     /// drops the other -- a subscription outliving its menu would fire into a
     /// handle that is gone.
+    /// Whether one of this panel's own menus is on screen.
+    ///
+    /// Rows consult this before asking for a tooltip. GPUI paints tooltips
+    /// AFTER every deferred draw (`gpui/src/window.rs:2552` runs
+    /// `paint_deferred_draws`, `:2559` then paints the tooltip), so a tooltip is
+    /// always above a context menu however high a priority the menu asks for --
+    /// raising `with_priority` cannot fix it. The menu opens directly under the
+    /// pointer that is still resting on the row, so without this a row's own
+    /// tooltip covers the menu that row just opened.
+    pub(crate) fn menu_is_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
     pub(crate) fn open_context_menu(
         &mut self,
         menu: Entity<ContextMenu>,

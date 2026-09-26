@@ -2376,13 +2376,33 @@ Example:
 
 ## Keep Display Awake
 
-- Description: Whether to keep the display lit while an agent's CLI is still working. Released automatically while running on battery, and whenever no agent is working. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
+- Description: Whether to keep the display lit while a terminal — agent, task, or shell — is actively producing output. Released automatically while running on battery, and whenever nothing is producing output. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
 - Setting: `keep_display_awake`
 - Default: `true`
 
 **Options**
 
 `boolean` values
+
+## Agent Finished Notification
+
+- Description: Whether to post an OS notification when an agent finishes answering or its CLI exits -- posted regardless of window focus. `quiet_period_ms` is how long the agent must stay quiet after its last output before the "finished answering" notification fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
+- Setting: `agent_finished_notification`
+- Default:
+
+```json [settings]
+{
+  "agent_finished_notification": {
+    "enabled": true,
+    "quiet_period_ms": 12000
+  }
+}
+```
+
+**Options**
+
+- `enabled`: `boolean`
+- `quiet_period_ms`: positive `integer` milliseconds, floored at `2000`
 
 ## Project Footprint Indicator
 
@@ -3670,6 +3690,16 @@ Positive integer values
 
 `boolean` values
 
+## Show Completion Preview
+
+- Description: Whether to preview the selected completion inline as dimmed ghost text at the cursor, showing what accepting it would insert. Nothing is previewed when the text already typed is not a literal prefix of the completion, which is common with fuzzy matches.
+- Setting: `show_completion_preview`
+- Default: `true`
+
+**Options**
+
+`boolean` values
+
 ## Show Completion Documentation
 
 - Description: Whether to display inline and alongside documentation for items in the completions menu.
@@ -3865,6 +3895,7 @@ List of `integer` column numbers
 
 - Description: Configuration for the terminal.
 - Setting: `terminal`
+- Note: when docked at the bottom, `default_height` sets the height of the whole bottom dock, not just the terminal. The dock keeps one height across every panel docked there, so switching to the debug panel does not move its edge — and dragging that edge while the debug panel is up resizes the terminal too.
 - Default:
 
 ```json [settings]
@@ -5061,6 +5092,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 
 - Description: Setting to customize the behavior of the git panel.
 - Setting: `git_panel`
+- Note: `default_width` sets the width of the whole left dock, not just this panel. The dock keeps one width across every panel docked there — currently governed by the branch panel's `default_width`, since it holds the lowest `activation_priority` on that edge. Switching to the outline panel or the branch panel does not move the dock's edge, and dragging that edge while either one is up resizes the branch panel's `default_width` instead of this one.
 - Default:
 
 ```json [settings]
@@ -5091,7 +5123,7 @@ See the [debugger page](../debugger.md) for more information about debugging sup
 - `sort_by_path`: Whether to sort entries in the panel by path or by status (the default)
 - `collapse_untracked_diff`: Whether to collapse untracked files in the diff panel
 - `scrollbar`: When to show the scrollbar in the git panel
-- `starts_open`: Whether the git panel should open on startup
+- `starts_open`: Whether the git panel should open on startup, when the workspace has no saved dock state of its own yet. Once a dock has restored a record — including one that has the panel closed — that record wins and `starts_open` no longer applies.
 
 ## Git Worktree Directory
 

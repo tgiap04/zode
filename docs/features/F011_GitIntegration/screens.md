@@ -15,7 +15,7 @@ session-context guidance to omit ROUTE###/SCR### entirely for this profile. -->
 | Project Diff              | `crates/git_ui/src/project_diff.rs::ProjectDiff` | Combined multibuffer diff of every changed file in the project (or a diff against a chosen branch)   | Jump from a listed hunk to its location in the corresponding file; stage a file from the diff view                                |
 | Git Graph                 | `crates/git_graph/src/git_graph.rs::GitGraph`    | Visual commit graph with parent/child lane edges, a search field, and commit detail/diff-stats panel | Open a commit's detail view; search commits; jump to a specific commit via `OpenAtCommit`                                         |
 | Git Picker (combined tab) | `crates/git_ui/src/git_picker.rs`                | Tabbed container switching between Branches and Stash lists                                          | Switch between the Branches tab and Stash tab                                                                                     |
-| Worktree Picker           | `crates/git_ui/src/worktree_picker.rs`           | List of linked `git worktree` checkouts for the current repo                                         | Delete a linked worktree from disk and from the project                                                                           |
+| Worktree Picker           | `crates/git_ui/src/worktree_picker.rs`           | List of linked `git worktree` checkouts for the current repo                                         | Delete a linked worktree from disk and from the project; reload the list by re-running `git worktree list`                        |
 
 ## User Journey
 

@@ -13,7 +13,7 @@ use ui::{ContextMenu, IconName};
 use util::disambiguate::compute_disambiguation_details;
 use workspace::MultiWorkspace;
 
-use super::{FootprintRoots, Footprints, Pid, ProjectFootprint, format_cpu, format_rss};
+use super::{FootprintRoots, Footprints, Pid, ProjectFootprint, format_cpu, format_memory};
 
 /// Every `DISCOVERY_EVERY`th tick is a discovery pass (10 x 3s = 30s), so one
 /// timer drives both rhythms and they can never interleave on the sampler.
@@ -38,23 +38,23 @@ pub(crate) fn is_discovery_tick(ticks_since_discovery: usize) -> bool {
 /// remote/guest project, or a sampler with no CPU baseline yet, has nothing
 /// to report; that is not the same as reporting zero.
 pub(crate) fn render_project_line(footprint: &ProjectFootprint) -> SharedString {
-    let (rss, cpu) = footprint_parts(footprint);
-    format!("RAM {rss} \u{b7} CPU {cpu}").into()
+    let (memory, cpu) = footprint_parts(footprint);
+    format!("RAM {memory} \u{b7} CPU {cpu}").into()
 }
 
 /// The memory and CPU halves separately, so the badge can put an icon in front
 /// of each while `render_project_line` keeps producing the single string that
 /// change-detection and the popover rows compare.
 pub(crate) fn footprint_parts(footprint: &ProjectFootprint) -> (SharedString, SharedString) {
-    let rss = footprint
-        .rss_bytes
-        .map(format_rss)
+    let memory = footprint
+        .memory_bytes
+        .map(format_memory)
         .unwrap_or_else(|| "not measured".into());
     let cpu = footprint
         .cpu_percent
         .map(format_cpu)
         .unwrap_or_else(|| "not measured".into());
-    (rss, cpu)
+    (memory, cpu)
 }
 
 /// The icon that stands for memory. Neither this nor [`CPU_ICON`] is a
@@ -62,12 +62,12 @@ pub(crate) fn footprint_parts(footprint: &ProjectFootprint) -> (SharedString, Sh
 /// its 265 -- so the badge's tooltip and the popover rows carry the words
 /// "RAM" and "CPU" as well, rather than leaving the icons to carry the meaning
 /// alone.
-pub(crate) const RSS_ICON: IconName = IconName::Database;
+pub(crate) const MEMORY_ICON: IconName = IconName::Database;
 
-/// The icon that stands for CPU. See [`RSS_ICON`] for why it is a bolt.
+/// The icon that stands for CPU. See [`MEMORY_ICON`] for why it is a bolt.
 pub(crate) const CPU_ICON: IconName = IconName::BoltOutlined;
 
-/// The label/rss/cpu text a `Footprints` actually draws, one entry per row.
+/// The label/memory/cpu text a `Footprints` actually draws, one entry per row.
 /// Change-detection compares *this*, not the raw `ProjectFootprint` values --
 /// comparing raw floats would notify on every fractional CPU jiggle the
 /// rounded, on-screen text can never show.

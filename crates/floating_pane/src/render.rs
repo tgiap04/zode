@@ -4,8 +4,13 @@
 //! the centre and the docks and under the notifications. It occupies no layout:
 //! the outer element is `absolute` and `size_full`, and everything inside it is
 //! positioned by hand.
-
-use std::sync::LazyLock;
+//!
+//! Everything here is "how the floating window draws itself". `Entry`,
+//! `entry_items` and the tab-bar/title-bar `+` menus that read it live in
+//! `entries.rs` instead -- the seam this file's own note once named for a later
+//! change, cut once the list of things a window can hold grew past the three it
+//! started with. What stayed is the window chrome: the title bar, the grips, the
+//! two drags, and the Split menu, which has no other natural home.
 
 use gpui::{
     Anchor, Bounds, ClickEvent, DragMoveEvent, MouseButton, MouseDownEvent, Pixels, Point, Size,
@@ -13,140 +18,77 @@ use gpui::{
 };
 use ui::prelude::*;
 use ui::{ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip};
+use workspace::{
+    ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp, ActivePaneDecorator,
+    MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp, SplitDirection, SwapPaneDown,
+    SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+};
 
-use crate::content::AGENTS;
+use crate::entries::{Entry, entry_items};
 use crate::host::{DraggedFloatingPane, Dragging, FloatingPane, Grab, Grip};
 
 /// The grab strip along the top of the window, and the corner handles.
 const TITLE_BAR_HEIGHT: Pixels = px(34.);
-/// Everything the window can be asked to hold.
+
+/// The four directions a pane can be split, paired with a label and an icon.
 ///
-/// One list, read by both the `+` menu and the empty state. Two lists would be
-/// two places to add the next entry, and the one used less would be the one that
-/// fell behind.
-#[derive(Clone, Copy)]
-enum Entry {
-    Terminal,
-    NewNote,
-    OpenNote,
-    Agent(&'static str, IconName, &'static str),
-}
+/// One list, read by the tab bar's Split button and the `+` menu's Split
+/// submenu, so the two can never offer a different set of directions.
+/// `ui::IconName` has no per-direction split icon -- only `Split` and
+/// `SplitAlt` exist, confirmed before writing this -- so `Split` stands for
+/// the horizontal pair and `SplitAlt` for the vertical one rather than
+/// inventing a new asset.
+const SPLIT_DIRECTIONS: [(SplitDirection, &str, IconName); 4] = [
+    (SplitDirection::Right, "Split Right", IconName::Split),
+    (SplitDirection::Left, "Split Left", IconName::Split),
+    (SplitDirection::Up, "Split Up", IconName::SplitAlt),
+    (SplitDirection::Down, "Split Down", IconName::SplitAlt),
+];
 
-/// Built once, not on every render: `render_menu` and `render_empty_state`
-/// both call `Entry::all()` on every frame, and `Entry` is `Copy`, so there is
-/// nothing to gain from a fresh `Vec` each time.
-static ENTRIES: LazyLock<Vec<Entry>> = LazyLock::new(|| {
-    let mut entries = vec![Entry::Terminal, Entry::NewNote, Entry::OpenNote];
-    entries.extend(
-        AGENTS
-            .iter()
-            .copied()
-            .map(|(agent, icon, label)| Entry::Agent(agent, icon, label)),
-    );
-    entries
-});
-
-impl Entry {
-    fn all() -> &'static [Entry] {
-        &ENTRIES
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Entry::Terminal => "New Terminal",
-            Entry::NewNote => "New Markdown Note",
-            Entry::OpenNote => "Open Markdown Note",
-            Entry::Agent(_, _, label) => label,
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            Entry::Terminal => IconName::Terminal,
-            Entry::NewNote => IconName::Notepad,
-            Entry::OpenNote => IconName::FileMarkdown,
-            Entry::Agent(_, icon, _) => icon,
-        }
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Entry::Terminal => "floating-pane-new-terminal",
-            Entry::NewNote => "floating-pane-new-note",
-            Entry::OpenNote => "floating-pane-open-note",
-            Entry::Agent(agent, _, _) => agent,
-        }
-    }
-
-    /// Whether a separator belongs above this entry.
-    ///
-    /// The agents are a different kind of thing from the three above them, and
-    /// the first of them is where the list changes subject.
-    fn opens_a_group(self) -> bool {
-        matches!(self, Entry::Agent(agent, _, _) if AGENTS.first().is_some_and(|(first, _, _)| *first == agent))
-    }
-
-    fn run(self, pane: &mut FloatingPane, window: &mut Window, cx: &mut Context<FloatingPane>) {
-        match self {
-            Entry::Terminal => pane.open_terminal(window, cx),
-            Entry::NewNote => pane.new_markdown_note(window, cx),
-            Entry::OpenNote => pane.open_markdown_note(window, cx),
-            Entry::Agent(agent, _, _) => pane.open_agent(agent, window, cx),
-        }
-    }
-}
-
-/// The one list, as menu entries.
+/// `SPLIT_DIRECTIONS`, as menu entries against one window.
 ///
-/// Shared so the window's own `+`, the tab bar's `+` and the empty state can
-/// never offer three different sets. That was the whole reason `Entry` exists.
-fn entry_items(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
-    for entry in Entry::all() {
-        if entry.opens_a_group() {
-            menu = menu.separator().header("Agent");
-        }
+/// Shared by the tab bar's Split button and the `+` menu's Split submenu, so
+/// the two lists cannot drift apart. `pub(crate)` because the `+` menu's own
+/// Split submenu is built from `entries.rs` now, alongside the rest of that
+/// menu.
+pub(crate) fn split_entries(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
+    for (direction, label, icon) in SPLIT_DIRECTIONS {
         let this = this.clone();
         menu = menu.item(
-            ContextMenuEntry::new(entry.label())
-                .icon(entry.icon())
+            ContextMenuEntry::new(label)
+                .icon(icon)
                 .handler(move |window, cx| {
-                    this.update(cx, |pane, cx| entry.run(pane, window, cx)).ok();
+                    this.update(cx, |pane, cx| pane.split_active(direction, window, cx))
+                        .ok();
                 }),
         );
     }
     menu
 }
 
-/// The `+` at the end of this window's tab bar.
+/// The Split button in the tab bar's left slot.
 ///
-/// A pane draws one by default, and the default offers New File, New Terminal
-/// and the agents as *workspace* actions -- which resolve against the active
-/// pane of the editor. This pane is not one of those, so every entry on that
-/// menu opened in the editor behind the window. It only showed once a tab
-/// existed, because until then the empty state is what fills the pane.
-pub(crate) fn tab_bar_menu(this: WeakEntity<FloatingPane>) -> AnyElement {
-    // Wrapped so a test can tell this `+` from the one in the window's title
-    // bar: `IconButton` names its debug selector after the icon, and both are
-    // a plus.
+/// Built the same way `tab_bar_menu` is: a wrapped `IconButton` with its own
+/// id, so a test can tell it apart from the tab bar's `+`.
+pub(crate) fn tab_bar_split_button(this: WeakEntity<FloatingPane>) -> AnyElement {
     h_flex()
-        .debug_selector(|| "floating-pane-tab-bar-add".into())
-        .child(menu_for(this))
-        .into_any_element()
-}
-
-fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
-    PopoverMenu::new("floating-pane-tab-bar-menu")
-        .trigger_with_tooltip(
-            IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
-            Tooltip::text("New\u{2026}"),
+        .debug_selector(|| "floating-pane-tab-bar-split".into())
+        .child(
+            PopoverMenu::new("floating-pane-tab-bar-split-menu")
+                .trigger_with_tooltip(
+                    IconButton::new("floating-pane-split", IconName::Split)
+                        .icon_size(IconSize::Small),
+                    Tooltip::text("Split Pane"),
+                )
+                .anchor(Anchor::TopRight)
+                .menu(move |window, cx| {
+                    let this = this.clone();
+                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                        split_entries(menu, &this)
+                    }))
+                })
+                .into_any_element(),
         )
-        .anchor(Anchor::TopRight)
-        .menu(move |window, cx| {
-            let this = this.clone();
-            Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                entry_items(menu, &this)
-            }))
-        })
         .into_any_element()
 }
 
@@ -157,7 +99,7 @@ fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
 const GRIP: Pixels = px(6.);
 
 impl Render for FloatingPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Not `occlude`: the layer covers the whole workspace, and occluding it
         // would swallow every click meant for the code underneath. Only the
         // button and the window itself occlude, which is why they are the only
@@ -182,7 +124,9 @@ impl Render for FloatingPane {
                     }
                 }),
             )
-            .when(self.open, |layer| layer.child(self.render_window(cx)))
+            .when(self.open, |layer| {
+                layer.child(self.render_window(window, cx))
+            })
             .child(self.render_launcher(cx))
             // The layer's own size is the area the window may occupy, and
             // nothing tells it: docks open, the rail widens, the editor window
@@ -230,45 +174,63 @@ impl Render for FloatingPane {
 }
 
 impl FloatingPane {
-    /// Applies one frame of a drag.
-    ///
-    /// The container's bounds come from the event rather than from a field: this
-    /// element is the floating layer, so its bounds *are* the area the window
-    /// may occupy, and reading them here means a resized editor window needs no
-    /// invalidation anywhere.
+    /// Dispatch shim: pulls the window-space pointer and the layer's own
+    /// window-space origin out of the event and hands them to [`Self::follow`],
+    /// which is the part a test can reach -- `DragMoveEvent`'s fields are
+    /// private, so nothing outside gpui can build one to call this directly.
     fn follow_the_pointer(
         &mut self,
         event: &DragMoveEvent<DraggedFloatingPane>,
         cx: &mut Context<Self>,
     ) {
+        self.follow(event.event.position, event.bounds.origin, event.bounds.size);
+        cx.notify();
+    }
+
+    /// Applies one frame of a drag, given the pointer in window space and the
+    /// floating layer's own origin in that same window space.
+    ///
+    /// The two grabs read the layer origin differently on purpose. A resize
+    /// grabs a corner of the window and needs it converted into the layer-space
+    /// `bounds_within` already works in, so it subtracts the layer origin out.
+    /// A move instead reads `dragging.anchor`, which already carries that
+    /// origin baked into a constant that cancels it (see the field's doc
+    /// comment on `Dragging`) -- so the move arm never touches `layer_origin`
+    /// at all. That asymmetry, stated in the two arms below, is what keeps a
+    /// title-bar drag from jumping by the layer's own position on screen.
+    pub(crate) fn follow(
+        &mut self,
+        pointer_in_window: Point<Pixels>,
+        layer_origin: Point<Pixels>,
+        container: Size<Pixels>,
+    ) {
         let Some(dragging) = self.dragging else {
             return;
         };
-        let container = event.bounds.size;
-        let pointer = event.event.position - event.bounds.origin;
         match dragging.grab {
-            Grab::Move => self.move_to(pointer - dragging.offset, container),
-            Grab::Resize(corner) => self.resize_to(corner, pointer, container),
+            Grab::Move => self.move_to(dragging.anchor + pointer_in_window, container),
+            Grab::Resize(corner) => {
+                self.resize_to(corner, pointer_in_window - layer_origin, container)
+            }
         }
-        cx.notify();
     }
 
     /// Records what a press grabbed, before the drag begins.
     ///
-    /// On mouse-down rather than in `on_drag`'s constructor, because the offset
+    /// On mouse-down rather than in `on_drag`'s constructor, because the anchor
     /// needs `&mut Self` to store and the constructor only lends `&mut App`.
-    /// Without the offset the window's corner jumps to the pointer on the first
-    /// move, however far in from the edge the press landed.
-    fn grab(&mut self, grab: Grab, event: &MouseDownEvent, bounds: Bounds<Pixels>) {
-        let offset = match grab {
-            Grab::Move => event.position - bounds.origin,
+    /// Without it the window's corner jumps to the pointer on the first move,
+    /// however far in from the edge the press landed.
+    pub(crate) fn grab(&mut self, grab: Grab, event: &MouseDownEvent, bounds: Bounds<Pixels>) {
+        let anchor = match grab {
+            Grab::Move => bounds.origin - event.position,
             // A resize does not need one: the corner goes where the pointer is.
             Grab::Resize(_) => Point::default(),
         };
-        self.dragging = Some(Dragging { grab, offset });
+        self.dragging = Some(Dragging { grab, anchor });
     }
 
-    fn render_window(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         // Laid out from the container, which is only known while painting. The
         // element is positioned by its stored offset and clamped by `canvas`
@@ -279,8 +241,20 @@ impl FloatingPane {
             height: px(800.),
         }));
 
+        // Resolved once, and the field dropped with it when it no longer
+        // upgrades: a weak left pointing at a pane that is gone would be
+        // retried on every frame for the life of the window.
+        let zoomed = self.zoomed.as_ref().and_then(|view| view.upgrade());
+        if zoomed.is_none() {
+            self.zoomed = None;
+        }
+
         div()
             .id("floating-pane")
+            // What the keymap block `"context": "FloatingPane"` matches
+            // against. Action dispatch already bubbles from the focused pane up
+            // through this div, so no `track_focus` is needed here for that.
+            .key_context("FloatingPane")
             .occlude()
             .absolute()
             .left(placement.origin.x)
@@ -295,6 +269,51 @@ impl FloatingPane {
             .border_1()
             .border_color(colors.border)
             .shadow_lg()
+            // Re-handles the workspace's own pane-navigation actions here,
+            // the same way `terminal_panel` does inside the dock: GPUI
+            // dispatches from the focused element outward, so these only run
+            // while focus is somewhere inside this window, and the
+            // workspace's own handlers see the keystroke exactly as before
+            // whenever it isn't. `ToggleZoom` needs no entry of its own --
+            // `Pane::render` already registers it on the pane itself, which
+            // is what actually emits `Event::ZoomIn`/`ZoomOut` that
+            // `handle_pane_event` reacts to.
+            .on_action(cx.listener(|this, _: &ActivatePaneLeft, window, cx| {
+                this.activate_in(SplitDirection::Left, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivatePaneRight, window, cx| {
+                this.activate_in(SplitDirection::Right, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivatePaneUp, window, cx| {
+                this.activate_in(SplitDirection::Up, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivatePaneDown, window, cx| {
+                this.activate_in(SplitDirection::Down, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneLeft, _window, cx| {
+                this.swap_in(SplitDirection::Left, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneRight, _window, cx| {
+                this.swap_in(SplitDirection::Right, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneUp, _window, cx| {
+                this.swap_in(SplitDirection::Up, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwapPaneDown, _window, cx| {
+                this.swap_in(SplitDirection::Down, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneLeft, _window, cx| {
+                this.move_active_to_border(SplitDirection::Left, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneRight, _window, cx| {
+                this.move_active_to_border(SplitDirection::Right, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneUp, _window, cx| {
+                this.move_active_to_border(SplitDirection::Up, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MovePaneDown, _window, cx| {
+                this.move_active_to_border(SplitDirection::Down, cx);
+            }))
             .child(self.render_title_bar(placement, cx))
             .child(
                 div()
@@ -306,8 +325,23 @@ impl FloatingPane {
                     // blank rectangle would have told them nothing.
                     .child(if self.is_empty(cx) {
                         self.render_empty_state(cx)
+                    } else if let Some(zoomed) = zoomed {
+                        // `PaneGroup::render` draws whichever pane matches its
+                        // `zoomed` argument as an empty `div` -- the workspace
+                        // draws that pane again as a separate top layer. This
+                        // window has no such layer, so `center.render` below
+                        // always gets `None` and the zoomed pane is drawn here
+                        // instead, filling the window on its own.
+                        div().size_full().child(zoomed).into_any_element()
                     } else {
-                        self.pane.clone().into_any_element()
+                        self.center
+                            .render(
+                                None,
+                                &ActivePaneDecorator::new(&self.active_pane, &self.workspace),
+                                window,
+                                cx,
+                            )
+                            .into_any_element()
                     }),
             )
             .children(

@@ -6,15 +6,48 @@
 //! knows how that merge comes out. Parsing the file would be a second, wrong
 //! implementation of it.
 //!
+//! That merge is the *default*, not the only path. When somebody has picked a
+//! file through the panel's own picker, `command` is given an explicit
+//! `--kubeconfig <path>`, and that flag *replaces* the `$KUBECONFIG` merge
+//! rather than joining it -- deliberately: the user picked one file, and a
+//! result quietly blended with whatever else was on `$KUBECONFIG` would not be
+//! the file they chose. Confirmed by hand: `kubectl config view --kubeconfig
+//! <path>` with `$KUBECONFIG` also set to a different file returns only what
+//! `<path>` contains.
+//!
 //! `kubectl config get-contexts -o json` does NOT work -- kubectl refuses
 //! `--output json` for that subcommand outright ("--output json is not available
 //! in kubectl config get-contexts"). `config view` is the one that answers in
 //! JSON.
 
+use std::path::{Path, PathBuf};
+
 use serde::Deserialize;
 use util::command::Command;
 
 use crate::backend::ContainerError;
+
+/// A file on disk naming what an engine can be aimed at, and what it is aimed
+/// at right now.
+///
+/// `label` names the control for the view -- "Kubeconfig File" -- without the
+/// view learning the word "kubeconfig" itself; it only ever repeats a string
+/// this crate gave it.
+pub struct ConfigSource {
+    pub label: &'static str,
+    pub path: Option<PathBuf>,
+    pub target: Option<String>,
+}
+
+/// One thing a config file offers to be aimed at -- a context, in
+/// Kubernetes's words, though the view never learns that word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigTarget {
+    pub name: String,
+    /// Opaque to the view, which only hands back what it was given -- that is
+    /// what stops `container_ui` from learning the word "namespace".
+    pub detail: Option<String>,
+}
 
 /// One context the kubeconfig offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,8 +135,15 @@ pub(crate) fn parse(stdout: &str) -> Result<Kubeconfig, ContainerError> {
     })
 }
 
-pub(crate) fn command(program: &str) -> Command {
+/// Builds `kubectl config view -o json`, scoped to `path` when one is given.
+///
+/// `path` goes *before* the subcommand and *replaces* the `$KUBECONFIG` merge
+/// described at the top of this module -- see there for how that was checked.
+pub(crate) fn command(program: &str, path: Option<&Path>) -> Command {
     let mut command = Command::new(program);
+    if let Some(path) = path {
+        command.arg("--kubeconfig").arg(path);
+    }
     command.args(["config", "view", "-o", "json"]);
     command
 }

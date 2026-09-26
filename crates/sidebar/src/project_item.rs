@@ -3,6 +3,7 @@ use crate::project_list::ListEntry;
 use gpui::{AnyElement, Context, SharedString, Window, px};
 use remote::RemoteConnectionOptions;
 use ui::{GradientFade, HighlightedLabel, Tab, Tooltip, prelude::*};
+use workspace::project_avatar::ProjectAvatar;
 
 impl Sidebar {
     /// FR2: renders one project row. `is_group_header_after_first` (a
@@ -98,6 +99,19 @@ impl Sidebar {
         let id = SharedString::from(format!("project-header-{ix}"));
         let group_name = SharedString::from(format!("header-group-{ix}"));
 
+        let workspace::ProjectPresentation {
+            initials: custom_initials,
+            colour: custom_colour,
+            logo,
+        } = self
+            .multi_workspace
+            .read_with(cx, |multi_workspace, _| {
+                multi_workspace.project_presentation(key)
+            })
+            .unwrap_or_default();
+        let initials =
+            custom_initials.unwrap_or_else(|| crate::rail_item::project_initials(&entry.label));
+
         let label = if entry.highlight_positions.is_empty() {
             Label::new(entry.label.clone())
                 .when(!entry.is_active, |this| this.color(Color::Muted))
@@ -162,6 +176,21 @@ impl Sidebar {
                     .min_w_0()
                     .w_full()
                     .gap_1()
+                    // A logo is drawn only when the project has one -- this row
+                    // carries no avatar today, and always drawing an initials
+                    // square here would be a design change nobody asked for.
+                    .when_some(logo, |this, logo| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .debug_selector(move || format!("project-header-avatar:{ix}"))
+                                .child(
+                                    ProjectAvatar::new(initials.clone(), custom_colour, Some(logo))
+                                        .size(px(16.))
+                                        .background(color.element_background),
+                                ),
+                        )
+                    })
                     .child(label)
                     .when_some(
                         self.render_remote_project_icon(ix, host.as_ref()),
@@ -195,5 +224,78 @@ impl Sidebar {
                 this.activate_or_open_workspace_for_group(&key_for_click, window, cx);
             }))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Sidebar;
+    use crate::sidebar_tests::init_test;
+    use fs::FakeFs;
+    use gpui::{AppContext as _, TestAppContext, px};
+    use project::Project;
+    use serde_json::json;
+    use util::path;
+    use workspace::MultiWorkspace;
+
+    /// A project row draws its avatar only once a logo has actually been set
+    /// -- this row has no avatar today, so a bare initials square here would
+    /// be a design change nobody asked for -- and a long project name must
+    /// shrink the label rather than the fixed-size avatar next to it.
+    #[gpui::test]
+    async fn the_panel_row_draws_the_same_avatar(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let long_name = "a-very-long-project-name-that-should-truncate-in-the-panel-row";
+        let project_root = std::path::Path::new(path!("/root_a")).join(long_name);
+        fs.insert_tree(
+            path!("/root_a"),
+            json!({ long_name: { "a.txt": "" }, "source_logo.png": "" }),
+        )
+        .await;
+        let project = Project::test(fs, [project_root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            let mw_entity = cx.entity();
+            let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+            mw.register_sidebar(sidebar, cx);
+        });
+        // The row lives in the panel, not the rail -- it draws nothing until
+        // the panel is actually open.
+        multi_workspace.update(cx, |mw, cx| mw.open_sidebar(cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        // No logo yet: the row must not carry an avatar probe at all.
+        assert!(
+            cx.debug_bounds("project-header-avatar:0").is_none(),
+            "a project without a logo must not draw an avatar on the panel row"
+        );
+
+        let key = multi_workspace.read_with(cx, |mw, cx| mw.project_groups(cx)[0].key.clone());
+        multi_workspace
+            .update(cx, |mw, cx| {
+                mw.set_project_logo(
+                    &key,
+                    std::path::PathBuf::from(path!("/root_a/source_logo.png")),
+                    cx,
+                )
+            })
+            .await;
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let avatar = cx
+            .debug_bounds("project-header-avatar:0")
+            .expect("with a logo set, the panel row must draw an avatar");
+        assert_eq!(
+            avatar.size.width,
+            px(16.),
+            "a long label must shrink instead of squeezing the fixed-size avatar"
+        );
     }
 }

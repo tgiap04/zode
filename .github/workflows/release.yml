@@ -516,9 +516,9 @@ jobs:
         path: ./artifacts/
     - name: ls -lR ./artifacts
       run: ls -lR ./artifacts
-    - name: release::prep_release_artifacts
+    - name: release::prep_upload_release_and_driver_artifacts
       run: |-
-        mkdir -p release-artifacts/
+        mkdir -p release-artifacts/ driver-artifacts/
 
         mv ./artifacts/Zode-aarch64.dmg/Zode-aarch64.dmg release-artifacts/Zode-aarch64.dmg
         mv ./artifacts/Zode-x86_64.dmg/Zode-x86_64.dmg release-artifacts/Zode-x86_64.dmg
@@ -526,18 +526,23 @@ jobs:
         mv ./artifacts/zode-linux-x86_64.tar.gz/zode-linux-x86_64.tar.gz release-artifacts/zode-linux-x86_64.tar.gz
         mv ./artifacts/Zode-x86_64.exe/Zode-x86_64.exe release-artifacts/Zode-x86_64.exe
         mv ./artifacts/Zode-aarch64.exe/Zode-aarch64.exe release-artifacts/Zode-aarch64.exe
-        mv ./artifacts/database-drivers-aarch64-apple-darwin/* release-artifacts/
-        mv ./artifacts/database-drivers-x86_64-apple-darwin/* release-artifacts/
-        mv ./artifacts/database-drivers-aarch64-unknown-linux-gnu/* release-artifacts/
-        mv ./artifacts/database-drivers-x86_64-unknown-linux-gnu/* release-artifacts/
-        mv ./artifacts/database-drivers-aarch64-pc-windows-msvc/* release-artifacts/
-        mv ./artifacts/database-drivers-x86_64-pc-windows-msvc/* release-artifacts/
+        mv ./artifacts/database-drivers-aarch64-apple-darwin/* driver-artifacts/
+        mv ./artifacts/database-drivers-x86_64-apple-darwin/* driver-artifacts/
+        mv ./artifacts/database-drivers-aarch64-unknown-linux-gnu/* driver-artifacts/
+        mv ./artifacts/database-drivers-x86_64-unknown-linux-gnu/* driver-artifacts/
+        mv ./artifacts/database-drivers-aarch64-pc-windows-msvc/* driver-artifacts/
+        mv ./artifacts/database-drivers-x86_64-pc-windows-msvc/* driver-artifacts/
     - name: release::build_driver_manifest
-      run: script/build-driver-manifest release-artifacts "${GITHUB_REF_NAME#v}"
+      run: script/build-driver-manifest driver-artifacts "${GITHUB_REF_NAME#v}"
     - name: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
       run: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: release::publish_drivers_to_web
+      run: script/publish-drivers-to-web driver-artifacts "${GITHUB_REF_NAME#v}"
+      env:
+        ZODE_DRIVER_UPLOAD_TOKEN: ${{ secrets.ZODE_DRIVER_UPLOAD_TOKEN }}
+        ZODE_DRIVER_UPLOAD_URL: ${{ vars.ZODE_DRIVER_UPLOAD_URL }}
   validate_release_assets:
     needs:
     - upload_release_assets
@@ -547,7 +552,7 @@ jobs:
     steps:
     - name: release::validate_release_assets
       run: |
-        EXPECTED_ASSETS='["Zode-aarch64.dmg", "Zode-x86_64.dmg", "zode-linux-aarch64.tar.gz", "zode-linux-x86_64.tar.gz", "Zode-x86_64.exe", "Zode-aarch64.exe", "zode-db-sqlite-aarch64-apple-darwin.tar.gz", "zode-db-postgres-aarch64-apple-darwin.tar.gz", "zode-db-mysql-aarch64-apple-darwin.tar.gz", "zode-db-mongodb-aarch64-apple-darwin.tar.gz", "zode-db-sqlite-x86_64-apple-darwin.tar.gz", "zode-db-postgres-x86_64-apple-darwin.tar.gz", "zode-db-mysql-x86_64-apple-darwin.tar.gz", "zode-db-mongodb-x86_64-apple-darwin.tar.gz", "zode-db-sqlite-aarch64-unknown-linux-gnu.tar.gz", "zode-db-postgres-aarch64-unknown-linux-gnu.tar.gz", "zode-db-mysql-aarch64-unknown-linux-gnu.tar.gz", "zode-db-mongodb-aarch64-unknown-linux-gnu.tar.gz", "zode-db-sqlite-x86_64-unknown-linux-gnu.tar.gz", "zode-db-postgres-x86_64-unknown-linux-gnu.tar.gz", "zode-db-mysql-x86_64-unknown-linux-gnu.tar.gz", "zode-db-mongodb-x86_64-unknown-linux-gnu.tar.gz", "zode-db-sqlite-aarch64-pc-windows-msvc.tar.gz", "zode-db-postgres-aarch64-pc-windows-msvc.tar.gz", "zode-db-mysql-aarch64-pc-windows-msvc.tar.gz", "zode-db-mongodb-aarch64-pc-windows-msvc.tar.gz", "zode-db-sqlite-x86_64-pc-windows-msvc.tar.gz", "zode-db-postgres-x86_64-pc-windows-msvc.tar.gz", "zode-db-mysql-x86_64-pc-windows-msvc.tar.gz", "zode-db-mongodb-x86_64-pc-windows-msvc.tar.gz", "zode-db-drivers-manifest.json"]'
+        EXPECTED_ASSETS='["Zode-aarch64.dmg", "Zode-x86_64.dmg", "zode-linux-aarch64.tar.gz", "zode-linux-x86_64.tar.gz", "Zode-x86_64.exe", "Zode-aarch64.exe"]'
         TAG="$GITHUB_REF_NAME"
 
         ACTUAL_ASSETS=$(gh release view "$TAG" --repo="$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')

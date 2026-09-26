@@ -598,6 +598,12 @@ pub struct LanguageSettingsContent {
     ///
     /// Default: true
     pub show_completion_documentation: Option<bool>,
+    /// Whether to show the remainder of the selected completion as dimmed
+    /// inline ghost text at the cursor, so accepting it can be previewed
+    /// without opening the completion's detail popover.
+    ///
+    /// Default: true
+    pub show_completion_preview: Option<bool>,
     /// Controls how completions are processed for this language.
     pub completions: Option<CompletionSettingsContent>,
     /// Preferred debuggers for this language.

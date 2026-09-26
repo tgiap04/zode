@@ -139,5 +139,12 @@ impl std::fmt::Debug for KeyBinding {
 /// A unique identifier for retrieval of metadata associated with a key binding.
 /// Intended to be used as an index or key into a user-defined store of metadata
 /// associated with the binding, such as the source of the binding.
+///
+/// This value is not opaque to gpui: `Keymap::bindings_for_input` reads it to decide binding
+/// precedence. A binding whose `meta` is `None` or `KeyBindingMetaIndex(0)` is treated as coming
+/// from the highest-precedence ("user") tier and is resolved ahead of any binding carrying a
+/// higher index, regardless of context depth. Callers that stamp meta onto bindings from a source
+/// ranking (such as `settings::KeybindSource`) must keep index `0` reserved for the tier that
+/// should win over every other source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyBindingMetaIndex(pub u32);

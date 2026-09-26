@@ -198,6 +198,7 @@ impl CreateWorktreeModal {
             files: false,
             directories: true,
             multiple: false,
+            show_hidden: false,
             prompt: Some("Choose".into()),
         });
 
@@ -227,6 +228,25 @@ impl CreateWorktreeModal {
             editor.clear(window, cx);
         });
         cx.notify();
+    }
+
+    /// The existing branch the typed name would collide with, if any.
+    ///
+    /// Only in `Name` mode, where the typed text becomes a *new* branch: `git
+    /// worktree add -b <name>` refuses a name a branch already holds, and the
+    /// refusal arrives from git talking about branches in a dialog the reader
+    /// opened to make a worktree. The branch list is already loaded for the
+    /// other tab, so the collision is knowable before anything is submitted.
+    ///
+    /// Compared exactly rather than case-insensitively: git treats refs as
+    /// case-sensitive, and a warning that fires on a name that would in fact
+    /// succeed teaches people to ignore it.
+    fn colliding_branch(&self, cx: &App) -> Option<SharedString> {
+        branch_colliding_with(
+            self.mode,
+            &self.name_editor.read(cx).text(cx),
+            &self.branches,
+        )
     }
 
     /// Branches matching what has been typed, for the Branch tab.
@@ -349,7 +369,7 @@ impl Render for CreateWorktreeModal {
                     )
                     .child(
                         Button::new("create", "Create worktree")
-                            .style(ButtonStyle::Filled)
+                            .style(ButtonStyle::Brand)
                             .disabled(!can_create)
                             .key_binding(
                                 KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
@@ -515,6 +535,43 @@ impl CreateWorktreeModal {
             .when_some(matches, |this, matches| {
                 this.child(self.render_branch_matches(matches, cx))
             })
+            .when_some(self.colliding_branch(cx), |this, branch| {
+                this.child(self.render_branch_collision(branch, cx))
+            })
+    }
+
+    /// Says the typed name is taken, and offers the tab that does what the
+    /// reader was reaching for.
+    ///
+    /// Naming an existing branch in this tab is far more often "make me a
+    /// worktree for that branch" than "make me a second branch of that name",
+    /// and the second is not something git will do at all. So this points at
+    /// the Branch tab rather than only refusing.
+    fn render_branch_collision(
+        &self,
+        branch: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .id("worktree-name-collides-with-branch")
+            .w_full()
+            .gap_1p5()
+            .child(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::XSmall)
+                    .color(Color::Warning),
+            )
+            .child(
+                Label::new(format!(
+                    "A branch named {branch} already exists. Use 'Create From' to make a worktree for it."
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(|modal, _, window, cx| {
+                modal.set_mode(NameMode::Branch, window, cx)
+            }))
     }
 
     fn render_branch_matches(
@@ -566,34 +623,37 @@ impl CreateWorktreeModal {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
-            .child(h_flex().w_full().gap_1p5().flex_wrap().children(
-                super::agent_choices().iter().map(|(id, label)| {
-                    let selected = self.agent == Some(*id);
-                    let id = *id;
-                    div()
-                        .id(SharedString::from(*label))
-                        .child(
-                            Chip::new(*label)
-                                .icon(agent_ui::agent_icon(id))
-                                .icon_color(Color::Custom(agent_ui::agent_color(id)))
-                                .label_color(if selected {
-                                    Color::Default
-                                } else {
-                                    Color::Muted
-                                })
-                                .when(selected, |chip| {
-                                    chip.border_color(cx.theme().colors().border_focused)
-                                }),
-                        )
-                        // Choosing the same agent twice clears it: the
-                        // form must be able to say "create the worktree
-                        // and start nothing".
-                        .on_click(cx.listener(move |modal, _, _, cx| {
-                            modal.agent = (modal.agent != Some(id)).then_some(id);
-                            cx.notify();
-                        }))
-                }),
-            ))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .flex_wrap()
+                    .children(agent_ui::agent_marks().map(|(id, icon, label)| {
+                        let selected = self.agent == Some(id);
+                        div()
+                            .id(SharedString::from(label))
+                            .child(
+                                Chip::new(label)
+                                    .icon(icon)
+                                    .icon_color(Color::Custom(agent_ui::agent_color(id)))
+                                    .label_color(if selected {
+                                        Color::Default
+                                    } else {
+                                        Color::Muted
+                                    })
+                                    .when(selected, |chip| {
+                                        chip.border_color(cx.theme().colors().border_focused)
+                                    }),
+                            )
+                            // Choosing the same agent twice clears it: the
+                            // form must be able to say "create the worktree
+                            // and start nothing".
+                            .on_click(cx.listener(move |modal, _, _, cx| {
+                                modal.agent = (modal.agent != Some(id)).then_some(id);
+                                cx.notify();
+                            }))
+                    })),
+            )
     }
 }
 
@@ -657,9 +717,73 @@ impl BranchPanel {
     }
 }
 
+/// The existing branch a typed name would collide with, if any.
+///
+/// Free-standing so the rule can be tested without a modal, an editor and a
+/// window, the same way `chosen_target` is.
+fn branch_colliding_with(
+    mode: NameMode,
+    typed: &str,
+    branches: &[SharedString],
+) -> Option<SharedString> {
+    if mode != NameMode::Name {
+        return None;
+    }
+    let typed = typed.trim();
+    if typed.is_empty() {
+        return None;
+    }
+    branches.iter().find(|name| name.as_ref() == typed).cloned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NameMode, chosen_target};
+    use super::{NameMode, branch_colliding_with, chosen_target};
+    use gpui::SharedString;
+
+    /// The case that sent a reader in circles: a branch exists, no worktree
+    /// uses it, so the worktree list is empty of it -- and typing that name
+    /// here is refused by git talking about branches.
+    #[test]
+    fn a_name_already_held_by_a_branch_is_reported_before_git_refuses_it() {
+        let branches = [SharedString::from("test"), SharedString::from("develop")];
+        assert_eq!(
+            branch_colliding_with(NameMode::Name, "test", &branches),
+            Some(SharedString::from("test"))
+        );
+        assert_eq!(
+            branch_colliding_with(NameMode::Name, "  test  ", &branches),
+            Some(SharedString::from("test")),
+            "the name is trimmed before it is submitted, so it must be trimmed before it is checked"
+        );
+    }
+
+    /// Nothing is being created in the Branch tab, so nothing can collide --
+    /// naming an existing branch there is the entire point of the tab.
+    #[test]
+    fn picking_an_existing_branch_is_never_a_collision() {
+        let branches = [SharedString::from("test")];
+        assert_eq!(
+            branch_colliding_with(NameMode::Branch, "test", &branches),
+            None
+        );
+    }
+
+    /// git refs are case-sensitive, and a warning that fires on a name which
+    /// would in fact succeed teaches people to ignore the warning.
+    #[test]
+    fn a_different_case_is_a_different_branch() {
+        let branches = [SharedString::from("test")];
+        assert_eq!(
+            branch_colliding_with(NameMode::Name, "Test", &branches),
+            None
+        );
+        assert_eq!(
+            branch_colliding_with(NameMode::Name, "testing", &branches),
+            None
+        );
+        assert_eq!(branch_colliding_with(NameMode::Name, "", &branches), None);
+    }
     use zed_actions::NewWorktreeBranchTarget;
 
     /// A worktree with a branch of its own is the point: a detached checkout

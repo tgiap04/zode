@@ -154,12 +154,15 @@
 # Account & Privacy
 
 - [Your Zode Account](./account.md)
+- [Environment sync protocol](./env-sync-protocol.md)
+- [Environment sync security](./env-sync-security.md)
 - [Roles](./roles.md)
 - [Worktree Trust](./worktree-trust.md)
 - [Telemetry](./telemetry.md)
 - [Agent Usage Indicator](./agent-usage.md)
 - [Agent Sessions Across Restarts](./agent-sessions.md)
 - [Keeping the Display Awake](./keep-display-awake.md)
+- [Agent Finished Notifications](./agent-finished-notifications.md)
 - [Project Footprint Indicator](./project-footprint-indicator.md)
 
 # Developing Zode

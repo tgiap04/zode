@@ -192,6 +192,23 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         None
     }
 
+    /// Whether this item has work running right now, which its tab draws as a
+    /// bar across its bottom edge.
+    ///
+    /// Deliberately not "unsaved" or "in the middle of saving" -- `is_dirty`
+    /// and `can_save` already say those, and both are states the item is *in*
+    /// rather than work it is *doing*. This answers the second question, for
+    /// the kind of item that spends minutes on one instruction.
+    ///
+    /// The bar has to span the tab, which nothing an item returns can do:
+    /// `tab_content` becomes one flex item among several, so an element it
+    /// positions absolutely resolves against itself and not against the tab.
+    /// Hence a bool the pane draws from, rather than an element the item hands
+    /// over.
+    fn is_busy(&self, _cx: &App) -> bool {
+        false
+    }
+
     /// Returns the tab tooltip text.
     ///
     /// Use this if you don't need to customize the tab tooltip content.
@@ -465,6 +482,7 @@ pub trait ItemHandle: 'static + Send {
     fn tab_content_text(&self, detail: usize, cx: &App) -> SharedString;
     fn suggested_filename(&self, cx: &App) -> SharedString;
     fn tab_icon(&self, window: &Window, cx: &App) -> Option<Icon>;
+    fn is_busy(&self, cx: &App) -> bool;
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString>;
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent>;
     fn telemetry_event_text(&self, cx: &App) -> Option<&'static str>;
@@ -619,6 +637,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn tab_icon(&self, window: &Window, cx: &App) -> Option<Icon> {
         self.read(cx).tab_icon(window, cx)
+    }
+
+    fn is_busy(&self, cx: &App) -> bool {
+        self.read(cx).is_busy(cx)
     }
 
     fn tab_tooltip_content(&self, cx: &App) -> Option<TabTooltipContent> {
@@ -1436,6 +1458,7 @@ pub mod test {
         pub buffer_kind: ItemBufferKind,
         pub has_conflict: bool,
         pub has_deleted_file: bool,
+        pub is_busy: bool,
         pub project_items: Vec<Entity<TestProjectItem>>,
         pub nav_history: Option<ItemNavHistory>,
         pub tab_descriptions: Option<Vec<&'static str>>,
@@ -1526,6 +1549,7 @@ pub mod test {
                 is_dirty: false,
                 has_conflict: false,
                 has_deleted_file: false,
+                is_busy: false,
                 project_items: Vec::new(),
                 buffer_kind: ItemBufferKind::Singleton,
                 nav_history: None,
@@ -1565,6 +1589,11 @@ pub mod test {
 
         pub fn with_conflict(mut self, has_conflict: bool) -> Self {
             self.has_conflict = has_conflict;
+            self
+        }
+
+        pub fn with_busy(mut self, is_busy: bool) -> Self {
+            self.is_busy = is_busy;
             self
         }
 
@@ -1645,6 +1674,10 @@ pub mod test {
             gpui::div().into_any_element()
         }
 
+        fn is_busy(&self, _cx: &App) -> bool {
+            self.is_busy
+        }
+
         fn for_each_project_item(
             &self,
             cx: &App,
@@ -1715,6 +1748,7 @@ pub mod test {
                     buffer_kind: self.buffer_kind,
                     has_conflict: self.has_conflict,
                     has_deleted_file: self.has_deleted_file,
+                    is_busy: self.is_busy,
                     project_items: self.project_items.clone(),
                     nav_history: None,
                     tab_descriptions: None,

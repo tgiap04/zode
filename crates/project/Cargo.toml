@@ -11,7 +11,6 @@ workspace = true
 [lib]
 path = "src/project.rs"
 doctest = false
-test = false
 
 [[test]]
 name = "integration"
@@ -123,6 +122,7 @@ project = {workspace = true, features = ["test-support"]}
 rpc = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 snippet_provider = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 unindent.workspace = true
 util = { workspace = true, features = ["test-support"] }
 worktree = { workspace = true, features = ["test-support"] }

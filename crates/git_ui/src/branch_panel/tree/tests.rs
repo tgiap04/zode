@@ -51,6 +51,7 @@ fn repo(id: u64, name: &str, worktrees: Vec<GitWorktree>) -> RepoData {
     RepoData {
         id: repo_id(id),
         path: Arc::from(PathBuf::from(format!("/repos/{name}")).as_path()),
+        anchor: Arc::from(PathBuf::from(format!("/repos/{name}")).as_path()),
         name: name.to_string().into(),
         current_branch: Some("main".into()),
         branches: vec![branch("main", true)],
@@ -332,9 +333,9 @@ mod agents {
         let (on_main, _) = agents_of(card(&rows, "main"));
         let (on_feature, _) = agents_of(card(&rows, "feature"));
         assert_eq!(on_main.len(), 1);
-        assert_eq!(on_main[0].label().as_ref(), "On main");
+        assert_eq!(on_main[0].stored_label().as_ref(), "On main");
         assert_eq!(on_feature.len(), 1);
-        assert_eq!(on_feature[0].label().as_ref(), "On feature");
+        assert_eq!(on_feature[0].stored_label().as_ref(), "On feature");
     }
 
     /// The row clones a refcount, never the entries. Gathering happens once per
@@ -592,22 +593,44 @@ mod activity {
 
     #[test]
     fn an_agent_producing_output_is_responding() {
-        assert_eq!(activity_for(true, true), AgentActivity::Responding);
+        assert_eq!(activity_for(true, true, false), AgentActivity::Responding);
     }
 
     #[test]
     fn an_agent_that_has_answered_is_ready() {
         assert_eq!(
-            activity_for(true, false),
+            activity_for(true, false, false),
             AgentActivity::Ready,
             "a live CLI sitting quiet is the one waiting for you"
+        );
+    }
+
+    /// The session's mark gives way to the row that can actually name what is
+    /// working.
+    ///
+    /// Both marks come off the same pty, which carries a subagent's output as
+    /// the session's own — so the session cannot tell the two apart, and the
+    /// one that can is the subagent's own row beneath it. Two spinners would
+    /// claim two things are being produced when there is one.
+    #[test]
+    fn a_session_gives_its_mark_to_the_subagent_doing_the_work() {
+        assert_eq!(
+            activity_for(true, true, true),
+            AgentActivity::Ready,
+            "the pty is busy, but it is the subagent's row that says so"
+        );
+        assert_eq!(
+            activity_for(true, false, true),
+            AgentActivity::Ready,
+            "and a session whose own writes fell quiet while a subagent works \
+             is still not the one producing anything"
         );
     }
 
     #[test]
     fn a_tab_whose_cli_has_exited_is_gone() {
         assert_eq!(
-            activity_for(false, false),
+            activity_for(false, false, false),
             AgentActivity::Gone,
             "the tab outlives the process by design; the mark must not"
         );

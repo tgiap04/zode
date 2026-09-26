@@ -14,9 +14,10 @@ See the platform-specific instructions for building Zode from source:
 ## Database drivers
 
 The database column talks to each engine through a separate binary
-(`zode-db-sqlite`, `zode-db-postgres`, `zode-db-mysql`), which the app starts
-from beside its own executable. Nothing links against them, and they are not in
-`default-members`, so `cargo run` does not build them.
+(`zode-db-sqlite`, `zode-db-postgres`, `zode-db-mysql`, `zode-db-mongodb`),
+which the app starts from beside its own executable. Nothing links against
+them, and they are not in `default-members`, so `cargo run` does not build
+them.
 
 `make build` builds them alongside the binary, so the usual loop needs nothing
 extra. To build them on their own:
@@ -28,11 +29,51 @@ script/build-database-drivers            # beside `cargo run`
 script/build-database-drivers --release  # beside `cargo run --release`
 ```
 
-The release bundles build and ship them; this is only for development builds.
+Resolution order, when the panel needs a driver, is unchanged by any of what
+follows: beside the running executable first (what the commands above build
+into), then the download store below, then whatever `ZODE_DB_<ID>` names —
+`ZODE_DB_POSTGRES=/path/to/zode-db-postgres`, a full path to an existing file,
+not a name looked up on `PATH`. A value that is not a file is logged and
+ignored rather than silently skipped. A checkout that has just run `make
+drivers` always gets the driver it just built, never a downloaded one.
 
-If they are missing, every connection fails — and the message you get is the
-shell's, not the driver's. The driver is started through a shell, so an absent
-binary is not a failed spawn: the shell writes `command not found:
+### Where a release build gets its drivers
+
+A release build ships no driver binaries at all — the release bundles used to
+build and include them, but they no longer do. Each driver is fetched the
+first time someone connects to the engine it speaks for, from Zode's own API
+rather than from a GitHub release: `{ZODE_API_URL}/drivers/{app version}/{asset}`,
+verified against a manifest and its SHA-256 before anything is unpacked (see
+`crates/database/src/install/`). `ZODE_API_URL` defaults to
+`https://api.zodekit.site/api` (`zode_account::api_url()`); point it at a
+backend you're running locally to test the download path end to end, e.g.
+`ZODE_API_URL=http://localhost:8000/api`. This is a public, unauthenticated
+route — the panel must work for someone who has never signed in.
+
+A development build (app version `0.0.0`) has no such release to ask, so
+asking it to download instead reports the actual fix: run
+`script/build-database-drivers` (or `make drivers`), or install the driver by
+hand (below). It does not report a raw network error.
+
+Downloaded drivers land under `<data_dir>/database_drivers/<id>/<version>/`,
+keyed by the running app's own version — a driver speaks a pinned protocol,
+and an app that has been updated must not keep running a driver built for a
+different one. `data_dir` is:
+
+- **macOS**: `~/Library/Application Support/Zode`
+- **Linux**: `$XDG_DATA_HOME/zode` (typically `~/.local/share/zode`)
+- **Windows**: `%LOCALAPPDATA%\Zode`
+
+This is also the manual/offline install path: no route to `api.zodekit.site`,
+or a version this backend doesn't (yet) publish, still works by placing the
+binary at `<data_dir>/database_drivers/<id>/<version>/zode-db-<id>` (add
+`.exe` on Windows) — the executable name and directory shape are exactly what
+the download path itself produces, so a driver placed there by hand is
+indistinguishable from one that was downloaded.
+
+If a driver is missing altogether, every connection fails — and the message you
+get is the shell's, not the driver's. The driver is started through a shell, so
+an absent binary is not a failed spawn: the shell writes `command not found:
 zode-db-postgres` to what the client reads as the driver's own stderr, and the
 reconnect loop repeats it every few seconds. Zode logs one clear warning at
 startup for each built-in driver it cannot find beside its executable; that line,

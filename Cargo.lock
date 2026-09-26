@@ -47,6 +47,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
+ "zode_env_sync",
 ]
 
 [[package]]
@@ -77,6 +78,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_notify"
+version = "0.1.0"
+dependencies = [
+ "agent_ui",
+ "editor",
+ "fs",
+ "gpui",
+ "project",
+ "settings",
+ "theme",
+ "theme_settings",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "agent_sessions"
 version = "0.1.0"
 dependencies = [
@@ -84,6 +101,7 @@ dependencies = [
  "log",
  "rusqlite",
  "serde_json",
+ "smol",
  "tempfile",
  "util",
 ]
@@ -98,12 +116,14 @@ dependencies = [
  "db",
  "editor",
  "fs",
+ "futures 0.3.32",
  "gpui",
  "log",
  "menu",
  "notifications",
  "paths",
  "project",
+ "serde",
  "serde_json",
  "settings",
  "task",
@@ -3220,6 +3240,7 @@ dependencies = [
  "sha2 0.10.9",
  "smol",
  "tempfile",
+ "url",
  "util",
 ]
 
@@ -3251,6 +3272,7 @@ dependencies = [
  "workspace",
  "zed_actions",
  "zed_credentials_provider",
+ "zode_account",
 ]
 
 [[package]]
@@ -4736,12 +4758,18 @@ version = "0.1.0"
 dependencies = [
  "agent_ui",
  "anyhow",
+ "container_ui",
+ "database_ui",
+ "debugger_ui",
  "editor",
  "fs",
+ "git_ui",
  "gpui",
  "language",
  "log",
  "project",
+ "project_panel",
+ "remote_connection",
  "settings",
  "terminal_view",
  "theme",
@@ -7669,6 +7697,9 @@ dependencies = [
  "log",
  "project",
  "settings",
+ "task",
+ "terminal",
+ "terminal_view",
  "theme",
  "theme_settings",
  "ui",
@@ -9771,6 +9802,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-local-authentication"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48e0b8b339e0d9d2ed4416b7f93f9d4daadff7d4dd797f89867cde11aeac607"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-metal"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10096,6 +10138,17 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "os_auth"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "futures 0.3.32",
+ "objc2",
+ "objc2-foundation",
+ "objc2-local-authentication",
 ]
 
 [[package]]
@@ -11556,6 +11609,7 @@ name = "project_footprint"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "libc",
  "log",
  "project",
  "settings",
@@ -19051,6 +19105,7 @@ dependencies = [
  "menu",
  "node_runtime",
  "parking_lot",
+ "paths",
  "postage",
  "pretty_assertions",
  "project",
@@ -19823,6 +19878,7 @@ name = "zode"
 version = "0.1.1"
 dependencies = [
  "activity_indicator",
+ "agent_notify",
  "agent_ui",
  "agent_usage",
  "anyhow",
@@ -19967,6 +20023,8 @@ dependencies = [
  "zlog_settings",
  "zode_account",
  "zode_account_ui",
+ "zode_env_sync",
+ "zode_env_sync_ui",
  "zode_sync",
  "ztracing",
 ]
@@ -20027,6 +20085,7 @@ dependencies = [
  "sysinfo 0.37.2",
  "zed_credentials_provider",
  "zed_env_vars",
+ "zode_account",
 ]
 
 [[package]]
@@ -20044,6 +20103,47 @@ dependencies = [
  "workspace",
  "zed_actions",
  "zode_account",
+ "zode_sync",
+]
+
+[[package]]
+name = "zode_env_sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "credentials_provider",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "log",
+ "paths",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+ "zode_account",
+ "zode_sync",
+]
+
+[[package]]
+name = "zode_env_sync_ui"
+version = "0.1.0"
+dependencies = [
+ "editor",
+ "gpui",
+ "menu",
+ "notifications",
+ "os_auth",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "workspace",
+ "zed_actions",
+ "zode_account",
+ "zode_env_sync",
  "zode_sync",
 ]
 

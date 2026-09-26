@@ -114,21 +114,66 @@ pub(crate) enum AgentActivity {
     Responding,
 }
 
+/// What one agent row's subagent list is held under.
+///
+/// Not the session id alone: the same conversation can be open in two tabs, and
+/// expanding one of them must not expand the other. A tab is keyed by its view
+/// and a finished transcript by the id its store knows it as.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum SubagentKey {
+    Open(gpui::EntityId),
+    Past(Arc<str>),
+}
+
 /// The mark for a tab that still exists, from the two questions asked of it.
 ///
 /// Split out because the case worth pinning is the quiet one: a tab whose CLI
 /// has exited is still an open tab, and reporting it as ready would send
 /// someone to a session that ended.
-pub(crate) fn activity_for(working: bool, responding: bool) -> AgentActivity {
-    match (working, responding) {
-        (false, _) => AgentActivity::Gone,
-        (true, true) => AgentActivity::Responding,
-        (true, false) => AgentActivity::Ready,
+pub(crate) fn activity_for(
+    working: bool,
+    responding: bool,
+    a_subagent_is_running: bool,
+) -> AgentActivity {
+    match (working, responding, a_subagent_is_running) {
+        (false, _, _) => AgentActivity::Gone,
+        // The work belongs to the subagent, and the row beneath this one is
+        // already saying so. Both spinning would claim two things are being
+        // produced when there is one -- the pty carries a subagent's output as
+        // the session's own, so the session's mark cannot tell them apart and
+        // must give way to the row that can.
+        (true, _, true) => AgentActivity::Ready,
+        (true, true, false) => AgentActivity::Responding,
+        (true, false, false) => AgentActivity::Ready,
     }
 }
 
 impl AgentEntry {
-    pub(crate) fn label(&self) -> &SharedString {
+    /// Asked at render for an open tab, for the reason [`Self::activity`] is:
+    /// renaming a tab changes what it is called while nothing else about the
+    /// row changes, so the copy taken when the tree was built is stale the
+    /// moment the user commits the rename. A transcript's title cannot change
+    /// under us, so a past row keeps the label it was built with.
+    ///
+    /// Falls back to the stored label when the view is gone: the row still has
+    /// to say something, and what the tab was called last is the truest thing
+    /// left to say.
+    pub(crate) fn label(&self, cx: &gpui::App) -> SharedString {
+        match self {
+            AgentEntry::Open { view, .. } => view
+                .upgrade()
+                .map(|view| view.read(cx).tab_label())
+                .unwrap_or_else(|| self.stored_label().clone()),
+            AgentEntry::Past { .. } => self.stored_label().clone(),
+        }
+    }
+
+    /// The label captured when the tree was built.
+    ///
+    /// What a row should *draw* is [`Self::label`] -- this one can be stale for
+    /// an open tab. It is the fallback when the view is gone, and what the
+    /// window-free tree tests assert on.
+    pub(crate) fn stored_label(&self) -> &SharedString {
         match self {
             AgentEntry::Open { label, .. } | AgentEntry::Past { label, .. } => label,
         }
@@ -157,7 +202,25 @@ impl AgentEntry {
             return AgentActivity::Gone;
         };
         let view = view.read(cx);
-        activity_for(view.is_working(cx), view.is_responding(cx))
+        // `is_answering` and not `is_responding`: the tab's mark is the settled
+        // one, and a panel drawing the raw value beside it would disagree with
+        // it several times inside every reply.
+        activity_for(
+            view.is_working(cx),
+            view.is_answering(),
+            view.any_subagent_running(),
+        )
+    }
+
+    /// What this row's subagent list is remembered under, or `None` when there
+    /// is nothing left to remember it by.
+    pub(crate) fn subagent_key(&self) -> Option<SubagentKey> {
+        match self {
+            AgentEntry::Open { view, .. } => view
+                .upgrade()
+                .map(|view| SubagentKey::Open(view.entity_id())),
+            AgentEntry::Past { id, .. } => Some(SubagentKey::Past(id.clone())),
+        }
     }
 
     pub(crate) fn updated_at(&self) -> Option<std::time::SystemTime> {
@@ -196,9 +259,24 @@ impl TreeRow {
 #[derive(Clone, Debug)]
 pub(crate) struct RepoData {
     pub(crate) id: RepositoryId,
-    /// Stable across sessions, unlike `id`. What the expanded set is keyed by
-    /// on disk.
+    /// Where *this workspace* has the repository open -- the checkout the
+    /// reader is standing in, which is what `work_directory_abs_path` means
+    /// (`git_store.rs`, where `linked_worktrees` is built by filtering this
+    /// path back out of `git worktree list`).
     pub(crate) path: Arc<std::path::Path>,
+    /// The repository itself, the same seen from every one of its checkouts
+    /// (`RepositorySnapshot::original_repo_abs_path`). What the persisted
+    /// record is keyed by.
+    ///
+    /// Not `path`, though `path` survives a restart just as well. A checkout
+    /// switch opens a *second* workspace at a *second* directory, so a key
+    /// built from `path` names the checkout the reader happened to be standing
+    /// in rather than the repository the row belongs to -- and every row
+    /// silently re-keys itself the moment they switch. `order_checkouts` had
+    /// already been bitten by the same asymmetry (see `all_checkouts` below,
+    /// "a path is the same seen from anywhere"); this is that lesson applied to
+    /// what goes on disk.
+    pub(crate) anchor: Arc<std::path::Path>,
     pub(crate) name: SharedString,
     pub(crate) current_branch: Option<SharedString>,
     /// Already run through `branch_service::process_branches`, so a remote ref

@@ -19,3 +19,9 @@ rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 util.workspace = true
+
+[dev-dependencies]
+# Only to block on the one `#[ignore]`d live-CLI test (M7), which spawns the
+# real `opencode` binary through `util::command::Command` -- an async API --
+# from an ordinary, non-async `#[test]`.
+smol.workspace = true

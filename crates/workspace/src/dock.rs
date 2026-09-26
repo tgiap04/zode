@@ -1,6 +1,7 @@
 use crate::focus_follows_mouse::FocusFollowsMouse as _;
 use crate::pane_group::element::pane_axis;
 use crate::pane_group::{SURFACE_MARGIN, SURFACE_ROUNDING};
+use crate::panel_size_key::PROJECT_PANEL_SIZE_STATE_KEY;
 use crate::persistence::model::DockData;
 use crate::{DraggedDock, Event, FocusFollowsMouse, ModalLayer, Pane, WorkspaceSettings};
 use crate::{Workspace, status_bar::StatusItemView};
@@ -302,6 +303,21 @@ impl From<&dyn PanelHandle> for AnyView {
 pub struct Dock {
     position: DockPosition,
     panel_entries: Vec<PanelEntry>,
+    /// The order the stacked sections are drawn in.
+    ///
+    /// Held apart from `panel_entries`, which stays in `activation_priority`
+    /// order because the project rail and the status bar draw their buttons
+    /// from it -- the user arranges the sections inside the dock, not the
+    /// buttons outside it.
+    ///
+    /// Identities, not indices. `add_panel` and `remove_panel` shift entry
+    /// indices, and an index list here would be the bug `PanelEntry::visible`
+    /// warns about; an `EntityId` moves with nothing and cannot go stale.
+    ///
+    /// Holds *every* panel in the dock, not only the showing ones, so
+    /// `show_panel` and `hide_panel_by_id` never have to touch it and a panel
+    /// put away comes back where the user left it.
+    stack_order: Vec<EntityId>,
     workspace: WeakEntity<Workspace>,
     is_open: bool,
     active_panel_index: Option<usize>,
@@ -330,6 +346,9 @@ pub struct Dock {
     /// the dock instead.
     stack_flexes: Arc<Mutex<Vec<f32>>>,
     stack_bounding_boxes: Arc<Mutex<Vec<Option<Bounds<Pixels>>>>>,
+    /// Which gap a section released right now would fall into, in drawn index
+    /// space. Only ever set while a drag is in flight.
+    stack_drop_gap: Option<usize>,
     /// The stack as last written down, so an unchanged one is not written again.
     ///
     /// `serialize_workspace` fires on every kind of workspace change, throttled
@@ -514,10 +533,17 @@ fn resize_panel_entry(
 ) -> (&'static str, PanelSizeState) {
     let size = size.map(|size| size.max(RESIZE_HANDLE_SIZE).round());
     let uses_flexible_width = panel_uses_flexible_width(position, entry.panel.as_ref(), window, cx);
+    // The axis not in use is cleared, not merely left alone. A record now
+    // outlives the workspace it was made in, so a pixel width written while
+    // the panel was fixed would otherwise still be sitting there the day the
+    // panel is fixed again -- in a dock that may well measure the other way.
+    // Held together the two fields describe one drag, never two.
     if uses_flexible_width {
         entry.size_state.flex = flex;
+        entry.size_state.size = None;
     } else {
         entry.size_state.size = size;
+        entry.size_state.flex = None;
     }
     entry.panel.size_state_changed(window, cx);
     (entry.panel.panel_key(), entry.size_state)
@@ -549,11 +575,13 @@ impl Dock {
                 position,
                 workspace: workspace.downgrade(),
                 panel_entries: Default::default(),
+                stack_order: Default::default(),
                 active_panel_index: None,
                 serialized_stack: None,
                 column: DockColumn::Tool,
                 stack_flexes: Default::default(),
                 stack_bounding_boxes: Default::default(),
+                stack_drop_gap: None,
                 last_persisted_stack: None,
                 is_open: false,
                 focus_handle: focus_handle.clone(),
@@ -690,24 +718,28 @@ impl Dock {
     /// The entry whose stored size decides how wide -- or, at the bottom, how
     /// tall -- the dock is.
     ///
-    /// A dock that takes turns is *one column* to the eye: its header is a tab
-    /// strip and only ever one panel is drawn below it. So it holds one extent,
-    /// and taking that extent from whichever panel happens to be up is what
-    /// made the column change width every time you switched tabs -- the project
-    /// panel defaults to 240px and the agent history to 420px, and a drag on
-    /// the column's edge only ever wrote to the panel showing at the time. Two
-    /// panels, two widths, one column: the width had to move.
+    /// A dock is *one column* to the eye however it draws its panels, so it
+    /// holds one extent. Taking that extent from whichever panel happens to be
+    /// up is what made the column change width every time you switched -- the
+    /// git panel defaulted to 360px and the branch panel beside it in the left
+    /// dock to 280px, and a drag on the column's edge only ever wrote to the
+    /// panel showing at the time. Two panels, two widths, one column: the
+    /// width had to move. (Both default to 360 since 2026-09-12, so the left
+    /// dock no longer demonstrates it -- any two panels with unequal defaults
+    /// still would.)
+    ///
+    /// This held for a dock that stacks too, which is what took a while to
+    /// see. A stack divides the column along the *other* axis -- `stack_flexes`
+    /// says how the sections share its height -- so its sections were never
+    /// describing their own width to begin with. Reading a width off the
+    /// active section was reading the wrong axis, and it moved the column for
+    /// the same reason a tab switch did.
     ///
     /// Entries are held in `activation_priority` order, so the first is the
-    /// column's primary panel. It owns the extent and the others read it. A
-    /// dock that stacks has no switcher and each section keeps its own size, so
-    /// there this stays the active entry, exactly as before.
+    /// column's primary panel. It owns the extent and every other panel reads
+    /// it.
     fn size_governing_index(&self) -> Option<usize> {
-        if self.takes_turns() {
-            (!self.panel_entries.is_empty()).then_some(0)
-        } else {
-            self.active_panel_index
-        }
+        (!self.panel_entries.is_empty()).then_some(0)
     }
 
     fn size_governing_entry(&self) -> Option<&PanelEntry> {
@@ -940,15 +972,47 @@ impl Dock {
                 panel: Arc::new(panel.clone()),
                 size_state,
                 // Added put away: `restore_state` and `starts_open` below are
-                // what decide to show it, exactly as before.
+                // what decide to show it -- and a restore that already found a
+                // record now wins over `starts_open` unconditionally forcing
+                // it open.
                 visible: false,
                 _subscriptions: subscriptions,
             },
         );
+        // Slotted among its priority neighbours rather than appended: `zed::init`
+        // registers panels in its own order and the insert above sorts them into
+        // priority position, so appending would hand every user registration
+        // order for a stack they never touched. Counted after that insert, so
+        // "sits before `index`" is well defined.
+        let slot = self
+            .stack_order
+            .iter()
+            .filter(|id| {
+                self.panel_entries
+                    .iter()
+                    .position(|entry| entry.panel.panel_id() == **id)
+                    .is_some_and(|entry_index| entry_index < index)
+            })
+            .count();
+        self.stack_order.insert(slot, Entity::entity_id(&panel));
+        self.debug_assert_stack_order_matches_entries();
 
-        self.restore_state(window, cx);
+        // `restore_state` already reports whether it found a record; the value
+        // was being discarded, so the panel below could force itself open on
+        // top of a dock that had already restored the record's own choice.
+        let restored = self.restore_state(window, cx);
 
-        if panel.read(cx).starts_open(window, cx) {
+        // "Starts open" means "when nothing else has said otherwise" -- a dock
+        // with a record of its own has already said otherwise. Without this
+        // gate, `activate_panel`'s exclusive `visible = ix == panel_ix` (below)
+        // hides every entry a restore had just brought back, and because the
+        // left dock stacks, that collapses the whole column to this one panel
+        // rather than the one section `starts_open` is meant to open.
+        //
+        // This is a user-visible behaviour change, worth its own release note:
+        // a panel the user had closed now stays closed across restarts, where
+        // it previously reopened whenever `starts_open` was true.
+        if !restored && panel.read(cx).starts_open(window, cx) {
             self.activate_panel(index, window, cx);
             self.set_open(true, window, cx);
         }
@@ -1010,7 +1074,9 @@ impl Dock {
                 }
             }
 
-            self.panel_entries.remove(panel_ix);
+            let removed = self.panel_entries.remove(panel_ix).panel.panel_id();
+            self.stack_order.retain(|id| *id != removed);
+            self.debug_assert_stack_order_matches_entries();
             self.reset_stack_flexes();
             cx.notify();
 
@@ -1096,6 +1162,124 @@ impl Dock {
     pub fn is_panel_visible(&self, panel_id: EntityId) -> bool {
         self.visible_panels()
             .any(|panel| panel.panel_id() == panel_id)
+    }
+
+    fn stacked_entries(&self) -> impl Iterator<Item = &PanelEntry> {
+        let is_open = self.is_open;
+        self.stack_order.iter().filter_map(move |id| {
+            self.panel_entries
+                .iter()
+                .find(|entry| entry.panel.panel_id() == *id)
+                .filter(|entry| is_open && entry.visible)
+        })
+    }
+
+    /// Moves a showing section to `to_gap` in the drawn order, carrying its
+    /// height share with it.
+    ///
+    /// Deliberately touches nothing but `stack_order` and `stack_flexes`. It
+    /// does NOT move `panel_entries`, `active_panel_index` or any size state,
+    /// and that is the whole reason the column cannot change width and the
+    /// rail and status bar cannot change order when the user drags a section:
+    /// all three read `panel_entries`, which stays in `activation_priority`
+    /// order. Do not "tidy" any of that back in.
+    ///
+    /// Keyed by `EntityId` rather than by index for the reason written on
+    /// `hide_panel_by_id`: the call arrives from a header drawn frames earlier.
+    ///
+    /// Returns whether anything actually moved, so a drop on a section's own
+    /// edge can be told from a real move.
+    pub fn move_stacked_panel(
+        &mut self,
+        panel_id: EntityId,
+        to_gap: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let drawn: Vec<EntityId> = self
+            .stacked_entries()
+            .map(|entry| entry.panel.panel_id())
+            .collect();
+        let Some(from) = drawn.iter().position(|id| *id == panel_id) else {
+            return false;
+        };
+        // The gaps either side of a section both name where it already is.
+        if to_gap == from || to_gap == from + 1 {
+            return false;
+        }
+        // Removing before inserting shifts everything after it down by one, so
+        // a gap below the section it came from names a lower index -- the same
+        // rule as `Sidebar::drop_project_at_gap`.
+        let to = if from < to_gap {
+            to_gap.saturating_sub(1)
+        } else {
+            to_gap
+        };
+
+        // Which section the moved one should come to rest before, named by
+        // identity: `stack_order` holds the hidden panels too, so a drawn index
+        // is not an absolute one. `to_gap` indexes `drawn`, which is the order
+        // BEFORE the removal below -- mixing it with the post-removal `to` is
+        // what silently turned every downward drag into a one-slot-short move.
+        //
+        // `None` is the gap past the last section, the one no section index can
+        // name; it becomes an append after whichever section is last.
+        let anchor = drawn.get(to_gap).copied();
+
+        self.stack_order.retain(|id| *id != panel_id);
+        // Resolved AFTER the removal, so there is no shift to correct for.
+        let insert_at = match anchor {
+            Some(anchor) => self
+                .stack_order
+                .iter()
+                .position(|id| *id == anchor)
+                .unwrap_or(self.stack_order.len()),
+            None => drawn
+                .last()
+                .and_then(|last| self.stack_order.iter().position(|id| id == last))
+                .map_or(self.stack_order.len(), |last| last + 1),
+        };
+        self.stack_order
+            .insert(insert_at.min(self.stack_order.len()), panel_id);
+
+        // Permuted, never rebuilt: `PaneAxisElement::prepaint` indexes
+        // `flexes[ix]` raw and asserts its length against the child count, so a
+        // length change is an out-of-bounds in release, not just in debug.
+        // `remove` + `insert` preserves both the length and the sum, and the
+        // dragged section keeps the height the user gave it.
+        {
+            let mut flexes = self.stack_flexes.lock();
+            // Asserted rather than guarded: skipping the permutation would leave
+            // the shares describing the order the sections used to be in, which
+            // is the very desync the paragraph above says cannot happen.
+            debug_assert_eq!(
+                flexes.len(),
+                drawn.len(),
+                "stack_flexes must hold one share per showing section"
+            );
+            if from < flexes.len() && to < flexes.len() {
+                let share = flexes.remove(from);
+                flexes.insert(to, share);
+            }
+        }
+        self.debug_assert_stack_order_matches_entries();
+
+        self.persist_stack(cx);
+        cx.notify();
+        true
+    }
+
+    /// Every panel the dock is showing, in the order the user arranged them.
+    ///
+    /// The same set as `visible_panels`, walked in `stack_order` instead of in
+    /// `activation_priority` order. Only the stacked sections read this: the
+    /// rail and the status bar draw from `panels()` so their buttons keep a
+    /// fixed order, which is what the user asked for.
+    ///
+    /// A `find` per id makes this O(n^2), left as a linear scan deliberately --
+    /// panels per dock are single digits, and the stack branch already collects
+    /// a `Vec` per frame.
+    pub fn stacked_panels(&self) -> impl Iterator<Item = &Arc<dyn PanelHandle>> {
+        self.stacked_entries().map(|entry| &entry.panel)
     }
 
     /// Whether this dock shows one panel at a time.
@@ -1211,7 +1395,36 @@ impl Dock {
     /// Shares the dock's length evenly whenever the stack gains or loses a
     /// panel. `PaneAxis::insert_pane` does the same on a split — a stack that
     /// silently kept a departed panel's share would leave a gap.
+    /// `stack_order` must stay a permutation of `panel_entries`' ids.
+    ///
+    /// Called directly from every site that writes `stack_order`, rather than
+    /// relying on `reset_stack_flexes` to catch it: two of the four write sites
+    /// do not reach that function on their normal path -- `add_panel` only does
+    /// when a later show happens to run it, and `apply_stack_state` only does
+    /// when the recorded flexes fail validation, which is the uncommon case. An
+    /// assertion that is skipped on the path that matters in production is not
+    /// an assertion.
+    fn debug_assert_stack_order_matches_entries(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let mut ordered: Vec<EntityId> = self.stack_order.clone();
+            let mut entries: Vec<EntityId> = self
+                .panel_entries
+                .iter()
+                .map(|entry| entry.panel.panel_id())
+                .collect();
+            ordered.sort();
+            entries.sort();
+            debug_assert_eq!(
+                ordered, entries,
+                "stack_order must stay a permutation of panel_entries"
+            );
+        }
+    }
+
     fn reset_stack_flexes(&mut self) {
+        self.debug_assert_stack_order_matches_entries();
+
         let showing = self.panel_entries.iter().filter(|e| e.visible).count();
         *self.stack_flexes.lock() = vec![1.; showing];
     }
@@ -1302,19 +1515,27 @@ impl Dock {
     }
 
     /// What this dock is showing, in a form that survives a restart.
+    ///
+    /// `showing` carries the ORDER as well as the membership -- the order the
+    /// user arranged, not `activation_priority`. `flexes` is indexed by drawn
+    /// position, so the two have to be written from the same walk or a restart
+    /// hands each section the height of whichever one used to sit there.
     pub fn stack_state(&self) -> DockStackState {
         DockStackState {
             showing: self
-                .panel_entries
-                .iter()
-                .filter(|entry| entry.visible)
+                .stacked_entries()
                 .map(|entry| entry.panel.persistent_name().to_string())
                 .collect(),
             flexes: self.stack_flexes.lock().clone(),
         }
     }
 
-    /// Puts back a stack recorded by `stack_state`.
+    /// Puts back a stack recorded by `stack_state`, in the order it was recorded.
+    ///
+    /// The order matters as much as the membership: `flexes` are indexed by
+    /// drawn position, so restoring the sections in a different order than they
+    /// were written in gives each one the height of whichever section used to
+    /// occupy its slot.
     ///
     /// Panels named in the record but no longer in this dock are skipped, and a
     /// record naming none of them leaves the dock untouched for `restore_state`
@@ -1351,6 +1572,26 @@ impl Dock {
         if self.takes_turns() {
             indices.truncate(1);
         }
+
+        // The record's order IS the drawn order, so putting the sections back
+        // in it is what makes `state.flexes` -- indexed by drawn position --
+        // land on the sections it was recorded against. The named panels first,
+        // in record order, then everything else in `panel_entries` order, so
+        // every panel still appears exactly once and Phase 1's permutation
+        // invariant holds.
+        let mut restored: Vec<EntityId> = indices
+            .iter()
+            .filter_map(|ix| self.panel_entries.get(*ix))
+            .map(|entry| entry.panel.panel_id())
+            .collect();
+        for entry in self.panel_entries.iter() {
+            let id = entry.panel.panel_id();
+            if !restored.contains(&id) {
+                restored.push(id);
+            }
+        }
+        self.stack_order = restored;
+        self.debug_assert_stack_order_matches_entries();
 
         for (ix, entry) in self.panel_entries.iter_mut().enumerate() {
             entry.visible = indices.contains(&ix);
@@ -1542,11 +1783,19 @@ impl Dock {
             };
             panel_uses_flexible_width(self.position, active_entry.panel.as_ref(), window, cx)
         };
+        // The mode filter keeps a drag off panels that measure the other way.
+        // The governing entry is exempt from it: that is the one the column's
+        // extent is read back from, so leaving it out means a drag that moves
+        // nothing at all -- the very complaint this sizing works to remove.
+        // Including it is safe because `resize_panel_entry` picks fixed or
+        // flexible from the entry's own mode, never from the active panel's.
+        let governing_index = self.size_governing_index();
         let mut size_states_to_persist = Vec::new();
-        for entry in &mut self.panel_entries {
-            if panel_uses_flexible_width(self.position, entry.panel.as_ref(), window, cx)
-                == active_panel_uses_flexible_width
-            {
+        for (index, entry) in self.panel_entries.iter_mut().enumerate() {
+            let matches_active_mode =
+                panel_uses_flexible_width(self.position, entry.panel.as_ref(), window, cx)
+                    == active_panel_uses_flexible_width;
+            if matches_active_mode || Some(index) == governing_index {
                 size_states_to_persist.push(resize_panel_entry(
                     self.position,
                     entry,
@@ -1626,7 +1875,7 @@ impl Dock {
                 .cached(StyleRefinement::default().v_flex().size_full())
                 .into_any_element(),
             Some(_) => {
-                let showing: Vec<Arc<dyn PanelHandle>> = self.visible_panels().cloned().collect();
+                let showing: Vec<Arc<dyn PanelHandle>> = self.stacked_panels().cloned().collect();
                 self.render_stack(showing, window, cx)
             }
             None => div().into_any_element(),
@@ -1650,13 +1899,14 @@ impl Dock {
             Axis::Vertical => Axis::Horizontal,
         };
 
+        let showing_count = showing.len();
         let children: Vec<AnyElement> = showing
             .iter()
             .enumerate()
-            .map(|(ix, panel)| self.render_stacked_panel(ix, panel, window, cx))
+            .map(|(ix, panel)| self.render_stacked_panel(ix, showing_count, panel, window, cx))
             .collect();
 
-        pane_axis(
+        let stack = pane_axis(
             axis,
             self.stack_element_basis(),
             self.stack_flexes.clone(),
@@ -1668,8 +1918,26 @@ impl Dock {
         // about editor panes; fading whichever panel is unfocused would be a
         // surprise nobody asked this dock for.
         .with_is_leaf_pane_mask(vec![false; children.len()])
-        .children(children)
-        .into_any_element()
+        .children(children);
+
+        // Wrapped rather than handled on `pane_axis` itself, which takes no
+        // event handlers -- and the wrapper must stay a plain full-size box so
+        // the stack still measures against the dock rather than against it.
+        div()
+            .size_full()
+            // Only ever *clears*, never claims -- every header claims solely
+            // while the pointer is inside its own bounds, and those do not
+            // overlap, so the order these fire in stops mattering. Same rule as
+            // `rail.rs`.
+            .on_drag_move(cx.listener(
+                |dock, event: &gpui::DragMoveEvent<stack_drag::DraggedPanel>, _window, cx| {
+                    if !event.bounds.contains(&event.event.position) {
+                        dock.set_stack_drop_gap(None, cx);
+                    }
+                },
+            ))
+            .child(stack)
+            .into_any_element()
     }
 
     /// One panel in a stack: a header naming it, then the panel.
@@ -1680,49 +1948,26 @@ impl Dock {
     fn render_stacked_panel(
         &self,
         ix: usize,
+        showing_count: usize,
         panel: &Arc<dyn PanelHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panel_id = panel.panel_id();
-        let name = SharedString::from(panel.persistent_name());
-        let icon = panel.icon(window, cx);
         let colors = cx.theme().colors();
 
-        v_flex()
+        let section = v_flex()
             .id(("dock-stacked-panel", panel_id))
             // Keyed by position in the stack rather than by name: two panels of
             // one kind can stack, and a test asserting how they divide the dock
             // is asking about first and second, not about which is which.
             .debug_selector(move || format!("dock-stacked-panel:{ix}"))
             .size_full()
+            // The drop indicator is absolutely positioned inside the section, so
+            // the section has to be the thing it positions against.
+            .relative()
             .bg(colors.panel_background)
-            .child(
-                h_flex()
-                    .flex_none()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .children(icon.map(|icon| {
-                                Icon::new(icon).size(IconSize::Small).color(Color::Muted)
-                            }))
-                            .child(Label::new(name).size(LabelSize::Small)),
-                    )
-                    .child(
-                        IconButton::new(("hide-stacked-panel", panel_id), IconName::Close)
-                            .icon_size(IconSize::Small)
-                            .tooltip(move |_window, cx| Tooltip::simple("Hide Panel", cx))
-                            .on_click(cx.listener(move |dock, _, window, cx| {
-                                dock.hide_panel_by_id(panel_id, window, cx);
-                            })),
-                    ),
-            )
+            .child(self.render_stack_section_header(ix, panel, window, cx))
             // `flex_1` with a floor of zero in a column, so the panel sizes
             // against a definite height instead of running past the header.
             .child(
@@ -1731,7 +1976,11 @@ impl Dock {
                         .to_any()
                         .cached(StyleRefinement::default().v_flex().size_full()),
                 ),
-            )
+            );
+
+        // The whole section accepts the drop, not just the header strip -- see
+        // `with_stack_drop_target`.
+        self.with_stack_drop_target(ix, showing_count, section, cx)
             .into_any_element()
     }
 
@@ -1808,7 +2057,46 @@ impl Dock {
         )
     }
 
+    /// The width this project last recorded for a panel.
+    ///
+    /// The record every read starts from, and the only one that separates one
+    /// project from another. `key` comes from
+    /// [`Workspace::project_panel_size_key`], the single place the shape is
+    /// decided, so a read and the write that follows it cannot disagree about
+    /// which project they mean.
+    pub(crate) fn load_project_size_state(key: &str, cx: &App) -> Option<PanelSizeState> {
+        Self::read_size_state(PROJECT_PANEL_SIZE_STATE_KEY, key, cx)
+    }
+
+    /// The width a project with no record of its own starts at.
+    ///
+    /// One row per panel, shared by every project. It is still written on every
+    /// drag, so a project opened for the first time begins at the width last
+    /// chosen rather than at one frozen on the day records became per-project.
+    /// Once that project has dragged a dock itself, its own record answers and
+    /// this one stops mattering to it.
     pub(crate) fn load_persisted_size_state(
+        panel_key: &'static str,
+        cx: &App,
+    ) -> Option<PanelSizeState> {
+        Self::read_size_state(PANEL_SIZE_STATE_KEY, panel_key, cx)
+    }
+
+    /// The width a workspace of its own recorded, from before records were
+    /// shared.
+    ///
+    /// Only ever read as a fallback, and only until this project has a record.
+    /// Two workspaces opening together can both find it absent and both write,
+    /// and the one that lands last is the width that project then gets -- the
+    /// write is a background task, so this is settled by completion order
+    /// rather than by which window opened first. A one-off wrong starting
+    /// width, correctable by one drag; not worth a compare-and-swap the
+    /// key-value store does not have.
+    ///
+    /// Left in place rather than deleted, unlike `load_legacy_panel_size`: the
+    /// rows are bounded and frozen, and a build from before this change still
+    /// reads them.
+    pub(crate) fn load_workspace_scoped_size_state(
         workspace: &Workspace,
         panel_key: &'static str,
         cx: &App,
@@ -1817,10 +2105,18 @@ impl Dock {
             .database_id()
             .map(|id| i64::from(id).to_string())
             .or(workspace.session_id())?;
+        Self::read_size_state(
+            PANEL_SIZE_STATE_KEY,
+            &format!("{workspace_id}:{panel_key}"),
+            cx,
+        )
+    }
+
+    fn read_size_state(namespace: &str, key: &str, cx: &App) -> Option<PanelSizeState> {
         let kvp = KeyValueStore::global(cx);
-        let scope = kvp.scoped(PANEL_SIZE_STATE_KEY);
+        let scope = kvp.scoped(namespace);
         scope
-            .read(&format!("{workspace_id}:{panel_key}"))
+            .read(key)
             .log_err()
             .flatten()
             .and_then(|json| serde_json::from_str::<PanelSizeState>(&json).log_err())
@@ -2427,6 +2723,12 @@ impl StatusItemView for PanelButtons {
     }
 }
 
+mod stack_drag;
+#[cfg(test)]
+mod stack_reorder_tests;
+
+pub use stack_drag::DraggedPanel;
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test {
     use super::*;
@@ -2448,6 +2750,9 @@ pub mod test {
         /// Defaults to `None`, matching a panel that contributes no dock button.
         /// Set it when a test needs the panel to appear in an icon list.
         pub icon: Option<ui::IconName>,
+        /// Defaults to `false`, matching `Panel::starts_open`'s own default --
+        /// set it when a test needs a panel that asks to open itself on add.
+        pub starts_open: bool,
     }
     actions!(test_only, [ToggleTestPanel]);
 
@@ -2470,6 +2775,7 @@ pub mod test {
                     DockPosition::Bottom,
                 ],
                 icon: None,
+                starts_open: false,
             }
         }
 
@@ -2591,6 +2897,10 @@ pub mod test {
         fn activation_priority(&self) -> u32 {
             self.0.activation_priority
         }
+
+        fn starts_open(&self, window: &Window, cx: &App) -> bool {
+            Panel::starts_open(&self.0, window, cx)
+        }
     }
 
     impl Panel for TestPanel {
@@ -2673,6 +2983,10 @@ pub mod test {
 
         fn own_column(&self) -> Option<DockColumn> {
             self.own_column
+        }
+
+        fn starts_open(&self, _window: &Window, _: &App) -> bool {
+            self.starts_open
         }
     }
 

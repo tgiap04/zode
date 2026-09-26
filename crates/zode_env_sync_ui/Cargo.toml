@@ -1,0 +1,39 @@
+[package]
+name = "zode_env_sync_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/zode_env_sync_ui.rs"
+doctest = false
+
+[dependencies]
+# No `telemetry` and no `client` named directly; `script/check-account-no-telemetry`
+# asserts the source-level half of that on every run. The graph half cannot be
+# held here for the same reason it cannot be held for `zode_account_ui`:
+# `workspace` is required to register actions, and it reaches `client`.
+editor.workspace = true
+gpui.workspace = true
+menu.workspace = true
+notifications.workspace = true
+os_auth.workspace = true
+ui.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
+zode_account.workspace = true
+zode_env_sync.workspace = true
+zode_sync.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme.workspace = true
+theme_settings.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
+zode_account = { workspace = true, features = ["test-support"] }
+zode_env_sync = { workspace = true, features = ["test-support"] }

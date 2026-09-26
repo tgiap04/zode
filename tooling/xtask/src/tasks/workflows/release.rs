@@ -110,11 +110,14 @@ impl ReleaseBundleJobs {
 /// Guards against the failure mode where a bundle succeeds but its artifact filename does
 /// not match what the release expects. `assets::all()` is the single source of truth for
 /// both this check and `prep_release_artifacts`.
+///
+/// Driver archives and the manifest are deliberately absent here: they no longer reach the
+/// GitHub release at all, so there is nothing of theirs for this job to validate. Their
+/// upload is checked by `script/publish-drivers-to-web` itself, which re-fetches the
+/// published manifest and counts its entries before the job can succeed.
 fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
     let expected_assets: Vec<String> = assets::all()
         .iter()
-        .map(|asset| asset.to_string())
-        .chain(assets::all_drivers())
         .map(|asset| format!("\"{asset}\""))
         .collect();
     let expected_assets_json = format!("[{}]", expected_assets.join(", "));
@@ -169,6 +172,15 @@ pub(crate) fn download_workflow_artifacts() -> Step<Use> {
     .add_with(("path", "./artifacts/"))
 }
 
+/// Unchanged from before this phase: still gathers every asset, including the driver
+/// archives, into one `release-artifacts/` directory.
+///
+/// `release_nightly.rs` also calls this, and that workflow's rolling prerelease still
+/// globs `release-artifacts/*` wholesale with no driver-manifest or web-upload step of its
+/// own. Splitting driver archives out here would silently drop them from the nightly
+/// build with no equivalent published anywhere -- a behavior change out of scope for this
+/// phase, which owns `release.yml` only. `prep_upload_release_and_driver_artifacts` below
+/// is the split version, used solely by `release.yml`'s `upload_release_assets`.
 pub(crate) fn prep_release_artifacts() -> Step<Run> {
     let mut script_lines = vec!["mkdir -p release-artifacts/\n".to_string()];
     for asset in assets::all() {
@@ -188,14 +200,49 @@ pub(crate) fn prep_release_artifacts() -> Step<Run> {
     named::bash!(&script_lines.join("\n"))
 }
 
+/// The `release.yml`-only split of `prep_release_artifacts` above: the six app assets go
+/// into `release-artifacts/`, exactly as before, but the driver archives land in their own
+/// `driver-artifacts/` directory instead.
+///
+/// They must never be reachable through `release-artifacts/*`, because that is exactly the
+/// glob `gh release upload` uses -- a driver archive left in that directory would still
+/// reach the GitHub release despite `validate_release_assets` no longer checking for it.
+pub(crate) fn prep_upload_release_and_driver_artifacts() -> Step<Run> {
+    let mut script_lines = vec!["mkdir -p release-artifacts/ driver-artifacts/\n".to_string()];
+    for asset in assets::all() {
+        let mv_command = format!("mv ./artifacts/{asset}/{asset} release-artifacts/{asset}");
+        script_lines.push(mv_command)
+    }
+
+    for target in assets::DRIVER_TARGETS {
+        let artifact = assets::drivers_artifact(target);
+        script_lines.push(format!("mv ./artifacts/{artifact}/* driver-artifacts/"));
+    }
+
+    named::bash!(&script_lines.join("\n"))
+}
+
 /// Writes the manifest the app reads to find its drivers.
 ///
 /// Built here rather than in the six bundle jobs because it describes all of
 /// them at once, and its checksums are taken from the very bytes about to be
 /// uploaded -- a checksum that travelled separately from what it describes is
 /// one more thing that can disagree, and detecting disagreement is its job.
+/// Reads from `driver-artifacts/`, the same directory
+/// `script/publish-drivers-to-web` uploads from, so the checksum is always
+/// computed from the exact bytes that reach the backend.
 pub(crate) fn build_driver_manifest() -> Step<Run> {
-    named::bash!("script/build-driver-manifest release-artifacts \"${GITHUB_REF_NAME#v}\"")
+    named::bash!("script/build-driver-manifest driver-artifacts \"${GITHUB_REF_NAME#v}\"")
+}
+
+/// Hands the driver archives and manifest to the web backend. The step's env
+/// carries the secret token and the base URL variable rather than the script
+/// resolving them itself, keeping every credential this job touches visible
+/// in one place in the generated YAML.
+fn publish_drivers_to_web() -> Step<Run> {
+    named::bash!("script/publish-drivers-to-web driver-artifacts \"${GITHUB_REF_NAME#v}\"")
+        .add_env(("ZODE_DRIVER_UPLOAD_TOKEN", vars::ZODE_DRIVER_UPLOAD_TOKEN))
+        .add_env(("ZODE_DRIVER_UPLOAD_URL", vars::ZODE_DRIVER_UPLOAD_URL))
 }
 
 fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> NamedJob {
@@ -205,18 +252,20 @@ fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> Name
     named::job!(
         steps::writes_to_releases(dependant_job(&deps))
             .runs_on(runners::LINUX_MEDIUM)
-            // Checked out for `script/build-driver-manifest`. Every other step
-            // here works on downloaded artifacts alone, which is why this job
-            // had no checkout until the manifest needed one.
+            // Checked out for `script/build-driver-manifest` and
+            // `script/publish-drivers-to-web`. Every other step here works on
+            // downloaded artifacts alone, which is why this job had no
+            // checkout until the manifest needed one.
             .add_step(steps::checkout_repo())
             .add_step(download_workflow_artifacts())
             .add_step(steps::script("ls -lR ./artifacts"))
-            .add_step(prep_release_artifacts())
+            .add_step(prep_upload_release_and_driver_artifacts())
             .add_step(build_driver_manifest())
             .add_step(
                 steps::script("gh release upload \"$GITHUB_REF_NAME\" --repo=\"$GITHUB_REPOSITORY\" release-artifacts/*")
                     .add_env(("GITHUB_TOKEN", vars::GITHUB_TOKEN)),
-            ),
+            )
+            .add_step(publish_drivers_to_web()),
     )
 }
 
@@ -385,15 +434,19 @@ mod tests {
 
     /// The driver ids live in three places that cannot see each other: the app
     /// decides which drivers it knows, a shell script decides which get
-    /// packaged, and this workflow decides which the release is validated for.
+    /// packaged, and this workflow decides which get uploaded to the web
+    /// backend.
     ///
     /// Drift between them fails in the least useful order. An id the app knows
     /// but nothing packages becomes an engine whose Download button always
     /// fails, discovered by a user. An id packaged but not listed here uploads
     /// unvalidated. Neither shows up until after a release is cut, which is why
-    /// it is asserted here instead.
+    /// it is asserted here instead. This test used to read `BUILT_IN` against
+    /// what the *GitHub release* validated; the coupling it protects has not
+    /// moved, only its destination has -- the drivers now go to the web
+    /// backend instead of a release asset.
     #[test]
-    fn the_drivers_the_release_validates_are_the_ones_the_app_knows() {
+    fn the_drivers_uploaded_to_the_web_are_the_ones_the_app_knows() {
         let registry = repo_file("crates/database_ui/src/driver_registry.rs");
         let built_in = registry
             .split_once("const BUILT_IN: &[(&str, &str)] = &[")
@@ -406,22 +459,23 @@ mod tests {
         for id in assets::DRIVER_IDS {
             assert!(
                 built_in.contains(&format!("(\"{id}\"")),
-                "the release validates `{id}`, but the app does not list it as a driver it knows"
+                "the pipeline uploads `{id}` to the web, but the app does not list it as a driver it knows"
             );
         }
         let listed = built_in.matches("(\"").count();
         assert_eq!(
             listed,
             assets::DRIVER_IDS.len(),
-            "the app knows {listed} drivers but the release validates {}",
+            "the app knows {listed} drivers but the pipeline uploads {}",
             assets::DRIVER_IDS.len()
         );
     }
 
     /// The same list again, this time against what actually gets packaged. A
-    /// driver missing here is an asset the release waits for and never gets.
+    /// driver missing here is an asset `script/publish-drivers-to-web` waits
+    /// for and never gets.
     #[test]
-    fn every_validated_driver_is_one_the_bundle_scripts_package() {
+    fn every_uploaded_driver_is_one_the_bundle_scripts_package() {
         let packager = repo_file("script/package-database-drivers");
         let listed = packager
             .split_once("drivers=(")
@@ -440,14 +494,87 @@ mod tests {
     }
 
     /// The manifest is what the app fetches first; without it every download
-    /// fails with a message about the release rather than about the packaging.
+    /// fails with a message about the backend rather than about the packaging.
+    /// Replaces the old `the_manifest_is_validated_like_any_other_asset`: the
+    /// manifest is no longer validated as a *release* asset (see
+    /// `no_driver_asset_reaches_the_github_release` below), but it is still
+    /// exactly one more entry in the list the web upload sends, and the count
+    /// this asserts is what `script/publish-drivers-to-web` itself checks
+    /// against the backend's response after publishing.
     #[test]
-    fn the_manifest_is_validated_like_any_other_asset() {
+    fn the_upload_list_is_one_archive_per_driver_per_platform_plus_the_manifest() {
         assert!(assets::all_drivers().contains(&assets::DRIVER_MANIFEST.to_string()));
         assert_eq!(
             assets::all_drivers().len(),
             assets::DRIVER_IDS.len() * assets::DRIVER_TARGETS.len() + 1,
             "one archive per driver per platform, plus the manifest"
+        );
+    }
+
+    /// The formal statement of "drivers no longer reach the GitHub release":
+    /// the two lists this workflow builds from must never overlap. A future
+    /// edit that quietly re-adds `.chain(assets::all_drivers())` to
+    /// `validate_release_assets`, or that renames a driver archive into
+    /// `assets::all()`, breaks this test before it breaks a release.
+    #[test]
+    fn no_driver_asset_reaches_the_github_release() {
+        let release_assets: std::collections::HashSet<String> =
+            assets::all().into_iter().map(str::to_string).collect();
+        let driver_assets: std::collections::HashSet<String> =
+            assets::all_drivers().into_iter().collect();
+
+        let overlap: Vec<&String> = release_assets.intersection(&driver_assets).collect();
+        assert!(
+            overlap.is_empty(),
+            "these assets are both release assets and driver uploads: {overlap:?}"
+        );
+
+        let workflow = jobs_of(release());
+        let validation_script = workflow["validate_release_assets"]["steps"][0]["run"]
+            .as_str()
+            .expect("validate_release_assets has a run step")
+            .to_string();
+        assert!(
+            !validation_script.contains(assets::DRIVER_MANIFEST),
+            "validate_release_assets still mentions the driver manifest: {validation_script}"
+        );
+    }
+
+    /// The upload step this phase adds, and the guarantee that it reads from
+    /// the driver directory while `gh release upload` reads from the release
+    /// directory -- so the two globs can never collide even if someone changes
+    /// the directory names later without noticing this test.
+    #[test]
+    fn the_upload_job_publishes_drivers_to_the_web() {
+        let jobs = jobs_of(release());
+        let steps = jobs["upload_release_assets"]["steps"]
+            .as_sequence()
+            .expect("upload_release_assets has steps");
+
+        let run_commands: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+
+        let publishes_to_web = run_commands
+            .iter()
+            .any(|command| command.contains("script/publish-drivers-to-web"));
+        assert!(
+            publishes_to_web,
+            "upload_release_assets never calls script/publish-drivers-to-web: {run_commands:?}"
+        );
+
+        let gh_upload = run_commands
+            .iter()
+            .find(|command| command.contains("gh release upload"))
+            .unwrap_or_else(|| panic!("no gh release upload step found: {run_commands:?}"));
+        assert!(
+            gh_upload.contains("release-artifacts/*"),
+            "gh release upload does not glob release-artifacts/*: {gh_upload}"
+        );
+        assert!(
+            !gh_upload.contains("driver-artifacts"),
+            "gh release upload must not read from driver-artifacts/: {gh_upload}"
         );
     }
 }

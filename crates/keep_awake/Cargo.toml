@@ -11,9 +11,11 @@ workspace = true
 # No `test-support` feature, unlike `agent_usage` which has one to switch itself
 # off under test. That feature exists there because `agent_usage` does its own
 # I/O -- keychain, HTTP, spawning a CLI -- which the deterministic test scheduler
-# reports as non-determinism. This crate reaches the OS only through the
-# `Platform` trait, and every test runs against `TestPlatform`, so there is no
-# real I/O to gate off.
+# reports as non-determinism. This crate's own production code reaches the OS
+# only through the `Platform` trait, and every test runs against `TestPlatform`,
+# so there is nothing of its own to gate off; the real shells its terminal tests
+# spawn are `terminal`'s and `terminal_view`'s own I/O, exercised the same way
+# their own test suites already do.
 
 [lib]
 path = "src/keep_awake.rs"
@@ -28,6 +30,15 @@ fs.workspace = true
 gpui.workspace = true
 log.workspace = true
 settings.workspace = true
+# For `Terminal::pty_writes_within` -- the same output-rate question this crate
+# already asks of an agent's own terminal through `agent_ui`, asked directly of
+# a terminal tab instead. `agent_ui` already depends on this, so it adds no new
+# cycle.
+terminal.workspace = true
+# For `TerminalView` and `TerminalPanel`/`TerminalPanelEvent` -- discovering and
+# watching terminal tabs, centre and dock, needs both. `agent_ui` already
+# depends on `terminal_view`, so it adds no new cycle here either.
+terminal_view.workspace = true
 ui.workspace = true
 workspace.workspace = true
 
@@ -47,3 +58,7 @@ fs = { workspace = true, features = ["test-support"] }
 theme = { workspace = true, features = ["test-support"] }
 theme_settings = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
+# For `SpawnInTerminal` -- `a_real_dock_terminal`'s only public path to a real
+# terminal in `TerminalPanel`'s own pane, since `add_terminal_shell` and its
+# dock-revealing siblings are private to `terminal_view`.
+task.workspace = true

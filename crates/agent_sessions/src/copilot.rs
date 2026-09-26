@@ -1,6 +1,7 @@
 use crate::{
-    AgentKind, Availability, Fork, ResumeCommand, SessionCounts, SessionProvider, SessionSummary,
-    Speaker, provider::is_safe_component,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+    SessionSummary, Speaker,
+    provider::{Untitled, is_safe_component},
 };
 use anyhow::{Context as _, Result};
 use std::{
@@ -11,7 +12,11 @@ use std::{
     time::SystemTime,
 };
 
-/// Enough of the beginning to reach `session.start`, which the CLI writes first.
+/// Enough of the beginning to reach `session.start`, which the CLI writes first,
+/// and the first `user.message` a few lines after it. Fixed rather than grown
+/// the way Claude's is: this store records a prompt as what the person typed,
+/// with no expanded skill or command body in front of it, and the deepest first
+/// message measured sat at 1.9 KB.
 const HEAD_BYTES: u64 = 16 * 1024;
 /// Enough of the end to reach the last message and the last model change.
 const TAIL_BYTES: u64 = 256 * 1024;
@@ -28,8 +33,9 @@ const TAIL_BYTES: u64 = 256 * 1024;
 /// on-disk shape imposes:
 ///
 /// - A session written by the VS Code extension rather than the CLI has a
-///   `vscode.metadata.json` and **no `events.jsonl`**. It still lists; it simply
-///   has no transcript to open.
+///   `vscode.metadata.json` and **no `events.jsonl`**. It still lists, on the
+///   strength of the `summary` its yaml carries; it simply has no transcript to
+///   open.
 /// - `user.message` carries both `content` and `transformedContent`. The latter
 ///   is the prompt after the CLI stuffed `<current_datetime>`, `<reminder>` and
 ///   tool preambles into it. Only `content` is what the person typed.
@@ -67,7 +73,7 @@ impl CopilotProvider {
             .join("session-state")
     }
 
-    fn summary_for(&self, dir: &Path) -> Result<Option<SessionSummary>> {
+    fn summary_for(&self, dir: &Path, untitled: Untitled) -> Result<Option<SessionSummary>> {
         let dir_id = dir
             .file_name()
             .and_then(|name| name.to_str())
@@ -98,12 +104,23 @@ impl CopilotProvider {
             .or_else(|| workspace.get("cwd").map(PathBuf::from))
             .unwrap_or_default();
 
+        // A row has to be listed under a name, and the id is not one. Five of
+        // the seven session directories this was written against held nothing
+        // but a yaml naming themselves -- opened, never spoken in, never
+        // summarised -- and every one of them listed as its own uuid.
         let title = workspace
             .get("summary")
             .filter(|summary| !summary.is_empty())
             .cloned()
-            .or_else(|| facts.first_user_message.clone())
-            .unwrap_or_else(|| id.clone());
+            .or_else(|| facts.first_user_message.clone());
+        let title = match (title, untitled) {
+            (Some(title), _) => title,
+            (None, Untitled::Drop) => {
+                log::debug!("a session with nothing to name it is not listed: {id}");
+                return Ok(None);
+            }
+            (None, Untitled::KeepAsId) => id.clone(),
+        };
 
         let updated_at = events_metadata
             .as_ref()
@@ -151,6 +168,40 @@ impl CopilotProvider {
     ///
     /// A path that cannot be canonicalised — gone, or a dangling symlink —
     /// answers `false`: there is nothing there to trash.
+    /// The directory a session was read out of.
+    ///
+    /// Only needed for a session with no transcript to name its own directory.
+    ///
+    /// The id first, because `summary_for` says the directory name and the
+    /// session id "agree in every session seen so far" -- so this is one
+    /// `is_dir` in practice, which matters because a bulk delete asks once per
+    /// session and a scan each time would be quadratic.
+    ///
+    /// The scan is the fallback for the case that precedence rule exists for:
+    /// the id comes from the transcript or the yaml, so a store where the two
+    /// disagree would otherwise name a directory that is not there. Bounded by
+    /// one pass, and only ever reached when the cheap answer missed.
+    fn dir_of(&self, session: &SessionSummary) -> Option<PathBuf> {
+        if crate::provider::is_safe_component(&session.id) {
+            let named = self.session_state_dir.join(session.id.as_ref());
+            if named.is_dir() {
+                return Some(named);
+            }
+        }
+        let entries = std::fs::read_dir(&self.session_state_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if matches!(self.summary_for(&path, Untitled::KeepAsId), Ok(Some(found)) if found.id == session.id)
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     fn contains(&self, path: &Path) -> bool {
         let Ok(root) = std::fs::canonicalize(&self.session_state_dir) else {
             return false;
@@ -159,6 +210,39 @@ impl CopilotProvider {
             return false;
         };
         path.starts_with(root)
+    }
+
+    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
+        // The whole session directory: the transcript is only one of the files
+        // Copilot writes for a session, and leaving `checkpoints/` and `files/`
+        // behind would leave the session half-deleted.
+        //
+        // The transcript names its own directory when there is one, which is
+        // the ordinary case and costs nothing. When there is not -- a session
+        // written by the VS Code extension has no `events.jsonl`, so `log_path`
+        // is `None` -- the directory is still there and still has to go, so it
+        // is looked up instead. That route used to answer "nothing to delete"
+        // and the caller, seeing no paths, returned without so much as asking.
+        //
+        // Looked up rather than joined from `session.id`: the id comes from the
+        // transcript or the yaml (see `summary_for`) and is not the directory's
+        // name, so joining it names a directory that does not exist.
+        let Some(dir) = session
+            .log_path
+            .as_ref()
+            .and_then(|log| log.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| self.dir_of(session))
+        else {
+            return Vec::new();
+        };
+        // `contains` alone would accept the store root itself, which would
+        // trash every session at once.
+        let root = std::fs::canonicalize(&self.session_state_dir).ok();
+        if !self.contains(&dir) || std::fs::canonicalize(&dir).ok() == root {
+            return Vec::new();
+        }
+        vec![dir]
     }
 }
 
@@ -189,7 +273,7 @@ impl SessionProvider for CopilotProvider {
                 continue;
             }
             let path = entry.path();
-            match self.summary_for(&path) {
+            match self.summary_for(&path, Untitled::Drop) {
                 Ok(Some(summary)) => sessions.push(summary),
                 Ok(None) => {}
                 // One unreadable session must not cost the whole list.
@@ -213,10 +297,10 @@ impl SessionProvider for CopilotProvider {
         // Unlike a missing directory, a directory that will not read is an error:
         // answering "not held" would send the caller off to start a session on
         // top of one that exists.
-        self.summary_for(&dir)
+        self.summary_for(&dir, Untitled::KeepAsId)
     }
 
-    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<ResumeCommand> {
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
         // `--resume=<id>` takes an id the CLI already wrote; there is no flag for
         // choosing the id of a new session. See the Codex impl for why inventing
         // one would be worse than declining.
@@ -234,37 +318,26 @@ impl SessionProvider for CopilotProvider {
         })
     }
 
-    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<ResumeCommand> {
+    fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
         // `copilot --resume=<id>` continues a session. There is no fork flag, so
         // the caller disables that control rather than building a command that
         // would not do what its label says.
         if fork == Fork::New {
             return None;
         }
-        Some(ResumeCommand {
+        Some(AgentCommand {
             program: "copilot".to_string(),
             args: vec![format!("--resume={}", session.id)],
             cwd: session.cwd.clone(),
         })
     }
 
-    fn paths_to_trash(&self, session: &SessionSummary) -> Vec<PathBuf> {
-        // The whole session directory: the transcript is only one of the files
-        // Copilot writes for a session, and leaving `checkpoints/` and `files/`
-        // behind would leave the session half-deleted.
-        let Some(log_path) = session.log_path.as_ref() else {
-            return Vec::new();
-        };
-        let root = std::fs::canonicalize(&self.session_state_dir).ok();
-        log_path
-            .parent()
-            .filter(|dir| {
-                // `contains` alone would accept the store root itself, which
-                // would trash every session at once.
-                self.contains(dir) && std::fs::canonicalize(dir).ok() != root
-            })
-            .map(|dir| vec![dir.to_path_buf()])
-            .unwrap_or_default()
+    fn deletion(&self, session: &SessionSummary) -> Deletion {
+        let paths = self.paths_to_trash(session);
+        if paths.is_empty() {
+            return Deletion::Nothing;
+        }
+        Deletion::Trash(paths)
     }
 }
 
@@ -454,6 +527,65 @@ mod tests {
     );
 
     #[test]
+    fn a_session_nobody_spoke_in_is_not_listed() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "4ebdb534-a568-4fae-9043-c699cad3a53e",
+            None,
+            "id: 4ebdb534-a568-4fae-9043-c699cad3a53e\n\
+             cwd: /work/project\n\
+             summary_count: 0\n",
+        );
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        assert!(
+            provider.list().unwrap().is_empty(),
+            "a directory opened and never spoken in has no name but its uuid, which is not one"
+        );
+    }
+
+    /// Same split as Claude keeps: the row is not worth browsing, but the
+    /// directory is still there and `find` has to say so — `deletion` locates it
+    /// the same way.
+    #[test]
+    fn a_session_the_list_hides_is_still_found_by_id() {
+        let root = tempfile::tempdir().unwrap();
+        let id = "4ebdb534-a568-4fae-9043-c699cad3a53e";
+        write_session(
+            root.path(),
+            id,
+            None,
+            "id: 4ebdb534-a568-4fae-9043-c699cad3a53e\ncwd: /work/project\n",
+        );
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        assert!(provider.list().unwrap().is_empty());
+        let found = provider
+            .find(id)
+            .unwrap()
+            .expect("the directory is on disk");
+        assert_eq!(found.title, id);
+    }
+
+    /// The VS Code extension writes no `events.jsonl`, so this row exists on the
+    /// strength of its `summary` alone. That is what separates it from the row
+    /// above, and why the rule is "no name" rather than "no transcript".
+    #[test]
+    fn a_summary_alone_is_enough_to_list() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "6454ea85-a0cc-4961-8f75-26c414f668e1",
+            None,
+            WORKSPACE,
+        );
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        let sessions = provider.list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "Vietnamese Greeting");
+        assert_eq!(sessions[0].preview, "");
+    }
+
+    #[test]
     fn a_session_reads_its_title_cwd_and_last_speaker() {
         let root = tempfile::tempdir().unwrap();
         write_session(root.path(), "6454ea85", Some(EVENTS), WORKSPACE);
@@ -498,8 +630,35 @@ mod tests {
         assert_eq!(sessions[0].title, "real question");
     }
 
+    /// A transcript-less session is still a directory on disk, so it must still
+    /// be deletable.
+    ///
+    /// The store names each session's directory by its id — `find` reaches it
+    /// that way and never looks at a transcript. Deriving it from
+    /// `log_path.parent()` instead made deletion depend on an `events.jsonl`
+    /// that a VS Code-written session never has, so `paths_to_trash` came back
+    /// empty and the delete bailed before it could even ask.
+    #[test]
+    fn a_session_with_no_transcript_can_still_be_deleted() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = write_session(root.path(), "3f0a6c3e", None, WORKSPACE);
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+
+        let sessions = provider.list().unwrap();
+        assert_eq!(
+            sessions[0].log_path, None,
+            "no transcript, as the store left it"
+        );
+
+        assert_eq!(
+            provider.paths_to_trash(&sessions[0]),
+            vec![dir],
+            "the session's own directory is what a delete takes, transcript or not"
+        );
+    }
+
     /// A session written by the VS Code extension has no `events.jsonl`. It must
-    /// still list — with no transcript to open and nothing to delete.
+    /// still list — with no transcript to open.
     #[test]
     fn a_session_with_no_transcript_still_lists() {
         let root = tempfile::tempdir().unwrap();
@@ -513,8 +672,11 @@ mod tests {
         assert_eq!(sessions[0].log_bytes, 0);
         assert_eq!(sessions[0].preview, "");
         assert_eq!(provider.counts(&sessions[0]).unwrap().messages, None);
-        // Nothing to trash: there is no transcript to anchor the directory to.
-        assert!(provider.paths_to_trash(&sessions[0]).is_empty());
+        // What it can still be is deleted -- see
+        // `a_session_with_no_transcript_can_still_be_deleted`. This test used to
+        // assert the opposite, which is how the defect was written down as
+        // intent: no transcript was read as nothing to delete, when the
+        // directory holding the session was there the whole time.
     }
 
     #[test]
@@ -715,6 +877,52 @@ mod tests {
             provider
                 .new_session_command("some-id", Path::new("/w/one"))
                 .is_none()
+        );
+    }
+}
+
+/// `deletion()` is new in phase 04's refactor; kept in its own module so the
+/// port of `paths_to_trash` above stays provably untouched -- `git diff` on
+/// `mod tests` is the check, and it must show nothing.
+#[cfg(test)]
+mod deletion_wrapping {
+    use super::*;
+
+    fn bare_session(id: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Copilot,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path,
+            log_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_transcript_and_no_directory_is_nothing() {
+        let provider = CopilotProvider::new(PathBuf::from("/does/not/exist"));
+        let session = bare_session("none", None);
+        assert_eq!(provider.deletion(&session), Deletion::Nothing);
+    }
+
+    #[test]
+    fn a_session_directory_inside_the_store_is_a_nonempty_trash() {
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("s1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let log = session_dir.join("events.jsonl");
+        std::fs::write(&log, "").unwrap();
+        let provider = CopilotProvider::new(root.path().to_path_buf());
+        let session = bare_session("s1", Some(log));
+        assert_eq!(
+            provider.deletion(&session),
+            Deletion::Trash(vec![session_dir])
         );
     }
 }

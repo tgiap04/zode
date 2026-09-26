@@ -126,6 +126,19 @@ pub fn insert_zed_terminal_env(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
+
+    // `alacritty_terminal` sets these unconditionally when it spawns the pty, but we only
+    // use it as a pty backend — Alacritty's built-in glyph renderer, which draws box
+    // drawing, block and sextant characters without font support, lives in the `alacritty`
+    // binary crate and is not part of Zed. Programs that key off `ALACRITTY_WINDOW_ID`
+    // therefore emit glyphs we cannot draw (Expo renders its QR code with
+    // U+1FB00..=U+1FB3B, which no bundled or system font covers). `WINDOWID` is wrong for
+    // a second reason: the id is a GPUI `WindowId`, a slotmap key, never an X11 XID.
+    //
+    // Blanking is the only lever available here: the pty applies this map after its own
+    // inserts, but `Command::env_remove` is not reachable through its API.
+    env.insert("ALACRITTY_WINDOW_ID".to_string(), String::new());
+    env.insert("WINDOWID".to_string(), String::new());
 }
 
 ///Upward flowing events, for changing the title and such
@@ -902,6 +915,12 @@ pub struct Terminal {
     ///
     /// Capped at [`PTY_OUTPUT_HISTORY`], so a fast writer costs a fixed
     /// sixteen timestamps rather than one per write.
+    ///
+    /// Stamped from `background_executor.now()`, not `Instant::now()`, so this
+    /// reads the same clock the scheduler runs on. Production behaviour is
+    /// unchanged -- the real scheduler's `now()` is `Instant::now()` -- but a
+    /// test can move the executor's clock without moving the wall clock, so
+    /// the write-rate window can actually be proven to expire.
     recent_pty_output: VecDeque<Instant>,
     last_hyperlink_search_position: Option<Point<Pixels>>,
     mouse_down_hyperlink: Option<(String, bool, Match)>,
@@ -2292,7 +2311,8 @@ impl Terminal {
         if self.recent_pty_output.len() == PTY_OUTPUT_HISTORY {
             self.recent_pty_output.pop_front();
         }
-        self.recent_pty_output.push_back(Instant::now());
+        self.recent_pty_output
+            .push_back(self.background_executor.now());
     }
 
     /// How many separate writes the pty has made within `window`.
@@ -2301,9 +2321,10 @@ impl Terminal {
     /// steadily", and past that many writes in a window the answer no longer
     /// changes.
     pub fn pty_writes_within(&self, window: Duration) -> usize {
+        let now = self.background_executor.now();
         self.recent_pty_output
             .iter()
-            .filter(|at| at.elapsed() < window)
+            .filter(|at| now.saturating_duration_since(**at) < window)
             .count()
     }
 
@@ -3063,6 +3084,22 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_zed_terminal_env_blanks_alacritty_identity() {
+        // The pty backend advertises an Alacritty window id that zode cannot live up to,
+        // and inherited values must not survive either.
+        let mut env = HashMap::from_iter([
+            ("ALACRITTY_WINDOW_ID".to_string(), "21474836553".to_string()),
+            ("WINDOWID".to_string(), "21474836553".to_string()),
+        ]);
+
+        insert_zed_terminal_env(&mut env, &"0.1.0");
+
+        assert_eq!(env.get("ALACRITTY_WINDOW_ID").map(String::as_str), Some(""));
+        assert_eq!(env.get("WINDOWID").map(String::as_str), Some(""));
+        assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("zed"));
+    }
+
+    #[test]
     fn test_rgb_for_index() {
         // Test every possible value in the color cube.
         for i in 16..=231 {
@@ -3403,10 +3440,11 @@ mod tests {
         let (terminal, completion_rx) =
             build_test_terminal(cx, "echo", &["test_output_before_kill; sleep 60"]).await;
 
-        // Wait a bit for the echo to execute and produce output
-        cx.background_executor
-            .timer(Duration::from_millis(200))
-            .await;
+        // Wait for the echo's output to reach the grid before killing. A fixed
+        // sleep races the same PTY drain `wait_for_terminal_content` exists for,
+        // and picks an arbitrary number to race it with; polling makes the kill
+        // genuinely happen after there is something to preserve.
+        wait_for_terminal_content(&terminal, "test_output_before_kill", cx).await;
 
         // Kill the active task
         terminal.update(cx, |term, _cx| {
@@ -3455,12 +3493,15 @@ mod tests {
             term.kill_active_task();
         });
 
-        // Content should still be there
-        let content = terminal.update(cx, |term, _| term.get_content());
-        assert!(
-            content.contains("done"),
-            "Output should still be present after no-op kill, got: {content}"
-        );
+        // Content should still be there. Polled rather than read once: the exit
+        // status above arrives when the child is reaped, which is not when its
+        // bytes reach the grid -- see `wait_for_terminal_content`. A read here
+        // times the two orderings against each other, and on Linux under a
+        // full-workspace run it loses.
+        //
+        // Waiting after the kill is also the stronger assertion: a kill that had
+        // wrongly discarded the output would leave this polling until it gives up.
+        wait_for_terminal_content(&terminal, "done", cx).await;
     }
 
     // Phase 5 (multi-project-window-switching): a real measurement, not
@@ -3911,6 +3952,27 @@ mod tests {
                     "the count saturates rather than growing with the writer"
                 );
                 assert_eq!(terminal.recent_pty_output.len(), PTY_OUTPUT_HISTORY);
+            });
+        }
+
+        /// The window is stamped from the executor's clock, not the wall
+        /// clock, so a test can expire it without waiting in real time.
+        #[gpui::test]
+        async fn writes_age_out_on_the_executor_clock(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                for _ in 0..5 {
+                    terminal.record_pty_output();
+                }
+                assert_eq!(terminal.pty_writes_within(Duration::from_secs(1)), 5);
+            });
+            cx.executor().advance_clock(Duration::from_secs(2));
+            terminal.update(cx, |terminal, _| {
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::from_secs(1)),
+                    0,
+                    "advancing the executor's clock must expire the window"
+                );
             });
         }
     }

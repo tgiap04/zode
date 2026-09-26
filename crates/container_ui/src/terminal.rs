@@ -76,31 +76,36 @@ impl ContainerPanel {
 
         let task = spawn_in_terminal(intent, &program, args, &name, kind);
 
-        // Done here rather than in a spawned future: `window` is in hand, and
-        // `spawn_task` needs one. Updating the *workspace* from inside this
-        // panel's own update is safe -- it is a different entity, and the trap
-        // this plan keeps meeting is re-entering the same one.
-        let spawned = workspace.update(cx, |workspace, cx| {
-            workspace
-                .panel::<TerminalPanel>(cx)
-                .map(|panel| panel.update(cx, |panel, cx| panel.spawn_task(&task, window, cx)))
-        });
+        // The panel is taken *out* of the workspace before it is driven:
+        // `spawn_task` reads the workspace entity itself, so an open
+        // `workspace.update` around it leaves that entity leased and GPUI
+        // panics on the read rather than opening anything.
+        let terminal_panel =
+            match workspace.read_with(cx, |workspace, cx| workspace.panel::<TerminalPanel>(cx)) {
+                Ok(terminal_panel) => terminal_panel,
+                Err(error) => {
+                    log::error!("could not reach the workspace: {error}");
+                    return;
+                }
+            };
+        let Some(terminal_panel) = terminal_panel else {
+            log::warn!("no terminal panel to open a container terminal in");
+            return;
+        };
 
-        match spawned {
-            Ok(Some(spawned)) => {
-                // Awaited rather than dropped: `spawn_task` refuses outright for
-                // a collaboration guest, and a button that silently does nothing
-                // is the exact defect this plan has already shipped once.
-                cx.spawn(async move |_this, _cx| {
-                    if let Err(error) = spawned.await {
-                        log::error!("could not open a container terminal: {error}");
-                    }
-                })
-                .detach();
+        // Done here rather than in a spawned future: `window` is in hand, and
+        // `spawn_task` needs one.
+        let spawned = terminal_panel.update(cx, |panel, cx| panel.spawn_task(&task, window, cx));
+
+        // Awaited rather than dropped: `spawn_task` refuses outright for a
+        // collaboration guest, and a button that silently does nothing is the
+        // exact defect this file has already shipped once.
+        cx.spawn(async move |_this, _cx| {
+            if let Err(error) = spawned.await {
+                log::error!("could not open a container terminal: {error}");
             }
-            Ok(None) => log::warn!("no terminal panel to open a container terminal in"),
-            Err(error) => log::error!("could not reach the workspace: {error}"),
-        }
+        })
+        .detach();
     }
 }
 

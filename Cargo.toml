@@ -4,6 +4,7 @@ members = [
     "crates/action_log",
     "crates/agent_usage",
     "crates/activity_indicator",
+    "crates/agent_notify",
     "crates/agent_sessions",
     "crates/agent_ui",
     "crates/askpass",
@@ -117,6 +118,7 @@ members = [
     "crates/notifications",
     "crates/onboarding",
     "crates/open_path_prompt",
+    "crates/os_auth",
     "crates/outline",
     "crates/outline_panel",
     "crates/panel",
@@ -197,6 +199,8 @@ members = [
     "crates/zed_credentials_provider",
     "crates/zode_account",
     "crates/zode_account_ui",
+    "crates/zode_env_sync",
+    "crates/zode_env_sync_ui",
     "crates/zode_sync",
     "crates/zed_env_vars",
     "crates/zlog",
@@ -236,6 +240,7 @@ edition = "2024"
 action_log = { path = "crates/action_log" }
 agent_usage = { path = "crates/agent_usage" }
 activity_indicator = { path = "crates/activity_indicator" }
+agent_notify = { path = "crates/agent_notify" }
 agent_sessions = { path = "crates/agent_sessions" }
 agent_ui = { path = "crates/agent_ui" }
 askpass = { path = "crates/askpass" }
@@ -423,8 +428,11 @@ worktree = { path = "crates/worktree" }
 zode = { path = "crates/zed" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
+os_auth = { path = "crates/os_auth" }
 zode_account = { path = "crates/zode_account" }
 zode_account_ui = { path = "crates/zode_account_ui" }
+zode_env_sync = { path = "crates/zode_env_sync" }
+zode_env_sync_ui = { path = "crates/zode_env_sync_ui" }
 zode_sync = { path = "crates/zode_sync" }
 zed_env_vars = { path = "crates/zed_env_vars" }
 zlog = { path = "crates/zlog" }

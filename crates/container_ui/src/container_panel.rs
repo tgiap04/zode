@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use container::kubeconfig::ConfigTarget;
 use container::{
     BackendEvent, ContainerBackend, ContainerError, DestructivePlan, DockerBackend,
     KubernetesBackend, PruneScope, Resource, ResourceAction, ResourceKind,
@@ -63,6 +65,12 @@ pub struct ContainerPanel {
     /// command it had in flight. CLAUDE.md's concurrency rule -- a detached task
     /// here would leave a `docker` process behind every time the panel goes.
     pub(crate) load: Option<Task<()>>,
+    /// Whether the list on screen is being re-asked for.
+    ///
+    /// Not `ListState::Loading`: that state means there is nothing truthful to
+    /// show, while a reload means what is on screen is still true and is simply
+    /// being confirmed again -- the list must stay put while this is true.
+    pub(crate) reloading: bool,
     /// Listening to the engine, and re-reading on a slow tick.
     ///
     /// Held in a field for the same reason as `load`, and it matters more here:
@@ -111,6 +119,21 @@ pub struct ContainerPanel {
     /// `App` creating the entity), so there is no workspace to open a tab in and
     /// the buttons that would say otherwise are not drawn.
     pub(crate) workspace: Option<gpui::WeakEntity<Workspace>>,
+    /// The kubeconfig file last chosen through the picker, so a context picked
+    /// afterwards knows which file it belongs to.
+    ///
+    /// Not persisted -- there is no settings key for this panel, so each new tab
+    /// or OS window starts back at `default_backends()` and this is `None`
+    /// again. See the module's own note on that deferral.
+    pub(crate) config_path: Option<PathBuf>,
+    /// What the chosen file offered the last time it was read.
+    pub(crate) config_targets: Vec<ConfigTarget>,
+    /// Why the file could not be read, if it could not.
+    pub(crate) config_error: Option<ContainerError>,
+    /// Reading the chosen file's targets. Held rather than detached for the
+    /// same reason as `load`: dropping the panel mid-read must not leave a
+    /// `kubectl config view` still running for a view that is already gone.
+    pub(crate) config_load: Option<Task<()>>,
 }
 
 pub enum ContainerPanelEvent {}
@@ -167,6 +190,7 @@ impl ContainerPanel {
             active_backend: 0,
             state: ListState::Loading,
             load: None,
+            reloading: false,
             watch: None,
             in_flight: HashMap::default(),
             last_error: None,
@@ -175,6 +199,10 @@ impl ContainerPanel {
             detail: None,
             logs_build: None,
             workspace: None,
+            config_path: None,
+            config_targets: Vec::new(),
+            config_error: None,
+            config_load: None,
         }
     }
 
@@ -216,6 +244,13 @@ impl ContainerPanel {
         }
         self.active_backend = index;
         self.state = ListState::Loading;
+        // Whatever file and targets were found belonged to the old engine's
+        // picker. Leaving them would let a context chosen for one engine be
+        // offered as though it belonged to another.
+        self.config_path = None;
+        self.config_targets = Vec::new();
+        self.config_error = None;
+        self.config_load = None;
         // The open row belonged to the old engine. Keeping it would leave its
         // logs following a container the panel is no longer even asking about.
         self.close_detail(cx);
@@ -450,6 +485,11 @@ impl ContainerPanel {
         cx.notify();
     }
 
+    pub(crate) fn dismiss_config_error(&mut self, cx: &mut Context<Self>) {
+        self.config_error = None;
+        cx.notify();
+    }
+
     pub(crate) fn choose_kind(&mut self, kind: ResourceKind, cx: &mut Context<Self>) {
         if kind == self.active_kind || !self.available_kinds().contains(&kind) {
             return;
@@ -460,6 +500,65 @@ impl ContainerPanel {
         self.state = ListState::Loading;
         self.close_detail(cx);
         self.reload(cx);
+        cx.notify();
+    }
+
+    /// Reads what `path` offers, and selects it outright when that is
+    /// unambiguous.
+    ///
+    /// Mirrors `Kubeconfig::effective`'s own rule: exactly one target and
+    /// nothing else to choose between is not a choice, so it is made here
+    /// rather than left for a menu with one row in it. Two or more leaves
+    /// `config_targets` populated and nothing selected, for the menu to offer.
+    pub(crate) fn choose_config_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(backend) = self.backend().cloned() else {
+            return;
+        };
+        self.config_error = None;
+        let read_path = path.clone();
+        self.config_load = Some(cx.spawn(async move |this, cx| {
+            let targets = backend.config_targets(Some(&read_path)).await;
+            this.update(cx, |this, cx| {
+                this.config_path = Some(path);
+                this.config_load = None;
+                match targets {
+                    Ok(targets) => {
+                        this.config_targets = targets.clone();
+                        this.config_error = None;
+                        if let [only] = targets.as_slice() {
+                            this.choose_config_target(only.clone(), cx);
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        this.config_targets = Vec::new();
+                        this.config_error = Some(error);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Aims the active engine at `target`, inside whichever file was last
+    /// chosen.
+    ///
+    /// Copies the tail of `choose_backend`: a new engine to ask means the list
+    /// on screen is no longer true, so the same reset applies here too.
+    pub(crate) fn choose_config_target(&mut self, target: ConfigTarget, cx: &mut Context<Self>) {
+        let Some(backend) = self.backend() else {
+            return;
+        };
+        let Some(aimed) = backend.aimed_at(self.config_path.clone(), Some(target)) else {
+            return;
+        };
+        self.backends[self.active_backend] = aimed;
+        self.state = ListState::Loading;
+        self.close_detail(cx);
+        self.reload(cx);
+        self.start_watching(cx);
         cx.notify();
     }
 
@@ -495,6 +594,7 @@ impl ContainerPanel {
             return;
         };
         let kind = self.active_kind;
+        self.reloading = true;
         self.load = Some(cx.spawn(async move |this, cx| {
             let listed = backend.list(kind).await;
             let state = match listed {
@@ -506,10 +606,12 @@ impl ContainerPanel {
                     this.refresh_detail(resources);
                 }
                 this.state = state;
+                this.reloading = false;
                 cx.notify();
             })
             .ok();
         }));
+        cx.notify();
     }
 }
 

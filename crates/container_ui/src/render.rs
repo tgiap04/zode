@@ -1,5 +1,5 @@
 use container::{BackendKind, ContainerError, Resource, ResourceAction, ResourceKind, RunState};
-use gpui::{Anchor, AnyElement, App, Context, Window};
+use gpui::{Anchor, AnyElement, App, Context, PathPromptOptions, Window};
 use ui::{Banner, ContextMenu, Indicator, PopoverMenu, Severity, Tab, TabBar, Table, prelude::*};
 
 use crate::container_panel::{ContainerPanel, ListState};
@@ -14,6 +14,14 @@ impl Render for ContainerPanel {
             .child(self.render_header(cx))
             .when_some(self.last_error.clone(), |element, error| {
                 element.child(self.render_error_banner(&error, cx))
+            })
+            // A file the user just picked and cannot be read is a failure of an
+            // action they took deliberately, so it says so. Its own banner
+            // rather than `last_error`: choosing an engine clears one and not
+            // the other, and sharing the field would make each dismiss the
+            // other's message.
+            .when_some(self.config_error.clone(), |element, error| {
+                element.child(self.render_config_error_banner(&error, cx))
             })
             .child(
                 div()
@@ -61,9 +69,11 @@ impl ContainerPanel {
     /// dividers that separate its start and end slots from the tabs, which is
     /// exactly the separation those two questions wanted.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        TabBar::new("container-header")
-            .start_child(self.render_engine_picker(cx))
-            .children(self.render_kind_tabs(cx))
+        let mut bar = TabBar::new("container-header").start_child(self.render_engine_picker(cx));
+        if let Some(picker) = self.render_config_picker(cx) {
+            bar = bar.start_child(picker);
+        }
+        bar.children(self.render_kind_tabs(cx))
             .end_child(self.render_tools(cx))
             .into_any_element()
     }
@@ -127,6 +137,102 @@ impl ContainerPanel {
                 }))
             })
             .into_any_element()
+    }
+
+    /// The engine's own config file, and a context inside it -- drawn only when
+    /// the active engine has one to offer.
+    ///
+    /// A single menu for both, file first: choosing a file is what makes the
+    /// contexts below it meaningful, and a context picked from the *previous*
+    /// file would be a choice that no longer names anything.
+    ///
+    /// The file row's own callback stays three lines on purpose --
+    /// `TestPlatform::prompt_for_paths` is `unimplemented!()`, so nothing a
+    /// test could catch may live here. Every real decision is in
+    /// `ContainerPanel::choose_config_file`.
+    fn render_config_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let source = self.backend()?.config_source()?;
+        let targets = self.config_targets.clone();
+        let chosen = source.target.clone();
+        let file_handle = cx.entity().downgrade();
+        let target_handle = file_handle.clone();
+
+        Some(
+            PopoverMenu::new("container-config-picker")
+                .trigger_with_tooltip(
+                    Button::new("container-config-trigger", source.label)
+                        .label_size(LabelSize::Small)
+                        .start_icon(
+                            Icon::new(IconName::Settings)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                    ui::Tooltip::text("Choose a kubeconfig"),
+                )
+                .anchor(Anchor::TopLeft)
+                .menu(move |window, cx| {
+                    let targets = targets.clone();
+                    let chosen = chosen.clone();
+                    let file_handle = file_handle.clone();
+                    let target_handle = target_handle.clone();
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        let file_handle = file_handle.clone();
+                        menu = menu.entry("Kubeconfig File\u{2026}", None, move |window, cx| {
+                            let file_handle = file_handle.clone();
+                            let paths = cx.prompt_for_paths(PathPromptOptions {
+                                files: true,
+                                directories: false,
+                                multiple: false,
+                                // `~/.kube/config` sits in a dotdirectory, and a
+                                // picker that cannot see it cannot choose it.
+                                show_hidden: true,
+                                prompt: Some("Choose a kubeconfig file".into()),
+                            });
+                            window
+                                .spawn(cx, async move |cx| {
+                                    let Ok(Ok(Some(mut chosen))) = paths.await else {
+                                        return;
+                                    };
+                                    let Some(path) = chosen.pop() else {
+                                        return;
+                                    };
+                                    file_handle
+                                        .update(cx, |panel, cx| panel.choose_config_file(path, cx))
+                                        .ok();
+                                })
+                                .detach();
+                        });
+                        if !targets.is_empty() {
+                            menu = menu.separator();
+                            for target in targets.iter().cloned() {
+                                let selected = chosen.as_deref() == Some(target.name.as_str());
+                                let handle = target_handle.clone();
+                                menu = menu.toggleable_entry(
+                                    target.name.clone(),
+                                    selected,
+                                    IconPosition::Start,
+                                    None,
+                                    move |_window, cx| {
+                                        let target = target.clone();
+                                        handle
+                                            .update(cx, |panel, cx| {
+                                                panel.choose_config_target(target, cx)
+                                            })
+                                            .ok();
+                                    },
+                                );
+                            }
+                        }
+                        menu
+                    }))
+                })
+                .into_any_element(),
+        )
     }
 
     /// One tab per kind the engine actually lists.
@@ -196,6 +302,7 @@ impl ContainerPanel {
             .child(
                 IconButton::new("container-reload", IconName::RotateCw)
                     .icon_size(IconSize::Small)
+                    .loading(self.reloading)
                     .tooltip(|_window, cx| ui::Tooltip::simple("Refresh", cx))
                     .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
             )
@@ -315,6 +422,7 @@ impl ContainerPanel {
             .child(
                 div().pt_1().child(
                     Button::new("container-refresh-after-error", "Refresh")
+                        .loading(self.reloading)
                         .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
                 ),
             )
@@ -501,26 +609,49 @@ impl ContainerPanel {
     /// its icon and its padding come from the same place as every other banner
     /// in the app and cannot drift from them.
     fn render_error_banner(&self, error: &ContainerError, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex_shrink_0()
-            .p_1p5()
-            .child(
-                Banner::new()
-                    .severity(Severity::Error)
-                    .child(
-                        Label::new(error.to_string())
-                            .size(LabelSize::Small)
-                            .color(Color::Default),
-                    )
-                    .action_slot(
-                        IconButton::new("container-dismiss-error", IconName::Close)
-                            .icon_size(IconSize::XSmall)
-                            .tooltip(|_window, cx| ui::Tooltip::simple("Dismiss", cx))
-                            .on_click(cx.listener(|this, _, _window, cx| this.dismiss_error(cx))),
-                    ),
-            )
-            .into_any_element()
+        error_banner("container-dismiss-error", error, cx, |this, cx| {
+            this.dismiss_error(cx)
+        })
     }
+
+    fn render_config_error_banner(
+        &self,
+        error: &ContainerError,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        error_banner("container-dismiss-config-error", error, cx, |this, cx| {
+            this.dismiss_config_error(cx)
+        })
+    }
+}
+
+/// The shared shape of both banners, so the two cannot drift apart in colour,
+/// padding or the affordance that dismisses them.
+fn error_banner(
+    id: &'static str,
+    error: &ContainerError,
+    cx: &mut Context<ContainerPanel>,
+    dismiss: impl Fn(&mut ContainerPanel, &mut Context<ContainerPanel>) + 'static,
+) -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .p_1p5()
+        .child(
+            Banner::new()
+                .severity(Severity::Error)
+                .child(
+                    Label::new(error.to_string())
+                        .size(LabelSize::Small)
+                        .color(Color::Default),
+                )
+                .action_slot(
+                    IconButton::new(id, IconName::Close)
+                        .icon_size(IconSize::XSmall)
+                        .tooltip(|_window, cx| ui::Tooltip::simple("Dismiss", cx))
+                        .on_click(cx.listener(move |this, _, _window, cx| dismiss(this, cx))),
+                ),
+        )
+        .into_any_element()
 }
 
 pub(crate) fn render_row(resource: &Resource, columns: &[&str]) -> Vec<AnyElement> {
