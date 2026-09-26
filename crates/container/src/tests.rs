@@ -642,12 +642,29 @@ mod kubernetes {
     /// A watch needs something chosen to watch, or it would follow whatever
     /// `kubectl` thinks is current -- the same reason `list` reads the
     /// kubeconfig before asking.
+    ///
+    /// Only the refusal is checked here. It returns before anything is spawned,
+    /// which is what keeps it on the normal run; the other half cannot say the
+    /// same and lives below.
     #[test]
     fn watch_needs_a_target_to_run_at_all() {
         assert!(
             KubernetesBackend::new().watch().is_none(),
             "no scope means nothing chosen to watch"
         );
+    }
+
+    /// The other half: a scope is enough to start the watch.
+    ///
+    /// Ignored because it spawns. `watch` hands its command to
+    /// `event_stream::json_values`, which returns `None` when the spawn itself
+    /// fails -- so on a machine with no `kubectl` this reads a missing binary as
+    /// a missing scope and fails for the wrong reason. GitHub's Ubuntu image
+    /// ships `kubectl` and its macOS image does not, which is exactly how that
+    /// went unnoticed.
+    #[test]
+    #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
+    fn a_scope_is_enough_to_start_the_watch() {
         let scoped = KubernetesBackend::with_scope(Scope {
             context: "prod".into(),
             namespace: None,
