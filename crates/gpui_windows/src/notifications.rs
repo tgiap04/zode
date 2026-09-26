@@ -160,12 +160,8 @@ fn build_and_show(
         ToastNotification,
         windows::core::IInspectable,
     >::new(move |_, _| {
-        Ok(forward_to_foreground(
-            platform_window,
-            validation_number,
-            &id,
-            true,
-        ))
+        forward_to_foreground(platform_window, validation_number, &id, true);
+        Ok(())
     }))?;
 
     let id = notification.id.clone();
@@ -173,23 +169,15 @@ fn build_and_show(
         ToastNotification,
         ToastDismissedEventArgs,
     >::new(move |_, _| {
-        Ok(forward_to_foreground(
-            platform_window,
-            validation_number,
-            &id,
-            false,
-        ))
+        forward_to_foreground(platform_window, validation_number, &id, false);
+        Ok(())
     }))?;
 
     let id = notification.id.clone();
     toast.Failed(
         &TypedEventHandler::<ToastNotification, ToastFailedEventArgs>::new(move |_, _| {
-            Ok(forward_to_foreground(
-                platform_window,
-                validation_number,
-                &id,
-                false,
-            ))
+            forward_to_foreground(platform_window, validation_number, &id, false);
+            Ok(())
         }),
     )?;
 
