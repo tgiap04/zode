@@ -327,6 +327,7 @@ impl BranchPanel {
     /// to write a hold as it goes.
     pub(crate) fn hold_known_agents(&mut self, cx: &App) {
         let settling = self.index_is_settling(cx);
+        let store = self.session_store.as_ref().map(|store| store.read(cx));
 
         for repo in self.repos.iter_mut() {
             for worktree in repo.worktrees.iter() {
@@ -342,8 +343,36 @@ impl BranchPanel {
                     // Empty, and the index cannot yet be believed: hand back
                     // what this checkout last showed, if anything did.
                     _ if settling => {
-                        if let Some(held) = self.last_known_agents.get(&path) {
-                            repo.agents.insert(path, held.clone());
+                        if let Some(held) = self.last_known_agents.get(&path).cloned() {
+                            // A session deleted while this sweep runs is gone
+                            // for good; the sweep just has not caught up, and
+                            // holding it would draw a deleted row until it does.
+                            let kept: Arc<[AgentEntry]> = match store {
+                                Some(store) => held
+                                    .iter()
+                                    .filter(|entry| match entry {
+                                        AgentEntry::Past { id, .. } => {
+                                            !store.was_forgotten_during_sweep(id)
+                                        }
+                                        AgentEntry::Open { .. } => true,
+                                    })
+                                    .cloned()
+                                    .collect(),
+                                None => held.clone(),
+                            };
+                            // Written back so the hold itself forgets the row: the
+                            // store's record only lasts one sweep, and a later one
+                            // would otherwise find the deleted entry still held.
+                            if kept.len() != held.len() {
+                                if kept.is_empty() {
+                                    self.last_known_agents.remove(&path);
+                                } else {
+                                    self.last_known_agents.insert(path.clone(), kept.clone());
+                                }
+                            }
+                            if !kept.is_empty() {
+                                repo.agents.insert(path, kept);
+                            }
                         }
                     }
                     // Empty, and nothing is in flight to excuse it: the

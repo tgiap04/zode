@@ -649,7 +649,8 @@ async fn test_fake_fs_trash(executor: BackgroundExecutor) {
     let trashed_entry = fs
         .trash(path, Default::default())
         .await
-        .expect("should be able to trash {path:?}");
+        .expect("should be able to trash {path:?}")
+        .expect("an existing path yields a trashed entry");
 
     assert_eq!(trashed_entry.name, "file_a.txt");
     assert_eq!(trashed_entry.original_parent, root_path);
@@ -678,7 +679,8 @@ async fn test_fake_fs_trash(executor: BackgroundExecutor) {
             },
         )
         .await
-        .expect("should be able to trash {path:?}");
+        .expect("should be able to trash {path:?}")
+        .expect("an existing path yields a trashed entry");
 
     assert_eq!(trashed_entry.name, "src");
     assert_eq!(trashed_entry.original_parent, root_path);
@@ -688,6 +690,76 @@ async fn test_fake_fs_trash(executor: BackgroundExecutor) {
     assert_eq!(trash_entries.len(), 2);
     assert_eq!(trash_entries[1].name, "src");
     assert_eq!(trash_entries[1].original_parent, root_path);
+}
+
+#[gpui::test]
+async fn test_fake_fs_trash_of_a_missing_path(executor: BackgroundExecutor) {
+    let fs = FakeFs::new(executor.clone());
+    fs.insert_tree(path!("/root"), json!({ "present.txt": "" }))
+        .await;
+    let missing = path!("/root/absent");
+    let ignoring = RemoveOptions {
+        recursive: true,
+        ignore_if_not_exists: true,
+    };
+
+    assert!(
+        fs.trash(missing.as_ref(), ignoring)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fs.trash(
+            missing.as_ref(),
+            RemoveOptions {
+                recursive: true,
+                ignore_if_not_exists: false,
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(fs.trash_entries().is_empty());
+
+    let trashed = fs
+        .trash(path!("/root/present.txt").as_ref(), ignoring)
+        .await
+        .unwrap();
+    assert_eq!(trashed.map(|entry| entry.name), Some("present.txt".into()));
+}
+
+#[gpui::test]
+async fn test_realfs_trash_of_a_missing_path(executor: BackgroundExecutor) {
+    let tempdir = TempDir::new().unwrap();
+    executor.allow_parking();
+    let fs = RealFs::new(None, executor);
+    let missing = tempdir.path().join("absent");
+
+    let outcome = fs
+        .trash(
+            &missing,
+            RemoveOptions {
+                recursive: true,
+                ignore_if_not_exists: true,
+            },
+        )
+        .await
+        .expect("an absent path is fine when the caller allows it");
+    assert!(outcome.is_none());
+
+    assert!(
+        fs.trash(
+            &missing,
+            RemoveOptions {
+                recursive: true,
+                ignore_if_not_exists: false,
+            },
+        )
+        .await
+        .is_err(),
+        "an absent path must still fail when the caller did not allow it"
+    );
 }
 
 #[gpui::test]
@@ -721,7 +793,7 @@ async fn test_fake_fs_restore(executor: BackgroundExecutor) {
     // it as part of its list of files, restore it and verify that the list of
     // files and trash has been updated accordingly.
     let path = path!("/root/src/file_a.txt").as_ref();
-    let trashed_entry = fs.trash(path, Default::default()).await.unwrap();
+    let trashed_entry = fs.trash(path, Default::default()).await.unwrap().unwrap();
 
     assert_eq!(fs.trash_entries().len(), 1);
     assert_eq!(
@@ -752,7 +824,7 @@ async fn test_fake_fs_restore(executor: BackgroundExecutor) {
         ..Default::default()
     };
     let path = path!("/root/src/").as_ref();
-    let trashed_entry = fs.trash(path, options).await.unwrap();
+    let trashed_entry = fs.trash(path, options).await.unwrap().unwrap();
 
     assert_eq!(fs.trash_entries().len(), 1);
     assert_eq!(fs.files(), vec![PathBuf::from(path!("/root/file_c.txt"))]);
@@ -772,7 +844,7 @@ async fn test_fake_fs_restore(executor: BackgroundExecutor) {
     // A collision error should be returned in case a file is being restored to
     // a path where a file already exists.
     let path = path!("/root/src/file_a.txt").as_ref();
-    let trashed_entry = fs.trash(path, Default::default()).await.unwrap();
+    let trashed_entry = fs.trash(path, Default::default()).await.unwrap().unwrap();
 
     assert_eq!(fs.trash_entries().len(), 1);
     assert_eq!(
@@ -809,7 +881,7 @@ async fn test_fake_fs_restore(executor: BackgroundExecutor) {
         ..Default::default()
     };
     let path = path!("/root/src/").as_ref();
-    let trashed_entry = fs.trash(path, options).await.unwrap();
+    let trashed_entry = fs.trash(path, options).await.unwrap().unwrap();
 
     assert_eq!(fs.trash_entries().len(), 2);
     assert_eq!(fs.files(), vec![PathBuf::from(path!("/root/file_c.txt"))]);

@@ -2045,3 +2045,301 @@ mod confirm_delete_checkout {
         });
     }
 }
+
+/// A single "Delete Session…" from the branch panel: the row has to leave the
+/// panel with no manual refresh.
+///
+/// `agent_ui::delete_session` checks `path.exists()` on the host's real disk
+/// before it asks the injected `Fs` to trash anything, so each fixture is a
+/// real file under the temp directory that is also registered with the fake
+/// filesystem.
+mod single_delete {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use agent_sessions::{AgentKind, SessionSummary};
+    use gpui::{TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use crate::branch_panel::panel::BranchPanel;
+    use crate::branch_panel::tree::{AgentEntry, TreeRow};
+
+    use super::panel_over_a_repo;
+
+    const CHECKOUT: &str = "/repos/zode";
+
+    struct RealLog(PathBuf);
+
+    impl Drop for RealLog {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+
+    fn session_with_log(id: &str, log_path: PathBuf) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from(CHECKOUT),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: Some(log_path),
+            log_bytes: 16,
+        }
+    }
+
+    fn listed_ids(panel: &BranchPanel) -> Vec<String> {
+        panel
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                _ => None,
+            })
+            .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+            .filter_map(|entry| match entry {
+                AgentEntry::Past { id, .. } => Some(id.to_string()),
+                AgentEntry::Open { .. } => None,
+            })
+            .collect()
+    }
+
+    /// An active panel with its store swept once and settled, and one stocked
+    /// session whose transcript exists on both disks.
+    async fn panel_listing_one_session<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        gpui::Entity<agent_ui::SessionStore>,
+        SessionSummary,
+        RealLog,
+        &'a mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+
+        let log_path = std::env::temp_dir().join(format!(
+            "zode-single-delete-{}-{name}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&log_path, "{}").expect("writing the real fixture must succeed");
+        let real_log = RealLog(log_path.clone());
+
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let fake_fs = workspace.read_with(cx, |workspace, cx| {
+            workspace.project().read(cx).fs().clone()
+        });
+        let fake = fake_fs.as_fake();
+        if let Some(parent) = log_path.parent() {
+            fake.insert_tree(parent, serde_json::json!({})).await;
+        }
+        fake.insert_file(&log_path, b"{}".to_vec()).await;
+
+        let session = session_with_log(name, log_path);
+        let store = panel
+            .read_with(cx, |panel, _| panel.session_store.clone())
+            .expect("ensure_session_store just ran");
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(vec![session.clone()], cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                listed_ids(panel),
+                vec![name.to_string()],
+                "the fixture must start out listed"
+            );
+        });
+        (panel, store, session, real_log, cx)
+    }
+
+    fn start_delete(
+        panel: &gpui::Entity<BranchPanel>,
+        session: &SessionSummary,
+        cx: &mut VisualTestContext,
+    ) {
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let session = session.clone();
+        panel.update_in(cx, |_, window, cx| {
+            agent_ui::delete_session(&workspace, &session, window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Move to Trash");
+        cx.run_until_parked();
+    }
+
+    /// Prompt answered, store idle.
+    #[gpui::test]
+    async fn the_row_leaves_the_panel_when_the_store_is_idle(cx: &mut TestAppContext) {
+        let (panel, _store, session, _log, cx) = panel_listing_one_session(cx, "h1").await;
+
+        start_delete(&panel, &session, cx);
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "the deleted session must leave the branch panel with no refresh"
+            );
+        });
+    }
+
+    /// A sweep is in flight at the moment of the delete, so the store
+    /// is scanning when the panel rebuilds. The held list for the checkout must
+    /// not hand the deleted row back.
+    #[gpui::test]
+    async fn the_row_does_not_come_back_from_the_hold_while_a_sweep_runs(cx: &mut TestAppContext) {
+        let (panel, store, _session, _log, cx) = panel_listing_one_session(cx, "h3").await;
+
+        store.update(cx, |store, cx| {
+            store.refresh(cx);
+            store.forget("h3", cx);
+        });
+        assert!(store.read_with(cx, |store, _| store.is_scanning()));
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "a forgotten session must not be held over while a sweep runs"
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// The panel is hidden when the delete lands; rows must be right
+    /// the moment it is shown again.
+    #[gpui::test]
+    async fn a_hidden_panel_shows_the_right_rows_once_active_again(cx: &mut TestAppContext) {
+        let (panel, _store, session, _log, cx) = panel_listing_one_session(cx, "h4").await;
+
+        panel.update_in(cx, |panel, window, cx| panel.set_active(false, window, cx));
+        start_delete(&panel, &session, cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.refresh_if_stale(cx);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "a delete made while the panel was hidden must not be listed on return"
+            );
+        });
+    }
+
+    /// A tab that is still open stays listed through the workspace's
+    /// tab source, whatever the index says. Expected, not a bug: the tab is
+    /// genuinely open.
+    #[gpui::test]
+    async fn an_open_tab_stays_listed_after_its_session_leaves_the_index(cx: &mut TestAppContext) {
+        let (panel, store, _session, _log, cx) = panel_listing_one_session(cx, "h5").await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        store.update(cx, |store, cx| store.forget("h5", cx));
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            let open_tabs = panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+                .filter(|entry| matches!(entry, AgentEntry::Open { .. }))
+                .count();
+            assert_eq!(
+                open_tabs, 1,
+                "the open tab is listed independently of the index"
+            );
+            assert!(listed_ids(panel).is_empty());
+        });
+    }
+
+    /// A refresh that arrives during a sweep is coalesced into a second sweep
+    /// that starts with an empty record of what was forgotten. The deleted row
+    /// must already be gone from the hold by then.
+    #[gpui::test]
+    async fn the_row_does_not_come_back_while_a_coalesced_second_sweep_runs(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, store, _session, _log, cx) = panel_listing_one_session(cx, "rescan").await;
+
+        store.update(cx, |store, cx| {
+            store.refresh(cx);
+            store.refresh(cx);
+            store.forget("rescan", cx);
+        });
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+
+        let generation_after_forget = store.read_with(cx, |store, _| store.generation());
+        for _ in 0..1000 {
+            if store.read_with(cx, |store, _| store.generation()) != generation_after_forget {
+                break;
+            }
+            cx.executor().tick();
+        }
+        assert!(
+            store.read_with(cx, |store, _| store.generation() != generation_after_forget
+                && store.is_scanning()),
+            "the first sweep must have landed with the second still running"
+        );
+
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "a deleted row must not be redrawn from the hold while the second sweep runs"
+            );
+        });
+        cx.run_until_parked();
+    }
+}

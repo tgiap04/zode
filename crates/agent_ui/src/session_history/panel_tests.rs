@@ -543,6 +543,41 @@ async fn deleting_all_takes_this_projects_sessions_and_no_others(cx: &mut TestAp
     );
 }
 
+/// A Claude session only has a sidecar directory when it ran subagents, yet
+/// its deletion always lists one. A path that is already absent counts as
+/// gone, so the session must not stay listed.
+#[gpui::test]
+async fn deleting_all_forgets_a_session_whose_sidecar_directory_never_existed(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "one.jsonl": "" })).await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![session("one", "/root", "First", 300)],
+        vec![(
+            "one",
+            vec![PathBuf::from("/logs/one.jsonl"), PathBuf::from("/logs/one")],
+        )],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert_eq!(trashed_names(&fs), vec!["one.jsonl".to_string()]);
+    assert!(
+        remaining_ids(&panel, &mut cx).is_empty(),
+        "an absent sidecar directory must not keep the row listed"
+    );
+}
+
 /// The second scope test: a filter narrows the list, never the delete.
 #[gpui::test]
 async fn the_search_filter_does_not_narrow_the_delete(cx: &mut TestAppContext) {
@@ -786,7 +821,8 @@ async fn a_session_with_nothing_on_disk_offers_to_drop_the_row(cx: &mut TestAppC
     );
 }
 
-/// The partial-failure rule. `FakeFs::trash` errors on a path it never held, so
+/// The partial-failure rule. `FakeFs::trash` errors on a path whose parent
+/// directory it never held, even when a missing path is otherwise tolerated, so
 /// the second session fails without any injection machinery.
 #[gpui::test]
 async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContext) {
@@ -803,7 +839,7 @@ async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContex
         ],
         vec![
             ("good", vec![PathBuf::from("/logs/good.jsonl")]),
-            ("bad", vec![PathBuf::from("/logs/missing.jsonl")]),
+            ("bad", vec![PathBuf::from("/unmounted/missing.jsonl")]),
         ],
         fs.clone(),
         cx,
@@ -871,6 +907,61 @@ async fn a_single_delete_whose_trash_fails_keeps_the_row(cx: &mut TestAppContext
         remaining_ids(&panel, &mut cx),
         vec!["bad".to_string()],
         "a failed trash must keep the row (H7), matching delete_all's own discipline"
+    );
+}
+
+/// The single delete's happy path with the store idle: the row leaves the
+/// panel with no manual refresh.
+///
+/// The transcript is a real file (see the comment on
+/// `a_single_delete_whose_trash_fails_keeps_the_row`) that is also registered
+/// with `FakeFs`, so the trash call itself succeeds.
+#[gpui::test]
+async fn a_single_delete_that_trashes_cleanly_drops_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let real_log =
+        std::env::temp_dir().join(format!("zode-single-ok-{}.jsonl", std::process::id()));
+    std::fs::write(&real_log, "").expect("writing the real fixture file must succeed");
+    if let Some(parent) = real_log.parent() {
+        fs.insert_tree(parent, json!({})).await;
+    }
+    fs.insert_file(&real_log, Vec::new()).await;
+
+    let target = SessionSummary {
+        log_path: Some(real_log.clone()),
+        log_bytes: 10,
+        ..session("gone", "/root", "Trashes cleanly", 300)
+    };
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![target.clone(), session("kept", "/root", "Still here", 200)],
+        Vec::new(),
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&target, window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    std::fs::remove_file(&real_log).ok();
+
+    assert_eq!(
+        trashed_names(&fs).len(),
+        1,
+        "the transcript must reach the trash"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["kept".to_string()],
+        "a clean single delete must drop the row without a refresh"
     );
 }
 
