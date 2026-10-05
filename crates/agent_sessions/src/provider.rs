@@ -1,9 +1,9 @@
 use crate::{
-    AgentCommand, Availability, CompletedSubagents, Deletion, Fork, SessionCounts, SessionSummary,
-    SubagentSummary,
+    AgentCommand, Availability, Deletion, Fork, SessionCounts, SessionSummary, SubagentSummary,
+    TranscriptProgress,
 };
 use anyhow::Result;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 /// Whether `id` is safe to use as a single path component.
 ///
@@ -101,8 +101,8 @@ pub trait SessionProvider: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// The tool calls this session has reported a result for, reading from byte
-    /// `from` onward.
+    /// The tool calls this session has reported a result for, and the turn
+    /// landmarks it wrote, reading from byte `from` onward.
     ///
     /// Incremental because the whole-file alternative is not affordable: a live
     /// transcript grows continuously and reaches megabytes, so re-reading it on
@@ -113,15 +113,35 @@ pub trait SessionProvider: Send + Sync {
     /// The caller pairs these against [`SubagentSummary::tool_use_id`]: spawned,
     /// and not yet reported, is a subagent still running. Nothing here decides
     /// that — a provider reports what the store says and no more.
-    fn completed_subagents(
+    fn transcript_progress(
         &self,
         _session: &SessionSummary,
         from: u64,
-    ) -> Result<CompletedSubagents> {
-        Ok(CompletedSubagents {
+    ) -> Result<TranscriptProgress> {
+        Ok(TranscriptProgress {
             tool_use_ids: Vec::new(),
+            turn_marks: Vec::new(),
             scanned_to: from,
+            restarted: false,
         })
+    }
+
+    /// How long it has been since the most recent write by any of this
+    /// session's subagents, or `None` when there is nothing to judge by.
+    ///
+    /// Read from the subagents' own transcripts' modification times, never their
+    /// contents. A subagent started in the background is reported "launched" to
+    /// the parent within a second and keeps working for minutes, so the parent's
+    /// transcript cannot say whether it is still alive; its own file can.
+    fn background_quiet_for(&self, _session: &SessionSummary) -> Result<Option<Duration>> {
+        Ok(None)
+    }
+
+    /// Whether [`TranscriptProgress::turn_marks`] is meaningful for this store.
+    /// A store that cannot say reports nothing, which a caller must not read as
+    /// "no turn ever ended".
+    fn reports_turns(&self) -> bool {
+        false
     }
 
     /// `None` when this agent cannot honour the request — Codex and Copilot have

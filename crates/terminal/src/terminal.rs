@@ -357,7 +357,10 @@ const DEFAULT_SCROLL_HISTORY_LINES: usize = 10_000;
 /// How many pty write timestamps are kept. Bounded on purpose: a streaming
 /// program writes hundreds of times a second, and the question this history
 /// answers -- steady or occasional -- is settled long before sixteen.
-const PTY_OUTPUT_HISTORY: usize = 16;
+///
+/// Public because a caller's "quiet" threshold has to sit below it: a count
+/// saturates here, so a threshold above it could never read as busy.
+pub const PTY_OUTPUT_HISTORY: usize = 16;
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 
 pub struct TerminalBuilder {
@@ -1761,6 +1764,15 @@ impl Terminal {
         let term = self.term.lock_unfair();
         let start = AlacPoint::new(term.topmost_line(), Column(0));
         let end = AlacPoint::new(term.bottommost_line(), term.last_column());
+        term.bounds_to_string(start, end)
+    }
+
+    /// Only the rows on the live screen, one per line, with none of the
+    /// scrollback above them. A row that wraps counts as the row it is.
+    pub fn visible_content(&self) -> String {
+        let term = self.term.lock_unfair();
+        let start = AlacPoint::new(Line(0), Column(0));
+        let end = AlacPoint::new(Line(term.screen_lines() as i32 - 1), term.last_column());
         term.bounds_to_string(start, end)
     }
 
@@ -3896,6 +3908,25 @@ mod tests {
                 .unwrap()
                 .subscribe(cx)
             })
+        }
+
+        #[gpui::test]
+        async fn visible_content_holds_the_screen_and_not_the_scrollback(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, cx| {
+                let rows = terminal.viewport_lines();
+                let output: String = (0..rows * 3).map(|row| format!("row-{row}\r\n")).collect();
+                terminal.write_output(output.as_bytes(), cx);
+
+                let visible = terminal.visible_content();
+                assert!(
+                    visible.contains(&format!("row-{}", rows * 3 - 1)),
+                    "the newest row is on screen"
+                );
+                assert!(!visible.contains("row-0\n"), "scrollback is not searched");
+                assert!(visible.lines().count() <= rows);
+                assert!(terminal.get_content().contains("row-0\n"));
+            });
         }
 
         #[gpui::test]

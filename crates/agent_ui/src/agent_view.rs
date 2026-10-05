@@ -12,6 +12,10 @@ use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 
 use crate::permission_bypass::PermissionBypassStore;
 use crate::subagents::{SubagentTracker, provider_for_agent};
+use crate::turn_tracker::{
+    SilenceWatch, TurnEvent, TurnPass, TurnTracker, approval_is_quiet, approval_next,
+    screen_asks_for_approval,
+};
 use agent_sessions::SubagentSummary;
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal::Terminal;
@@ -104,6 +108,22 @@ const RESPONDING_DEBOUNCE_TICKS: u32 =
 /// not a four-times-a-second event. One second still lands well inside the
 /// two-second debounce above, so nothing it reports is late to the mark.
 const SUBAGENT_SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The window the pty is counted over to decide it has gone quiet enough, with
+/// a tool call outstanding, for the screen to be read for a permission dialog.
+///
+/// Three seconds because a dialog is not silent: measured against a real
+/// `claude` waiting on a Bash approval and on a file-create approval, it
+/// repaints about 1.7 times a second, steady for twenty-five seconds. How many
+/// writes in this window count as quiet is [`approval_is_quiet`]'s to say.
+const APPROVAL_QUIET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often the screen is read for a dialog at most. Reading it copies the
+/// terminal's content, which is worth doing once a second and not four times.
+const APPROVAL_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+const APPROVAL_READ_TICKS: u32 =
+    (APPROVAL_READ_INTERVAL.as_millis() / ACTIVITY_TICK.as_millis()) as u32;
 
 /// Whether the mark should change, given what the terminal says on this tick.
 ///
@@ -204,6 +224,15 @@ pub struct AgentView {
     /// This session's subagents, and which of them are still working. Followed
     /// by the same tick, at a slower cadence — see [`SUBAGENT_SCAN_EVERY`].
     subagents: SubagentTracker,
+    /// Where this session's turn stands, folded from the transcript and the
+    /// screen. Only fed when [`Self::reports_turns`]; untouched by
+    /// `is_answering`, which other readers depend on keeping its meaning.
+    turns: TurnTracker,
+    /// Notices a transcript that never produces a turn mark. See
+    /// [`SilenceWatch`].
+    turn_silence: SilenceWatch,
+    /// Ticks since the screen was last read for a permission dialog.
+    ticks_since_screen_read: u32,
 }
 
 enum State {
@@ -243,6 +272,12 @@ pub enum AgentViewEvent {
     /// agent drawing breath does not. `should_serialize` is where that split
     /// is spent — see its doc.
     Activity,
+    /// The turn started or ended, or a permission dialog appeared or went
+    /// away. Only raised for a tab that [reports turns](AgentView::reports_turns).
+    ///
+    /// Worth nothing in the persisted row and nothing to the pane, so neither
+    /// `should_serialize` nor `to_item_events` has anything to do with it.
+    Turn(TurnEvent),
     /// The shell this tab handed back has exited, so the tab goes with it.
     Close,
 }
@@ -597,6 +632,9 @@ impl AgentView {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
         };
         view.start(window, cx);
         view
@@ -690,6 +728,9 @@ impl AgentView {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
         }
     }
 
@@ -778,6 +819,7 @@ impl AgentView {
     /// length of a conversation would be paying that for the three hundred and
     /// ninety-six ticks out of four hundred where nothing changed.
     fn track_responding(&mut self, cx: &mut Context<Self>) {
+        let reports_turns = self.reports_turns();
         self._activity_tick = Some(cx.spawn(async move |this, cx| {
             let mut pending: Option<(bool, u32)> = None;
 
@@ -809,6 +851,18 @@ impl AgentView {
                         this.responding = settled;
                         cx.emit(AgentViewEvent::Activity);
                     }
+                    if reports_turns {
+                        this.check_for_approval(working, cx);
+                        let writing = working && this.is_responding(cx);
+                        if this.turn_silence.observe(writing, ACTIVITY_TICK) {
+                            log::warn!(
+                                "a tab that reports turns has seen no turn marks in its \
+                                 transcript while the agent wrote output for a minute; \
+                                 turn notifications for it will not fire. The transcript \
+                                 format may have changed"
+                            );
+                        }
+                    }
                     working
                 }) else {
                     return;
@@ -822,6 +876,60 @@ impl AgentView {
                 }
             }
         }));
+    }
+
+    /// Whether a permission dialog is on screen, reported on the change.
+    ///
+    /// A dialog is *noticed* only when the transcript says a tool call is
+    /// outstanding and the terminal has gone quiet: it is the one thing that
+    /// makes an agent hold a call open and stop writing, so a long build or a
+    /// reply being streamed never reaches the read. Once noticed it is *kept*
+    /// for as long as it is on screen however the writes wobble, because a
+    /// dialog repaints and a rate that straddles the threshold would otherwise
+    /// withdraw and re-announce it.
+    ///
+    /// Only the screen's visible rows are searched, and at most once a second.
+    fn check_for_approval(&mut self, working: bool, cx: &mut Context<Self>) {
+        self.ticks_since_screen_read = self.ticks_since_screen_read.saturating_add(1);
+        let tool_pending = working && self.turns.tool_pending();
+        let was_asking = self.turns.awaiting_approval();
+        let asking = match self.terminal() {
+            Some(terminal_view) if tool_pending => {
+                let terminal = terminal_view.read(cx).terminal().read(cx);
+                let quiet = approval_is_quiet(terminal.pty_writes_within(APPROVAL_QUIET));
+                if !(was_asking || quiet) {
+                    false
+                } else if self.ticks_since_screen_read < APPROVAL_READ_TICKS {
+                    // Nothing to learn that the last read did not say.
+                    return;
+                } else {
+                    self.ticks_since_screen_read = 0;
+                    let rows: Vec<String> = terminal
+                        .visible_content()
+                        .lines()
+                        .map(str::to_owned)
+                        .collect();
+                    approval_next(was_asking, true, quiet, screen_asks_for_approval(&rows))
+                }
+            }
+            _ => false,
+        };
+        if let Some(event) = self.turns.set_awaiting_approval(asking) {
+            cx.emit(AgentViewEvent::Turn(event));
+        }
+    }
+
+    /// Whether this tab's turns come from the transcript.
+    ///
+    /// The agent is fixed when the tab opens, but whether it owns a session is
+    /// not: "Start a New Session" drops the identity, and the tab then falls
+    /// back to the pty heuristic, so callers read this per event. A tab that
+    /// does not qualify keeps the heuristic, including before its transcript
+    /// exists -- typing the first prompt is exactly the write burst the
+    /// heuristic mistakes for an answer.
+    pub fn reports_turns(&self) -> bool {
+        matches!(self.origin.intent, SessionIntent::Tracked(_))
+            && provider_for_agent(&self.agent).is_some_and(|provider| provider.reports_turns())
     }
 
     /// Reads this session's subagents for as long as its agent runs.
@@ -847,6 +955,7 @@ impl AgentView {
             return;
         };
         let session_id = session_id.clone();
+        let reports_turns = self.reports_turns();
 
         self._subagent_tick = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -865,7 +974,26 @@ impl AgentView {
                     .await;
 
                 let Ok(still_running) = this.update(cx, |this, cx| {
-                    this.subagents.apply(pass);
+                    let turn_input = this.subagents.apply(pass);
+                    if reports_turns {
+                        if !turn_input.marks.is_empty() {
+                            this.turn_silence.saw_marks();
+                        }
+                        if turn_input.restarted {
+                            if let Some(event) = this.turns.set_awaiting_approval(false) {
+                                cx.emit(AgentViewEvent::Turn(event));
+                            }
+                            this.turns = TurnTracker::default();
+                        }
+                        for event in this.turns.apply(TurnPass {
+                            marks: &turn_input.marks,
+                            finished: &turn_input.finished,
+                            live: turn_input.live,
+                            background_quiet_for: turn_input.background_quiet_for,
+                        }) {
+                            cx.emit(AgentViewEvent::Turn(event));
+                        }
+                    }
                     // The panel draws a row per subagent off this, and the tab's
                     // own mark follows `any_running` on its next tick.
                     cx.notify();
@@ -1032,6 +1160,22 @@ impl AgentView {
         cx.notify();
     }
 
+    /// Abandons the session this tab named and starts a fresh, untracked one.
+    ///
+    /// The whole origin goes, not just the id, so the tab stops reporting turns
+    /// from a transcript it no longer owns and falls back to the pty heuristic.
+    pub fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Before the origin goes: once it is untracked the notifier stops
+        // listening for turns, and the approval it holds would never be cleared.
+        self.reset_turn_state(cx);
+        self._subagent_tick = None;
+        self.origin = SessionOrigin::default();
+        self.state = State::Starting;
+        self.start(window, cx);
+        cx.emit(AgentViewEvent::UpdateTab);
+        cx.notify();
+    }
+
     /// Drops whatever the view was showing, and with it the process behind it.
     ///
     /// Separate from `restart` so a test can reach the teardown without also
@@ -1049,9 +1193,22 @@ impl AgentView {
         self._activity_tick = None;
         self._subagent_tick = None;
         self.responding = false;
+        self.reset_turn_state(cx);
         let previous = std::mem::replace(&mut self.state, State::Starting);
         Self::warn_if_retained(&previous, cx);
         drop(previous);
+    }
+
+    /// Forgets everything derived from the session or terminal being replaced,
+    /// so a restart or a change of origin starts clean. A wait that was
+    /// announced is withdrawn first: nothing is left to clear it.
+    fn reset_turn_state(&mut self, cx: &mut Context<Self>) {
+        if let Some(event) = self.turns.set_awaiting_approval(false) {
+            cx.emit(AgentViewEvent::Turn(event));
+        }
+        self.turns = TurnTracker::default();
+        self.turn_silence = SilenceWatch::default();
+        self.ticks_since_screen_read = 0;
     }
 
     /// Reports a mode that outlived the switch away from it.
@@ -1811,6 +1968,7 @@ impl workspace::item::Item for AgentView {
                 f(workspace::item::ItemEvent::UpdateTab)
             }
             AgentViewEvent::Close => f(workspace::item::ItemEvent::CloseItem),
+            AgentViewEvent::Turn(_) => {}
         }
     }
 
@@ -2059,12 +2217,12 @@ impl workspace::item::SerializableItem for AgentView {
     /// pass ever wrote the row, and a rename does not trigger that pass. A rename
     /// and a mode switch both arrive as `UpdateTab`, and both belong in the row.
     ///
-    /// `Activity` does not. Nothing it reports appears in the row, and an agent
+    /// `Activity` and `Turn` do not. Nothing either reports appears in the row, and an agent
     /// pauses to read a file or wait on a model several times inside one answer
     /// — so answering `true` here would put a database write behind every one of
     /// those, for a row that comes back byte for byte the same.
     fn should_serialize(&self, event: &Self::Event) -> bool {
-        !matches!(event, AgentViewEvent::Activity)
+        matches!(event, AgentViewEvent::UpdateTab | AgentViewEvent::Close)
     }
 }
 
@@ -2112,11 +2270,7 @@ impl Render for AgentView {
                                     // The whole origin, not just the id: the name
                                     // belonged to the session that is gone, and a
                                     // fresh conversation must not wear it.
-                                    this.origin = SessionOrigin::default();
-                                    this.state = State::Starting;
-                                    this.start(window, cx);
-                                    cx.emit(AgentViewEvent::UpdateTab);
-                                    cx.notify();
+                                    this.start_new_session(window, cx);
                                 }),
                             ),
                         )
@@ -2404,6 +2558,116 @@ mod tests {
                 view.should_serialize(&AgentViewEvent::UpdateTab),
                 "and the rename it shares a pane event with still does"
             );
+        });
+    }
+
+    /// Positive, not "everything but `Activity`": a turn ends once per answer,
+    /// and a variant added later must not silently become a database write.
+    /// `Close` is pinned too, since the rewrite had to keep what it answered.
+    #[gpui::test]
+    async fn only_a_rename_or_a_close_is_worth_writing_down(cx: &mut TestAppContext) {
+        use workspace::item::SerializableItem as _;
+
+        let (view, cx) = bypass_view(cx).await;
+
+        view.read_with(cx, |view, _| {
+            for event in [
+                TurnEvent::Started,
+                TurnEvent::Ended,
+                TurnEvent::Interrupted,
+                TurnEvent::ApprovalNeeded,
+                TurnEvent::ApprovalCleared,
+            ] {
+                assert!(!view.should_serialize(&AgentViewEvent::Turn(event)));
+            }
+            assert!(view.should_serialize(&AgentViewEvent::UpdateTab));
+            assert!(view.should_serialize(&AgentViewEvent::Close));
+            assert!(!view.should_serialize(&AgentViewEvent::Activity));
+        });
+    }
+
+    /// Transcript turns need both a store that records them and a session id
+    /// the tab owns; either missing leaves the tab on the pty heuristic.
+    #[gpui::test]
+    async fn only_a_tracked_claude_tab_reports_turns(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let build = |agent: &str, intent: SessionIntent, cx: &mut gpui::VisualTestContext| {
+            let agent = AgentId::new(agent.to_string());
+            let project = project.clone();
+            workspace.update_in(cx, |workspace, _window, cx| {
+                let handle = workspace.weak_handle();
+                cx.new(|cx| {
+                    AgentView::test_new(
+                        agent,
+                        AgentViewMode::Terminal,
+                        project,
+                        handle,
+                        SessionOrigin::new(intent, None),
+                        cx,
+                    )
+                })
+            })
+        };
+        let tracked = || SessionIntent::Tracked("session-one".into());
+
+        let claude_untracked = build(project::CLAUDE_CODE_AGENT_ID, SessionIntent::Untracked, cx);
+        let codex_tracked = build(project::CODEX_AGENT_ID, tracked(), cx);
+        let claude_tracked = build(project::CLAUDE_CODE_AGENT_ID, tracked(), cx);
+
+        claude_untracked.read_with(cx, |view, _| assert!(!view.reports_turns()));
+        codex_tracked.read_with(cx, |view, _| assert!(!view.reports_turns()));
+        claude_tracked.read_with(cx, |view, _| assert!(view.reports_turns()));
+    }
+
+    /// A restart or a change of origin starts from a clean slate: an announced
+    /// wait is withdrawn, since nothing is left to clear it, and the turn the
+    /// old terminal was in does not carry over to the new one.
+    #[gpui::test]
+    async fn replacing_the_terminal_withdraws_a_wait_and_forgets_the_turn(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::new(SessionIntent::Tracked("session-one".into()), None),
+                    cx,
+                )
+            })
+        });
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _subscription = cx.update(|_, cx| {
+            let seen = seen.clone();
+            cx.subscribe(&view, move |_, event: &AgentViewEvent, _| {
+                if let AgentViewEvent::Turn(turn) = event {
+                    seen.borrow_mut().push(*turn);
+                }
+            })
+        });
+        view.update(cx, |view, _| {
+            view.turns.apply(TurnPass {
+                marks: &[
+                    agent_sessions::TurnMark::Prompt,
+                    agent_sessions::TurnMark::ToolCall("toolu_one".into()),
+                ],
+                finished: &[],
+                live: true,
+                background_quiet_for: None,
+            });
+            view.turns.set_awaiting_approval(true);
+            view.ticks_since_screen_read = 3;
+        });
+
+        view.update(cx, |view, cx| view.end_previous_mode(cx));
+
+        assert_eq!(*seen.borrow(), [TurnEvent::ApprovalCleared]);
+        view.read_with(cx, |view, _| {
+            assert!(!view.turns.awaiting_approval());
+            assert!(!view.turns.tool_pending());
+            assert_eq!(view.ticks_since_screen_read, 0);
         });
     }
 
@@ -2913,6 +3177,9 @@ mod tests {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
         });
 
         let terminal_view = cx.new_window_entity(|window, cx| {
@@ -3360,6 +3627,9 @@ mod tests {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
         });
 
         let left_behind = terminal_view.downgrade();

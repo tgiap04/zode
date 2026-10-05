@@ -2386,7 +2386,7 @@ Example:
 
 ## Agent Finished Notification
 
-- Description: Whether to post an OS notification when an agent finishes answering or its CLI exits -- posted regardless of window focus. `quiet_period_ms` is how long the agent must stay quiet after its last output before the "finished answering" notification fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
+- Description: Whether to post an OS notification when an agent finishes answering, is waiting for your approval, or its CLI exits -- posted regardless of window focus. For a Claude tab with a tracked session, "finished answering" comes from the end of the turn in its transcript and the approval notification from its permission dialog. For every other agent, `quiet_period_ms` is how long it must stay quiet after its last output before "finished answering" fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
 - Setting: `agent_finished_notification`
 - Default:
 

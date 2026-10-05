@@ -4,12 +4,23 @@
 //! methods directly with values it chooses, which is what makes the dedup
 //! and quiet-period rules here testable without a real agent tab.
 
-use agent_ui::AgentView;
+use std::time::Duration;
+
+use agent_ui::{AgentView, TurnEvent};
 use gpui::{Context, EntityId, Notification, SharedString};
 use util::ResultExt as _;
 
 use crate::agent_notify_settings::AgentFinishedNotificationSetting;
 use crate::agent_notify_watch::AgentNotifier;
+
+/// How long a transcript-reported turn end is held before it is believed.
+///
+/// Not the user's `quiet_period_ms`: that setting exists to outwait the
+/// pty heuristic's false edges, which this path does not have. What is left
+/// to outwait is an agent that logs a turn end and then immediately starts
+/// another (a blocking stop hook), which arrives as `Started` well inside
+/// this window and retracts it.
+const TURN_END_CONFIRMATION: Duration = Duration::from_secs(3);
 
 impl AgentNotifier {
     /// The `AgentViewEvent::Activity` handler. Fires on both edges -- reading
@@ -18,12 +29,20 @@ impl AgentNotifier {
         &mut self,
         id: EntityId,
         answering: bool,
+        transcript_turns: bool,
         title: SharedString,
         cx: &mut Context<Self>,
     ) {
         let Some(watched) = self.watched.get_mut(&id) else {
             return;
         };
+        // For a tab whose turns come from its transcript the pty-rate edges
+        // are ignored: they cannot tell a finished answer from a keystroke, a
+        // resize or a long-running command. Passed per event because a tab
+        // can stop qualifying (a fresh session after its own is gone).
+        if transcript_turns {
+            return;
+        }
 
         if answering {
             // The rising edge. Dropping `quiet` cancels an armed timer from a
@@ -48,11 +67,70 @@ impl AgentNotifier {
         }));
     }
 
+    /// The `AgentViewEvent::Turn` handler, for tabs whose turns come from
+    /// their transcript. Ignored for any other tab, so a stray event can never
+    /// reach the heuristic path's latch.
+    pub(crate) fn on_turn(
+        &mut self,
+        id: EntityId,
+        event: TurnEvent,
+        transcript_turns: bool,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(watched) = self.watched.get_mut(&id) else {
+            return;
+        };
+        if !transcript_turns {
+            return;
+        }
+
+        match event {
+            TurnEvent::Started | TurnEvent::Interrupted => {
+                // `Interrupted` follows `Ended` immediately for a turn the
+                // user cut short, so cancelling the armed timer is what
+                // suppresses the announcement.
+                watched.quiet = None;
+                watched.notified = false;
+            }
+            // The transcript is polled on its own clock, so an event can be
+            // delivered after the exit waiter has already fired; announcing
+            // it would put "Finished answering" behind "Session ended".
+            TurnEvent::Ended | TurnEvent::ApprovalNeeded if watched.exited => {}
+            TurnEvent::Ended => {
+                if watched.notified {
+                    return;
+                }
+                watched.quiet = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(TURN_END_CONFIRMATION).await;
+                    this.update(cx, |this, cx| this.fire_answered(id, &title, cx))
+                        .log_err();
+                }));
+            }
+            TurnEvent::ApprovalNeeded => {
+                if watched.approval_notified {
+                    return;
+                }
+                if !AgentFinishedNotificationSetting::is_enabled(cx) {
+                    return;
+                }
+                cx.post_notification(Notification {
+                    id: format!("{id}-approval").into(),
+                    title,
+                    body: "Waiting for your approval".into(),
+                });
+                watched.approval_notified = true;
+            }
+            TurnEvent::ApprovalCleared => watched.approval_notified = false,
+        }
+    }
+
     /// Fires once the quiet period has elapsed with nothing having cancelled
     /// it. There is no "is the agent still quiet" recheck here beyond that:
     /// the timer that reaches this is cancelled synchronously (by
-    /// [`Self::on_activity`]'s rising-edge branch, or by [`Self::fire_exit`])
-    /// the moment either happens, so if this runs at all, both were still
+    /// [`Self::on_activity`]'s rising-edge branch, by a transcript
+    /// `Started` or `Interrupted`, or by [`Self::fire_exit`])
+    /// the moment any of them happens, so if this runs at all, both were still
     /// true when it started. The one thing that *can* change between arming
     /// and firing without going through this tab's own edges is the setting
     /// itself, which is why that alone is re-read here.
@@ -89,8 +167,13 @@ impl AgentNotifier {
         };
         watched.exit = None;
         watched.quiet = None;
-        watched.terminal = None;
+        // `terminal` stays on the dead terminal's id: clearing it would make
+        // the next `reread` (any view notify) see a change, re-arm a waiter
+        // on a terminal that has already completed, and post a second
+        // "Session ended". A restart puts a new id there, which does re-arm.
+        watched.exited = true;
         watched.notified = false;
+        watched.approval_notified = false;
 
         if !AgentFinishedNotificationSetting::is_enabled(cx) {
             return;
@@ -140,10 +223,11 @@ pub(crate) fn needs_reread(awaited: Option<EntityId>, current: Option<EntityId>)
 }
 
 /// Recovers the watched tab's `EntityId` from a notification id built as
-/// `"{entity_id}-answer"` or `"{entity_id}-exit"`.
-fn parse_notification_id(id: &str) -> Option<EntityId> {
+/// `"{entity_id}-answer"`, `"{entity_id}-approval"` or `"{entity_id}-exit"`.
+pub(crate) fn parse_notification_id(id: &str) -> Option<EntityId> {
     let raw = id
         .strip_suffix("-answer")
+        .or_else(|| id.strip_suffix("-approval"))
         .or_else(|| id.strip_suffix("-exit"))?;
     raw.parse::<u64>().ok().map(EntityId::from)
 }

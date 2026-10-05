@@ -2,7 +2,12 @@
 //! CLI exits.
 //!
 //! Two triggers, and each answers a different question. "Finished answering"
-//! is `AgentView::is_answering()`'s `true → false` edge, held quiet for
+//! has two sources. For a tracked Claude tab (`AgentView::reports_turns`) it is
+//! the transcript's own turn end (`TurnEvent::Ended`), held for a few seconds
+//! so an immediate `Started` or `Interrupted` can retract it; that same
+//! transcript also reports when the agent is waiting on an approval, which
+//! posts its own notification. For every other tab it is
+//! `AgentView::is_answering()`'s `true -> false` edge, held quiet for
 //! `agent_notify_settings::AgentFinishedNotificationSetting::quiet_period`
 //! before it is believed. "Session ended" is the tab's CLI actually exiting,
 //! read the same way `keep_awake` reads it: from the terminal's own task
@@ -11,19 +16,19 @@
 //! hosted). See `agent_notify_watch` for how both are wired to a real tab, and
 //! `agent_notify_signals` for what happens once either is known.
 //!
-//! **The quiet period is a mitigation, not a fix.** There is no protocol-level
-//! "reply finished" event -- these agents are ptys, not something this editor
-//! speaks a protocol to (stated at `agent_view.rs:736-742`). `is_answering`
-//! goes false during long tool calls and model waits exactly as often as it
-//! goes false at the end of a real answer, and nothing observable here tells
-//! the two apart. `keep_awake` answers the same ambiguity with a 60-second
-//! grace; this feature's default is 12 seconds, a different trade that favours
-//! fewer late notifications over more early ones. **A notification can and
-//! will fire while the agent is still working**, whenever it pauses longer
-//! than the configured period -- a slow model response, a long build, a big
-//! file read. The setting exists so a user who is bitten by this can raise
-//! it; it cannot be raised away entirely, because the signal it reads from
-//! does not carry more information than this.
+//! **On the heuristic path the quiet period is a mitigation, not a fix.**
+//! There is no protocol-level "reply finished" event for these ptys (stated at
+//! `agent_view.rs:736-742`). `is_answering` goes false during long tool calls
+//! and model waits exactly as often as it goes false at the end of a real
+//! answer, and nothing observable there tells the two apart. `keep_awake`
+//! answers the same ambiguity with a 60-second grace; this feature's default
+//! is 12 seconds, a different trade that favours fewer late notifications over
+//! more early ones. **On that path a notification can and will fire while the
+//! agent is still working**, whenever it pauses longer than the configured
+//! period. The setting exists so a user who is bitten by this can raise it. A
+//! transcript-backed tab does not read `is_answering` at all, so it has no
+//! such false positives; if its transcript never appears it simply gets no
+//! "finished" notification, and the exit one still fires.
 //!
 //! No focus check anywhere, by explicit user decision: a notification fires
 //! even while a zode window is frontmost. `agent_notify_tests` carries a
@@ -96,3 +101,5 @@ pub fn init(cx: &mut App) {
 mod agent_notify_tests;
 #[cfg(test)]
 mod agent_notify_tests_more;
+#[cfg(test)]
+mod agent_notify_tests_turns;

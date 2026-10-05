@@ -124,7 +124,7 @@ impl SessionSummary {
 ///
 /// Whether it is *still running* is deliberately not here. That answer lives in
 /// the parent's transcript rather than beside the subagent, costs a scan, and is
-/// [`SessionProvider::completed_subagents`](crate::SessionProvider::completed_subagents)'s
+/// [`SessionProvider::transcript_progress`](crate::SessionProvider::transcript_progress)'s
 /// job — a field here would invite a caller to read it for free when it is not.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubagentSummary {
@@ -142,21 +142,56 @@ pub struct SubagentSummary {
     pub description: Arc<str>,
     /// The parent's tool call that spawned it, and the key its completion is
     /// reported under. See
-    /// [`SessionProvider::completed_subagents`](crate::SessionProvider::completed_subagents).
+    /// [`SessionProvider::transcript_progress`](crate::SessionProvider::transcript_progress).
     pub tool_use_id: Arc<str>,
     /// When the sidecar was written, which is when the subagent started.
     pub spawned_at: SystemTime,
 }
 
+/// One landmark on the main conversation chain of a transcript, in the order
+/// the file wrote it. What a provider reports so a caller can tell a turn that
+/// is over from one that is merely between tool calls, without knowing the
+/// store's line format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnMark {
+    /// The user sent a message.
+    Prompt,
+    /// The agent produced output that is followed by a tool call.
+    Working,
+    /// The agent made this tool call.
+    ToolCall(Arc<str>),
+    /// The agent produced output that ends its turn. A turn can write several
+    /// of these in a row, one per content block.
+    ///
+    /// `message_id` names the reply the block belongs to: every block of one
+    /// reply shares it, which is the only way to tell a second block of the
+    /// reply just seen from the first block of a new one.
+    EndTurn { message_id: Option<Arc<str>> },
+    /// The store recorded the turn as finished. `background_pending` is whether
+    /// work the turn started was still running when it did.
+    TurnDuration { background_pending: bool },
+    /// The user interrupted the turn.
+    Interrupt,
+}
+
 /// What one incremental pass over a transcript found.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct CompletedSubagents {
+pub struct TranscriptProgress {
     /// The tool calls reported finished within the bytes just read.
     pub tool_use_ids: Vec<Arc<str>>,
+    /// The main chain's turn landmarks within the bytes just read, in file
+    /// order. Empty for a provider that does not [report turns].
+    ///
+    /// [report turns]: crate::SessionProvider::reports_turns
+    pub turn_marks: Vec<TurnMark>,
     /// Where the next pass should resume. Never moves backwards except when the
     /// transcript itself shrank, which means a different file is under the same
     /// path and the whole scan starts again.
     pub scanned_to: u64,
+    /// The transcript was shorter than where the last pass stopped, so this
+    /// pass read a different file from its start. Whatever the caller derived
+    /// from the earlier file no longer describes anything.
+    pub restarted: bool,
 }
 
 /// The numbers that cost a full scan of the transcript.

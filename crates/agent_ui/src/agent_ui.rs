@@ -14,6 +14,7 @@ mod permission_bypass;
 mod session_history;
 mod session_store;
 pub mod subagents;
+mod turn_tracker;
 
 pub use actions::*;
 pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks};
@@ -27,6 +28,7 @@ pub use session_history::{
 };
 pub use session_store::SessionStore;
 pub use subagents::{SubagentTracker, provider_for_agent};
+pub use turn_tracker::TurnEvent;
 
 use gpui::App;
 use project::AgentId;
