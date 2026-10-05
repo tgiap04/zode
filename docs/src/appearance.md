@@ -132,6 +132,13 @@ sessions. A newly opened project still appears at the top. Dragging a square off
 the rail entirely moves that project to a new window — both that and **Remove**
 ask for confirmation first, since both take the project off this window.
 
+A number in the top-right corner of a square counts that project's Claude agent
+tabs that are waiting on you: a permission dialog on screen, or a finished reply
+you have not looked at yet. Focusing the tab clears the second kind. The number
+reads **9+** above nine, and hovering the square names the exact count. Other agents (Codex, OpenCode, Copilot) and tabs Zode
+is not tracking are not counted. The dot that shows a project re-indexing after
+it wakes sits in the bottom-right corner.
+
 ## What's Next
 
 - [All Settings](./reference/all-settings.md) — Complete settings reference

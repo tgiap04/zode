@@ -215,3 +215,254 @@ async fn test_restored_project_groups_reach_the_rail(cx: &mut TestAppContext) {
         );
     });
 }
+
+mod waiting_agents {
+    use super::*;
+    use crate::rail_test_support::{
+        TwoProjects, add_waiting_claude_tab, new_claude_agent_view, two_projects, waiting,
+    };
+    use agent_ui::{AgentView, TurnEvent};
+    use gpui::{Entity, Focusable as _, VisualTestContext};
+
+    fn turn(view: &Entity<AgentView>, events: &[TurnEvent], cx: &mut VisualTestContext) {
+        view.update(cx, |view, cx| view.simulate_turn_events(events, cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_project_without_agent_tabs_has_none_waiting(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0);
+        assert_eq!(waiting(&sidebar, "root_b", cx), 0);
+    }
+
+    #[gpui::test]
+    async fn a_finished_turn_in_a_background_project_reaches_its_rail_entry(
+        cx: &mut TestAppContext,
+    ) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let view = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0, "nothing has ended yet");
+
+        turn(&view, &[TurnEvent::Ended], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 1);
+        assert_eq!(
+            waiting(&sidebar, "root_b", cx),
+            0,
+            "only the owning project"
+        );
+
+        turn(&view, &[TurnEvent::Started], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0, "a new turn retracts it");
+    }
+
+    #[gpui::test]
+    async fn an_interrupted_turn_never_counts(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let view = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        turn(&view, &[TurnEvent::Ended, TurnEvent::Interrupted], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0);
+    }
+
+    #[gpui::test]
+    async fn focusing_the_waiting_tab_clears_it(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                multi_workspace,
+                sidebar,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        // Focus only lands in the workspace that is in front.
+        let workspace_b = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let project_b = workspace_b.read_with(cx, |workspace, _| workspace.project().clone());
+        let view = add_waiting_claude_tab(&workspace_b, &project_b, cx);
+        turn(&view, &[TurnEvent::Ended], cx);
+        assert_eq!(waiting(&sidebar, "root_b", cx), 1);
+
+        view.update_in(cx, |view, window, cx| {
+            let handle = view.focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(waiting(&sidebar, "root_b", cx), 0);
+    }
+
+    #[gpui::test]
+    async fn an_approval_counts_even_on_the_focused_tab(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let view = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        view.update_in(cx, |view, window, cx| {
+            let handle = view.focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| view.simulate_approval(true, cx));
+        cx.run_until_parked();
+        assert_eq!(waiting(&sidebar, "root_a", cx), 1);
+
+        view.update(cx, |view, cx| view.simulate_approval(false, cx));
+        cx.run_until_parked();
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0);
+    }
+
+    #[gpui::test]
+    async fn the_agent_cli_ending_clears_the_count(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let view = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        turn(&view, &[TurnEvent::Ended], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 1);
+
+        view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+        cx.run_until_parked();
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0);
+    }
+
+    #[gpui::test]
+    async fn closing_a_waiting_tab_clears_it_and_drops_its_subscription(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let view = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        turn(&view, &[TurnEvent::Ended], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 1);
+        let watched =
+            sidebar.read_with(cx, |sidebar, _| sidebar.agent_attention_subscriptions.len());
+        assert_eq!(watched, 1);
+
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.remove_item(view.entity_id(), false, false, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(waiting(&sidebar, "root_a", cx), 0);
+        let watched =
+            sidebar.read_with(cx, |sidebar, _| sidebar.agent_attention_subscriptions.len());
+        assert_eq!(watched, 0, "a closed tab must not stay subscribed");
+    }
+
+    #[gpui::test]
+    async fn a_hibernated_project_still_counts_its_waiting_tab(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let view = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        turn(&view, &[TurnEvent::Ended], cx);
+
+        project_a.update(cx, |project, cx| {
+            project.set_activity(ProjectActivity::Warm, cx);
+            project.set_activity(ProjectActivity::Hibernated, cx);
+        });
+        cx.run_until_parked();
+
+        sidebar.read_with(cx, |sidebar, _| {
+            let entry = sidebar
+                .contents
+                .rail_entries
+                .iter()
+                .find(|entry| entry.label.as_ref() == "root_a")
+                .expect("on the rail");
+            assert_eq!(entry.activity, Some(ProjectActivity::Hibernated));
+            assert_eq!(entry.waiting_agents, 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn waiting_tabs_across_a_groups_workspaces_are_summed(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                multi_workspace,
+                sidebar,
+                workspace_a,
+                project_a,
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let fs = project_a.read_with(cx, |project, _| project.fs().clone());
+        let twin = Project::test(fs, ["/root_a".as_ref()], cx).await;
+        let twin_workspace = multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(twin.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        let first = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        let second = add_waiting_claude_tab(&workspace_a, &project_a, cx);
+        let third = add_waiting_claude_tab(&twin_workspace, &twin, cx);
+        turn(&first, &[TurnEvent::Ended], cx);
+        turn(&third, &[TurnEvent::Ended], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 2);
+
+        turn(&second, &[TurnEvent::Ended], cx);
+        assert_eq!(waiting(&sidebar, "root_a", cx), 3);
+    }
+
+    /// A tab that already holds an approval when it lands emits no further
+    /// `Attention`, so only the workspace's own `ItemAdded` can tell the rail.
+    #[gpui::test]
+    async fn a_tab_that_arrives_already_waiting_is_counted(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                sidebar,
+                workspace_a,
+                project_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            let view = new_claude_agent_view(workspace, &project_a, cx);
+            view.update(cx, |view, cx| view.simulate_approval(true, cx));
+            workspace.add_item_to_active_pane(Box::new(view), None, false, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(waiting(&sidebar, "root_a", cx), 1);
+    }
+}

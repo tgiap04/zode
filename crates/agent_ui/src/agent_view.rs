@@ -1,4 +1,5 @@
 use crate::RenameAgent;
+use crate::agent_attention::AgentAttention;
 use crate::agent_icon;
 use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
@@ -233,6 +234,22 @@ pub struct AgentView {
     turn_silence: SilenceWatch,
     /// Ticks since the screen was last read for a permission dialog.
     ticks_since_screen_read: u32,
+    /// Whether a finished turn is waiting for the user to look. Only fed when
+    /// [`Self::reports_turns`]: for every other tab the pty write rate cannot
+    /// tell an answer from a user typing, and a badge must not light from a
+    /// guess.
+    attention: AgentAttention,
+    /// Whether keyboard focus is inside this tab while its window is active.
+    in_view: bool,
+    /// Set when the tick finds the CLI no longer running, cleared when the
+    /// tab's state is reset for a new one. The transcript pass can still
+    /// deliver an `Ended` after that, and an unread flag set then would have
+    /// no tick left to retract it.
+    cli_gone: bool,
+    /// What [`AgentViewEvent::Attention`] last reported, so it fires on a
+    /// change and not on every pass that re-derives the same answer.
+    attention_shown: bool,
+    _attention_watch: Vec<Subscription>,
 }
 
 enum State {
@@ -278,6 +295,10 @@ pub enum AgentViewEvent {
     /// Worth nothing in the persisted row and nothing to the pane, so neither
     /// `should_serialize` nor `to_item_events` has anything to do with it.
     Turn(TurnEvent),
+    /// [`AgentView::needs_attention`] changed. Raised on the change only.
+    ///
+    /// Like `Turn`, worth nothing in the persisted row and nothing to the pane.
+    Attention,
     /// The shell this tab handed back has exited, so the tab goes with it.
     Close,
 }
@@ -635,7 +656,13 @@ impl AgentView {
             turns: TurnTracker::default(),
             turn_silence: SilenceWatch::default(),
             ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         };
+        view.watch_attention(window, cx);
         view.start(window, cx);
         view
     }
@@ -697,8 +724,8 @@ impl AgentView {
     /// label says, what gets written down — build the view this way and never
     /// touch a process. Tests whose claim is about the open path itself still go
     /// through `AgentView::open`.
-    #[cfg(test)]
-    pub(crate) fn test_new(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_new(
         agent: AgentId,
         mode: AgentViewMode,
         project: Entity<Project>,
@@ -731,6 +758,11 @@ impl AgentView {
             turns: TurnTracker::default(),
             turn_silence: SilenceWatch::default(),
             ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         }
     }
 
@@ -851,6 +883,9 @@ impl AgentView {
                         this.responding = settled;
                         cx.emit(AgentViewEvent::Activity);
                     }
+                    if !working {
+                        this.on_cli_exited(cx);
+                    }
                     if reports_turns {
                         this.check_for_approval(working, cx);
                         let writing = working && this.is_responding(cx);
@@ -914,9 +949,123 @@ impl AgentView {
             }
             _ => false,
         };
+        self.set_approval(asking, cx);
+    }
+
+    /// Records whether a permission dialog is on screen and says so on the
+    /// change.
+    fn set_approval(&mut self, asking: bool, cx: &mut Context<Self>) {
         if let Some(event) = self.turns.set_awaiting_approval(asking) {
             cx.emit(AgentViewEvent::Turn(event));
+            self.refresh_attention(cx);
         }
+    }
+
+    /// Hands out a pass's turn events and folds them into the attention flag
+    /// before judging it once, so an `Ended` and the `Interrupted` that
+    /// follows it in the same pass never flash a badge.
+    fn publish_turn_events(&mut self, events: Vec<TurnEvent>, cx: &mut Context<Self>) {
+        for event in events {
+            if !self.cli_gone {
+                self.attention.on_turn(event, self.in_view);
+            }
+            cx.emit(AgentViewEvent::Turn(event));
+        }
+        self.refresh_attention(cx);
+    }
+
+    /// The transcript began again from its start, so the turns folded so far
+    /// belong to a conversation that is gone, unread end included.
+    fn on_transcript_restarted(&mut self, cx: &mut Context<Self>) {
+        self.set_approval(false, cx);
+        self.turns = TurnTracker::default();
+        self.attention.clear();
+        self.refresh_attention(cx);
+    }
+
+    /// The tick found the agent's CLI no longer running.
+    fn on_cli_exited(&mut self, cx: &mut Context<Self>) {
+        self.cli_gone = true;
+        self.on_cli_ended(cx);
+    }
+
+    /// The agent's CLI is no longer running: nothing it left unread or
+    /// pending can still be acted on.
+    fn on_cli_ended(&mut self, cx: &mut Context<Self>) {
+        self.attention.clear();
+        self.refresh_attention(cx);
+    }
+
+    /// Whether this tab holds something the user has to come back for: a
+    /// permission dialog on screen, or a finished turn not yet looked at.
+    ///
+    /// Always false for a tab that does not [report turns](Self::reports_turns).
+    /// An approval counts for as long as the dialog is up, in view or not,
+    /// because looking at it does not answer it.
+    pub fn needs_attention(&self) -> bool {
+        self.reports_turns() && (self.attention.unread() || self.turns.awaiting_approval())
+    }
+
+    fn refresh_attention(&mut self, cx: &mut Context<Self>) {
+        let needs = self.needs_attention();
+        if needs != self.attention_shown {
+            self.attention_shown = needs;
+            cx.emit(AgentViewEvent::Attention);
+        }
+    }
+
+    /// Keeps `in_view` true exactly while keyboard focus is inside this tab and
+    /// its window is the active one, and takes an unread end back whenever that
+    /// becomes true.
+    pub(crate) fn watch_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.focus_handle.clone();
+        self._attention_watch = vec![
+            cx.on_focus_in(&handle, window, |this, window, cx| {
+                this.in_view = window.is_window_active();
+                this.look_if_in_view(cx);
+            }),
+            cx.on_focus_out(&handle, window, |this, _, _, _| {
+                this.in_view = false;
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.in_view =
+                    window.is_window_active() && this.focus_handle.contains_focused(window, cx);
+                this.look_if_in_view(cx);
+            }),
+        ];
+    }
+
+    /// For a view built with [`Self::test_new`], which has no window to watch
+    /// until a test puts it in one.
+    #[cfg(feature = "test-support")]
+    pub fn watch_attention_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.watch_attention(window, cx);
+    }
+
+    fn look_if_in_view(&mut self, cx: &mut Context<Self>) {
+        if self.in_view {
+            self.attention.clear();
+            self.refresh_attention(cx);
+        }
+    }
+
+    /// Stands in for the transcript pass: the same fold the tick runs, minus
+    /// the files it reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_turn_events(&mut self, events: &[TurnEvent], cx: &mut Context<Self>) {
+        self.publish_turn_events(events.to_vec(), cx);
+    }
+
+    /// Stands in for the screen read finding, or losing, a permission dialog.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_approval(&mut self, asking: bool, cx: &mut Context<Self>) {
+        self.set_approval(asking, cx);
+    }
+
+    /// Stands in for the tick noticing the agent's CLI is gone.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_cli_ended(&mut self, cx: &mut Context<Self>) {
+        self.on_cli_exited(cx);
     }
 
     /// Whether this tab's turns come from the transcript.
@@ -980,19 +1129,15 @@ impl AgentView {
                             this.turn_silence.saw_marks();
                         }
                         if turn_input.restarted {
-                            if let Some(event) = this.turns.set_awaiting_approval(false) {
-                                cx.emit(AgentViewEvent::Turn(event));
-                            }
-                            this.turns = TurnTracker::default();
+                            this.on_transcript_restarted(cx);
                         }
-                        for event in this.turns.apply(TurnPass {
+                        let events = this.turns.apply(TurnPass {
                             marks: &turn_input.marks,
                             finished: &turn_input.finished,
                             live: turn_input.live,
                             background_quiet_for: turn_input.background_quiet_for,
-                        }) {
-                            cx.emit(AgentViewEvent::Turn(event));
-                        }
+                        });
+                        this.publish_turn_events(events, cx);
                     }
                     // The panel draws a row per subagent off this, and the tab's
                     // own mark follows `any_running` on its next tick.
@@ -1169,6 +1314,9 @@ impl AgentView {
         // listening for turns, and the approval it holds would never be cleared.
         self.reset_turn_state(cx);
         self._subagent_tick = None;
+        // The old tick would read the new session's empty `Starting` state as
+        // an exited CLI and mark it gone before it has started.
+        self._activity_tick = None;
         self.origin = SessionOrigin::default();
         self.state = State::Starting;
         self.start(window, cx);
@@ -1209,6 +1357,8 @@ impl AgentView {
         self.turns = TurnTracker::default();
         self.turn_silence = SilenceWatch::default();
         self.ticks_since_screen_read = 0;
+        self.cli_gone = false;
+        self.on_cli_ended(cx);
     }
 
     /// Reports a mode that outlived the switch away from it.
@@ -1968,7 +2118,7 @@ impl workspace::item::Item for AgentView {
                 f(workspace::item::ItemEvent::UpdateTab)
             }
             AgentViewEvent::Close => f(workspace::item::ItemEvent::CloseItem),
-            AgentViewEvent::Turn(_) => {}
+            AgentViewEvent::Turn(_) | AgentViewEvent::Attention => {}
         }
     }
 
@@ -3125,6 +3275,51 @@ mod tests {
         });
     }
 
+    /// In production the tab's focus handle is its terminal's, not the root
+    /// one, so the attention watch has to see focus land there.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn focus_inside_the_terminal_counts_as_looking_at_the_tab(cx: &mut TestAppContext) {
+        tolerate_the_pty_reader(cx);
+        let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
+        agent_view.update_in(cx, |view, window, cx| {
+            view.origin = SessionOrigin::new(SessionIntent::Tracked("session-one".into()), None);
+            view.watch_attention(window, cx);
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        agent_view.update_in(cx, |view, window, cx| {
+            let terminal_handle = view.focus_handle(cx);
+            assert_ne!(
+                terminal_handle, view.focus_handle,
+                "this only means something when the tab hands out the terminal's handle"
+            );
+            window.focus(&terminal_handle, cx);
+        });
+        cx.run_until_parked();
+        assert!(agent_view.read_with(cx, |view, _| view.in_view));
+
+        agent_view.update(cx, |view, cx| {
+            view.simulate_turn_events(&[TurnEvent::Ended], cx)
+        });
+        assert!(
+            !agent_view.read_with(cx, |view, _| view.needs_attention()),
+            "a turn ending under the terminal the user is typing in is not unread"
+        );
+
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        assert!(!agent_view.read_with(cx, |view, _| view.in_view));
+
+        agent_view.update(cx, |view, cx| {
+            view.simulate_turn_events(&[TurnEvent::Started, TurnEvent::Ended], cx)
+        });
+        assert!(
+            agent_view.read_with(cx, |view, _| view.needs_attention()),
+            "a turn ending with focus elsewhere is unread"
+        );
+    }
+
     /// An agent tab showing a terminal, with no agent process behind it.
     ///
     /// Display-only: what these tests drive is the exit path, and a real CLI
@@ -3180,6 +3375,11 @@ mod tests {
             turns: TurnTracker::default(),
             turn_silence: SilenceWatch::default(),
             ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         });
 
         let terminal_view = cx.new_window_entity(|window, cx| {
@@ -3630,6 +3830,11 @@ mod tests {
             turns: TurnTracker::default(),
             turn_silence: SilenceWatch::default(),
             ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         });
 
         let left_behind = terminal_view.downgrade();
@@ -4310,21 +4515,7 @@ mod tests {
         assert_ne!(claude, agent_icon("something-else"));
     }
 
-    /// A workspace with `crate::init` already run, so the rail's actions are
-    /// registered on it and a dispatch reaches the real handler.
-    ///
-    /// Dispatching rather than calling the handler body is not thoroughness for
-    /// its own sake: `register_action` hands the handler a leased `Workspace`, and
-    /// a body that reaches back through a workspace handle aborts the process
-    /// under that lease while behaving perfectly when called directly. Only a
-    /// dispatch proves the real path.
-    async fn workspace_with_agents(
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<Workspace>,
-        Entity<project::Project>,
-        &mut gpui::VisualTestContext,
-    ) {
+    fn init_agents_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
@@ -4341,6 +4532,24 @@ mod tests {
             // asserted at all.
             workspace::register_project_item::<Editor>(cx);
         });
+    }
+
+    /// A workspace with `crate::init` already run, so the rail's actions are
+    /// registered on it and a dispatch reaches the real handler.
+    ///
+    /// Dispatching rather than calling the handler body is not thoroughness for
+    /// its own sake: `register_action` hands the handler a leased `Workspace`, and
+    /// a body that reaches back through a workspace handle aborts the process
+    /// under that lease while behaving perfectly when called directly. Only a
+    /// dispatch proves the real path.
+    async fn workspace_with_agents(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<project::Project>,
+        &mut gpui::VisualTestContext,
+    ) {
+        init_agents_test(cx);
 
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(path!("/test"), json!({ "a.rs": "fn a() {}" }))
@@ -4846,6 +5055,373 @@ mod tests {
                 .is_some_and(|item| item.downcast::<AgentView>().is_some())),
             "and stays in front, rather than leaving an empty pane behind"
         );
+    }
+
+    /// What a sidebar counting waiting tabs relies on: `needs_attention` moves
+    /// with the user's eyes and the turn, and says so exactly once per move.
+    mod attention {
+        use super::*;
+        use agent_sessions::TurnMark;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use workspace::SerializableItem as _;
+
+        fn tab(
+            agent: &str,
+            intent: SessionIntent,
+            workspace: &Entity<Workspace>,
+            project: &Entity<project::Project>,
+            focus: bool,
+            cx: &mut gpui::VisualTestContext,
+        ) -> Entity<AgentView> {
+            let agent = AgentId::new(agent.to_string());
+            let project = project.clone();
+            workspace.update_in(cx, |workspace, window, cx| {
+                let handle = workspace.weak_handle();
+                let view = cx.new(|cx| {
+                    AgentView::test_new(
+                        agent,
+                        AgentViewMode::Terminal,
+                        project,
+                        handle,
+                        SessionOrigin::new(intent, None),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| view.watch_attention(window, cx));
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, focus, window, cx);
+                view
+            })
+        }
+
+        fn claude(
+            workspace: &Entity<Workspace>,
+            project: &Entity<project::Project>,
+            focus: bool,
+            cx: &mut gpui::VisualTestContext,
+        ) -> Entity<AgentView> {
+            let intent = SessionIntent::Tracked("session-one".into());
+            let view = tab(
+                project::CLAUDE_CODE_AGENT_ID,
+                intent,
+                workspace,
+                project,
+                focus,
+                cx,
+            );
+            cx.run_until_parked();
+            view
+        }
+
+        fn count_attention(
+            view: &Entity<AgentView>,
+            cx: &mut gpui::VisualTestContext,
+        ) -> (Rc<RefCell<usize>>, gpui::Subscription) {
+            let count = Rc::new(RefCell::new(0));
+            let subscription = cx.update(|_, cx| {
+                let count = count.clone();
+                cx.subscribe(view, move |_, event: &AgentViewEvent, _| {
+                    if matches!(event, AgentViewEvent::Attention) {
+                        *count.borrow_mut() += 1;
+                    }
+                })
+            });
+            (count, subscription)
+        }
+
+        fn needs(view: &Entity<AgentView>, cx: &mut gpui::VisualTestContext) -> bool {
+            view.read_with(cx, |view, _| view.needs_attention())
+        }
+
+        fn focus(view: &Entity<AgentView>, cx: &mut gpui::VisualTestContext) {
+            view.update_in(cx, |view, window, cx| {
+                let handle = view.focus_handle.clone();
+                window.focus(&handle, cx);
+            });
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        async fn attention_is_raised_once_per_change(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                cx.emit(AgentViewEvent::Activity);
+                cx.emit(AgentViewEvent::Activity);
+            });
+            assert!(needs(&view, cx));
+            assert_eq!(*count.borrow(), 1, "a repeated end is not a change");
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Started], cx);
+            });
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 2);
+
+            let before = *count.borrow();
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended, TurnEvent::Interrupted], cx);
+            });
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), before, "an end cut short never flashes");
+        }
+
+        #[gpui::test]
+        async fn an_attention_event_costs_no_database_write(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            view.read_with(cx, |view, _| {
+                assert!(!view.should_serialize(&AgentViewEvent::Attention));
+            });
+            let mut forwarded = 0;
+            <AgentView as workspace::item::Item>::to_item_events(
+                &AgentViewEvent::Attention,
+                &mut |_| {
+                    forwarded += 1;
+                },
+            );
+            assert_eq!(forwarded, 0);
+        }
+
+        #[gpui::test]
+        async fn a_pending_approval_counts_even_while_the_tab_is_focused(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| view.simulate_approval(true, cx));
+            assert!(needs(&view, cx));
+            assert_eq!(*count.borrow(), 1);
+
+            focus(&view, cx);
+            assert!(needs(&view, cx), "looking at a dialog does not answer it");
+
+            view.update(cx, |view, cx| view.simulate_approval(false, cx));
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 2);
+        }
+
+        #[gpui::test]
+        async fn focusing_the_tab_clears_an_unread_end(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx));
+
+            focus(&view, cx);
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 2);
+        }
+
+        #[gpui::test]
+        async fn a_turn_ending_under_the_users_eyes_is_never_unread(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 0);
+        }
+
+        #[gpui::test]
+        async fn a_blurred_window_counts_as_not_looking_until_it_returns(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+
+            cx.deactivate_window();
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx), "the window was not looking at it");
+
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            assert!(
+                !needs(&view, cx),
+                "back in an active window with the keyboard still inside the tab"
+            );
+        }
+
+        /// Focus-out must reach a tab whose workspace stops being the active
+        /// one. Otherwise `in_view` stays true and a turn ending in the
+        /// background is taken for one the user watched.
+        #[gpui::test]
+        async fn a_tab_in_a_workspace_that_was_switched_away_from_is_not_in_view(
+            cx: &mut TestAppContext,
+        ) {
+            init_agents_test(cx);
+            let fs = FakeFs::new(cx.executor());
+            fs.insert_tree(path!("/test"), json!({})).await;
+            fs.insert_tree(path!("/other"), json!({})).await;
+            let project = project::Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+            let other = project::Project::test(fs, [path!("/other").as_ref()], cx).await;
+            let (multi, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi.read_with(cx, |multi, _| multi.workspace().clone());
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+            assert!(view.read_with(cx, |view, _| view.in_view));
+
+            multi.update_in(cx, |multi, window, cx| {
+                multi.test_enable_background_retention(cx);
+                multi.test_add_workspace(other, window, cx);
+            });
+            cx.run_until_parked();
+            assert!(
+                multi.read_with(cx, |multi, _| multi.workspace() != &workspace),
+                "the first workspace must have been swapped out for this to mean anything"
+            );
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(
+                needs(&view, cx),
+                "a turn ending in a workspace nobody is looking at is unread"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_dead_cli_or_a_reset_clears_everything(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                view.simulate_approval(true, cx);
+            });
+            assert!(needs(&view, cx));
+
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+            assert!(
+                needs(&view, cx),
+                "the approval belongs to the turn tracker, which a dead CLI does not reset"
+            );
+            view.update(cx, |view, cx| view.end_previous_mode(cx));
+            assert!(!needs(&view, cx));
+            view.read_with(cx, |view, _| assert!(!view.turns.awaiting_approval()));
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx));
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+            assert!(!needs(&view, cx));
+        }
+
+        #[gpui::test]
+        async fn a_restarted_transcript_drops_the_unread_end(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx));
+
+            view.update(cx, |view, cx| view.on_transcript_restarted(cx));
+
+            assert!(
+                !needs(&view, cx),
+                "the end belonged to a conversation that is gone"
+            );
+            assert_eq!(*count.borrow(), 2);
+        }
+
+        #[gpui::test]
+        async fn an_end_arriving_after_the_cli_exited_is_not_unread(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(
+                !needs(&view, cx),
+                "no tick is left to retract a flag set on a dead CLI"
+            );
+
+            view.update(cx, |view, cx| view.end_previous_mode(cx));
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx), "a fresh start listens again");
+        }
+
+        #[gpui::test]
+        async fn a_resumed_sessions_past_turns_are_not_news(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+
+            view.update(cx, |view, cx| {
+                let events = view.turns.apply(TurnPass {
+                    marks: &[
+                        TurnMark::Prompt,
+                        TurnMark::EndTurn {
+                            message_id: Some("m1".into()),
+                        },
+                        TurnMark::TurnDuration {
+                            background_pending: false,
+                        },
+                    ],
+                    finished: &[],
+                    live: false,
+                    background_quiet_for: None,
+                });
+                view.simulate_turn_events(&events, cx);
+            });
+
+            assert!(!needs(&view, cx));
+        }
+
+        #[gpui::test]
+        async fn a_tab_that_does_not_report_turns_never_needs_attention(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let tracked = || SessionIntent::Tracked("session-one".into());
+            let codex = tab(
+                project::CODEX_AGENT_ID,
+                tracked(),
+                &workspace,
+                &project,
+                false,
+                cx,
+            );
+            let untracked = tab(
+                project::CLAUDE_CODE_AGENT_ID,
+                SessionIntent::Untracked,
+                &workspace,
+                &project,
+                false,
+                cx,
+            );
+            cx.run_until_parked();
+
+            for view in [&codex, &untracked] {
+                let (count, _subscription) = count_attention(view, cx);
+                view.update(cx, |view, cx| {
+                    view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                    view.simulate_approval(true, cx);
+                });
+                assert!(!needs(view, cx));
+                assert_eq!(*count.borrow(), 0);
+            }
+        }
     }
 }
 
