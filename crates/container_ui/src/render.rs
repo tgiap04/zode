@@ -1,8 +1,11 @@
 use container::{BackendKind, ContainerError, Resource, ResourceAction, ResourceKind, RunState};
 use gpui::{Anchor, AnyElement, App, Context, PathPromptOptions, Window};
-use ui::{Banner, ContextMenu, Indicator, PopoverMenu, Severity, Tab, TabBar, Table, prelude::*};
+use ui::{
+    Banner, CommonAnimationExt as _, ContextMenu, Indicator, PopoverMenu, Severity, Tab, TabBar,
+    Table, prelude::*,
+};
 
-use crate::container_panel::{ContainerPanel, ListState};
+use crate::container_panel::{Busy, ContainerPanel, ListState};
 use crate::terminal::TerminalIntent;
 
 impl Render for ContainerPanel {
@@ -533,7 +536,7 @@ impl ContainerPanel {
         // Handed to the closure as *data*, not as elements: `AnyElement` is not
         // `Clone`, and `uniform_list` asks for a range again on every frame.
         let resources = std::rc::Rc::new(resources.to_vec());
-        let in_flight = std::rc::Rc::new(self.in_flight.clone());
+        let busy_rows = std::rc::Rc::new(self.busy_rows());
         let count = resources.len();
         // One extra column for the buttons, and only when there are buttons: a
         // `Table` is built with a column count, so an unused trailing column
@@ -583,7 +586,7 @@ impl ContainerPanel {
                                     cells.push(render_trailing(
                                         resource,
                                         actions,
-                                        in_flight.get(&resource.id).copied(),
+                                        busy_rows.get(&resource.id).copied(),
                                         logs,
                                         shell,
                                         removable,
@@ -700,28 +703,33 @@ pub(crate) fn state_dot(state: RunState) -> impl IntoElement {
         })
 }
 
-/// The buttons for one row, or what is being attempted instead.
-///
-/// While an action is running the row says so rather than showing buttons:
-/// `docker stop` waits ten seconds before killing, and buttons that do nothing
-/// for ten seconds read as broken.
 /// Everything the row can be asked to do: lifecycle buttons, then the two
-/// terminals.
+/// terminals -- or, while something is running on it, a spinner saying what.
+///
+/// Busy replaces every button rather than only the lifecycle ones: `docker stop`
+/// waits ten seconds before killing, and a removal leaves a row that is about to
+/// be gone, so a terminal or a second remove aimed at it is a click that can only
+/// fail.
 ///
 /// Terminals last, and visually apart, because they are the two that open
 /// something new rather than changing what is there.
 pub(crate) fn render_trailing(
     resource: &Resource,
     actions: &'static [ResourceAction],
-    running: Option<ResourceAction>,
+    busy: Option<Busy>,
     logs: bool,
     shell: bool,
     removable: bool,
     handle: gpui::WeakEntity<ContainerPanel>,
 ) -> AnyElement {
+    if let Some(busy) = busy {
+        return render_busy(&resource.id, busy);
+    }
+    let id_for_selector = resource.id.clone();
     h_flex()
+        .debug_selector(move || format!("container-row-buttons:{id_for_selector}"))
         .gap_1()
-        .child(render_actions(resource, actions, running, handle.clone()))
+        .child(render_actions(resource, actions, handle.clone()))
         .when(logs, |element| {
             let id = resource.id.clone();
             let name = resource.name.clone();
@@ -803,19 +811,52 @@ pub(crate) fn render_trailing(
         .into_any_element()
 }
 
+/// The spinner and what it is doing, shared by the list row and the open row's
+/// header so a start and a removal wait the same way.
+fn render_busy(id: &str, busy: Busy) -> AnyElement {
+    h_flex()
+        .debug_selector({
+            let id = id.to_string();
+            move || format!("container-busy:{id}")
+        })
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .debug_selector({
+                    let id = id.to_string();
+                    move || format!("container-busy-spinner:{id}")
+                })
+                .child(
+                    Icon::new(IconName::LoadCircle)
+                        .size(IconSize::XSmall)
+                        .color(Color::Accent)
+                        // Keyed by the resource, not by its position: a row above
+                        // this one going away shifts every position, and a
+                        // position-keyed animation would restart the rotation of
+                        // rows still working.
+                        .with_keyed_rotate_animation(
+                            (
+                                gpui::ElementId::from("container-busy-spinner"),
+                                SharedString::from(id.to_string()),
+                            ),
+                            1,
+                        ),
+                ),
+        )
+        .child(
+            Label::new(busy.progress_label())
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .into_any_element()
+}
+
 fn render_actions(
     resource: &Resource,
     actions: &'static [ResourceAction],
-    running: Option<ResourceAction>,
     handle: gpui::WeakEntity<ContainerPanel>,
 ) -> AnyElement {
-    if let Some(running) = running {
-        return Label::new(format!("{}...", running.label()))
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-            .into_any_element();
-    }
-
     h_flex()
         .gap_1()
         .children(actions.iter().copied().filter_map(|action| {

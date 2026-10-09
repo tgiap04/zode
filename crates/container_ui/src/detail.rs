@@ -310,7 +310,7 @@ impl ContainerPanel {
             .child(crate::render::render_trailing(
                 resource,
                 self.available_actions(),
-                self.in_flight.get(&resource.id).copied(),
+                self.busy_for(&resource.id),
                 self.terminal_available(crate::terminal::TerminalIntent::FollowLogs),
                 self.terminal_available(crate::terminal::TerminalIntent::Shell),
                 self.removable(),

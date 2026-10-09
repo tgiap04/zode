@@ -34,6 +34,84 @@ pub(crate) enum ListState {
     Failed(ContainerError),
 }
 
+/// What a row is busy with, which is all the row needs to say.
+///
+/// One type for every operation in flight, so a start and a removal draw the
+/// same spinner and cannot drift into two ways of saying "wait".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Busy {
+    Action(ResourceAction),
+    Removing,
+}
+
+impl Busy {
+    pub(crate) fn progress_label(self) -> &'static str {
+        match self {
+            Busy::Action(ResourceAction::Start) => "Starting\u{2026}",
+            Busy::Action(ResourceAction::Stop) => "Stopping\u{2026}",
+            Busy::Action(ResourceAction::Restart) => "Restarting\u{2026}",
+            Busy::Action(ResourceAction::Pause) => "Pausing\u{2026}",
+            Busy::Action(ResourceAction::Unpause) => "Resuming\u{2026}",
+            Busy::Removing => "Removing\u{2026}",
+        }
+    }
+}
+
+/// One row's busy state, and whether the command behind it has finished.
+///
+/// A finished command is not the end of the busy state: the row is still on
+/// screen until the list is read again, and its buttons coming back for that
+/// gap would invite a second click on something already gone.
+#[derive(Clone, Debug)]
+pub(crate) struct InFlight {
+    busy: Busy,
+    /// The `actions` key of the task that started it, so an outcome that arrives
+    /// late cannot settle a newer operation on the same id.
+    token: usize,
+    settled: bool,
+    /// What this entry took the row over from, when a removal lands on a row an
+    /// action is still running on.
+    ///
+    /// Kept so a refused removal hands the row back to the action instead of
+    /// leaving it looking idle mid-action. A removal that goes through drops it:
+    /// the row is going away and the action's outcome no longer matters.
+    displaced: Option<Box<InFlight>>,
+}
+
+impl InFlight {
+    pub(crate) fn new(busy: Busy, token: usize) -> Self {
+        Self {
+            busy,
+            token,
+            settled: false,
+            displaced: None,
+        }
+    }
+
+    /// What is left of this entry once the operation `token` has finished, or
+    /// `None` when the row has nothing left to wait for.
+    ///
+    /// An outcome for a displaced operation is applied to it where it sits, so
+    /// that restoring it later does not bring back something already over.
+    fn finished(self, token: usize, failed: bool) -> Option<InFlight> {
+        if self.token != token {
+            let displaced = self
+                .displaced
+                .and_then(|displaced| displaced.finished(token, failed))
+                .map(Box::new);
+            return Some(InFlight { displaced, ..self });
+        }
+        if failed {
+            return self.displaced.map(|displaced| *displaced);
+        }
+        Some(InFlight {
+            settled: true,
+            displaced: None,
+            ..self
+        })
+    }
+}
+
 pub struct ContainerPanel {
     /// The width the view was last drawn at, when it is standing on its own.
     ///
@@ -77,12 +155,16 @@ pub struct ContainerPanel {
     /// this one owns a child process. Detached, every close of the column would
     /// leave a `docker events` behind.
     pub(crate) watch: Option<Task<()>>,
-    /// Actions still running, by resource id, so a row can say "stopping" rather
-    /// than sitting still.
+    /// Operations still running, by resource id, so a row can say "stopping" or
+    /// "removing" rather than sitting still.
     ///
     /// `docker stop` waits ten seconds for the process before killing it. A
     /// button that goes dead for ten seconds with no explanation reads as broken.
-    pub(crate) in_flight: HashMap<String, ResourceAction>,
+    ///
+    /// Bounded: an entry ends when the list is read again after its command
+    /// finished, immediately if the command failed, and all of them go when the
+    /// engine or kind changes, since those rows are no longer on screen.
+    pub(crate) in_flight: HashMap<String, InFlight>,
     /// The last action that failed, until it is dismissed or another runs.
     ///
     /// Kept and shown rather than logged: CLAUDE.md requires an async failure to
@@ -228,6 +310,48 @@ impl ContainerPanel {
         ]
     }
 
+    pub(crate) fn busy_for(&self, id: &str) -> Option<Busy> {
+        self.in_flight.get(id).map(|in_flight| in_flight.busy)
+    }
+
+    /// Every busy row as plain data, for a list closure that is asked again on
+    /// every frame and cannot borrow the panel.
+    pub(crate) fn busy_rows(&self) -> HashMap<String, Busy> {
+        self.in_flight
+            .iter()
+            .map(|(id, in_flight)| (id.clone(), in_flight.busy))
+            .collect()
+    }
+
+    fn mark_busy(&mut self, ids: impl IntoIterator<Item = String>, busy: Busy, token: usize) {
+        for id in ids {
+            let displaced = self.in_flight.remove(&id).map(Box::new);
+            self.in_flight.insert(
+                id,
+                InFlight {
+                    displaced,
+                    ..InFlight::new(busy, token)
+                },
+            );
+        }
+    }
+
+    /// Records that the command finished.
+    ///
+    /// Success leaves the row busy until the list is read again (see
+    /// `InFlight`); failure clears it at once, because the list that follows may
+    /// be the very thing that is failing and the row has nothing left to wait for.
+    fn finish_busy(&mut self, ids: &[String], token: usize, failed: bool) {
+        for id in ids {
+            let Some(in_flight) = self.in_flight.remove(id) else {
+                continue;
+            };
+            if let Some(remaining) = in_flight.finished(token, failed) {
+                self.in_flight.insert(id.clone(), remaining);
+            }
+        }
+    }
+
     pub(crate) fn backend(&self) -> Option<&Arc<dyn ContainerBackend>> {
         self.backends.get(self.active_backend)
     }
@@ -244,6 +368,7 @@ impl ContainerPanel {
         }
         self.active_backend = index;
         self.state = ListState::Loading;
+        self.in_flight.clear();
         // Whatever file and targets were found belonged to the old engine's
         // picker. Leaving them would let a context chosen for one engine be
         // offered as though it belonged to another.
@@ -357,21 +482,20 @@ impl ContainerPanel {
             return;
         }
         let kind = self.active_kind;
-        self.in_flight.insert(id.clone(), action);
+        let action_id = self.next_action_id;
+        self.next_action_id += 1;
+        self.mark_busy([id.clone()], Busy::Action(action), action_id);
         self.last_error = None;
         cx.notify();
 
-        let action_id = self.next_action_id;
-        self.next_action_id += 1;
         self.actions.insert(
             action_id,
             cx.spawn(async move |this, cx| {
                 let outcome = backend.act(kind, action, &id).await;
                 if let Err(error) = this.update(cx, |this, cx| {
-                    this.in_flight.remove(&id);
-                    match outcome {
-                        Ok(()) => {}
-                        Err(error) => this.last_error = Some(error),
+                    this.finish_busy(&[id], action_id, outcome.is_err());
+                    if let Err(error) = outcome {
+                        this.last_error = Some(error);
                     }
                     // Whether it worked or not: the engine is the only thing
                     // that knows the resulting state.
@@ -452,15 +576,22 @@ impl ContainerPanel {
         let Some(backend) = self.backend().cloned() else {
             return;
         };
-        self.last_error = None;
-        cx.notify();
         let action_id = self.next_action_id;
         self.next_action_id += 1;
+        let ids: Vec<String> = plan
+            .targets()
+            .iter()
+            .map(|target| target.id.clone())
+            .collect();
+        self.mark_busy(ids.iter().cloned(), Busy::Removing, action_id);
+        self.last_error = None;
+        cx.notify();
         self.actions.insert(
             action_id,
             cx.spawn(async move |this, cx| {
                 let outcome = backend.destroy(&plan).await;
                 if let Err(error) = this.update(cx, |this, cx| {
+                    this.finish_busy(&ids, action_id, outcome.is_err());
                     if let Err(error) = outcome {
                         this.last_error = Some(error);
                     }
@@ -498,6 +629,7 @@ impl ContainerPanel {
         // Same reason as switching engine: a volume list left on screen under an
         // "Images" heading is a lie for as long as the command takes.
         self.state = ListState::Loading;
+        self.in_flight.clear();
         self.close_detail(cx);
         self.reload(cx);
         cx.notify();
@@ -556,6 +688,7 @@ impl ContainerPanel {
         };
         self.backends[self.active_backend] = aimed;
         self.state = ListState::Loading;
+        self.in_flight.clear();
         self.close_detail(cx);
         self.reload(cx);
         self.start_watching(cx);
@@ -607,6 +740,9 @@ impl ContainerPanel {
                 }
                 this.state = state;
                 this.reloading = false;
+                // The list is the engine's answer to what the finished commands
+                // did, so rows waiting on one are done being waited on.
+                this.in_flight.retain(|_, in_flight| !in_flight.settled);
                 cx.notify();
             })
             .ok();
