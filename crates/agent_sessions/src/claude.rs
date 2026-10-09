@@ -261,6 +261,7 @@ impl SessionProvider for ClaudeProvider {
             return Ok(TranscriptProgress {
                 tool_use_ids: Vec::new(),
                 turn_marks: Vec::new(),
+                subagent_events: Vec::new(),
                 scanned_to: from,
                 restarted: false,
             });
@@ -905,6 +906,50 @@ mod tests {
     }
 
     #[test]
+    fn a_sidecar_says_whether_the_subagent_was_started_in_the_background() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("subagents");
+        sidecar(
+            &dir,
+            "agent-bg",
+            r#"{"agentType":"tester","toolUseId":"toolu_1","spawnDepth":1,"requestShape":"background","requestNonInteractive":true}"#,
+        );
+        sidecar(
+            &dir,
+            "agent-fg",
+            r#"{"agentType":"tester","toolUseId":"toolu_2","requestShape":"foreground"}"#,
+        );
+        sidecar(
+            &dir,
+            "agent-old",
+            r#"{"agentType":"tester","toolUseId":"toolu_3"}"#,
+        );
+        let flags: std::collections::HashMap<String, bool> = read_subagents(&dir)
+            .into_iter()
+            .map(|one| (one.id.to_string(), one.background))
+            .collect();
+        assert_eq!(flags["agent-bg"], true);
+        assert_eq!(flags["agent-fg"], false);
+        assert_eq!(flags["agent-old"], false, "no field means today's rule");
+    }
+
+    #[test]
+    fn a_subagent_event_in_a_half_written_line_arrives_exactly_once() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let notification = r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>"}"#;
+        std::fs::write(&log, format!("{notification}\n{notification}")).unwrap();
+        let first = read_transcript_progress(&log, 0).unwrap();
+        assert_eq!(first.subagent_events.len(), 1);
+
+        std::fs::write(&log, format!("{notification}\n{notification}\n")).unwrap();
+        let second = read_transcript_progress(&log, first.scanned_to).unwrap();
+        assert_eq!(second.subagent_events.len(), 1);
+        let third = read_transcript_progress(&log, second.scanned_to).unwrap();
+        assert!(third.subagent_events.is_empty());
+    }
+
+    #[test]
     fn a_missing_sidecar_directory_is_no_subagents_not_an_error() {
         let root = tempfile::tempdir().unwrap();
         assert!(read_subagents(&root.path().join("nothing-here")).is_empty());
@@ -1028,6 +1073,8 @@ fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
                         .unwrap_or_default(),
                 ),
                 tool_use_id: Arc::from(tool_use_id),
+                background: meta.get("requestShape").and_then(serde_json::Value::as_str)
+                    == Some("background"),
                 // An assumption about a format this editor does not own, and the
                 // one claim here no test can settle: every sidecar observed was
                 // written once, at spawn, and never touched again, so its own
@@ -1071,6 +1118,7 @@ fn read_transcript_progress(path: &Path, from: u64) -> Result<TranscriptProgress
         return Ok(TranscriptProgress {
             tool_use_ids: Vec::new(),
             turn_marks: Vec::new(),
+            subagent_events: Vec::new(),
             scanned_to: from,
             restarted,
         });
@@ -1079,10 +1127,11 @@ fn read_transcript_progress(path: &Path, from: u64) -> Result<TranscriptProgress
     // bytes: a replacement character is a different length from what it stands
     // in for, so counting the converted string would drift the resume point.
     let complete = String::from_utf8_lossy(&bytes[..=last_newline]);
-    let (tool_use_ids, turn_marks) = claude_log::scan_chunk(&complete);
+    let scan = claude_log::scan_chunk(&complete);
     Ok(TranscriptProgress {
-        tool_use_ids: tool_use_ids.into_iter().map(Arc::from).collect(),
-        turn_marks,
+        tool_use_ids: scan.tool_use_ids.into_iter().map(Arc::from).collect(),
+        turn_marks: scan.turn_marks,
+        subagent_events: scan.subagent_events,
         scanned_to: from + last_newline as u64 + 1,
         restarted,
     })

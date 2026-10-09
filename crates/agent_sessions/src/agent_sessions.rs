@@ -38,7 +38,7 @@ pub use provider::SessionProvider;
 pub use session_index::SessionIndex;
 pub use summary::{
     AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionSummary, Speaker,
-    SubagentSummary, TranscriptProgress, TurnMark,
+    SubagentEvent, SubagentSummary, TranscriptProgress, TurnMark,
 };
 
 use std::sync::Arc;

@@ -14,7 +14,9 @@
 //! apart, so no staleness threshold separates a thinking subagent from a
 //! finished one.
 
-use agent_sessions::{AgentKind, SessionProvider, SessionSummary, SubagentSummary, TurnMark};
+use agent_sessions::{
+    AgentKind, SessionProvider, SessionSummary, SubagentEvent, SubagentSummary, TurnMark,
+};
 use collections::HashSet;
 use gpui::SharedString;
 use std::sync::Arc;
@@ -33,6 +35,9 @@ pub struct SubagentPass {
     /// on a transient read error would blink the whole disclosure away.
     subagents: Option<Vec<SubagentSummary>>,
     finished: Vec<Arc<str>>,
+    /// Background subagents that stopped or started again in this stretch, in
+    /// file order.
+    events: Vec<SubagentEvent>,
     /// The turn landmarks in the stretch this pass read. Not kept by the
     /// tracker: they are consumed once, by the turn state that folds them.
     turn_marks: Vec<TurnMark>,
@@ -75,6 +80,17 @@ pub struct SubagentTracker {
     /// The tool calls the parent has reported a result for. Only ever grows
     /// within one transcript, which is what lets the scan below be incremental.
     finished: HashSet<Arc<str>>,
+    /// Subagents (by sidecar id) whose latest run has ended. How a background
+    /// subagent ends, since its tool result arrives at launch and says nothing.
+    stopped: HashSet<Arc<str>>,
+    /// Subagents started again since they last stopped. Running whatever their
+    /// shape, because a resume is a fresh run the tool result already answered.
+    resumed: HashSet<Arc<str>>,
+    /// What the last fresh list did not name, per set. An id is pruned only when
+    /// two lists in a row leave it out: a sidecar that fails to read once is
+    /// dropped from that list and comes back in the next, and its stop must
+    /// still be there when it does.
+    unlisted: Unlisted,
     /// How far into the transcript the last pass read. Always the end of a
     /// complete line — see `ClaudeProvider::transcript_progress`.
     scanned_to: u64,
@@ -169,6 +185,7 @@ impl SubagentTracker {
             session: Some(session),
             subagents: subagents.flatten(),
             finished: completed.tool_use_ids,
+            events: completed.subagent_events,
             turn_marks: completed.turn_marks,
             scanned_to: completed.scanned_to,
             restarted: completed.restarted,
@@ -182,6 +199,9 @@ impl SubagentTracker {
             // The pass itself is read from the start of the new file and is
             // the past again.
             self.finished.clear();
+            self.stopped.clear();
+            self.resumed.clear();
+            self.unlisted = Unlisted::default();
             self.scanned_to = 0;
             self.baselined = false;
             // Not reset to "never seen a pass": a replaced file that has no
@@ -202,10 +222,43 @@ impl SubagentTracker {
             self.session = pass.session;
         }
         // Kept when the pass had nothing to say. See `SubagentPass::subagents`.
+        let listed = pass.subagents.is_some();
         if let Some(subagents) = pass.subagents {
             self.subagents = Arc::from(subagents);
         }
         self.finished.extend(pass.finished.iter().cloned());
+        for event in pass.events {
+            match event {
+                SubagentEvent::Stopped(id) => {
+                    self.resumed.remove(&id);
+                    self.stopped.insert(id);
+                }
+                SubagentEvent::Resumed(id) => {
+                    self.stopped.remove(&id);
+                    self.resumed.insert(id);
+                }
+            }
+        }
+        // The list is read after the transcript, so a fresh one names every
+        // subagent this pass could have seen an ending for. Whatever else the
+        // sets hold belongs to no listed subagent -- a background shell's
+        // notification, say -- and would only accumulate. Each set is bounded
+        // by the listed subagents plus whatever one list left out.
+        if listed {
+            let subagents = &self.subagents;
+            prune_after_two_misses(&mut self.finished, &mut self.unlisted.finished, |id| {
+                subagents.iter().any(|subagent| subagent.tool_use_id == *id)
+            });
+            prune_after_two_misses(&mut self.stopped, &mut self.unlisted.stopped, |id| {
+                subagents.iter().any(|subagent| subagent.id == *id)
+            });
+            prune_after_two_misses(&mut self.resumed, &mut self.unlisted.resumed, |id| {
+                subagents.iter().any(|subagent| subagent.id == *id)
+            });
+        }
+        if !live {
+            self.settle_running();
+        }
         self.scanned_to = pass.scanned_to;
         TurnInput {
             marks: pass.turn_marks,
@@ -232,18 +285,89 @@ impl SubagentTracker {
     /// in a stretch of transcript this tracker never read would be wrong here —
     /// which is why the scan is resumed from a complete line and never from the
     /// end of a file that was still being written.
+    ///
+    /// A background subagent's result is the launch receipt, so it runs until
+    /// a notification says it stopped; a resume restarts either kind. A
+    /// foreground one ends on its result, or on a notification when it was
+    /// moved to the background mid-run and kept its foreground shape.
+    ///
+    /// A resume whose notification never arrives would read as running for
+    /// good. Measured on every local transcript, each resume was followed by
+    /// one, and the caller only asks while the tab is working, which bounds it.
     pub fn is_running(&self, subagent: &SubagentSummary) -> bool {
-        !self.finished.contains(&subagent.tool_use_id)
+        self.resumed.contains(&subagent.id)
+            || if subagent.background {
+                !self.stopped.contains(&subagent.id)
+            } else {
+                !self.finished.contains(&subagent.tool_use_id)
+                    && !self.stopped.contains(&subagent.id)
+            }
+    }
+
+    /// The subagents still working, in list order (newest first).
+    pub fn running(&self) -> impl Iterator<Item = &SubagentSummary> {
+        self.subagents
+            .iter()
+            .filter(|subagent| self.is_running(subagent))
+    }
+
+    /// Marks every subagent still reading as running as ended.
+    ///
+    /// For the stretch of transcript that predates this tab: it was written by
+    /// a CLI process that is gone, and a run it left open will never see its
+    /// ending. A later live resume revives one.
+    fn settle_running(&mut self) {
+        let orphans: Vec<SubagentSummary> = self.running().cloned().collect();
+        for subagent in orphans {
+            self.resumed.remove(&subagent.id);
+            if subagent.background {
+                self.stopped.insert(subagent.id);
+            } else {
+                self.finished.insert(subagent.tool_use_id);
+            }
+        }
     }
 
     pub fn any_running(&self) -> bool {
-        self.subagents
-            .iter()
-            .any(|subagent| self.is_running(subagent))
+        self.running().next().is_some()
     }
 }
 
+/// Which ids the previous fresh list left out, one set per kept set.
+#[derive(Default)]
+struct Unlisted {
+    finished: HashSet<Arc<str>>,
+    stopped: HashSet<Arc<str>>,
+    resumed: HashSet<Arc<str>>,
+}
+
+/// Drops from `kept` every id that `is_listed` rejects now and `missed` already
+/// recorded as rejected by the list before, then records this list's rejects.
+fn prune_after_two_misses(
+    kept: &mut HashSet<Arc<str>>,
+    missed: &mut HashSet<Arc<str>>,
+    is_listed: impl Fn(&Arc<str>) -> bool,
+) {
+    let absent: HashSet<Arc<str>> = kept.iter().filter(|id| !is_listed(id)).cloned().collect();
+    kept.retain(|id| !(absent.contains(id) && missed.contains(id)));
+    *missed = absent.difference(missed).cloned().collect();
+}
+
 impl SubagentPass {
+    /// What a scan that found `listed` and the notifications for `stopped`
+    /// would have produced, for tests that have no transcript to read.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn simulated(listed: Vec<SubagentSummary>, stopped: &[Arc<str>]) -> Self {
+        Self {
+            subagents: Some(listed),
+            events: stopped
+                .iter()
+                .map(|id| SubagentEvent::Stopped(id.clone()))
+                .collect(),
+            ..Self::default()
+        }
+    }
+
     fn empty(from: u64) -> Self {
         Self {
             scanned_to: from,
@@ -269,8 +393,358 @@ mod tests {
             kind: "reviewer".into(),
             description: "Review the diff".into(),
             tool_use_id: Arc::from(tool_use_id),
+            background: false,
             spawned_at: SystemTime::UNIX_EPOCH,
         }
+    }
+
+    fn background(id: &str, tool_use_id: &str) -> SubagentSummary {
+        SubagentSummary {
+            background: true,
+            ..subagent(id, tool_use_id)
+        }
+    }
+
+    fn stopped(id: &str) -> SubagentEvent {
+        SubagentEvent::Stopped(Arc::from(id))
+    }
+
+    fn resumed(id: &str) -> SubagentEvent {
+        SubagentEvent::Resumed(Arc::from(id))
+    }
+
+    /// A pass over bytes appended after the tab opened, so it is news and
+    /// nothing in it is settled.
+    fn live_pass(
+        subagents: Vec<SubagentSummary>,
+        finished: Vec<&str>,
+        events: Vec<SubagentEvent>,
+        scanned_to: u64,
+    ) -> SubagentPass {
+        SubagentPass {
+            events,
+            ..pass(subagents, finished, scanned_to)
+        }
+    }
+
+    /// A tracker that has already read its past, so later passes are live.
+    fn live_tracker() -> SubagentTracker {
+        let mut tracker = SubagentTracker::default();
+        tracker.apply(SubagentPass::empty(0));
+        tracker
+    }
+
+    #[test]
+    fn a_background_subagent_runs_past_its_launch_result_until_it_stops() {
+        let mut tracker = live_tracker();
+        let agents = || vec![background("agent-bg", "toolu_bg")];
+        tracker.apply(live_pass(agents(), vec!["toolu_bg"], Vec::new(), 10));
+        assert!(tracker.any_running(), "the launch result is not an ending");
+
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![stopped("agent-bg")],
+            20,
+        ));
+        assert!(!tracker.any_running());
+    }
+
+    #[test]
+    fn a_resumed_background_subagent_runs_again_until_its_second_stop() {
+        let mut tracker = live_tracker();
+        let agents = || vec![background("agent-bg", "toolu_bg")];
+        tracker.apply(live_pass(
+            agents(),
+            vec!["toolu_bg"],
+            vec![stopped("agent-bg")],
+            10,
+        ));
+        assert!(!tracker.any_running());
+
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![resumed("agent-bg")],
+            20,
+        ));
+        assert!(tracker.any_running());
+
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![stopped("agent-bg")],
+            30,
+        ));
+        assert!(!tracker.any_running());
+    }
+
+    #[test]
+    fn events_in_one_pass_apply_in_file_order() {
+        let mut tracker = live_tracker();
+        tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            Vec::new(),
+            vec![stopped("agent-bg"), resumed("agent-bg")],
+            10,
+        ));
+        assert!(tracker.any_running(), "the later resume wins");
+    }
+
+    #[test]
+    fn a_foreground_subagent_keeps_the_result_rule_and_a_resume_revives_it() {
+        let mut tracker = live_tracker();
+        let agents = || vec![subagent("agent-fg", "toolu_fg")];
+        tracker.apply(live_pass(agents(), Vec::new(), Vec::new(), 10));
+        assert!(tracker.any_running());
+        tracker.apply(live_pass(agents(), vec!["toolu_fg"], Vec::new(), 20));
+        assert!(!tracker.any_running());
+
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![resumed("agent-fg")],
+            30,
+        ));
+        assert!(tracker.any_running());
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![stopped("agent-fg")],
+            40,
+        ));
+        assert!(!tracker.any_running());
+    }
+
+    #[test]
+    fn a_notification_for_a_task_that_is_not_a_listed_subagent_changes_nothing() {
+        let mut tracker = live_tracker();
+        tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            Vec::new(),
+            vec![stopped("agent-bq1w2e3r4")],
+            10,
+        ));
+        tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            Vec::new(),
+            Vec::new(),
+            20,
+        ));
+        assert!(tracker.any_running());
+        assert!(
+            tracker.stopped.is_empty(),
+            "an id that two lists in a row leave out is pruned, not kept"
+        );
+    }
+
+    /// A launch left over from an earlier CLI process never gets its
+    /// notification now, so the history read when a tab opens must not leave it
+    /// spinning.
+    #[test]
+    fn unfinished_subagents_in_the_history_read_count_as_ended() {
+        let mut tracker = SubagentTracker::default();
+        let past = tracker.apply(live_pass(
+            vec![
+                background("agent-bg", "toolu_bg"),
+                subagent("agent-fg", "toolu_fg"),
+            ],
+            vec!["toolu_bg"],
+            Vec::new(),
+            500,
+        ));
+        assert!(!past.live);
+        assert!(!tracker.any_running());
+    }
+
+    #[test]
+    fn a_live_resume_revives_a_subagent_the_history_settled() {
+        let mut tracker = SubagentTracker::default();
+        let agents = || vec![background("agent-bg", "toolu_bg")];
+        tracker.apply(live_pass(agents(), vec!["toolu_bg"], Vec::new(), 500));
+        assert!(!tracker.any_running());
+
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![resumed("agent-bg")],
+            600,
+        ));
+        assert!(tracker.any_running());
+    }
+
+    #[test]
+    fn a_resume_inside_the_history_is_settled_too() {
+        let mut tracker = SubagentTracker::default();
+        tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            Vec::new(),
+            vec![resumed("agent-bg")],
+            500,
+        ));
+        assert!(!tracker.any_running());
+    }
+
+    #[test]
+    fn a_restarted_transcript_clears_what_was_known_and_settles_again() {
+        let mut tracker = live_tracker();
+        tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            Vec::new(),
+            vec![stopped("agent-bg")],
+            900,
+        ));
+        tracker.apply(SubagentPass {
+            subagents: Some(vec![background("agent-bg", "toolu_bg")]),
+            scanned_to: 100,
+            restarted: true,
+            ..SubagentPass::default()
+        });
+        assert!(!tracker.any_running(), "the new file's past is settled");
+        assert!(
+            tracker.resumed.is_empty() && tracker.finished.is_empty(),
+            "nothing of the old file survives"
+        );
+    }
+
+    #[test]
+    fn state_stays_bounded_by_the_listed_subagents() {
+        let mut tracker = live_tracker();
+        let finished: Vec<String> = (0..50).map(|n| format!("toolu_{n}")).collect();
+        let events: Vec<SubagentEvent> = (0..50)
+            .flat_map(|n| {
+                [
+                    stopped(&format!("agent-gone-{n}")),
+                    resumed(&format!("agent-x-{n}")),
+                ]
+            })
+            .collect();
+        let agents = || vec![background("agent-bg", "toolu_0")];
+        tracker.apply(live_pass(
+            agents(),
+            finished.iter().map(String::as_str).collect(),
+            events,
+            10,
+        ));
+        tracker.apply(live_pass(agents(), Vec::new(), Vec::new(), 20));
+        assert!(tracker.finished.len() <= 1);
+        assert!(tracker.stopped.len() <= 1);
+        assert!(tracker.resumed.len() <= 1);
+    }
+
+    /// A sidecar that cannot be read for one pass is missing from that list
+    /// and back in the next; its stop must have survived the gap.
+    #[test]
+    fn a_stop_survives_one_list_that_left_its_subagent_out() {
+        let mut tracker = live_tracker();
+        let agents = || vec![background("agent-bg", "toolu_bg")];
+        tracker.apply(live_pass(agents(), Vec::new(), Vec::new(), 10));
+        tracker.apply(live_pass(
+            Vec::new(),
+            Vec::new(),
+            vec![stopped("agent-bg")],
+            20,
+        ));
+        tracker.apply(live_pass(agents(), Vec::new(), Vec::new(), 30));
+        assert!(
+            !tracker.any_running(),
+            "the sidecar came back, still stopped"
+        );
+    }
+
+    #[test]
+    fn a_stop_for_a_subagent_absent_from_two_lists_in_a_row_is_dropped() {
+        let mut tracker = live_tracker();
+        tracker.apply(live_pass(
+            Vec::new(),
+            Vec::new(),
+            vec![stopped("agent-bg")],
+            10,
+        ));
+        tracker.apply(live_pass(Vec::new(), Vec::new(), Vec::new(), 20));
+        assert!(tracker.stopped.is_empty());
+    }
+
+    /// A list that names the id again in between resets the count.
+    #[test]
+    fn two_misses_must_be_consecutive() {
+        let mut tracker = live_tracker();
+        let agents = || vec![background("agent-bg", "toolu_bg")];
+        tracker.apply(live_pass(
+            Vec::new(),
+            Vec::new(),
+            vec![stopped("agent-bg")],
+            10,
+        ));
+        tracker.apply(live_pass(agents(), Vec::new(), Vec::new(), 20));
+        tracker.apply(live_pass(Vec::new(), Vec::new(), Vec::new(), 30));
+        assert!(tracker.stopped.contains("agent-bg"));
+    }
+
+    /// A tab that opened onto no transcript is live from byte zero, so a
+    /// background launch in its very first scanned chunk is news, not history.
+    #[test]
+    fn a_launch_in_a_new_tabs_first_chunk_reads_as_running() {
+        let mut tracker = SubagentTracker::default();
+        assert!(tracker.apply(SubagentPass::empty(0)).live);
+        let first_chunk = tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            vec!["toolu_bg"],
+            Vec::new(),
+            300,
+        ));
+        assert!(first_chunk.live);
+        assert!(tracker.any_running());
+    }
+
+    #[test]
+    fn a_foreground_subagent_moved_to_the_background_ends_on_its_stop() {
+        let mut tracker = live_tracker();
+        let agents = || vec![subagent("agent-fg", "toolu_fg")];
+        tracker.apply(live_pass(agents(), Vec::new(), Vec::new(), 10));
+        assert!(tracker.any_running());
+        tracker.apply(live_pass(
+            agents(),
+            Vec::new(),
+            vec![stopped("agent-fg")],
+            20,
+        ));
+        assert!(!tracker.any_running());
+    }
+
+    #[test]
+    fn a_pass_with_no_fresh_list_does_not_prune() {
+        let mut tracker = live_tracker();
+        tracker.apply(live_pass(
+            vec![background("agent-bg", "toolu_bg")],
+            Vec::new(),
+            Vec::new(),
+            10,
+        ));
+        tracker.apply(SubagentPass {
+            events: vec![stopped("agent-bg")],
+            scanned_to: 20,
+            ..SubagentPass::default()
+        });
+        assert!(!tracker.any_running());
+        assert!(tracker.stopped.contains("agent-bg"));
+    }
+
+    #[test]
+    fn running_lists_only_what_is_running_in_list_order() {
+        let mut tracker = live_tracker();
+        tracker.apply(live_pass(
+            vec![
+                background("agent-new", "toolu_1"),
+                background("agent-done", "toolu_2"),
+                subagent("agent-old", "toolu_3"),
+            ],
+            Vec::new(),
+            vec![stopped("agent-done")],
+            10,
+        ));
+        let ids: Vec<&str> = tracker.running().map(|one| &*one.id).collect();
+        assert_eq!(ids, vec!["agent-new", "agent-old"]);
     }
 
     fn pass(subagents: Vec<SubagentSummary>, finished: Vec<&str>, scanned_to: u64) -> SubagentPass {
@@ -287,7 +761,7 @@ mod tests {
     /// Spawned and unreported is running; reported is not. The whole rule.
     #[test]
     fn a_subagent_runs_until_its_result_is_reported() {
-        let mut tracker = SubagentTracker::default();
+        let mut tracker = live_tracker();
         tracker.apply(pass(
             vec![subagent("agent-one", "toolu_one")],
             Vec::new(),
@@ -458,8 +932,8 @@ mod tests {
         assert!(replaced.restarted);
         assert!(!replaced.live, "the new file's contents are the past");
         assert!(
-            tracker.is_running(&subagent("agent-one", "toolu_one")),
-            "results of the old file no longer count"
+            !tracker.is_running(&subagent("agent-one", "toolu_one")),
+            "the new file's past is settled, whatever the old file said"
         );
         assert!(tracker.apply(reading(200)).live);
     }

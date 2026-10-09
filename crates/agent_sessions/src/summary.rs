@@ -144,6 +144,11 @@ pub struct SubagentSummary {
     /// reported under. See
     /// [`SessionProvider::transcript_progress`](crate::SessionProvider::transcript_progress).
     pub tool_use_id: Arc<str>,
+    /// Started with `run_in_background`. Its tool call is answered within a
+    /// second of launch, so that result says nothing about when it ends; only
+    /// a [`SubagentEvent::Stopped`] does. A sidecar that does not say counts as
+    /// foreground.
+    pub background: bool,
     /// When the sidecar was written, which is when the subagent started.
     pub spawned_at: SystemTime,
 }
@@ -174,6 +179,16 @@ pub enum TurnMark {
     Interrupt,
 }
 
+/// A change in whether a background subagent is running, read from the
+/// parent's transcript. Ids are [`SubagentSummary::id`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentEvent {
+    /// The agent reported it stopped (any status: finished, failed, killed).
+    Stopped(Arc<str>),
+    /// The agent was started again by a later message to it.
+    Resumed(Arc<str>),
+}
+
 /// What one incremental pass over a transcript found.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TranscriptProgress {
@@ -184,6 +199,9 @@ pub struct TranscriptProgress {
     ///
     /// [report turns]: crate::SessionProvider::reports_turns
     pub turn_marks: Vec<TurnMark>,
+    /// Subagents that stopped or resumed within the bytes just read, in file
+    /// order — order matters, a run can stop, resume and stop again.
+    pub subagent_events: Vec<SubagentEvent>,
     /// Where the next pass should resume. Never moves backwards except when the
     /// transcript itself shrank, which means a different file is under the same
     /// path and the whole scan starts again.

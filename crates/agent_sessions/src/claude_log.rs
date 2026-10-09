@@ -8,7 +8,7 @@
 //! Everything in this module takes `&str` rather than a path. That keeps the
 //! parse decisions testable without a filesystem, and keeps them in one place.
 
-use crate::{Speaker, TurnMark};
+use crate::{Speaker, SubagentEvent, TurnMark};
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
@@ -103,6 +103,14 @@ pub(crate) fn line_is_message(line: &str) -> bool {
     line.contains(r#""type":"user""#) || line.contains(r#""type":"assistant""#)
 }
 
+/// What one pass over a stretch of transcript found.
+#[derive(Default, Debug, PartialEq)]
+pub(crate) struct ChunkScan {
+    pub tool_use_ids: Vec<String>,
+    pub turn_marks: Vec<TurnMark>,
+    pub subagent_events: Vec<SubagentEvent>,
+}
+
 /// The tool calls this stretch of transcript reports a result for, and the
 /// landmarks of the main conversation chain, in the order the file wrote them.
 ///
@@ -133,9 +141,8 @@ pub(crate) fn line_is_message(line: &str) -> bool {
 ///
 /// So it is logged. A spinner that will not stop is a bug someone will report,
 /// and this is the line in the log that explains it.
-pub(crate) fn scan_chunk(chunk: &str) -> (Vec<String>, Vec<TurnMark>) {
-    let mut ids = Vec::new();
-    let mut marks = Vec::new();
+pub(crate) fn scan_chunk(chunk: &str) -> ChunkScan {
+    let mut scan = ChunkScan::default();
     for line in chunk.lines() {
         if !is_scan_candidate(line) {
             continue;
@@ -167,13 +174,32 @@ pub(crate) fn scan_chunk(chunk: &str) -> (Vec<String>, Vec<TurnMark>) {
                 }
                 has_result_block = true;
                 match block.get("tool_use_id").and_then(Value::as_str) {
-                    Some(id) => ids.push(id.to_owned()),
+                    Some(id) => scan.tool_use_ids.push(id.to_owned()),
                     None => log::warn!(
                         "a tool result carries no readable `tool_use_id`; the \
                          subagent it ends will read as still running"
                     ),
                 }
             }
+        }
+        // Before the sidechain skip, like the tool_use_ids above: a subagent
+        // resuming a sibling is still a run that started, and the tracker looks
+        // for it by sidecar id whichever chain reported it.
+        if has_result_block
+            && let Some(task_id) = value
+                .get("toolUseResult")
+                .and_then(|result| result.get("resumedAgentId"))
+                .and_then(Value::as_str)
+        {
+            scan.subagent_events
+                .push(SubagentEvent::Resumed(sidecar_id(task_id)));
+        }
+        if kind == Some("queue-operation") {
+            for task_id in notified_task_ids(&value) {
+                scan.subagent_events
+                    .push(SubagentEvent::Stopped(sidecar_id(task_id)));
+            }
+            continue;
         }
         if is_sidechain {
             continue;
@@ -205,18 +231,18 @@ pub(crate) fn scan_chunk(chunk: &str) -> (Vec<String>, Vec<TurnMark>) {
                     .and_then(Value::as_str)
                 {
                     Some("tool_use") => {
-                        marks.push(TurnMark::Working);
+                        scan.turn_marks.push(TurnMark::Working);
                         let blocks = content.and_then(Value::as_array).into_iter().flatten();
                         for block in blocks {
                             if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                                 continue;
                             }
                             if let Some(id) = block.get("id").and_then(Value::as_str) {
-                                marks.push(TurnMark::ToolCall(Arc::from(id)));
+                                scan.turn_marks.push(TurnMark::ToolCall(Arc::from(id)));
                             }
                         }
                     }
-                    Some(_) => marks.push(TurnMark::EndTurn {
+                    Some(_) => scan.turn_marks.push(TurnMark::EndTurn {
                         message_id: message
                             .and_then(|message| message.get("id"))
                             .and_then(Value::as_str)
@@ -227,7 +253,7 @@ pub(crate) fn scan_chunk(chunk: &str) -> (Vec<String>, Vec<TurnMark>) {
             }
             Some("system") => {
                 if value.get("subtype").and_then(Value::as_str) == Some("turn_duration") {
-                    marks.push(TurnMark::TurnDuration {
+                    scan.turn_marks.push(TurnMark::TurnDuration {
                         background_pending: value
                             .get("pendingBackgroundAgentCount")
                             .and_then(Value::as_u64)
@@ -237,13 +263,48 @@ pub(crate) fn scan_chunk(chunk: &str) -> (Vec<String>, Vec<TurnMark>) {
             }
             Some("user") => {
                 if let Some(mark) = user_mark(&value, content, has_result_block) {
-                    marks.push(mark);
+                    scan.turn_marks.push(mark);
                 }
             }
             _ => {}
         }
     }
-    (ids, marks)
+    scan
+}
+
+/// The sidecar file stem Claude Code gives a subagent: `agent-` and its task id.
+fn sidecar_id(task_id: &str) -> Arc<str> {
+    Arc::from(format!("agent-{task_id}"))
+}
+
+/// The tasks a queued `<task-notification>` enqueue is about -- one per block,
+/// since a single enqueue may batch several. Only an `enqueue` counts: the same
+/// text reappears on `remove`, in attachments and in prose, and counting those
+/// would end a resumed run the moment it restarted.
+fn notified_task_ids(value: &Value) -> Vec<&str> {
+    if value.get("operation").and_then(Value::as_str) != Some("enqueue") {
+        return Vec::new();
+    }
+    let Some(content) = value.get("content").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    if !content.trim_start().starts_with("<task-notification>") {
+        return Vec::new();
+    }
+    content
+        .split("<task-notification>")
+        .skip(1)
+        .filter_map(|block| {
+            let task_id = between(block, "<task-id>", "</task-id>").map(str::trim);
+            if task_id.is_none_or(str::is_empty) {
+                log::warn!(
+                    "a task notification names no task; the subagent it ends will read as still running"
+                );
+                return None;
+            }
+            task_id
+        })
+        .collect()
 }
 
 const INTERRUPT_MARKER: &str = "[Request interrupted by user";
@@ -254,6 +315,7 @@ fn is_scan_candidate(line: &str) -> bool {
         r#""type":"user""#,
         r#""stop_reason":""#,
         r#""subtype":"turn_duration""#,
+        r#""operation":"enqueue""#,
     ]
     .iter()
     .any(|needle| line.contains(needle))
@@ -589,13 +651,16 @@ not json at all
 
     #[test]
     fn only_a_result_ends_a_subagent_not_the_call_that_started_it() {
-        assert_eq!(scan_chunk(SUBAGENT_BRACKET).0, vec!["toolu_finished"]);
+        assert_eq!(
+            scan_chunk(SUBAGENT_BRACKET).tool_use_ids,
+            vec!["toolu_finished"]
+        );
     }
 
     #[test]
     fn a_transcript_with_no_results_ends_nothing() {
-        assert!(scan_chunk(TAIL).0.is_empty());
-        assert!(scan_chunk("").0.is_empty());
+        assert!(scan_chunk(TAIL).tool_use_ids.is_empty());
+        assert!(scan_chunk("").tool_use_ids.is_empty());
     }
 
     /// The chosen behaviour on a result nobody can read, pinned so it is a
@@ -618,7 +683,7 @@ not json at all
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_after"}]}}"#,
         );
         assert_eq!(
-            scan_chunk(mixed).0,
+            scan_chunk(mixed).tool_use_ids,
             vec!["toolu_good", "toolu_after"],
             "one unreadable result must not cost the readable ones around it"
         );
@@ -633,11 +698,11 @@ not json at all
             "\n",
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"tool_result"}]}}"#,
         );
-        assert!(scan_chunk(decoys).0.is_empty());
+        assert!(scan_chunk(decoys).tool_use_ids.is_empty());
     }
 
     fn marks(chunk: &str) -> Vec<TurnMark> {
-        scan_chunk(chunk).1
+        scan_chunk(chunk).turn_marks
     }
 
     fn tool_call(id: &str) -> TurnMark {
@@ -736,7 +801,11 @@ not json at all
             r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":"sub prompt"}}"#,
             r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_side"}]}}"#,
         ]);
-        let (ids, marks) = scan_chunk(&chunk);
+        let ChunkScan {
+            tool_use_ids: ids,
+            turn_marks: marks,
+            ..
+        } = scan_chunk(&chunk);
         assert!(marks.is_empty());
         assert_eq!(ids, vec!["toolu_side"]);
     }
@@ -746,7 +815,11 @@ not json at all
         let meta = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<command-name>/x</command-name>"}}"#;
         let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_r"}]}}"#;
         assert!(marks(meta).is_empty());
-        let (ids, marks) = scan_chunk(result);
+        let ChunkScan {
+            tool_use_ids: ids,
+            turn_marks: marks,
+            ..
+        } = scan_chunk(result);
         assert_eq!(ids, vec!["toolu_r"]);
         assert!(marks.is_empty());
     }
@@ -840,7 +913,11 @@ not json at all
     fn a_prompt_that_mentions_tool_result_is_a_prompt_with_no_id() {
         let line =
             r#"{"type":"user","message":{"role":"user","content":"why is tool_result missing"}}"#;
-        let (ids, marks) = scan_chunk(line);
+        let ChunkScan {
+            tool_use_ids: ids,
+            turn_marks: marks,
+            ..
+        } = scan_chunk(line);
         assert!(ids.is_empty());
         assert_eq!(marks, vec![TurnMark::Prompt]);
     }
@@ -867,7 +944,7 @@ not json at all
             r#"{"type":"mode","mode":"plan"}"#,
             r#"{"type":"system","subtype":"informational"}"#,
         ]);
-        assert_eq!(scan_chunk(&chunk), (Vec::new(), Vec::new()));
+        assert_eq!(scan_chunk(&chunk), ChunkScan::default());
     }
 
     #[test]
@@ -913,5 +990,130 @@ not json at all
         })
         .to_string();
         assert_eq!(parse_tail(&line).preview.as_deref(), Some("ab c d e"));
+    }
+
+    const LAUNCH_RESULT: &str = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_bg","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a254ef155e0d05a00"}}"#;
+    const RESUME_RESULT: &str = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_resume","type":"tool_result","content":[{"type":"text","text":"resumed"}]}]},"toolUseResult":{"success":true,"message":"Resuming agent a1ea775","resumedAgentId":"a254ef155e0d05a00"}}"#;
+
+    fn notification(task_id: &str, status: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-05T13:27:22.560Z","sessionId":"s","content":"<task-notification>\n<task-id>{task_id}</task-id>\n<tool-use-id>toolu_bg</tool-use-id>\n<output-file>/tmp/{task_id}.output</output-file>\n<status>{status}</status>\n<summary>Agent finished</summary>\n</task-notification>"}}"#
+        )
+    }
+
+    fn stopped(task_id: &str) -> SubagentEvent {
+        SubagentEvent::Stopped(Arc::from(format!("agent-{task_id}")))
+    }
+
+    fn resumed(task_id: &str) -> SubagentEvent {
+        SubagentEvent::Resumed(Arc::from(format!("agent-{task_id}")))
+    }
+
+    #[test]
+    fn a_background_launch_result_and_its_notification_both_register() {
+        let chunk = lines(&[
+            LAUNCH_RESULT,
+            &notification("a254ef155e0d05a00", "completed"),
+        ]);
+        let scan = scan_chunk(&chunk);
+        assert_eq!(scan.tool_use_ids, vec!["toolu_bg"]);
+        assert_eq!(scan.subagent_events, vec![stopped("a254ef155e0d05a00")]);
+    }
+
+    #[test]
+    fn a_resume_sits_between_two_stops_in_file_order() {
+        let chunk = lines(&[
+            &notification("a254ef155e0d05a00", "completed"),
+            RESUME_RESULT,
+            &notification("a254ef155e0d05a00", "completed"),
+        ]);
+        assert_eq!(
+            scan_chunk(&chunk).subagent_events,
+            vec![
+                stopped("a254ef155e0d05a00"),
+                resumed("a254ef155e0d05a00"),
+                stopped("a254ef155e0d05a00")
+            ]
+        );
+    }
+
+    #[test]
+    fn every_terminal_status_ends_the_run() {
+        for status in ["completed", "failed", "killed", "stopped", "something-new"] {
+            assert_eq!(
+                scan_chunk(&notification("abc", status)).subagent_events,
+                vec![stopped("abc")],
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn copies_of_a_notification_outside_an_enqueue_line_are_ignored() {
+        let text = r#"<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>"#;
+        let chunk = lines(&[
+            &format!(r#"{{"type":"queue-operation","operation":"remove","content":"{text}"}}"#),
+            &format!(
+                r#"{{"type":"attachment","attachment":{{"type":"queued_command","prompt":"{text}"}}}}"#
+            ),
+            &format!(r#"{{"type":"user","message":{{"role":"user","content":"{text}"}}}}"#),
+            &format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","stop_reason":"end_turn","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            ),
+        ]);
+        assert!(scan_chunk(&chunk).subagent_events.is_empty());
+    }
+
+    #[test]
+    fn a_foreground_result_makes_no_event_and_a_send_message_is_not_a_resume() {
+        let send_message = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_sm","type":"tool_result","content":"queued"}]},"toolUseResult":{"success":true,"message":"Message queued"}}"#;
+        let chunk = lines(&[SUBAGENT_BRACKET.trim(), send_message]);
+        let scan = scan_chunk(&chunk);
+        assert_eq!(scan.tool_use_ids, vec!["toolu_finished", "toolu_sm"]);
+        assert!(scan.subagent_events.is_empty());
+    }
+
+    #[test]
+    fn a_background_bash_notification_yields_an_id_no_subagent_has() {
+        assert_eq!(
+            scan_chunk(&notification("bq1w2e3r4", "completed")).subagent_events,
+            vec![stopped("bq1w2e3r4")]
+        );
+    }
+
+    #[test]
+    fn a_notification_missing_its_task_id_is_skipped() {
+        let line = r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<status>completed</status>\n</task-notification>"}"#;
+        assert!(scan_chunk(line).subagent_events.is_empty());
+    }
+
+    #[test]
+    fn every_notification_block_in_one_enqueue_ends_its_own_task() {
+        let line = r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>aaa</task-id>\n<status>completed</status>\n</task-notification>\n<task-notification>\n<task-id>bbb</task-id>\n<status>failed</status>\n</task-notification>"}"#;
+        assert_eq!(
+            scan_chunk(line).subagent_events,
+            vec![stopped("aaa"), stopped("bbb")]
+        );
+    }
+
+    #[test]
+    fn a_block_without_a_task_id_does_not_hide_the_blocks_around_it() {
+        let line = r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>aaa</task-id>\n</task-notification>\n<task-notification>\n<status>completed</status>\n</task-notification>\n<task-notification>\n<task-id>ccc</task-id>\n</task-notification>"}"#;
+        assert_eq!(
+            scan_chunk(line).subagent_events,
+            vec![stopped("aaa"), stopped("ccc")]
+        );
+    }
+
+    #[test]
+    fn a_resume_reported_on_a_sidechain_line_still_counts() {
+        let line = RESUME_RESULT.replacen(
+            r#"{"type":"user","#,
+            r#"{"type":"user","isSidechain":true,"#,
+            1,
+        );
+        let scan = scan_chunk(&line);
+        assert_eq!(scan.subagent_events, vec![resumed("a254ef155e0d05a00")]);
+        assert!(scan.turn_marks.is_empty());
     }
 }

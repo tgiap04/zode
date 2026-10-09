@@ -2343,3 +2343,260 @@ mod single_delete {
         cx.run_until_parked();
     }
 }
+
+/// What the branch panel draws under an agent row: the subagents running right
+/// now, and nothing else.
+mod running_subagents {
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use agent_sessions::SubagentSummary;
+    use gpui::{TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use super::{BranchPanel, panel_over_a_repo};
+    use crate::branch_panel::tree::{AgentEntry, RowKey};
+
+    fn background(id: &str) -> SubagentSummary {
+        SubagentSummary {
+            id: Arc::from(id),
+            kind: Arc::from("reviewer"),
+            description: Arc::from("Reads the diff"),
+            tool_use_id: Arc::from(format!("toolu_{id}")),
+            background: true,
+            spawned_at: SystemTime::now(),
+        }
+    }
+
+    /// A panel docked in a real window with one Claude tab open and the
+    /// checkout's agent list expanded, so the card draws its agent row.
+    async fn panel_showing_an_agent(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        gpui::Entity<agent_ui::AgentView>,
+        &mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<BranchPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        let key = panel.read_with(cx, |panel, _| {
+            let repo = &panel.repos[0];
+            RowKey::WorktreeAgents(repo.id, Arc::from(repo.worktrees[0].path.as_path()))
+        });
+        panel.update(cx, |panel, cx| panel.toggle_row(key, cx));
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        let view = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .next()
+                .expect("the agent tab just opened")
+        });
+        view.update(cx, |view, cx| view.simulate_cli_alive(true, cx));
+        cx.run_until_parked();
+        (panel, view, cx)
+    }
+
+    /// Lets the window draw and publish the frame, which is what fills in
+    /// `debug_bounds`: parking alone leaves it empty.
+    fn draw(cx: &mut VisualTestContext) {
+        cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_running_background_subagent_gets_one_row_with_a_spinner(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(vec![background("agent-a")], &[], cx)
+        });
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+        assert!(
+            cx.debug_bounds("subagent-spinner:agent-a").is_some(),
+            "a running subagent spins"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_subagent_that_stops_loses_its_row(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+        let listed = vec![background("agent-a")];
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed.clone(), &[], cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed, &[Arc::from("agent-a")], cx)
+        });
+        // No resize this time: the panel has to notice by itself, on its own
+        // activity tick, which is what happens when a subagent stops in a
+        // window nobody is touching. The resize above is only the first frame.
+        cx.executor()
+            .advance_clock(crate::branch_panel::lifecycle::ACTIVITY_TICK);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("subagent-row:agent-a").is_none(),
+            "a finished subagent draws nothing"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_tab_whose_cli_is_gone_draws_no_subagent_rows(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(vec![background("agent-a")], &[], cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+
+        view.update(cx, |view, cx| view.simulate_cli_alive(false, cx));
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(
+            view.read_with(cx, |view, cx| view.running_subagents(cx).next().is_none()),
+            "the tracker still lists it as running; the tab's own state is what hides it"
+        );
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_none());
+    }
+
+    #[gpui::test]
+    async fn a_past_entry_in_the_panel_draws_no_subagent_rows(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<BranchPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        // A session on disk and no tab open on it: the panel lists it as past.
+        let store = panel
+            .read_with(cx, |panel, _| panel.session_store.clone())
+            .expect("the store was just created");
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(
+                vec![agent_sessions::SessionSummary {
+                    id: Arc::from("old-session"),
+                    agent: agent_sessions::AgentKind::Claude,
+                    title: "an old session".into(),
+                    preview: String::new(),
+                    preview_speaker: None,
+                    cwd: std::path::PathBuf::from("/repos/zode"),
+                    branch: None,
+                    model: None,
+                    updated_at: SystemTime::now(),
+                    log_path: None,
+                    log_bytes: 0,
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let key = panel.read_with(cx, |panel, _| {
+            let repo = &panel.repos[0];
+            RowKey::WorktreeAgents(repo.id, Arc::from(repo.worktrees[0].path.as_path()))
+        });
+        panel.update(cx, |panel, cx| panel.toggle_row(key, cx));
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        draw(cx);
+
+        panel.read_with(cx, |panel, _| {
+            let shown = panel.rows.iter().any(|row| match row {
+                crate::branch_panel::tree::TreeRow::Worktree {
+                    agents, expanded, ..
+                } => *expanded && agents.iter().any(|agent| !agent.is_open()),
+                _ => false,
+            });
+            assert!(
+                shown,
+                "the past session is on screen, or this proves nothing"
+            );
+        });
+        assert!(
+            cx.debug_bounds("subagent-row:agent-a").is_none()
+                && cx.debug_bounds("subagent-spinner:agent-a").is_none()
+        );
+    }
+
+    #[gpui::test]
+    async fn the_others_stay_when_one_of_two_stops(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+        let listed = vec![background("agent-a"), background("agent-b")];
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed.clone(), &[], cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+        assert!(cx.debug_bounds("subagent-row:agent-b").is_some());
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed, &[Arc::from("agent-a")], cx)
+        });
+        draw(cx);
+
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_none());
+        assert!(cx.debug_bounds("subagent-row:agent-b").is_some());
+    }
+
+    #[gpui::test]
+    async fn a_session_without_a_tab_shows_no_subagents(cx: &mut TestAppContext) {
+        let (_panel, _view, cx) = panel_showing_an_agent(cx).await;
+        let past = AgentEntry::Past {
+            label: "an old session".into(),
+            agent: project::CLAUDE_CODE_AGENT_ID.into(),
+            id: Arc::from("old-session"),
+            updated_at: SystemTime::now(),
+        };
+
+        cx.update(|_, cx| {
+            assert!(
+                past.running_subagents(cx).is_empty(),
+                "a finished session has no running subagents to show"
+            );
+        });
+    }
+}

@@ -31,7 +31,6 @@ pub use session_history::{
     execute_session_deletion, plan_delete_all, resume_session, sessions_in_project,
 };
 pub use session_store::SessionStore;
-pub use subagents::{SubagentTracker, provider_for_agent};
 pub use turn_tracker::TurnEvent;
 
 use gpui::App;

@@ -246,6 +246,9 @@ pub struct AgentView {
     /// deliver an `Ended` after that, and an unread flag set then would have
     /// no tick left to retract it.
     cli_gone: bool,
+    /// Stands in for a live pty task, which a test has no process to provide.
+    #[cfg(any(test, feature = "test-support"))]
+    cli_alive_for_tests: bool,
     /// What [`AgentViewEvent::Attention`] last reported, so it fires on a
     /// change and not on every pass that re-derives the same answer.
     attention_shown: bool,
@@ -659,6 +662,8 @@ impl AgentView {
             attention: AgentAttention::default(),
             in_view: false,
             cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
             attention_shown: false,
             _attention_watch: Vec::new(),
         };
@@ -761,6 +766,8 @@ impl AgentView {
             attention: AgentAttention::default(),
             in_view: false,
             cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
             attention_shown: false,
             _attention_watch: Vec::new(),
         }
@@ -804,6 +811,10 @@ impl AgentView {
     /// working -- the same call `keep_awake` makes, for the same reason: a
     /// status nobody will ever update must not be treated as activity.
     pub fn is_working(&self, cx: &App) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.cli_alive_for_tests {
+            return true;
+        }
         self.terminal().is_some_and(|terminal_view| {
             terminal_view
                 .read(cx)
@@ -1062,6 +1073,28 @@ impl AgentView {
         self.set_approval(asking, cx);
     }
 
+    /// Stands in for the agent's CLI being alive, which needs a pty a test does
+    /// not have.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_cli_alive(&mut self, alive: bool, cx: &mut Context<Self>) {
+        self.cli_alive_for_tests = alive;
+        cx.notify();
+    }
+
+    /// Stands in for a subagent scan: the listed subagents, and the ones whose
+    /// latest run the transcript has since reported ended.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_subagent_pass(
+        &mut self,
+        listed: Vec<SubagentSummary>,
+        stopped: &[Arc<str>],
+        cx: &mut Context<Self>,
+    ) {
+        self.subagents
+            .apply(crate::subagents::SubagentPass::simulated(listed, stopped));
+        cx.notify();
+    }
+
     /// Stands in for the tick noticing the agent's CLI is gone.
     #[cfg(any(test, feature = "test-support"))]
     pub fn simulate_cli_ended(&mut self, cx: &mut Context<Self>) {
@@ -1155,18 +1188,16 @@ impl AgentView {
         }));
     }
 
-    /// This session's subagents, newest first.
+    /// The subagents running right now, newest first.
     ///
-    /// Empty until the first scan lands, and empty for good on an untracked tab
-    /// or an agent whose store this editor cannot read — only Claude keeps a
-    /// sidecar naming them.
-    pub fn subagents(&self) -> &Arc<[SubagentSummary]> {
-        self.subagents.subagents()
-    }
-
-    /// Whether this subagent is still working.
-    pub fn subagent_is_running(&self, subagent: &SubagentSummary) -> bool {
-        self.subagents.is_running(subagent)
+    /// Empty unless the CLI is alive: a record left open by a process that died
+    /// never completes, and would otherwise be drawn as running for good.
+    pub fn running_subagents<'a>(
+        &'a self,
+        cx: &App,
+    ) -> impl Iterator<Item = &'a SubagentSummary> + use<'a> {
+        let working = self.is_working(cx);
+        self.subagents.running().filter(move |_| working)
     }
 
     /// Whether any of them is.
@@ -3378,6 +3409,8 @@ mod tests {
             attention: AgentAttention::default(),
             in_view: false,
             cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
             attention_shown: false,
             _attention_watch: Vec::new(),
         });
@@ -3833,6 +3866,8 @@ mod tests {
             attention: AgentAttention::default(),
             in_view: false,
             cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
             attention_shown: false,
             _attention_watch: Vec::new(),
         });

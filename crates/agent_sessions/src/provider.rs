@@ -121,6 +121,7 @@ pub trait SessionProvider: Send + Sync {
         Ok(TranscriptProgress {
             tool_use_ids: Vec::new(),
             turn_marks: Vec::new(),
+            subagent_events: Vec::new(),
             scanned_to: from,
             restarted: false,
         })
