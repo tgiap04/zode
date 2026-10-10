@@ -87,6 +87,10 @@ attacker who wants to be paired.
   confirm a prompt you did not start.
 - **Nothing is pinned until you say the digits match**, and a host that declines
   leaves nothing pinned.
+- **A pins when you confirm on A.** Choosing **Digits differ** on the other
+  device afterwards does not undo that: the relay could hold that message back,
+  so A does not wait for it. If you confirmed on A by mistake, remove the device
+  under **Manage trusted devices...**.
 - **Lockouts.** A takes one pairing at a time, a request expires after 120
   seconds, and it takes at most three requests an hour. Three failed attempts
   lock pairing, and the lock does not expire: you unlock it explicitly under
