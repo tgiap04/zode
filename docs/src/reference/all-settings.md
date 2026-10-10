@@ -2404,6 +2404,26 @@ Example:
 - `enabled`: `boolean`
 - `quiet_period_ms`: positive `integer` milliseconds, floored at `2000`
 
+## Remote Control
+
+- Description: Whether another of your devices, signed in to the same account, may watch and type into the agents and terminals running in this Zode. Off means Zode opens no connection for it and watches no terminal. Turning it on also needs you to be signed in, and every device that may connect has to be approved once by comparing a six-digit code. While a device is connected the status bar says so and offers a way to disconnect it, and the status bar is shown for as long as one is connected even if `status_bar.show` hides it; a toast announces each device that takes control (in the window you are looking at, or the most recently used one if Zode is in the background); at most four devices may be connected at once; the actions `remote_control::DisconnectAll`, `remote_control::Disable` and `remote_control::ManageDevices` are in the command palette. While a device is connected, Zode holds the display awake on the same terms as `keep_display_awake`. Everything sent between the devices is end-to-end encrypted; the wire format is described in [Remote control protocol](../remote-control-protocol.md).
+- Setting: `remote_control`
+- Default:
+
+```json [settings]
+{
+  "remote_control": {
+    "enabled": false,
+    "idle_timeout_minutes": 30
+  }
+}
+```
+
+**Options**
+
+- `enabled`: `boolean`
+- `idle_timeout_minutes`: `integer` minutes a connected device may send nothing before it is disconnected; `0` turns the limit off
+
 ## Project Footprint Indicator
 
 - Description: Whether to show the combined CPU and RAM footprint of every tracked project's child processes -- its language servers and its terminals -- in the status bar. Click the badge for a per-project breakdown. Zode hosts every project in one OS process, so its own heap and CPU cannot be attributed per project and are not counted. See [Project Footprint Indicator](../project-footprint-indicator.md) for what is measured, the polling cost, and privacy.
