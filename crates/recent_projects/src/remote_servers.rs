@@ -1,4 +1,5 @@
 use crate::{
+    relay_devices::{RelayDevices, RelayDevicesEvent},
     remote_connections::{
         Connection, RemoteConnectionModal, RemoteConnectionPrompt, RemoteSettings, SshConnection,
         SshConnectionHeader, connect, determine_paths_with_positions, open_remote_project,
@@ -415,6 +416,10 @@ impl ProjectPicker {
                 connection_string: "".into(),
                 nickname: None,
             },
+            RemoteConnectionOptions::Relay(connection) => ProjectPickerData::Ssh {
+                connection_string: connection.host_name.clone().into(),
+                nickname: None,
+            },
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(options) => ProjectPickerData::Ssh {
                 connection_string: format!("mock-{}", options.id).into(),
@@ -483,6 +488,10 @@ impl ProjectPicker {
                                         server.projects.insert(RemoteProject { paths });
                                     };
                                 }
+                                // Projects on another Zode are remembered with the workspace, not in settings.
+                                // Projects on another Zode are remembered with the
+                                // workspace, not in settings.
+                                ServerIndex::Relay => {}
                             }
                         });
                     })
@@ -611,6 +620,9 @@ impl std::fmt::Display for WslServerIndex {
 enum ServerIndex {
     Ssh(SshServerIndex),
     Wsl(WslServerIndex),
+    /// Another Zode reached through the relay. Its projects are remembered
+    /// with the workspaces, not in the settings.
+    Relay,
 }
 impl From<SshServerIndex> for ServerIndex {
     fn from(index: SshServerIndex) -> Self {
@@ -663,6 +675,7 @@ struct DefaultState {
     add_new_server: NavigableEntry,
     add_new_devcontainer: NavigableEntry,
     add_new_wsl: NavigableEntry,
+    add_new_relay: NavigableEntry,
     servers: Vec<RemoteEntry>,
 }
 
@@ -672,6 +685,7 @@ impl DefaultState {
         let add_new_server = NavigableEntry::new(&handle, cx);
         let add_new_devcontainer = NavigableEntry::new(&handle, cx);
         let add_new_wsl = NavigableEntry::new(&handle, cx);
+        let add_new_relay = NavigableEntry::new(&handle, cx);
 
         let ssh_settings = RemoteSettings::get_global(cx);
         let read_ssh_config = ssh_settings.read_ssh_config;
@@ -742,6 +756,7 @@ impl DefaultState {
             add_new_server,
             add_new_devcontainer,
             add_new_wsl,
+            add_new_relay,
             servers,
         }
     }
@@ -770,11 +785,20 @@ impl ViewServerOptionsState {
     }
 }
 
+struct RelayDevicesState {
+    view: Entity<RelayDevices>,
+    // Cached so focusing the picker never has to read the view, which may be
+    // mid-update when focus is requested.
+    focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
 enum Mode {
     Default(DefaultState),
     ViewServerOptions(ViewServerOptionsState),
     EditNickname(EditNicknameState),
     ProjectPicker(Entity<ProjectPicker>),
+    RelayDevices(RelayDevicesState),
     CreateRemoteServer(CreateRemoteServer),
     CreateRemoteDevContainer(CreateRemoteDevContainer),
     #[cfg(target_os = "windows")]
@@ -1154,6 +1178,39 @@ impl RemoteServerProjects {
         cx.notify();
     }
 
+    /// Opening this is what connects to the relay: nothing is reached before.
+    fn show_relay_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| RelayDevices::new(self.workspace.clone(), cx));
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &RelayDevicesEvent, window, cx| match event {
+                    RelayDevicesEvent::OpenProject(options) => this.create_remote_project(
+                        ServerIndex::Relay,
+                        RemoteConnectionOptions::Relay(options.clone()),
+                        window,
+                        cx,
+                    ),
+                    RelayDevicesEvent::Back => {
+                        this.mode = Mode::default_mode(&this.ssh_config_servers, cx);
+                        this.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe(&view, |_, _, _: &DismissEvent, cx| cx.emit(DismissEvent)),
+        ];
+        let focus_handle = view.focus_handle(cx);
+        self.mode = Mode::RelayDevices(RelayDevicesState {
+            view: view.clone(),
+            focus_handle: focus_handle.clone(),
+            _subscriptions: subscriptions,
+        });
+        focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     fn create_remote_project(
         &mut self,
         index: ServerIndex,
@@ -1261,7 +1318,7 @@ impl RemoteServerProjects {
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
         match &self.mode {
             Mode::Default(_) | Mode::ViewServerOptions(_) => {}
-            Mode::ProjectPicker(_) => {}
+            Mode::ProjectPicker(_) | Mode::RelayDevices(_) => {}
             Mode::CreateRemoteServer(state) => {
                 if let Some(prompt) = state.ssh_prompt.as_ref() {
                     prompt.update(cx, |prompt, cx| {
@@ -1540,6 +1597,7 @@ impl RemoteServerProjects {
             match server_ix {
                 ServerIndex::Ssh(index) => format!("ssh-{index}"),
                 ServerIndex::Wsl(index) => format!("wsl-{index}"),
+                ServerIndex::Relay => "relay".to_string(),
             }
         ));
         let container_element_id_base =
@@ -1690,6 +1748,9 @@ impl RemoteServerProjects {
             ServerIndex::Wsl(server) => {
                 self.delete_wsl_project(server, project, cx);
             }
+            // Projects on another Zode are remembered in recents; there is no
+            // saved server entry to edit.
+            ServerIndex::Relay => {}
         }
     }
 
@@ -2675,6 +2736,30 @@ impl RemoteServerProjects {
                 this.init_dev_container_mode(window, cx);
             }));
 
+        let connect_relay_button = div()
+            .id("connect-other-zode")
+            .track_focus(&state.add_new_relay.focus_handle)
+            .anchor_scroll(state.add_new_relay.scroll_anchor.clone())
+            .child(
+                ListItem::new("connect-other-zode-button")
+                    .toggle_state(
+                        state
+                            .add_new_relay
+                            .focus_handle
+                            .contains_focused(window, cx),
+                    )
+                    .inset(true)
+                    .spacing(ui::ListItemSpacing::Sparse)
+                    .start_slot(Icon::new(IconName::Link).color(Color::Muted))
+                    .child(Label::new("Open a Zode on your account"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_relay_devices(window, cx);
+                    })),
+            )
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                this.show_relay_devices(window, cx);
+            }));
+
         #[cfg(target_os = "windows")]
         let wsl_connect_button = div()
             .id("wsl-connect-new-server")
@@ -2729,6 +2814,7 @@ impl RemoteServerProjects {
             .track_scroll(&state.scroll_handle)
             .size_full()
             .child(connect_button)
+            .child(connect_relay_button)
             .when(has_open_project && is_local, |this| {
                 this.child(connect_dev_container_button)
             });
@@ -2762,7 +2848,8 @@ impl RemoteServerProjects {
                 )
                 .into_any_element(),
         )
-        .entry(state.add_new_server.clone());
+        .entry(state.add_new_server.clone())
+        .entry(state.add_new_relay.clone());
 
         if has_open_project && is_local {
             modal_section = modal_section.entry(state.add_new_devcontainer.clone());
@@ -2976,6 +3063,7 @@ impl Focusable for RemoteServerProjects {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match &self.mode {
             Mode::ProjectPicker(picker) => picker.focus_handle(cx),
+            Mode::RelayDevices(state) => state.focus_handle.clone(),
             _ => self.focus_handle.clone(),
         }
     }
@@ -3007,6 +3095,7 @@ impl Render for RemoteServerProjects {
                     .render_view_options(state.clone(), window, cx)
                     .into_any_element(),
                 Mode::ProjectPicker(element) => element.clone().into_any_element(),
+                Mode::RelayDevices(state) => state.view.clone().into_any_element(),
                 Mode::CreateRemoteServer(state) => self
                     .render_create_remote_server(state, window, cx)
                     .into_any_element(),

@@ -293,6 +293,9 @@ pub struct Metadata {
     pub is_dir: bool,
     pub len: u64,
     pub is_fifo: bool,
+    /// An ordinary file, as opposed to a directory, a pipe, a device or a
+    /// socket. For a symlink, what it points to.
+    pub is_regular_file: bool,
     pub is_executable: bool,
 }
 
@@ -1058,6 +1061,7 @@ impl Fs for RealFs {
             is_symlink,
             is_dir: metadata.file_type().is_dir(),
             is_fifo,
+            is_regular_file: metadata.file_type().is_file(),
             is_executable,
         }))
     }
@@ -2991,6 +2995,7 @@ impl Fs for FakeFs {
                     is_dir: false,
                     is_symlink,
                     is_fifo: false,
+                    is_regular_file: true,
                     is_executable: false,
                 },
                 FakeFsEntry::Dir {
@@ -3002,6 +3007,7 @@ impl Fs for FakeFs {
                     is_dir: true,
                     is_symlink,
                     is_fifo: false,
+                    is_regular_file: false,
                     is_executable: false,
                 },
                 FakeFsEntry::Symlink { .. } => unreachable!(),

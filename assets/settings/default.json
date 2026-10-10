@@ -143,6 +143,17 @@
     "enabled": true,
     "quiet_period_ms": 12000,
   },
+  // Whether another of your devices, signed in to the same account, may watch
+  // and type into the agents and terminals running here. Off means Zode opens
+  // no connection for it and watches no terminal. Every device must be approved
+  // once by comparing a six-digit code, and whenever one is connected the status
+  // bar says so and offers a way to disconnect it.
+  // `idle_timeout_minutes` disconnects a device that sends nothing for that
+  // long; 0 turns the limit off.
+  "remote_control": {
+    "enabled": false,
+    "idle_timeout_minutes": 30,
+  },
   // Whether to show the combined CPU and RAM footprint of every tracked
   // project's child processes -- its language servers and its terminals --
   // in the status bar. Click the badge for a per-project breakdown.

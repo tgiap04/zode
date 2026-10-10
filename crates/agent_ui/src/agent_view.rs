@@ -1007,6 +1007,14 @@ impl AgentView {
         self.refresh_attention(cx);
     }
 
+    /// Whether a permission dialog is on this tab's screen right now.
+    ///
+    /// Public for the remote-control host, which reports it so that a device
+    /// watching from afar can tell a stalled agent from a working one.
+    pub fn awaiting_approval(&self) -> bool {
+        self.turns.awaiting_approval()
+    }
+
     /// Whether this tab holds something the user has to come back for: a
     /// permission dialog on screen, or a finished turn not yet looked at.
     ///

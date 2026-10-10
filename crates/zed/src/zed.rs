@@ -373,6 +373,11 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         agent_notify::init(cx);
     }
 
+    // Switched off by default, and built to do nothing while it is: no
+    // connection is opened and no terminal is watched until the
+    // `remote_control` setting is on and an account is signed in.
+    remote_control::init(cx);
+
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -5142,6 +5147,7 @@ mod tests {
                 "project_symbols",
                 "projects",
                 "recent_projects",
+                "remote_control",
                 "remote_debug",
                 "repl",
                 "search",

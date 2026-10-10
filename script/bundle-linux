@@ -78,7 +78,7 @@ database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql zode-db-mongodb)
 # The database drivers are built here but no longer packaged into the tarball:
 # they are published as release assets of their own and downloaded on first
 # use, so an install carries only the drivers its user asked for.
-cargo build --release --target "${target_triple}" --package zode --package cli \
+cargo build --release --target "${target_triple}" --package zode --package cli --package remote_server \
     --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb
 
 # Upload debug info to sentry.io
@@ -113,6 +113,7 @@ fi
 # doesn't understand CREL sections produced by newer LLVM.
 llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/zode"
 llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/cli"
+llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/remote_server"
 for driver in "${database_drivers[@]}"; do
     llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/${driver}"
 done
@@ -131,6 +132,8 @@ zed_dir="${temp_dir}/zed$suffix.app"
 mkdir -p "${zed_dir}/bin" "${zed_dir}/libexec"
 cp "${target_dir}/${target_triple}/release/zode" "${zed_dir}/libexec/zed-editor"
 cp "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zed"
+# Beside the app binary: the project server is looked up next to the running executable.
+cp "${target_dir}/${target_triple}/release/remote_server" "${zed_dir}/libexec/remote_server"
 
 # Packaged beside the tarball rather than inside it. `libexec` is still where a
 # driver is looked for first, so a driver put there by hand keeps working -- but

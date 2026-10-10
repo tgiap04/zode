@@ -1,11 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use collections::HashMap;
-use gpui::{App, AppContext as _, Context, Entity, Task, WeakEntity};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Task, WeakEntity};
 
-use futures::{FutureExt, future::Shared};
+use futures::{FutureExt, StreamExt as _, channel::mpsc, future::Shared};
 use itertools::Itertools as _;
 use language::LanguageName;
 use remote::RemoteClient;
+use rpc::{TypedEnvelope, proto};
 use settings::{Settings, SettingsLocation};
 use smol::channel::bounded;
 use std::{
@@ -14,17 +15,44 @@ use std::{
 };
 use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
 use terminal::{
-    TaskState, TaskStatus, Terminal, TerminalBuilder, insert_zed_terminal_env,
-    terminal_settings::TerminalSettings,
+    RemoteBackedOptions, RemoteTerminalCommand, TaskState, TaskStatus, Terminal, TerminalBounds,
+    TerminalBuilder, insert_zed_terminal_env,
+    terminal_settings::{self, TerminalSettings},
 };
 use util::{
-    command::new_std_command, get_default_system_shell, get_system_shell, maybe, rel_path::RelPath,
+    ResultExt as _, command::new_std_command, get_default_system_shell, get_system_shell, maybe,
+    rel_path::RelPath,
 };
 
 use crate::{Project, ProjectPath};
 
+#[derive(Default)]
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+    remote: RemoteTerminals,
+}
+
+/// Terminals whose process runs on the remote server, by the id this side
+/// gave them, so that what the server sends about one finds it.
+#[derive(Default)]
+struct RemoteTerminals {
+    next_id: u64,
+    live: HashMap<u64, WeakEntity<terminal::Terminal>>,
+}
+
+struct RpcLook {
+    cursor_shape: terminal_settings::CursorShape,
+    alternate_scroll: terminal_settings::AlternateScroll,
+    max_scroll_history_lines: Option<usize>,
+}
+
+/// What to start on the remote server. A missing program is the host's own
+/// login shell.
+struct RpcLaunch {
+    program: Option<String>,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    working_directory: Option<Arc<Path>>,
 }
 
 impl Project {
@@ -100,6 +128,9 @@ impl Project {
             completion_rx,
         });
         let remote_client = self.remote_client.clone();
+        let over_rpc = remote_client
+            .as_ref()
+            .is_some_and(|client| client.read(cx).terminals_over_rpc());
         let shell = match &remote_client {
             Some(remote_client) => remote_client
                 .read(cx)
@@ -153,6 +184,55 @@ impl Project {
             })
             .await
             .unwrap_or_default();
+
+            if over_rpc && let Some(remote_client) = remote_client.clone() {
+                env.extend(spawn_task.env);
+                let (program, args) = if activation_script.is_empty() {
+                    (spawn_task.command, spawn_task.args)
+                } else {
+                    let separator = shell_kind.sequential_commands_separator();
+                    let activation_script = activation_script.join(&format!("{separator} "));
+                    let to_run = match &spawn_task.command {
+                        Some(command) => {
+                            let command = shell_kind.prepend_command_prefix(command);
+                            let command = shell_kind.try_quote_prefix_aware(&command);
+                            let args = spawn_task
+                                .args
+                                .iter()
+                                .filter_map(|arg| shell_kind.try_quote(arg));
+                            command.into_iter().chain(args).join(" ")
+                        }
+                        None => format!("exec {shell} -l"),
+                    };
+                    let arg = format!("{activation_script}{separator} {to_run}");
+                    (Some(shell.clone()), shell_kind.args_for_shell(true, arg))
+                };
+                let launch = RpcLaunch {
+                    program,
+                    args,
+                    env,
+                    working_directory: path,
+                };
+                return project
+                    .update(cx, |this, cx| {
+                        this.spawn_rpc_terminal(
+                            remote_client,
+                            launch,
+                            RemoteBackedOptions {
+                                task: task_state,
+                                completion_tx: Some(completion_tx),
+                                title_override: None,
+                            },
+                            RpcLook {
+                                cursor_shape: settings.cursor_shape,
+                                alternate_scroll: settings.alternate_scroll,
+                                max_scroll_history_lines: settings.max_scroll_history_lines,
+                            },
+                            cx,
+                        )
+                    })?
+                    .await;
+            }
 
             let builder = project
                 .update(cx, move |_, cx| {
@@ -358,6 +438,9 @@ impl Project {
         } else {
             self.remote_client.clone()
         };
+        let over_rpc = remote_client
+            .as_ref()
+            .is_some_and(|client| client.read(cx).terminals_over_rpc());
         let shell = match &remote_client {
             Some(remote_client) => remote_client
                 .read(cx)
@@ -400,6 +483,30 @@ impl Project {
             })
             .await
             .unwrap_or_default();
+
+            if over_rpc && let Some(remote_client) = remote_client.clone() {
+                let launch = RpcLaunch {
+                    program: None,
+                    args: Vec::new(),
+                    env,
+                    working_directory: path,
+                };
+                return project
+                    .update(cx, |this, cx| {
+                        this.spawn_rpc_terminal(
+                            remote_client,
+                            launch,
+                            RemoteBackedOptions::default(),
+                            RpcLook {
+                                cursor_shape: settings.cursor_shape,
+                                alternate_scroll: settings.alternate_scroll,
+                                max_scroll_history_lines: settings.max_scroll_history_lines,
+                            },
+                            cx,
+                        )
+                    })?
+                    .await;
+            }
 
             let builder = project
                 .update(cx, move |_, cx| {
@@ -465,6 +572,15 @@ impl Project {
         // We cannot clone the task's terminal, as it will effectively re-spawn the task, which might not be desirable.
         // For now, create a new shell instead.
         if terminal.read(cx).task().is_some() {
+            return self.create_terminal_shell(cwd, cx);
+        }
+        // A copy of this terminal's launch would start a local process, but
+        // this one's process is on the remote server.
+        if self
+            .remote_client
+            .as_ref()
+            .is_some_and(|client| client.read(cx).terminals_over_rpc())
+        {
             return self.create_terminal_shell(cwd, cx);
         }
         let local_path = if self.is_via_remote_server() {
@@ -621,6 +737,201 @@ impl Project {
                 terminal.update(cx, |terminal, _cx| terminal.restore_scroll_history_limit());
             }
         }
+    }
+
+    /// Starts a terminal process on the remote server and returns the
+    /// terminal that shows it, once the server has accepted it.
+    fn spawn_rpc_terminal(
+        &mut self,
+        remote_client: Entity<RemoteClient>,
+        launch: RpcLaunch,
+        options: RemoteBackedOptions,
+        look: RpcLook,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Terminal>>> {
+        let proto_client = remote_client.read(cx).proto_client();
+        let host = remote_client.read(cx).connection_options().display_name();
+        let mut env = launch.env;
+        env.remove("SHLVL");
+        insert_zed_terminal_env(&mut env, &release_channel::AppVersion::global(cx));
+
+        let terminal_id = self.terminals.remote.next_id;
+        self.terminals.remote.next_id += 1;
+
+        let (commands_tx, mut commands_rx) = mpsc::unbounded();
+        let options = RemoteBackedOptions {
+            title_override: options
+                .title_override
+                .or_else(|| Some(format!("{host} — Terminal"))),
+            ..options
+        };
+        let builder = match TerminalBuilder::new_remote_backed(
+            commands_tx,
+            options,
+            look.cursor_shape,
+            look.alternate_scroll,
+            look.max_scroll_history_lines,
+            cx.entity_id().as_u64(),
+            cx.background_executor(),
+            self.path_style(cx),
+        ) {
+            Ok(builder) => builder,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+
+        // Registered before the server hears of it: output can arrive as soon
+        // as the process starts.
+        self.terminals
+            .remote
+            .live
+            .insert(terminal_id, terminal.downgrade());
+        self.terminals.local_handles.push(terminal.downgrade());
+        let entity_id = terminal.entity_id();
+        cx.observe_release(&terminal, move |project, _terminal, cx| {
+            project
+                .terminals
+                .local_handles
+                .retain(|handle| handle.entity_id() != entity_id);
+            // Ids are never reused, so the entry can only be this terminal's.
+            project.terminals.remote.live.remove(&terminal_id);
+            cx.notify();
+        })
+        .detach();
+
+        let bounds = TerminalBounds::default();
+        let create = proto_client.request(proto::CreateTerminal {
+            project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+            terminal_id,
+            program: launch.program,
+            args: launch.args,
+            env: env.into_iter().collect(),
+            cwd: launch
+                .working_directory
+                .map(|path| path.to_string_lossy().into_owned()),
+            columns: u32::try_from(bounds.num_columns()).unwrap_or(u32::MAX),
+            rows: u32::try_from(bounds.num_lines()).unwrap_or(u32::MAX),
+        });
+        let weak_terminal = terminal.downgrade();
+        cx.spawn(async move |project, cx| {
+            if let Err(error) = create.await {
+                project
+                    .update(cx, |project, _| {
+                        project.terminals.remote.live.remove(&terminal_id);
+                    })
+                    .ok();
+                return Err(error.context("starting the terminal on the remote machine"));
+            }
+
+            // Only now do typed bytes and resizes follow, so none can reach
+            // the server before the terminal exists there.
+            cx.spawn(async move |cx| {
+                let forget_terminal = |cx: &mut AsyncApp| {
+                    project
+                        .update(cx, |project, _| {
+                            project.terminals.remote.live.remove(&terminal_id);
+                        })
+                        .ok();
+                };
+                while let Some(command) = commands_rx.next().await {
+                    let sent = match command {
+                        RemoteTerminalCommand::Input(data) => {
+                            proto_client.send(proto::TerminalInput {
+                                project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+                                terminal_id,
+                                data,
+                            })
+                        }
+                        RemoteTerminalCommand::Resize { columns, rows } => {
+                            proto_client.send(proto::ResizeTerminal {
+                                project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+                                terminal_id,
+                                columns: u32::from(columns),
+                                rows: u32::from(rows),
+                            })
+                        }
+                        RemoteTerminalCommand::Close => {
+                            let closed = proto_client
+                                .request(proto::CloseTerminal {
+                                    project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+                                    terminal_id,
+                                })
+                                .await
+                                .map(|_| ());
+                            // The server does not report an exit it caused,
+                            // so the terminal is told here.
+                            if let Some(terminal) = weak_terminal.upgrade() {
+                                terminal.update(cx, |terminal, cx| {
+                                    terminal.remote_process_exited(None, cx)
+                                });
+                            }
+                            forget_terminal(cx);
+                            closed
+                        }
+                    };
+                    if let Err(error) = sent {
+                        log::warn!(
+                            "terminal {terminal_id}: the remote connection is gone: {error:#}"
+                        );
+                        forget_terminal(cx);
+                        return;
+                    }
+                }
+                forget_terminal(cx);
+                // The terminal was dropped, which ends its process.
+                proto_client
+                    .request(proto::CloseTerminal {
+                        project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+                        terminal_id,
+                    })
+                    .await
+                    .log_err();
+            })
+            .detach();
+            Ok(terminal)
+        })
+    }
+
+    pub(crate) async fn handle_terminal_output(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::TerminalOutput>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        this.update(&mut cx, |this, cx| {
+            let terminal = this
+                .terminals
+                .remote
+                .live
+                .get(&envelope.payload.terminal_id)
+                .and_then(|terminal| terminal.upgrade())
+                .with_context(|| format!("no terminal {}", envelope.payload.terminal_id))?;
+            terminal.update(cx, |terminal, cx| {
+                terminal.feed_remote_output(&envelope.payload.data, cx)
+            });
+            anyhow::Ok(())
+        })?;
+        Ok(proto::Ack {})
+    }
+
+    pub(crate) async fn handle_terminal_exited(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::TerminalExited>,
+        mut cx: AsyncApp,
+    ) -> Result<()> {
+        this.update(&mut cx, |this, cx| {
+            let terminal = this
+                .terminals
+                .remote
+                .live
+                .remove(&envelope.payload.terminal_id)
+                .and_then(|terminal| terminal.upgrade());
+            if let Some(terminal) = terminal {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.remote_process_exited(envelope.payload.exit_code, cx)
+                });
+            }
+        });
+        Ok(())
     }
 
     fn resolve_directory_environment(

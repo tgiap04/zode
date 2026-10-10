@@ -608,6 +608,20 @@ async fn test_realfs_broken_symlink_metadata(executor: BackgroundExecutor) {
 }
 
 #[gpui::test]
+async fn test_realfs_metadata_tells_regular_files_from_the_rest(executor: BackgroundExecutor) {
+    let tempdir = TempDir::new().unwrap();
+    let path = tempdir.path();
+    std::fs::write(path.join("file.txt"), "text").unwrap();
+    std::fs::create_dir(path.join("folder")).unwrap();
+    let fs = RealFs::new(None, executor);
+
+    let file = fs.metadata(&path.join("file.txt")).await.unwrap().unwrap();
+    assert!(file.is_regular_file);
+    let folder = fs.metadata(&path.join("folder")).await.unwrap().unwrap();
+    assert!(!folder.is_regular_file);
+}
+
+#[gpui::test]
 #[cfg(unix)]
 async fn test_realfs_symlink_loop_metadata(executor: BackgroundExecutor) {
     let tempdir = TempDir::new().unwrap();

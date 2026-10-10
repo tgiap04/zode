@@ -139,6 +139,9 @@ members = [
     "crates/release_channel",
     "crates/remote",
     "crates/remote_connection",
+    "crates/remote_control",
+    "crates/remote_relay_client",
+    "crates/remote_relay_protocol",
     "crates/remote_server",
     "crates/repl",
     "crates/reqwest_client",
@@ -372,6 +375,9 @@ refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
 remote_connection = { path = "crates/remote_connection" }
+remote_control = { path = "crates/remote_control" }
+remote_relay_client = { path = "crates/remote_relay_client" }
+remote_relay_protocol = { path = "crates/remote_relay_protocol" }
 remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
@@ -445,7 +451,7 @@ ztracing_macro = { path = "crates/ztracing_macro" }
 #
 
 aho-corasick = "1.1"
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
+alacritty_terminal = { git = "https://github.com/tgiap04/alacritty", rev = "1435e5c16e8ca7c3ca4c2433f2d1c90ab53672d5" }
 any_vec = "0.14"
 anyhow = "1.0.86"
 ashpd = { version = "0.13", default-features = false, features = [
@@ -692,6 +698,12 @@ simplelog = "0.12.2"
 slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 smol = "2.0"
+# Static device keys must outlive a process, which `ring` cannot do: it only
+# offers ephemeral X25519. `snow` is the Noise implementation both ends of the
+# remote-control channel are held to; its default resolver carries the AES-GCM,
+# SHA-256 and X25519 primitives the pattern needs. A narrower feature set does
+# not compile — snow's AES-GCM backend relies on aes-gcm's default features.
+snow = "0.10"
 sqlformat = "0.2"
 stacksafe = "0.1"
 streaming-iterator = "0.1"

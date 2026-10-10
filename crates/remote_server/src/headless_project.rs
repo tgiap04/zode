@@ -48,6 +48,8 @@ use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath};
 use worktree::Worktree;
 
+use crate::headless_terminals::HeadlessTerminals;
+
 pub struct HeadlessProject {
     pub fs: Arc<dyn Fs>,
     pub session: AnyProtoClient,
@@ -70,6 +72,7 @@ pub struct HeadlessProject {
     // Local variant is used within LSP store, but that's a separate entity.
     pub _toolchain_store: Entity<ToolchainStore>,
     pub kernels: HashMap<String, Child>,
+    pub(crate) terminals: HeadlessTerminals,
 }
 
 pub struct HeadlessAppState {
@@ -295,6 +298,10 @@ impl HeadlessProject {
         session.add_entity_request_handler(Self::handle_find_search_candidates);
         session.add_entity_request_handler(Self::handle_open_server_settings);
         session.add_entity_request_handler(Self::handle_get_directory_environment);
+        session.add_entity_request_handler(Self::handle_create_terminal);
+        session.add_entity_message_handler(Self::handle_terminal_input);
+        session.add_entity_message_handler(Self::handle_resize_terminal);
+        session.add_entity_request_handler(Self::handle_close_terminal);
         session.add_entity_message_handler(Self::handle_toggle_lsp_logs);
         session.add_entity_request_handler(Self::handle_open_image_by_path);
         session.add_entity_request_handler(Self::handle_trust_worktrees);
@@ -347,6 +354,7 @@ impl HeadlessProject {
             extensions,
             git_store,
             environment,
+            terminals: HeadlessTerminals::default(),
             profiling_collector: gpui::ProfilingCollector::new(startup_time),
             _toolchain_store: toolchain_store,
             kernels: Default::default(),
@@ -1308,6 +1316,68 @@ impl HeadlessProject {
             .into_iter()
             .collect();
         Ok(proto::DirectoryEnvironment { environment })
+    }
+
+    /// Ends every terminal process and returns a flag per terminal that is set
+    /// once its child has been collected, so that a server told to stop can
+    /// wait for the children to go before it exits.
+    pub fn close_all_terminals(&mut self) -> Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.terminals.close_all()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_terminal_count(&self) -> usize {
+        self.terminals.len()
+    }
+
+    async fn handle_create_terminal(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::CreateTerminal>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        this.update(&mut cx, |this, cx| {
+            let session = this.session.clone();
+            this.terminals.create(envelope.payload, session, cx)
+        })?;
+        Ok(proto::Ack {})
+    }
+
+    async fn handle_terminal_input(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::TerminalInput>,
+        mut cx: AsyncApp,
+    ) -> Result<()> {
+        this.update(&mut cx, |this, _| {
+            this.terminals
+                .input(envelope.payload.terminal_id, envelope.payload.data);
+        });
+        Ok(())
+    }
+
+    async fn handle_resize_terminal(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::ResizeTerminal>,
+        mut cx: AsyncApp,
+    ) -> Result<()> {
+        this.update(&mut cx, |this, _| {
+            this.terminals.resize(
+                envelope.payload.terminal_id,
+                envelope.payload.columns,
+                envelope.payload.rows,
+            );
+        });
+        Ok(())
+    }
+
+    async fn handle_close_terminal(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::CloseTerminal>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        this.update(&mut cx, |this, _| {
+            this.terminals.close(envelope.payload.terminal_id);
+        });
+        Ok(proto::Ack {})
     }
 }
 

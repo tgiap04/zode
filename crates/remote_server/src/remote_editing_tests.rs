@@ -2553,6 +2553,17 @@ pub async fn init_test(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) -> (Entity<Project>, Entity<HeadlessProject>) {
+    init_test_routing_terminals(server_fs, false, cx, server_cx).await
+}
+
+/// Like [`init_test`], with the connection saying whether its terminals are
+/// processes of the server (as over the relay) or of a local command.
+async fn init_test_routing_terminals(
+    server_fs: &Arc<FakeFs>,
+    terminals_over_rpc: bool,
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (Entity<Project>, Entity<HeadlessProject>) {
     let server_fs = server_fs.clone();
     cx.update(|cx| {
         release_channel::init(semver::Version::new(0, 0, 0), cx);
@@ -2563,6 +2574,9 @@ pub async fn init_test(
     init_logger();
 
     let (opts, ssh_server_client, _) = RemoteClient::fake_server(cx, server_cx);
+    if terminals_over_rpc {
+        RemoteClient::route_mock_terminals_over_rpc(&opts, cx);
+    }
     let http_client = Arc::new(BlockedHttpClient);
     let node_runtime = NodeRuntime::unavailable();
     let languages = Arc::new(LanguageRegistry::new(cx.executor()));
@@ -2625,4 +2639,359 @@ fn build_project(ssh: Entity<RemoteClient>, cx: &mut TestAppContext) -> Entity<P
     });
 
     cx.update(|cx| Project::remote(ssh, client, node, user_store, languages, fs, false, cx))
+}
+
+#[cfg(unix)]
+mod terminals {
+    use super::*;
+    use crate::MAX_TERMINALS_PER_CLIENT;
+    use gpui::{TestAppContext, px};
+    use project::Project;
+    use rpc::proto;
+    use std::time::{Duration, Instant};
+    use task::{HideStrategy, SpawnInTerminal};
+    use terminal::{Terminal, TerminalBounds};
+
+    fn shell_task(script: &str) -> SpawnInTerminal {
+        SpawnInTerminal {
+            command: Some("/bin/sh".into()),
+            args: vec!["-c".into(), script.into()],
+            hide: HideStrategy::Never,
+            ..SpawnInTerminal::default()
+        }
+    }
+
+    /// Held first, so it is dropped last: it waits for every terminal process
+    /// the test started to be gone, which is when the test is really over.
+    struct Drained(TestAppContext, TestAppContext);
+
+    impl Drop for Drained {
+        fn drop(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                self.0.update(|_| {});
+                self.1.update(|_| {});
+                self.0.run_until_parked();
+                self.1.run_until_parked();
+                if crate::headless_terminals::LIVE_WATCHERS
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == 0
+                    || Instant::now() >= deadline
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    async fn setup(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) -> (Drained, Entity<Project>, Entity<HeadlessProject>) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/code"), json!({})).await;
+        // The process output arrives from a real thread, which the test
+        // scheduler cannot see coming.
+        cx.executor().allow_parking();
+        let drained = Drained(cx.clone(), server_cx.clone());
+        let (project, headless) = init_test_routing_terminals(&fs, true, cx, server_cx).await;
+        (drained, project, headless)
+    }
+
+    /// Lets the two sides run until `done` holds. Real time passes between
+    /// turns because the child process is a real one.
+    fn wait_until(
+        cx: &mut TestAppContext,
+        what: &str,
+        mut done: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn screen(terminal: &Entity<Terminal>, cx: &TestAppContext) -> String {
+        terminal.read_with(cx, |terminal, _| terminal.get_content())
+    }
+
+    #[gpui::test]
+    async fn test_a_task_over_the_connection_streams_output_takes_input_and_exits(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(
+                    shell_task(
+                        "printf 'hello\\nworld\\n'; read line; printf \"got-$line\\n\"; exit 3",
+                    ),
+                    cx,
+                )
+            })
+            .await
+            .expect("the server starts the terminal");
+
+        wait_until(cx, "the first output", |cx| {
+            screen(&terminal, cx).contains("world")
+        });
+        let content = screen(&terminal, cx);
+        assert!(content.contains("hello"), "{content}");
+
+        terminal.update(cx, |terminal, _| terminal.input(b"abc\n".to_vec()));
+        wait_until(cx, "the echo of the input", |cx| {
+            screen(&terminal, cx).contains("got-abc")
+        });
+
+        let status = terminal
+            .update(cx, |terminal, cx| terminal.wait_for_completed_task(cx))
+            .await;
+        assert_eq!(status.and_then(|status| status.code()), Some(3));
+    }
+
+    #[gpui::test]
+    async fn test_a_shell_over_the_connection_runs_commands(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_shell(Some(std::env::temp_dir()), cx)
+            })
+            .await
+            .expect("the server starts the shell");
+        terminal.update(cx, |terminal, _| {
+            terminal.input(b"echo shell-says-$((6*7))\n".to_vec())
+        });
+        wait_until(cx, "the shell's answer", |cx| {
+            screen(&terminal, cx).contains("shell-says-42")
+        });
+    }
+
+    #[gpui::test]
+    async fn test_a_new_size_reaches_the_process(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(
+                    shell_task("stty size; read go; stty size; read stop"),
+                    cx,
+                )
+            })
+            .await
+            .expect("the server starts the terminal");
+        wait_until(cx, "the first size", |cx| {
+            !screen(&terminal, cx).trim().is_empty()
+        });
+
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.set_size(TerminalBounds::new(
+                    px(10.),
+                    px(5.),
+                    gpui::bounds(gpui::Point::default(), gpui::size(px(500.), px(200.))),
+                ));
+                terminal.sync(window, cx);
+            });
+        });
+        terminal.update(cx, |terminal, _| terminal.input(b"\n".to_vec()));
+        wait_until(cx, "the second size", |cx| {
+            screen(&terminal, cx).contains("20 100")
+        });
+    }
+
+    #[gpui::test]
+    async fn test_at_most_sixteen_terminals_may_be_open(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, headless) = setup(cx, server_cx).await;
+        let mut open = Vec::new();
+        for _ in 0..MAX_TERMINALS_PER_CLIENT {
+            open.push(
+                project
+                    .update(cx, |project, cx| {
+                        project.create_terminal_task(shell_task("sleep 60"), cx)
+                    })
+                    .await
+                    .expect("within the limit"),
+            );
+        }
+        let refused = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(shell_task("sleep 60"), cx)
+            })
+            .await;
+        let error = refused.err().expect("the seventeenth is refused");
+        assert!(
+            format!("{error:#}").contains("too many terminals"),
+            "{error:#}"
+        );
+
+        // Closing one makes room again.
+        open.pop();
+        // A dropped entity is released when effects next flush.
+        cx.update(|_| {});
+        wait_until(cx, "the server to free the place", |_| {
+            headless.read_with(server_cx, |headless, _| headless.open_terminal_count())
+                < MAX_TERMINALS_PER_CLIENT
+        });
+        project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(shell_task("sleep 60"), cx)
+            })
+            .await
+            .expect("a place was freed");
+    }
+
+    #[gpui::test]
+    async fn test_closing_a_terminal_ends_its_process(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let pid_file = std::env::temp_dir().join(format!(
+            "zode-terminal-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(
+                    shell_task(&format!("echo $$ > {}; exec sleep 60", pid_file.display())),
+                    cx,
+                )
+            })
+            .await
+            .expect("the server starts the terminal");
+        let mut pid = None;
+        wait_until(cx, "the process to report its id", |_| {
+            pid = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            pid.is_some()
+        });
+        let pid = pid.expect("a process id");
+        // SAFETY: signal 0 only asks whether the process exists.
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        assert!(alive());
+
+        drop(terminal);
+        cx.update(|_| {});
+        wait_until(cx, "the process to end", |_| !alive());
+        std::fs::remove_file(&pid_file).ok();
+    }
+
+    fn scratch_file(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "zode-terminal-test-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ))
+    }
+
+    #[gpui::test]
+    async fn test_a_peer_cannot_make_the_server_build_a_terminal_of_any_size(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let size_file = scratch_file("size");
+        let client = project.read_with(cx, |project, cx| {
+            project
+                .remote_client()
+                .expect("a remote project")
+                .read(cx)
+                .proto_client()
+        });
+        client
+            .request(proto::CreateTerminal {
+                project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+                terminal_id: 1000,
+                program: Some("/bin/sh".into()),
+                args: vec![
+                    "-c".into(),
+                    format!("stty size > {}; sleep 60", size_file.display()),
+                ],
+                env: Default::default(),
+                cwd: None,
+                columns: u32::MAX,
+                rows: u32::MAX,
+            })
+            .await
+            .expect("the server starts the terminal");
+        let mut size = String::new();
+        wait_until(cx, "the process to report its size", |_| {
+            size = std::fs::read_to_string(&size_file).unwrap_or_default();
+            size.ends_with('\n')
+        });
+        assert_eq!(size.trim(), "1000 1000");
+        client
+            .request(proto::CloseTerminal {
+                project_id: rpc::proto::REMOTE_SERVER_PROJECT_ID,
+                terminal_id: 1000,
+            })
+            .await
+            .expect("closed");
+        std::fs::remove_file(&size_file).ok();
+    }
+
+    #[gpui::test]
+    async fn test_a_process_that_ignores_the_hang_up_is_killed_when_the_server_stops(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, headless) = setup(cx, server_cx).await;
+        let pid_file = scratch_file("ignores-hup");
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(
+                    shell_task(&format!(
+                        "trap '' HUP; echo $$ > {}; while :; do sleep 1; done",
+                        pid_file.display()
+                    )),
+                    cx,
+                )
+            })
+            .await
+            .expect("the server starts the terminal");
+        let mut pid = None;
+        wait_until(cx, "the process to report its id", |_| {
+            pid = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            pid.is_some()
+        });
+        let pid = pid.expect("a process id");
+        // SAFETY: signal 0 only asks whether the process exists.
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        assert!(alive());
+
+        let reaped = headless.update(server_cx, |headless, _| headless.close_all_terminals());
+        assert_eq!(reaped.len(), 1);
+        wait_until(cx, "the process to be killed and collected", |_| {
+            reaped
+                .iter()
+                .all(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        });
+        assert!(!alive(), "the process outlived the shutdown");
+        drop(terminal);
+        std::fs::remove_file(&pid_file).ok();
+    }
 }

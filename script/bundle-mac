@@ -93,7 +93,7 @@ echo "Compiling zed binaries"
 # they are published as release assets of their own and downloaded on first
 # use, so an install carries only the drivers its user asked for. See
 # `package_database_drivers` below and `script/package-database-drivers`.
-cargo build ${build_flag} --package zode --package cli \
+cargo build ${build_flag} --package zode --package cli --package remote_server \
     --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb \
     --target $target_triple
 
@@ -208,6 +208,7 @@ function sign_app_binaries() {
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/remote_server" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/zode" -v
         /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
     else
@@ -368,5 +369,8 @@ upload_debug_symbols
 
 cp target/${target_triple}/${target_dir}/zode "${app_path}/Contents/MacOS/zode"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
+# Beside the app binary: the project server a controlling Zode asks this one to
+# run is looked up next to the running executable.
+cp target/${target_triple}/${target_dir}/remote_server "${app_path}/Contents/MacOS/remote_server"
 package_database_drivers
 sign_app_binaries

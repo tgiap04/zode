@@ -40,6 +40,8 @@ project.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 remote_connection.workspace = true
+remote_relay_client.workspace = true
+remote_relay_protocol.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -47,6 +49,8 @@ settings.workspace = true
 smol.workspace = true
 task.workspace = true
 telemetry.workspace = true
+terminal.workspace = true
+terminal_view.workspace = true
 ui.workspace = true
 ui_input.workspace = true
 util.workspace = true
@@ -59,6 +63,8 @@ indoc.workspace = true
 windows-registry = "0.6.0"
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
+zode_account = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 extension.workspace = true
 fs.workspace = true
@@ -69,6 +75,7 @@ project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true
 remote = { workspace = true, features = ["test-support"] }
 remote_connection = { workspace = true, features = ["test-support"] }
+remote_relay_client = { workspace = true, features = ["test-support"] }
 remote_server.workspace = true
 serde_json.workspace = true
 settings = { workspace = true, features = ["test-support"] }

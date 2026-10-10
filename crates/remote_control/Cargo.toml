@@ -1,0 +1,62 @@
+[package]
+name = "remote_control"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/remote_control.rs"
+doctest = false
+
+[dependencies]
+agent_ui.workspace = true
+anyhow.workspace = true
+fs.workspace = true
+futures.workspace = true
+git.workspace = true
+gpui.workspace = true
+http_client.workspace = true
+keep_awake.workspace = true
+log.workspace = true
+menu.workspace = true
+parking_lot.workspace = true
+paths.workspace = true
+project.workspace = true
+release_channel.workspace = true
+remote_relay_client.workspace = true
+remote_relay_protocol.workspace = true
+rpc.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+smol.workspace = true
+sysinfo.workspace = true
+terminal.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+worktree.workspace = true
+zode_account.workspace = true
+
+[dev-dependencies]
+collections.workspace = true
+db = { workspace = true, features = ["test-support"] }
+task.workspace = true
+tempfile.workspace = true
+agent_ui = { workspace = true, features = ["test-support"] }
+editor = { workspace = true, features = ["test-support"] }
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+remote = { workspace = true, features = ["test-support"] }
+remote_relay_client = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+terminal = { workspace = true, features = ["test-support"] }
+theme = { workspace = true, features = ["test-support"] }
+theme_settings = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }
+zode_account = { workspace = true, features = ["test-support"] }

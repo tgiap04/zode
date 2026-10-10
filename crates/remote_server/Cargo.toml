@@ -22,6 +22,7 @@ debug-embed = ["dep:rust-embed"]
 test-support = ["fs/test-support"]
 
 [dependencies]
+alacritty_terminal.workspace = true
 anyhow.workspace = true
 askpass.workspace = true
 clap.workspace = true
@@ -50,6 +51,7 @@ log.workspace = true
 lsp.workspace = true
 net.workspace = true
 node_runtime.workspace = true
+parking_lot.workspace = true
 paths.workspace = true
 project.workspace = true
 proto.workspace = true
@@ -95,6 +97,7 @@ node_runtime = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true
 project = { workspace = true, features = ["test-support"] }
 remote = { workspace = true, features = ["test-support"] }
+terminal = { workspace = true, features = ["test-support"] }
 theme_settings.workspace = true
 theme = { workspace = true, features = ["test-support"] }
 lsp = { workspace = true, features = ["test-support"] }

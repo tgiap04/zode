@@ -28,8 +28,9 @@ use project::{
 
 use language::{LanguageName, Toolchain, ToolchainScope};
 use remote::{
-    DockerConnectionOptions, RemoteConnectionIdentity, RemoteConnectionOptions,
-    SshConnectionOptions, WslConnectionOptions, remote_connection_identity,
+    DockerConnectionOptions, RelayConnectionOptions, RemoteConnectionIdentity,
+    RemoteConnectionOptions, SshConnectionOptions, WslConnectionOptions,
+    remote_connection_identity,
 };
 use serde::{Deserialize, Serialize};
 use sqlez::{
@@ -1644,6 +1645,18 @@ impl WorkspaceDb {
                 name = Some(identity_name);
                 user = Some(remote_user);
             }
+            RemoteConnectionIdentity::Relay { host_device_id } => {
+                kind = RemoteConnectionKind::Relay;
+                host = Some(host_device_id);
+                user = None;
+                // The host's name is kept beside its id so a restored
+                // workspace can say where it lives before reconnecting. Rows
+                // are matched by device id alone, so renaming a host updates
+                // its row instead of orphaning the workspaces that use it.
+                if let RemoteConnectionOptions::Relay(relay) = &options {
+                    name = Some(relay.host_name.clone());
+                }
+            }
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionIdentity::Mock { id } => {
                 kind = RemoteConnectionKind::Ssh;
@@ -1657,6 +1670,10 @@ impl WorkspaceDb {
             remote_env = serde_json::to_string(&options.remote_env).ok();
         }
 
+        if kind == RemoteConnectionKind::Relay {
+            return Self::get_or_create_relay_connection_query(this, host, name);
+        }
+
         Self::get_or_create_remote_connection_query(
             this,
             kind,
@@ -1668,6 +1685,37 @@ impl WorkspaceDb {
             container_id,
             use_podman,
             remote_env,
+        )
+    }
+
+    fn get_or_create_relay_connection_query(
+        this: &Connection,
+        host_device_id: Option<String>,
+        host_name: Option<String>,
+    ) -> Result<RemoteConnectionId> {
+        if let Some(id) = this.select_row_bound(sql!(
+            UPDATE remote_connections
+            SET name = ?2
+            WHERE kind = ?1 AND host = ?3
+            RETURNING id
+        ))?((
+            RemoteConnectionKind::Relay.serialize(),
+            host_name.clone(),
+            host_device_id.clone(),
+        ))? {
+            return Ok(RemoteConnectionId(id));
+        }
+        Self::get_or_create_remote_connection_query(
+            this,
+            RemoteConnectionKind::Relay,
+            host_device_id,
+            None,
+            None,
+            None,
+            host_name,
+            None,
+            None,
+            None,
         )
     }
 
@@ -1917,6 +1965,12 @@ impl WorkspaceDb {
                     upload_binary_over_docker_exec: false,
                     use_podman: use_podman?,
                     remote_env,
+                }))
+            }
+            RemoteConnectionKind::Relay => {
+                Some(RemoteConnectionOptions::Relay(RelayConnectionOptions {
+                    host_device_id: host?,
+                    host_name: name?,
                 }))
             }
         }
@@ -2213,7 +2267,7 @@ impl WorkspaceDb {
                     .as_ref()
                     .map(|flexes| serde_json::json!(flexes).to_string());
 
-                let group_id = conn.select_row_bound::<_, i64>(sql!(
+                let group_id = conn.select_row_bound(sql!(
                     INSERT INTO pane_groups(
                         workspace_id,
                         parent_group_id,
@@ -2251,7 +2305,7 @@ impl WorkspaceDb {
         pane: &SerializedPane,
         parent: Option<(GroupId, usize)>,
     ) -> Result<PaneId> {
-        let pane_id = conn.select_row_bound::<_, i64>(sql!(
+        let pane_id = conn.select_row_bound(sql!(
             INSERT INTO panes(workspace_id, active, pinned_count)
             VALUES (?, ?, ?)
             RETURNING pane_id
@@ -4094,6 +4148,61 @@ mod tests {
             .into_iter()
             .collect::<HashMap<_, _>>(),
         );
+    }
+
+    #[gpui::test]
+    async fn a_relay_connection_is_stored_and_restored_by_device_id() {
+        let db = WorkspaceDb::open_test_db("a_relay_connection_is_stored_and_restored").await;
+        let options = RemoteConnectionOptions::Relay(RelayConnectionOptions {
+            host_device_id: "device-a".into(),
+            host_name: "Work Mac".into(),
+        });
+
+        let id = db
+            .get_or_create_remote_connection(options.clone())
+            .await
+            .unwrap();
+        let again = db
+            .get_or_create_remote_connection(options.clone())
+            .await
+            .unwrap();
+        assert_eq!(id, again, "the same host is the same row");
+
+        let other_host = db
+            .get_or_create_remote_connection(RemoteConnectionOptions::Relay(
+                RelayConnectionOptions {
+                    host_device_id: "device-b".into(),
+                    host_name: "Work Mac".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert_ne!(id, other_host, "two hosts with one name stay apart");
+
+        assert_eq!(db.remote_connection(id).unwrap(), options);
+    }
+
+    #[gpui::test]
+    async fn renaming_a_relay_host_keeps_its_connection_row() {
+        let db = WorkspaceDb::open_test_db("renaming_a_relay_host").await;
+        let relay = |name: &str| {
+            RemoteConnectionOptions::Relay(RelayConnectionOptions {
+                host_device_id: "device-a".into(),
+                host_name: name.into(),
+            })
+        };
+
+        let id = db
+            .get_or_create_remote_connection(relay("Work Mac"))
+            .await
+            .unwrap();
+        let renamed = db
+            .get_or_create_remote_connection(relay("Studio Mac"))
+            .await
+            .unwrap();
+
+        assert_eq!(id, renamed, "a rename must not create a second row");
+        assert_eq!(db.remote_connection(id).unwrap(), relay("Studio Mac"));
     }
 
     #[gpui::test]
