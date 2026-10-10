@@ -142,7 +142,8 @@ where
 }
 
 static WASM_ENGINE: LazyLock<wasmtime::Engine> = LazyLock::new(|| {
-    wasmtime::Engine::new(&wasmtime::Config::new()).expect("Failed to create Wasmtime engine")
+    util::process::with_sigchld_blocked(|| wasmtime::Engine::new(&wasmtime::Config::new()))
+        .expect("Failed to create Wasmtime engine")
 });
 
 /// A shared grammar for plain text, exposed for reuse by downstream crates.
