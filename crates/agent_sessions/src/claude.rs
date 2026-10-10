@@ -1,6 +1,6 @@
 use crate::{
-    AgentCommand, AgentKind, Availability, CompletedSubagents, Deletion, Fork, SessionCounts,
-    SessionProvider, SessionSummary, SubagentSummary,
+    AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+    SessionSummary, SubagentSummary, TranscriptProgress,
     claude_log::{self, HeadFacts, TailFacts},
     provider::{Untitled, is_safe_component},
 };
@@ -10,6 +10,7 @@ use std::{
     io::{Read as _, Seek as _, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 /// How much of the end of a transcript to read before giving up on finding an
@@ -251,18 +252,32 @@ impl SessionProvider for ClaudeProvider {
         Ok(read_subagents(&sidecar.join("subagents")))
     }
 
-    fn completed_subagents(
+    fn transcript_progress(
         &self,
         session: &SessionSummary,
         from: u64,
-    ) -> Result<CompletedSubagents> {
+    ) -> Result<TranscriptProgress> {
         let Some(log_path) = session.log_path.as_ref() else {
-            return Ok(CompletedSubagents {
+            return Ok(TranscriptProgress {
                 tool_use_ids: Vec::new(),
+                turn_marks: Vec::new(),
+                subagent_events: Vec::new(),
                 scanned_to: from,
+                restarted: false,
             });
         };
-        read_completed_tool_uses(log_path, from)
+        read_transcript_progress(log_path, from)
+    }
+
+    fn background_quiet_for(&self, session: &SessionSummary) -> Result<Option<Duration>> {
+        let Some(sidecar) = Self::sidecar_dir(session) else {
+            return Ok(None);
+        };
+        Ok(quiet_for(&sidecar.join("subagents"), SystemTime::now()))
+    }
+
+    fn reports_turns(&self) -> bool {
+        true
     }
 
     fn resume_command(&self, session: &SessionSummary, fork: Fork) -> Option<AgentCommand> {
@@ -891,6 +906,50 @@ mod tests {
     }
 
     #[test]
+    fn a_sidecar_says_whether_the_subagent_was_started_in_the_background() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("subagents");
+        sidecar(
+            &dir,
+            "agent-bg",
+            r#"{"agentType":"tester","toolUseId":"toolu_1","spawnDepth":1,"requestShape":"background","requestNonInteractive":true}"#,
+        );
+        sidecar(
+            &dir,
+            "agent-fg",
+            r#"{"agentType":"tester","toolUseId":"toolu_2","requestShape":"foreground"}"#,
+        );
+        sidecar(
+            &dir,
+            "agent-old",
+            r#"{"agentType":"tester","toolUseId":"toolu_3"}"#,
+        );
+        let flags: std::collections::HashMap<String, bool> = read_subagents(&dir)
+            .into_iter()
+            .map(|one| (one.id.to_string(), one.background))
+            .collect();
+        assert_eq!(flags["agent-bg"], true);
+        assert_eq!(flags["agent-fg"], false);
+        assert_eq!(flags["agent-old"], false, "no field means today's rule");
+    }
+
+    #[test]
+    fn a_subagent_event_in_a_half_written_line_arrives_exactly_once() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let notification = r#"{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>"}"#;
+        std::fs::write(&log, format!("{notification}\n{notification}")).unwrap();
+        let first = read_transcript_progress(&log, 0).unwrap();
+        assert_eq!(first.subagent_events.len(), 1);
+
+        std::fs::write(&log, format!("{notification}\n{notification}\n")).unwrap();
+        let second = read_transcript_progress(&log, first.scanned_to).unwrap();
+        assert_eq!(second.subagent_events.len(), 1);
+        let third = read_transcript_progress(&log, second.scanned_to).unwrap();
+        assert!(third.subagent_events.is_empty());
+    }
+
+    #[test]
     fn a_missing_sidecar_directory_is_no_subagents_not_an_error() {
         let root = tempfile::tempdir().unwrap();
         assert!(read_subagents(&root.path().join("nothing-here")).is_empty());
@@ -919,7 +978,7 @@ mod tests {
             format!("{}\n{}", finished("toolu_a"), finished("toolu_b")),
         )
         .unwrap();
-        let first = read_completed_tool_uses(&log, 0).unwrap();
+        let first = read_transcript_progress(&log, 0).unwrap();
         assert_eq!(
             first
                 .tool_use_ids
@@ -942,7 +1001,7 @@ mod tests {
             format!("{}\n{}\n", finished("toolu_a"), finished("toolu_b")),
         )
         .unwrap();
-        let second = read_completed_tool_uses(&log, first.scanned_to).unwrap();
+        let second = read_transcript_progress(&log, first.scanned_to).unwrap();
         assert_eq!(
             second
                 .tool_use_ids
@@ -966,11 +1025,13 @@ mod tests {
         )
         .unwrap();
 
-        let pass = read_completed_tool_uses(&log, 10_000).unwrap();
+        let pass = read_transcript_progress(&log, 10_000).unwrap();
         assert_eq!(
             pass.tool_use_ids.iter().map(|id| &**id).collect::<Vec<_>>(),
             vec!["toolu_only"]
         );
+        assert!(pass.restarted, "the caller must be told to start over");
+        assert!(!read_transcript_progress(&log, 0).unwrap().restarted);
     }
 }
 
@@ -1012,6 +1073,8 @@ fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
                         .unwrap_or_default(),
                 ),
                 tool_use_id: Arc::from(tool_use_id),
+                background: meta.get("requestShape").and_then(serde_json::Value::as_str)
+                    == Some("background"),
                 // An assumption about a format this editor does not own, and the
                 // one claim here no test can settle: every sidecar observed was
                 // written once, at spawn, and never touched again, so its own
@@ -1023,7 +1086,7 @@ fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
                 //
                 // The transcript beside it is the file that keeps moving, and it
                 // is deliberately not consulted — see
-                // `claude_log::completed_tool_uses`.
+                // `claude_log::scan_chunk`.
                 spawned_at: entry.metadata().ok()?.modified().ok()?,
             })
         })
@@ -1032,40 +1095,65 @@ fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
     subagents
 }
 
-/// Reads `path` from `from` to its end and reports the tool results in it.
+/// Reads `path` from `from` to its end and reports the tool results and turn
+/// marks in it.
 ///
 /// Reports the offset of the last complete line rather than the file's length.
 /// A transcript being appended to right now ends mid-line, and counting that
 /// partial line as read would lose whatever result it turns out to carry once
 /// the rest of it lands.
-fn read_completed_tool_uses(path: &Path, from: u64) -> Result<CompletedSubagents> {
+fn read_transcript_progress(path: &Path, from: u64) -> Result<TranscriptProgress> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
     // A transcript only ever grows. Shorter than where the last pass stopped
     // means a different file stands at this path now, so resuming would read
     // into the middle of someone else's line. Start again instead.
-    let from = if from > length { 0 } else { from };
+    let restarted = from > length;
+    let from = if restarted { 0 } else { from };
     file.seek(SeekFrom::Start(from))?;
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok(CompletedSubagents {
+        return Ok(TranscriptProgress {
             tool_use_ids: Vec::new(),
+            turn_marks: Vec::new(),
+            subagent_events: Vec::new(),
             scanned_to: from,
+            restarted,
         });
     };
     // Lossy on the complete portion only, and the offset computed from the raw
     // bytes: a replacement character is a different length from what it stands
     // in for, so counting the converted string would drift the resume point.
     let complete = String::from_utf8_lossy(&bytes[..=last_newline]);
-    Ok(CompletedSubagents {
-        tool_use_ids: claude_log::completed_tool_uses(&complete)
-            .into_iter()
-            .map(Arc::from)
-            .collect(),
+    let scan = claude_log::scan_chunk(&complete);
+    Ok(TranscriptProgress {
+        tool_use_ids: scan.tool_use_ids.into_iter().map(Arc::from).collect(),
+        turn_marks: scan.turn_marks,
+        subagent_events: scan.subagent_events,
         scanned_to: from + last_newline as u64 + 1,
+        restarted,
     })
+}
+
+/// How long before `now` the newest `agent-*.jsonl` in `dir` was written.
+///
+/// Stats the files and reads nothing from them. `None` when there are none, or
+/// none whose time can be read: no evidence, which is different from "quiet".
+fn quiet_for(dir: &Path, now: SystemTime) -> Option<Duration> {
+    let newest = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            name.to_str()
+                .is_some_and(|name| name.starts_with("agent-") && name.ends_with(".jsonl"))
+        })
+        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+        .max()?;
+    // A clock that moved backwards makes the file newer than now: not quiet.
+    Some(now.duration_since(newest).unwrap_or_default())
 }
 
 fn count_meta_files(dir: &Path) -> usize {
@@ -1122,6 +1210,32 @@ mod deletion_wrapping {
         assert_eq!(
             provider.deletion(&session),
             Deletion::Trash(vec![sidecar, log])
+        );
+    }
+}
+
+#[cfg(test)]
+mod quiet_tests {
+    use super::*;
+
+    #[test]
+    fn quiet_is_measured_from_the_newest_subagent_transcript_only() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(quiet_for(root.path(), SystemTime::now()), None);
+        std::fs::write(root.path().join("agent-a.meta.json"), "{}").unwrap();
+        assert_eq!(
+            quiet_for(root.path(), SystemTime::now()),
+            None,
+            "a sidecar is not a transcript"
+        );
+
+        std::fs::write(root.path().join("agent-a.jsonl"), "x\n").unwrap();
+        let later = SystemTime::now() + Duration::from_secs(120);
+        let quiet = quiet_for(root.path(), later).unwrap();
+        assert!(quiet >= Duration::from_secs(119) && quiet <= Duration::from_secs(121));
+        assert_eq!(
+            quiet_for(root.path(), SystemTime::UNIX_EPOCH),
+            Some(Duration::ZERO)
         );
     }
 }

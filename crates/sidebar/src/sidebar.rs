@@ -1,4 +1,5 @@
 mod activity_watch;
+mod agent_attention_watch;
 mod chrome;
 mod colour_modal;
 #[cfg(test)]
@@ -21,6 +22,8 @@ mod rail_container;
 mod rail_database;
 mod rail_item;
 mod rail_panels;
+#[cfg(test)]
+mod rail_test_support;
 mod refresh;
 mod render;
 mod serialization;
@@ -77,6 +80,12 @@ pub struct Sidebar {
     /// waking or hibernating in the background would never refresh
     /// `contents` -- `MultiWorkspaceEvent` alone doesn't fire for it.
     pub(crate) project_activity_subscriptions: HashMap<EntityId, Subscription>,
+    /// One per live workspace, keyed by workspace id: hears agent tabs opening
+    /// and closing so the rail's waiting count follows them even while that
+    /// workspace is in the background.
+    pub(crate) workspace_item_subscriptions: HashMap<EntityId, Subscription>,
+    /// One per live agent tab, keyed by view id: hears its `Attention` edge.
+    pub(crate) agent_attention_subscriptions: HashMap<EntityId, Subscription>,
     /// Where a dragged project would land: an index into the *gaps* between
     /// rows, so `0` is above the first and `len` is below the last.
     ///
@@ -153,6 +162,8 @@ impl Sidebar {
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_handles: HashMap::default(),
             project_activity_subscriptions: HashMap::default(),
+            workspace_item_subscriptions: HashMap::default(),
+            agent_attention_subscriptions: HashMap::default(),
             _subscriptions: subscriptions,
         }
     }

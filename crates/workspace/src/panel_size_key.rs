@@ -93,6 +93,10 @@ fn host_token(host: &RemoteConnectionIdentity) -> String {
             push_field(&mut token, name);
             push_field(&mut token, remote_user);
         }
+        RemoteConnectionIdentity::Relay { host_device_id } => {
+            token.push_str("relay");
+            push_field(&mut token, host_device_id);
+        }
         #[cfg(any(test, feature = "test-support"))]
         RemoteConnectionIdentity::Mock { id } => {
             token.push_str("mock");

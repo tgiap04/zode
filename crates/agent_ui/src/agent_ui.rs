@@ -7,6 +7,7 @@
 //! a name, and a way back to it.
 
 mod actions;
+mod agent_attention;
 mod agent_roster;
 mod agent_view;
 mod missing_binary;
@@ -14,19 +15,23 @@ mod permission_bypass;
 mod session_history;
 mod session_store;
 pub mod subagents;
+mod turn_tracker;
 
 pub use actions::*;
 pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks};
 pub use agent_view::{
     AgentView, AgentViewEvent, RESPONDING_WINDOW, RESPONDING_WRITES, SessionOrigin, responding_at,
 };
+// Only another crate's tests build a tab of a chosen intent.
+#[cfg(any(test, feature = "test-support"))]
+pub use agent_view::SessionIntent;
 pub use permission_bypass::PermissionBypassStore;
 pub use session_history::{
     AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, delete_all_detail, delete_session,
     execute_session_deletion, plan_delete_all, resume_session, sessions_in_project,
 };
 pub use session_store::SessionStore;
-pub use subagents::{SubagentTracker, provider_for_agent};
+pub use turn_tracker::TurnEvent;
 
 use gpui::App;
 use project::AgentId;

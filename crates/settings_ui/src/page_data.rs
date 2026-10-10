@@ -236,6 +236,54 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
+    fn remote_control_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Remote Control"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Allow Remote Control",
+                description: "Let another of your devices, signed in to the same account, watch and type into the agents and terminals running here. Each device must be approved once by comparing a six-digit code.",
+                field: Box::new(SettingField {
+                    json_path: Some("remote_control.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .remote_control
+                            .as_ref()
+                            .and_then(|settings| settings.enabled.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .remote_control
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Remote Control Idle Timeout",
+                description: "Minutes a connected device may send nothing before it is disconnected. 0 turns the limit off.",
+                field: Box::new(SettingField {
+                    json_path: Some("remote_control.idle_timeout_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .remote_control
+                            .as_ref()
+                            .and_then(|settings| settings.idle_timeout_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .remote_control
+                            .get_or_insert_default()
+                            .idle_timeout_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     fn workspace_restoration_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Workspace Restoration"),
@@ -361,6 +409,7 @@ fn general_page(cx: &App) -> SettingsPage {
             @vec,
             general_settings_section(cx),
             security_section(),
+            remote_control_section(),
             workspace_restoration_section(),
             scoped_settings_section(),
             privacy_section(),

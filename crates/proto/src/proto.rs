@@ -346,6 +346,14 @@ messages!(
     (GitCloneResponse, Background),
     (ToggleLspLogs, Background),
     (GetDirectoryEnvironment, Background),
+    // Terminal traffic is order-sensitive: input, resizes and output must be
+    // handled in the order they were sent.
+    (CreateTerminal, Foreground),
+    (TerminalOutput, Foreground),
+    (TerminalInput, Foreground),
+    (ResizeTerminal, Foreground),
+    (TerminalExited, Foreground),
+    (CloseTerminal, Foreground),
     (DirectoryEnvironment, Background),
     (GetAgentServerCommand, Background),
     (AgentServerCommand, Background),
@@ -570,6 +578,9 @@ request_messages!(
     (GitClone, GitCloneResponse),
     (ToggleLspLogs, Ack),
     (GetDirectoryEnvironment, DirectoryEnvironment),
+    (CreateTerminal, Ack),
+    (TerminalOutput, Ack),
+    (CloseTerminal, Ack),
     (GetProcesses, GetProcessesResponse),
     (GetAgentServerCommand, AgentServerCommand),
     (GetContextServerCommand, ContextServerCommand),
@@ -739,6 +750,12 @@ entity_messages!(
     SetIndexText,
     ToggleLspLogs,
     GetDirectoryEnvironment,
+    CreateTerminal,
+    TerminalOutput,
+    TerminalInput,
+    ResizeTerminal,
+    TerminalExited,
+    CloseTerminal,
 
     Push,
     Fetch,
@@ -982,6 +999,75 @@ impl LspQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_terminal_messages_round_trip_through_the_envelope() {
+        let create = CreateTerminal {
+            project_id: REMOTE_SERVER_PROJECT_ID,
+            terminal_id: 7,
+            program: Some("/bin/sh".into()),
+            args: vec!["-c".into(), "echo hi".into()],
+            env: [("TERM".to_string(), "xterm-256color".to_string())].into(),
+            cwd: Some("/tmp".into()),
+            columns: 80,
+            rows: 24,
+        };
+        let envelope = create.clone().into_envelope(1, None, None);
+        let bytes = envelope.encode_to_vec();
+        let decoded = Envelope::decode(bytes.as_slice()).expect("decodes");
+        assert_eq!(CreateTerminal::from_envelope(decoded), Some(create));
+
+        let output = TerminalOutput {
+            project_id: REMOTE_SERVER_PROJECT_ID,
+            terminal_id: 7,
+            data: vec![0, 255, b'\n'],
+        };
+        let decoded = Envelope::decode(
+            output
+                .clone()
+                .into_envelope(2, None, None)
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .expect("decodes");
+        assert_eq!(TerminalOutput::from_envelope(decoded), Some(output));
+
+        let exited = TerminalExited {
+            project_id: REMOTE_SERVER_PROJECT_ID,
+            terminal_id: 7,
+            exit_code: None,
+        };
+        let decoded = Envelope::decode(
+            exited
+                .clone()
+                .into_envelope(3, None, None)
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .expect("decodes");
+        assert_eq!(TerminalExited::from_envelope(decoded), Some(exited));
+    }
+
+    #[test]
+    fn test_terminal_messages_are_handled_in_order_and_routed_by_project() {
+        assert_eq!(
+            TerminalInput {
+                project_id: 3,
+                terminal_id: 1,
+                data: Vec::new()
+            }
+            .remote_entity_id(),
+            3
+        );
+        assert!(matches!(
+            TerminalInput::PRIORITY,
+            MessagePriority::Foreground
+        ));
+        assert!(matches!(
+            CreateTerminal::PRIORITY,
+            MessagePriority::Foreground
+        ));
+    }
 
     #[test]
     fn test_converting_peer_id_from_and_to_u64() {

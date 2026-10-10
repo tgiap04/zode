@@ -5,7 +5,7 @@ use container::fake_backend::{FakeBackend, Misbehaviour};
 use container::{ContainerBackend, ResourceKind};
 use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 
-use crate::container_panel::{ContainerPanel, ListState};
+use crate::container_panel::{Busy, ContainerPanel, ListState};
 use settings::Settings as _;
 
 /// Opens the container tab in a real workspace, over a backend the test chose.
@@ -786,8 +786,8 @@ mod lifecycle {
         panel.update(cx, |panel, cx| {
             panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
             assert_eq!(
-                panel.in_flight.get("c0ffee"),
-                Some(&ResourceAction::Stop),
+                panel.busy_for("c0ffee"),
+                Some(Busy::Action(ResourceAction::Stop)),
                 "the row must say what is being attempted while it runs -- \
                  `docker stop` waits ten seconds before killing"
             );
@@ -891,6 +891,527 @@ mod lifecycle {
             recorder.acted().is_empty(),
             "and the engine must never have been asked"
         );
+    }
+}
+
+/// The one busy state a row shows for anything in flight, and when it ends.
+mod busy {
+    use super::*;
+    use container::backend::{BackendEvent, ContainerError};
+    use container::{DestructivePlan, PruneScope, Resource, ResourceAction, RunState};
+    use futures::channel::oneshot;
+    use futures::stream::BoxStream;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+
+    /// One use of "wait until the test says go".
+    #[derive(Default)]
+    struct Gate(Mutex<Option<oneshot::Receiver<()>>>);
+
+    impl Gate {
+        fn hold(&self) -> oneshot::Sender<()> {
+            let (release, wait) = oneshot::channel();
+            if let Ok(mut gate) = self.0.lock() {
+                *gate = Some(wait);
+            }
+            release
+        }
+
+        fn take(&self) -> Option<oneshot::Receiver<()>> {
+            self.0.lock().ok().and_then(|mut gate| gate.take())
+        }
+    }
+
+    /// A fake whose next `list`, `act` or `destroy` waits until the test lets it
+    /// through, so the moment between "the command finished" and "the list was
+    /// re-read" -- and one operation finishing before another -- can be observed
+    /// instead of raced.
+    struct GatedListBackend {
+        inner: FakeBackend,
+        list_gate: Gate,
+        act_gate: Gate,
+        destroy_gate: Gate,
+        destroy_error: Mutex<Option<ContainerError>>,
+    }
+
+    impl GatedListBackend {
+        fn new(inner: FakeBackend) -> Self {
+            Self {
+                inner,
+                list_gate: Gate::default(),
+                act_gate: Gate::default(),
+                destroy_gate: Gate::default(),
+                destroy_error: Mutex::new(None),
+            }
+        }
+
+        /// Holds the next `list` until the returned sender fires.
+        fn hold_next_list(&self) -> oneshot::Sender<()> {
+            self.list_gate.hold()
+        }
+
+        fn hold_next_act(&self) -> oneshot::Sender<()> {
+            self.act_gate.hold()
+        }
+
+        fn hold_next_destroy(&self) -> oneshot::Sender<()> {
+            self.destroy_gate.hold()
+        }
+
+        fn fail_next_destroy(&self) {
+            if let Ok(mut error) = self.destroy_error.lock() {
+                *error = Some(ContainerError::CommandFailed {
+                    program: "fake".into(),
+                    stderr: "removal refused".into(),
+                });
+            }
+        }
+    }
+
+    impl ContainerBackend for GatedListBackend {
+        fn kind(&self) -> BackendKind {
+            self.inner.kind()
+        }
+        fn supported_kinds(&self) -> &'static [ResourceKind] {
+            self.inner.supported_kinds()
+        }
+        fn supported_actions(&self, kind: ResourceKind) -> &'static [ResourceAction] {
+            self.inner.supported_actions(kind)
+        }
+        fn list<'life0, 'async_trait>(
+            &'life0 self,
+            kind: ResourceKind,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<Resource>, ContainerError>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            let held = self.list_gate.take();
+            let listed = self.inner.list(kind);
+            Box::pin(async move {
+                if let Some(wait) = held {
+                    wait.await.ok();
+                }
+                listed.await
+            })
+        }
+        fn act<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            kind: ResourceKind,
+            action: ResourceAction,
+            id: &'life1 str,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ContainerError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            let held = self.act_gate.take();
+            let acted = self.inner.act(kind, action, id);
+            Box::pin(async move {
+                if let Some(wait) = held {
+                    wait.await.ok();
+                }
+                acted.await
+            })
+        }
+        fn watch(&self) -> Option<BoxStream<'static, BackendEvent>> {
+            self.inner.watch()
+        }
+        fn prune_targets<'life0, 'async_trait>(
+            &'life0 self,
+            scope: PruneScope,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Option<Result<Vec<Resource>, ContainerError>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            self.inner.prune_targets(scope)
+        }
+        fn destroy<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            plan: &'life1 DestructivePlan,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ContainerError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            let held = self.destroy_gate.take();
+            let refusal = self.destroy_error.lock().ok().and_then(|mut e| e.take());
+            let destroyed = self.inner.destroy(plan);
+            Box::pin(async move {
+                if let Some(wait) = held {
+                    wait.await.ok();
+                }
+                match refusal {
+                    Some(error) => Err(error),
+                    None => destroyed.await,
+                }
+            })
+        }
+        fn logs_command(&self, kind: ResourceKind, id: &str) -> Option<(String, Vec<String>)> {
+            self.inner.logs_command(kind, id)
+        }
+        fn exec_command(&self, kind: ResourceKind, id: &str) -> Option<(String, Vec<String>)> {
+            self.inner.exec_command(kind, id)
+        }
+    }
+
+    fn a_container(id: &str) -> Resource {
+        Resource {
+            kind: ResourceKind::Container,
+            id: id.into(),
+            name: format!("{id}-name"),
+            state: RunState::Running,
+            detail: vec![("Image", "postgres:16".into())],
+            parent: None,
+        }
+    }
+
+    fn gated_panel(
+        cx: &mut TestAppContext,
+    ) -> (
+        Arc<GatedListBackend>,
+        gpui::Entity<ContainerPanel>,
+        &mut VisualTestContext,
+    ) {
+        let gated = Arc::new(GatedListBackend::new(FakeBackend::docker()));
+        let (panel, cx) = panel_over(gated.clone(), cx);
+        (gated, panel, cx)
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
+        cx.run_until_parked();
+    }
+
+    fn removal_of(id: &str) -> DestructivePlan {
+        DestructivePlan::remove(ResourceKind::Container, vec![a_container(id)])
+            .expect("a container is removable")
+    }
+
+    #[test]
+    fn every_busy_state_has_its_own_progress_word() {
+        let words: Vec<_> = [
+            Busy::Action(ResourceAction::Start),
+            Busy::Action(ResourceAction::Stop),
+            Busy::Action(ResourceAction::Restart),
+            Busy::Action(ResourceAction::Pause),
+            Busy::Action(ResourceAction::Unpause),
+            Busy::Removing,
+        ]
+        .into_iter()
+        .map(Busy::progress_label)
+        .collect();
+        assert_eq!(
+            words,
+            [
+                "Starting\u{2026}",
+                "Stopping\u{2026}",
+                "Restarting\u{2026}",
+                "Pausing\u{2026}",
+                "Resuming\u{2026}",
+                "Removing\u{2026}",
+            ]
+        );
+    }
+
+    /// The row must say "removing" from the click until the list that no longer
+    /// holds it has landed -- not just until the command returned, or its
+    /// buttons would flash back for the length of one `docker ps`.
+    #[gpui::test]
+    async fn a_removal_keeps_the_row_busy_until_the_list_is_read_again(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let release = gated.hold_next_list();
+
+        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.busy_for("c0ffee"), Some(Busy::Removing));
+        });
+
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.busy_for("c0ffee"),
+                Some(Busy::Removing),
+                "the command is done but the list has not been re-read, so the \
+                 row is still on screen and must still say so"
+            );
+        });
+
+        release.send(()).ok();
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.in_flight.is_empty(),
+                "once the list landed there is nothing left to wait for"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn an_action_keeps_the_row_busy_until_the_list_is_read_again(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let release = gated.hold_next_list();
+
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Restart, "c0ffee".into(), cx)
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.busy_for("c0ffee"),
+                Some(Busy::Action(ResourceAction::Restart))
+            );
+        });
+
+        release.send(()).ok();
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| assert!(panel.in_flight.is_empty()));
+    }
+
+    /// A prune lists everything it will delete, and each of those rows is
+    /// working, not only the one somebody happened to click.
+    #[gpui::test]
+    async fn a_prune_marks_every_target_busy(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let release = gated.hold_next_list();
+        let plan = DestructivePlan::prune(
+            PruneScope::Reclaimable,
+            vec![a_container("aaa"), a_container("bbb"), a_container("ccc")],
+        )
+        .expect("a prune with targets is a plan");
+
+        panel.update(cx, |panel, cx| panel.destroy(plan, cx));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            for id in ["aaa", "bbb", "ccc"] {
+                assert_eq!(panel.busy_for(id), Some(Busy::Removing), "{id}");
+            }
+            assert_eq!(panel.in_flight.len(), 3, "and nothing else");
+        });
+
+        release.send(()).ok();
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| assert!(panel.in_flight.is_empty()));
+    }
+
+    /// A refused removal leaves the row where it was, so it must stop claiming
+    /// to be working -- and say why.
+    #[gpui::test]
+    async fn a_failed_removal_clears_the_busy_row_and_shows_the_error(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> =
+            Arc::new(FakeBackend::docker().misbehaving(Misbehaviour::FailEveryList));
+        let (panel, cx) = panel_over(backend, cx);
+
+        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.busy_for("c0ffee"), Some(Busy::Removing));
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.in_flight.is_empty(),
+                "failure must not leave a spinner"
+            );
+            assert!(
+                panel.last_error.is_some(),
+                "and the engine's words are shown"
+            );
+        });
+    }
+
+    /// A failure must not wait for a list read: the next list may be the very
+    /// thing that is failing.
+    #[gpui::test]
+    async fn a_failed_action_clears_the_busy_row_before_the_list_returns(cx: &mut TestAppContext) {
+        init_test(cx);
+        let backend: Arc<dyn ContainerBackend> =
+            Arc::new(FakeBackend::docker().misbehaving(Misbehaviour::FailEveryList));
+        let (panel, cx) = panel_over(backend, cx);
+
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Stop, "c0ffee".into(), cx)
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.in_flight.is_empty());
+            assert!(panel.last_error.is_some());
+        });
+    }
+
+    /// The map is bounded by what is on screen: leaving the list that held the
+    /// row must not leave its entry behind for a list that was never read.
+    #[gpui::test]
+    async fn switching_kind_drops_the_busy_rows(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let _held = gated.hold_next_list();
+
+        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.choose_kind(ResourceKind::Image, cx));
+        panel.read_with(cx, |panel, _| assert!(panel.in_flight.is_empty()));
+    }
+
+    /// An action finishing while a removal of the same row is still running
+    /// must not cut the removal's busy state short.
+    #[gpui::test]
+    async fn an_old_outcome_does_not_settle_a_newer_operation(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let release_destroy = gated.hold_next_destroy();
+
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
+            panel.destroy(removal_of("c0ffee"), cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.busy_for("c0ffee"),
+                Some(Busy::Removing),
+                "the stop is over, the removal is not -- and the stop's re-read                  of the list must not have ended it"
+            );
+        });
+
+        release_destroy.send(()).ok();
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| assert!(panel.in_flight.is_empty()));
+    }
+
+    /// A refused removal hands the row back to the action still running on it,
+    /// rather than leaving the buttons up mid-action.
+    #[gpui::test]
+    async fn a_refused_removal_gives_the_row_back_to_the_running_action(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let release_act = gated.hold_next_act();
+        gated.fail_next_destroy();
+        let plan = DestructivePlan::prune(PruneScope::Reclaimable, vec![a_container("c0ffee")])
+            .expect("a prune with targets is a plan");
+
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
+            panel.destroy(plan, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.busy_for("c0ffee"),
+                Some(Busy::Action(ResourceAction::Stop)),
+                "the removal failed but the stop is still running"
+            );
+            assert!(panel.last_error.is_some());
+        });
+
+        release_act.send(()).ok();
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.in_flight.is_empty(),
+                "and when the stop finishes the row is done"
+            );
+        });
+    }
+
+    /// If the action ended while the removal was running, a refused removal must
+    /// not resurrect it.
+    #[gpui::test]
+    async fn a_refused_removal_does_not_revive_a_finished_action(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let release_destroy = gated.hold_next_destroy();
+        gated.fail_next_destroy();
+
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
+            panel.destroy(removal_of("c0ffee"), cx);
+        });
+        cx.run_until_parked();
+        release_destroy.send(()).ok();
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.in_flight.is_empty());
+            assert!(panel.last_error.is_some());
+        });
+    }
+
+    /// Idle rows have their buttons; a busy row has the spinner and its word
+    /// and none of them.
+    #[gpui::test]
+    async fn a_busy_row_swaps_its_buttons_for_a_spinner(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        draw(cx);
+        assert!(cx.debug_bounds("container-row-buttons:c0ffee").is_some());
+        assert!(cx.debug_bounds("container-busy:c0ffee").is_none());
+
+        let _held = gated.hold_next_list();
+        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(cx.debug_bounds("container-busy:c0ffee").is_some());
+        assert!(cx.debug_bounds("container-busy-spinner:c0ffee").is_some());
+        assert!(
+            cx.debug_bounds("container-row-buttons:c0ffee").is_none(),
+            "no action, terminal or remove button while the row is working"
+        );
+    }
+
+    #[gpui::test]
+    async fn an_action_draws_the_same_busy_row(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        let _held = gated.hold_next_list();
+        panel.update(cx, |panel, cx| {
+            panel.act(ResourceAction::Stop, "c0ffee".into(), cx)
+        });
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(cx.debug_bounds("container-busy-spinner:c0ffee").is_some());
+        assert!(cx.debug_bounds("container-row-buttons:c0ffee").is_none());
+    }
+
+    /// The open row's header shows the same thing as the list row did.
+    #[gpui::test]
+    async fn the_detail_header_shows_the_busy_row_too(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (gated, panel, cx) = gated_panel(cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.open_detail(a_container("c0ffee"), window, cx)
+        });
+        cx.run_until_parked();
+        draw(cx);
+        assert!(cx.debug_bounds("container-detail").is_some());
+        assert!(cx.debug_bounds("container-row-buttons:c0ffee").is_some());
+
+        let _held = gated.hold_next_list();
+        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(cx.debug_bounds("container-busy-spinner:c0ffee").is_some());
+        assert!(cx.debug_bounds("container-row-buttons:c0ffee").is_none());
     }
 }
 

@@ -168,11 +168,12 @@ function BuildZedAndItsFriends {
     # .exe be overwritten, so the app hands off to the helper on quit and the helper is what
     # replaces the app and relaunches it. Without it in `tools`, an in-app update on Windows
     # cannot complete.
-    cargo build --release --package zode --package cli --package auto_update_helper `
+    cargo build --release --package zode --package cli --package auto_update_helper --package remote_server `
         --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb `
         --target $target
     Copy-Item -Path ".\$CargoOutDir\zode.exe" -Destination "$innoDir\Zode.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\remote_server.exe" -Destination "$innoDir\remote_server.exe" -Force
     # Must land in `tools`: `finalize_auto_update_on_quit` looks for it beside the app at
     # `tools\auto_update_helper.exe` and nowhere else.
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
@@ -262,7 +263,7 @@ function SignZedAndItsFriends {
         return
     }
 
-    $files = "$innoDir\Zode.exe,$innoDir\cli.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    $files = "$innoDir\Zode.exe,$innoDir\cli.exe,$innoDir\remote_server.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
     # The drivers are signed where they are packaged, not here: they are no
     # longer inside `$innoDir`, and signing has to happen before the archive is
     # built rather than after.
@@ -327,6 +328,9 @@ function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
     Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
     Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
+    # In `bin`, which the installer already copies whole, so no installer script
+    # change is needed; the project server is looked up at `bin\remote_server.exe`.
+    Move-Item -Path "$innoDir\remote_server.exe" -Destination "$innoDir\bin\remote_server.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
         Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force

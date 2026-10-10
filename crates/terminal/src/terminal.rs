@@ -4,7 +4,14 @@ pub use alacritty_terminal;
 
 mod pty_info;
 mod terminal_hyperlinks;
+mod terminal_remote_snapshot;
 pub mod terminal_settings;
+
+pub use terminal_remote_snapshot::{
+    REMOTE_SNAPSHOT_HISTORY_LINES, REMOTE_TAP_QUEUE_BYTES, REMOTE_TAP_QUEUE_CAPACITY,
+    RemoteOutputChunk, RemoteSnapshot, RemoteTap,
+};
+use terminal_remote_snapshot::{RemoteTapSlot, render_snapshot};
 
 use alacritty_terminal::{
     Term,
@@ -357,7 +364,10 @@ const DEFAULT_SCROLL_HISTORY_LINES: usize = 10_000;
 /// How many pty write timestamps are kept. Bounded on purpose: a streaming
 /// program writes hundreds of times a second, and the question this history
 /// answers -- steady or occasional -- is settled long before sixteen.
-const PTY_OUTPUT_HISTORY: usize = 16;
+///
+/// Public because a caller's "quiet" threshold has to sit below it: a count
+/// saturates here, so a threshold above it could never read as busy.
+pub const PTY_OUTPUT_HISTORY: usize = 16;
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 
 pub struct TerminalBuilder {
@@ -374,7 +384,65 @@ impl TerminalBuilder {
         background_executor: &BackgroundExecutor,
         path_style: PathStyle,
     ) -> Result<TerminalBuilder> {
-        // Create a display-only terminal (no actual PTY).
+        Self::surface(
+            TerminalType::DisplayOnly,
+            SurfaceOptions::default(),
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id,
+            background_executor,
+            path_style,
+        )
+    }
+
+    /// A terminal whose process lives somewhere else. What the process prints
+    /// is fed in with [`Terminal::feed_remote_output`], and what is typed, and
+    /// every new size, leaves through `commands`.
+    pub fn new_remote_backed(
+        commands: UnboundedSender<RemoteTerminalCommand>,
+        options: RemoteBackedOptions,
+        cursor_shape: CursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        window_id: u64,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+    ) -> Result<TerminalBuilder> {
+        let max_scroll_history_lines = if options.task.is_some() {
+            // A task's output is read after the fact, so keep all of it, as a
+            // local task terminal does.
+            Some(MAX_SCROLL_HISTORY_LINES)
+        } else {
+            max_scroll_history_lines
+        };
+        Self::surface(
+            TerminalType::RemoteBacked { commands },
+            SurfaceOptions {
+                task: options.task,
+                completion_tx: options.completion_tx,
+                title_override: options.title_override,
+                is_remote_terminal: true,
+            },
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id,
+            background_executor,
+            path_style,
+        )
+    }
+
+    fn surface(
+        terminal_type: TerminalType,
+        options: SurfaceOptions,
+        cursor_shape: CursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        window_id: u64,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+    ) -> Result<TerminalBuilder> {
         let default_cursor_style = AlacCursorStyle::from(cursor_shape);
         let scrolling_history = max_scroll_history_lines
             .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
@@ -398,14 +466,15 @@ impl TerminalBuilder {
 
         let term = Arc::new(FairMutex::new(term));
 
+        let terminal_type_is_remote = matches!(terminal_type, TerminalType::RemoteBacked { .. });
         let terminal = Terminal {
-            task: None,
-            terminal_type: TerminalType::DisplayOnly,
-            completion_tx: None,
+            task: options.task,
+            terminal_type,
+            completion_tx: options.completion_tx,
             term,
             term_config: config,
             pre_hibernate_scroll_history: None,
-            title_override: None,
+            title_override: options.title_override,
             events: VecDeque::with_capacity(10),
             last_content: Default::default(),
             last_mouse: None,
@@ -418,7 +487,7 @@ impl TerminalBuilder {
             selection_phase: SelectionPhase::Ended,
             hyperlink_regex_searches: RegexSearches::default(),
             vi_mode_enabled: false,
-            is_remote_terminal: false,
+            is_remote_terminal: options.is_remote_terminal,
             last_mouse_move_time: Instant::now(),
             recent_pty_output: VecDeque::new(),
             last_hyperlink_search_position: None,
@@ -441,6 +510,8 @@ impl TerminalBuilder {
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
+            remote_tap_slot: Arc::default(),
+            remote_parser: terminal_type_is_remote.then(RemoteParser::new),
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
         };
@@ -615,7 +686,7 @@ impl TerminalBuilder {
             let pty_info = PtyProcessInfo::new(&pty);
 
             //And connect them together
-            let event_loop = EventLoop::new(
+            let mut event_loop = EventLoop::new(
                 term.clone(),
                 ZedListener(events_tx),
                 pty,
@@ -623,6 +694,12 @@ impl TerminalBuilder {
                 false,
             )
             .context("failed to create event loop")?;
+
+            // The event loop takes its tap only before it spawns, so the tap is
+            // always installed and the slot behind it decides whether anything
+            // is listening.
+            let remote_tap_slot = Arc::new(RemoteTapSlot::default());
+            event_loop.set_output_tap(Some(remote_tap_slot.output_tap()));
 
             let pty_tx = event_loop.channel();
             let _io_thread = event_loop.spawn(); // DANGER
@@ -677,6 +754,8 @@ impl TerminalBuilder {
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
+                remote_tap_slot,
+                remote_parser: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
             };
@@ -869,6 +948,40 @@ enum TerminalType {
         info: Arc<PtyProcessInfo>,
     },
     DisplayOnly,
+    /// The process runs on another machine; see [`TerminalBuilder::new_remote_backed`].
+    RemoteBacked {
+        commands: UnboundedSender<RemoteTerminalCommand>,
+    },
+}
+
+type RemoteParser =
+    alacritty_terminal::vte::ansi::Processor<alacritty_terminal::vte::ansi::StdSyncHandler>;
+
+/// What a remote-backed terminal asks of the process it stands in for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteTerminalCommand {
+    Input(Vec<u8>),
+    Resize {
+        columns: u16,
+        rows: u16,
+    },
+    /// The terminal wants the remote process gone: a task was cancelled.
+    Close,
+}
+
+#[derive(Default)]
+pub struct RemoteBackedOptions {
+    pub task: Option<TaskState>,
+    pub completion_tx: Option<Sender<Option<ExitStatus>>>,
+    pub title_override: Option<String>,
+}
+
+#[derive(Default)]
+struct SurfaceOptions {
+    task: Option<TaskState>,
+    completion_tx: Option<Sender<Option<ExitStatus>>>,
+    title_override: Option<String>,
+    is_remote_terminal: bool,
 }
 
 pub struct Terminal {
@@ -933,6 +1046,12 @@ pub struct Terminal {
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
+    /// Keeps an escape sequence or a character that straddles two chunks of
+    /// remote output whole. Only a remote-backed terminal has one.
+    remote_parser: Option<RemoteParser>,
+    /// Where the pty reader thread hands raw output to whoever mirrors this
+    /// terminal. Empty until [`Terminal::attach_remote_tap`] fills it.
+    remote_tap_slot: Arc<RemoteTapSlot>,
     #[cfg(any(test, feature = "test-support"))]
     input_log: Vec<Vec<u8>>,
 }
@@ -1084,8 +1203,21 @@ impl Terminal {
 
                 self.last_content.terminal_bounds = new_bounds;
 
-                if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-                    pty_tx.0.send(Msg::Resize(new_bounds.into())).ok();
+                match &self.terminal_type {
+                    TerminalType::Pty { pty_tx, .. } => {
+                        pty_tx.0.send(Msg::Resize(new_bounds.into())).ok();
+                    }
+                    TerminalType::RemoteBacked { commands } => {
+                        self.send_remote_command(
+                            commands,
+                            RemoteTerminalCommand::Resize {
+                                columns: u16::try_from(new_bounds.num_columns())
+                                    .unwrap_or(u16::MAX),
+                                rows: u16::try_from(new_bounds.num_lines()).unwrap_or(u16::MAX),
+                            },
+                        );
+                    }
+                    TerminalType::DisplayOnly => {}
                 }
 
                 term.resize(new_bounds);
@@ -1542,17 +1674,61 @@ impl Terminal {
     /// Write the Input payload to the PTY, if applicable.
     /// (This is a no-op for display-only terminals.)
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
-        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-            let input = input.into();
-            if log::log_enabled!(log::Level::Debug) {
-                if let Ok(str) = str::from_utf8(&input) {
-                    log::debug!("Writing to PTY: {:?}", str);
-                } else {
-                    log::debug!("Writing to PTY: {:?}", input);
+        match &self.terminal_type {
+            TerminalType::Pty { pty_tx, .. } => {
+                let input = input.into();
+                if log::log_enabled!(log::Level::Debug) {
+                    if let Ok(str) = str::from_utf8(&input) {
+                        log::debug!("Writing to PTY: {:?}", str);
+                    } else {
+                        log::debug!("Writing to PTY: {:?}", input);
+                    }
                 }
+                pty_tx.notify(input);
             }
-            pty_tx.notify(input);
+            TerminalType::RemoteBacked { commands } => {
+                self.send_remote_command(
+                    commands,
+                    RemoteTerminalCommand::Input(input.into().into_owned()),
+                );
+            }
+            TerminalType::DisplayOnly => {}
         }
+    }
+
+    fn send_remote_command(
+        &self,
+        commands: &UnboundedSender<RemoteTerminalCommand>,
+        command: RemoteTerminalCommand,
+    ) {
+        // A closed channel means the remote process is already gone, and
+        // there is nobody left to tell.
+        if commands.unbounded_send(command).is_err() {
+            log::debug!("the remote terminal is gone; dropping what was sent to it");
+        }
+    }
+
+    /// Draws what a remote process printed. The bytes go in exactly as they
+    /// arrived: unlike [`Self::write_output`] no carriage return is added,
+    /// because they already come from a real pty that does its own.
+    ///
+    /// Chunks may end anywhere, even inside an escape sequence or a
+    /// multi-byte character: the parser carries its state to the next call.
+    /// A snapshot that starts with a full reset is fed the same way.
+    pub fn feed_remote_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let parser = self.remote_parser.get_or_insert_with(RemoteParser::new);
+        {
+            let mut term = self.term.lock();
+            parser.advance(&mut *term, bytes);
+        }
+        self.record_pty_output();
+        cx.emit(Event::Wakeup);
+    }
+
+    /// The remote process ended. `exit_code` is `None` when it was killed by a
+    /// signal or its status is not known.
+    pub fn remote_process_exited(&mut self, exit_code: Option<i32>, cx: &mut Context<Self>) {
+        self.register_task_finished(exit_code.map(raw_status_for_exit_code), cx);
     }
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
@@ -1571,6 +1747,57 @@ impl Terminal {
     #[cfg(any(test, feature = "test-support"))]
     pub fn take_input_log(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.input_log)
+    }
+
+    /// Whether this terminal is backed by a process, as opposed to being a
+    /// surface something else draws on. Only a process produces output worth
+    /// mirroring or accepts input worth forwarding.
+    pub fn is_pty_backed(&self) -> bool {
+        matches!(self.terminal_type, TerminalType::Pty { .. })
+    }
+
+    /// Starts handing out this terminal's raw pty output, replacing any
+    /// previous tap. `None` for a terminal with no pty, which has none.
+    ///
+    /// Take the first [`Self::remote_snapshot`] after this, not before: the
+    /// snapshot's sequence number is relative to the tap that is installed when
+    /// it is taken.
+    pub fn attach_remote_tap(&mut self) -> Option<RemoteTap> {
+        self.is_pty_backed().then(|| self.remote_tap_slot.install())
+    }
+
+    pub fn detach_remote_tap(&mut self) {
+        self.remote_tap_slot.remove();
+    }
+
+    pub fn has_remote_tap(&self) -> bool {
+        self.remote_tap_slot.is_installed()
+    }
+
+    /// The emulator's own size in columns and rows, which is what the child
+    /// process believes. `last_content` only learns a new size when the view
+    /// next draws, so a terminal nobody is looking at would report a stale one.
+    pub fn remote_dimensions(&self) -> (u16, u16) {
+        let term = self.term.lock_unfair();
+        (
+            u16::try_from(term.columns()).unwrap_or(u16::MAX),
+            u16::try_from(term.screen_lines()).unwrap_or(u16::MAX),
+        )
+    }
+
+    /// The screen and its scrollback as bytes a fresh emulator can replay,
+    /// with the sequence of the last tapped chunk it already contains.
+    pub fn remote_snapshot(&self) -> RemoteSnapshot {
+        // The tap runs under this same lock, which is what makes the sequence
+        // read below describe exactly the chunks already drawn into the grid.
+        let term = self.term.lock();
+        let sequence = self.remote_tap_slot.sequence();
+        RemoteSnapshot {
+            sequence,
+            columns: u16::try_from(term.columns()).unwrap_or(u16::MAX),
+            rows: u16::try_from(term.screen_lines()).unwrap_or(u16::MAX),
+            bytes: render_snapshot(&term, REMOTE_SNAPSHOT_HISTORY_LINES),
+        }
     }
 
     pub fn toggle_vi_mode(&mut self) {
@@ -1761,6 +1988,15 @@ impl Terminal {
         let term = self.term.lock_unfair();
         let start = AlacPoint::new(term.topmost_line(), Column(0));
         let end = AlacPoint::new(term.bottommost_line(), term.last_column());
+        term.bounds_to_string(start, end)
+    }
+
+    /// Only the rows on the live screen, one per line, with none of the
+    /// scrollback above them. A row that wraps counts as the row it is.
+    pub fn visible_content(&self) -> String {
+        let term = self.term.lock_unfair();
+        let start = AlacPoint::new(Line(0), Column(0));
+        let end = AlacPoint::new(Line(term.screen_lines() as i32 - 1), term.last_column());
         term.bounds_to_string(start, end)
     }
 
@@ -2223,7 +2459,7 @@ impl Terminal {
                 .read()
                 .as_ref()
                 .map(|process| process.cwd.clone()),
-            TerminalType::DisplayOnly => None,
+            TerminalType::DisplayOnly | TerminalType::RemoteBacked { .. } => None,
         }
     }
 
@@ -2274,7 +2510,9 @@ impl Terminal {
                             format!("{process_file} — {process_name}")
                         })
                         .unwrap_or_else(|| "Terminal".to_string()),
-                    TerminalType::DisplayOnly => "Terminal".to_string(),
+                    TerminalType::DisplayOnly | TerminalType::RemoteBacked { .. } => {
+                        "Terminal".to_string()
+                    }
                 }),
         }
     }
@@ -2283,12 +2521,18 @@ impl Terminal {
         if let Some(task) = self.task()
             && task.status == TaskStatus::Running
         {
-            if let TerminalType::Pty { info, .. } = &self.terminal_type {
-                // First kill the foreground process group (the command running in the shell)
-                info.kill_current_process();
-                // Then kill the shell itself so that the terminal exits properly
-                // and wait_for_completed_task can complete
-                info.kill_child_process();
+            match &self.terminal_type {
+                TerminalType::Pty { info, .. } => {
+                    // First kill the foreground process group (the command running in the shell)
+                    info.kill_current_process();
+                    // Then kill the shell itself so that the terminal exits properly
+                    // and wait_for_completed_task can complete
+                    info.kill_child_process();
+                }
+                TerminalType::RemoteBacked { commands } => {
+                    self.send_remote_command(commands, RemoteTerminalCommand::Close);
+                }
+                TerminalType::DisplayOnly => {}
             }
         }
     }
@@ -2296,14 +2540,14 @@ impl Terminal {
     pub fn pid(&self) -> Option<sysinfo::Pid> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info.pid(),
-            TerminalType::DisplayOnly => None,
+            TerminalType::DisplayOnly | TerminalType::RemoteBacked { .. } => None,
         }
     }
 
     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => Some(info.pid_getter()),
-            TerminalType::DisplayOnly => None,
+            TerminalType::DisplayOnly | TerminalType::RemoteBacked { .. } => None,
         }
     }
 
@@ -2554,6 +2798,16 @@ impl Drop for Terminal {
 }
 
 impl EventEmitter<Event> for Terminal {}
+
+/// The wait status a local child would have reported for `exit_code`, which
+/// is the shape [`Terminal::register_task_finished`] reads.
+fn raw_status_for_exit_code(exit_code: i32) -> i32 {
+    if cfg!(unix) {
+        exit_code << 8
+    } else {
+        exit_code
+    }
+}
 
 fn make_selection(range: &RangeInclusive<AlacPoint>) -> Selection {
     let mut selection = Selection::new(SelectionType::Simple, *range.start(), AlacDirection::Left);
@@ -3277,6 +3531,174 @@ mod tests {
         assert!(line2_col0, "Second line should start at column 0");
     }
 
+    fn remote_backed_terminal(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Terminal>,
+        futures::channel::mpsc::UnboundedReceiver<RemoteTerminalCommand>,
+    ) {
+        let (commands, commands_rx) = futures::channel::mpsc::unbounded();
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_remote_backed(
+                commands,
+                RemoteBackedOptions::default(),
+                CursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .unwrap()
+            .subscribe(cx)
+        });
+        (terminal, commands_rx)
+    }
+
+    #[gpui::test]
+    async fn test_remote_output_is_not_given_carriage_returns(cx: &mut TestAppContext) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"ab\ncd", cx);
+        });
+        let content = terminal.update(cx, |terminal, _cx| {
+            let term = terminal.term.lock_unfair();
+            Terminal::make_content(&term, &terminal.last_content)
+        });
+        // Without a carriage return the line feed only moves down, so the
+        // second line starts where the first ended: this is what a real pty
+        // sends and what the emulator must be shown as it is.
+        let column_of = |character: char| {
+            content
+                .cells
+                .iter()
+                .find(|cell| cell.c == character)
+                .map(|cell| (cell.point.line.0, cell.point.column.0))
+        };
+        assert_eq!(column_of('a'), Some((0, 0)));
+        assert_eq!(column_of('c'), Some((1, 2)));
+    }
+
+    #[gpui::test]
+    async fn test_remote_output_split_anywhere_draws_the_same_as_whole(cx: &mut TestAppContext) {
+        let whole: &[u8] = "\x1b[31mX\x1b[0m é€ end".as_bytes();
+        let cells_after = |cx: &mut TestAppContext, chunks: Vec<&[u8]>| {
+            let (terminal, _commands) = remote_backed_terminal(cx);
+            for chunk in chunks {
+                terminal.update(cx, |terminal, cx| terminal.feed_remote_output(chunk, cx));
+            }
+            terminal.update(cx, |terminal, _| {
+                let term = terminal.term.lock_unfair();
+                Terminal::make_content(&term, &terminal.last_content)
+                    .cells
+                    .into_iter()
+                    .map(|cell| (cell.point, cell.c, cell.fg))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let expected = cells_after(cx, vec![whole]);
+        // Inside the escape sequence, and inside the three-byte euro sign.
+        let euro_start = whole
+            .windows(3)
+            .position(|window| window == "€".as_bytes())
+            .expect("the euro sign is in the text");
+        for split in [3, 4, euro_start + 1, euro_start + 2] {
+            let (first, second) = whole.split_at(split);
+            assert_eq!(
+                cells_after(cx, vec![first, second]),
+                expected,
+                "split at byte {split}"
+            );
+        }
+        // One byte at a time is the worst case.
+        let singles: Vec<&[u8]> = whole.chunks(1).collect();
+        assert_eq!(cells_after(cx, singles), expected);
+    }
+
+    #[gpui::test]
+    async fn test_a_snapshot_that_starts_with_a_reset_replaces_the_screen(cx: &mut TestAppContext) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"old text", cx);
+            terminal.feed_remote_output(b"\x1bcnew", cx);
+        });
+        let content = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+        assert!(content.contains("new"), "{content}");
+        assert!(!content.contains("old"), "{content}");
+    }
+
+    #[gpui::test]
+    async fn test_remote_backed_input_and_resize_leave_on_the_channel(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let (commands, mut commands_rx) = futures::channel::mpsc::unbounded();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_remote_backed(
+                commands,
+                RemoteBackedOptions::default(),
+                CursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .unwrap()
+            .subscribe(cx)
+        });
+        terminal.update_in(window, |terminal, window, cx| {
+            terminal.input(b"ls\r".to_vec());
+            terminal.set_size(TerminalBounds::new(
+                px(10.),
+                px(5.),
+                bounds(Point::default(), size(px(500.), px(200.))),
+            ));
+            // The resize is applied when the view next draws.
+            terminal.sync(window, cx);
+        });
+        assert_eq!(
+            commands_rx.try_recv().ok(),
+            Some(RemoteTerminalCommand::Input(b"ls\r".to_vec()))
+        );
+        assert_eq!(
+            commands_rx.try_recv().ok(),
+            Some(RemoteTerminalCommand::Resize {
+                columns: 100,
+                rows: 20
+            })
+        );
+        assert!(!terminal.read_with(window, |terminal, _| terminal.is_pty_backed()));
+    }
+
+    #[gpui::test]
+    async fn test_remote_process_exit_finishes_the_task(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (commands, _commands_rx) = futures::channel::mpsc::unbounded();
+        let (completion_tx, completion_rx) = smol::channel::unbounded();
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_remote_backed(
+                commands,
+                RemoteBackedOptions {
+                    task: None,
+                    completion_tx: Some(completion_tx),
+                    title_override: Some("host".into()),
+                },
+                CursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .unwrap()
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.remote_process_exited(Some(3), cx)
+        });
+        let status = completion_rx.try_recv().expect("completion is reported");
+        assert_eq!(status.and_then(|status| status.code()), Some(3));
+    }
+
     #[gpui::test]
     async fn test_write_output_preserves_existing_crlf(cx: &mut TestAppContext) {
         let terminal = cx.new(|cx| {
@@ -3896,6 +4318,25 @@ mod tests {
                 .unwrap()
                 .subscribe(cx)
             })
+        }
+
+        #[gpui::test]
+        async fn visible_content_holds_the_screen_and_not_the_scrollback(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, cx| {
+                let rows = terminal.viewport_lines();
+                let output: String = (0..rows * 3).map(|row| format!("row-{row}\r\n")).collect();
+                terminal.write_output(output.as_bytes(), cx);
+
+                let visible = terminal.visible_content();
+                assert!(
+                    visible.contains(&format!("row-{}", rows * 3 - 1)),
+                    "the newest row is on screen"
+                );
+                assert!(!visible.contains("row-0\n"), "scrollback is not searched");
+                assert!(visible.lines().count() <= rows);
+                assert!(terminal.get_content().contains("row-0\n"));
+            });
         }
 
         #[gpui::test]

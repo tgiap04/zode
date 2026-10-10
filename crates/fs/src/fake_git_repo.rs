@@ -65,6 +65,8 @@ pub struct FakeGitRepositoryState {
     pub simulated_index_write_error_message: Option<String>,
     pub simulated_create_worktree_error: Option<String>,
     pub simulated_graph_error: Option<String>,
+    /// Makes a scoped diff never finish, as a repository on a stalled disk would.
+    pub simulated_scoped_diff_hangs: bool,
     pub refs: HashMap<String, String>,
     pub graph_commits: Vec<Arc<InitialGraphCommitData>>,
     pub stash_entries: GitStash,
@@ -83,6 +85,7 @@ impl FakeGitRepositoryState {
             simulated_index_write_error_message: Default::default(),
             simulated_create_worktree_error: Default::default(),
             simulated_graph_error: None,
+            simulated_scoped_diff_hangs: false,
             refs: HashMap::from_iter([("HEAD".into(), "abc".into())]),
             merge_base_contents: Default::default(),
             oids: Default::default(),
@@ -1113,6 +1116,24 @@ impl GitRepository for FakeGitRepository {
 
     fn diff(&self, _diff: git::repository::DiffType) -> BoxFuture<'_, Result<String>> {
         future::ready(Ok(String::new())).boxed()
+    }
+
+    fn diff_head_to_worktree_scoped(
+        &self,
+        _request: git::bounded_diff::ScopedDiff,
+    ) -> BoxFuture<'_, Result<Option<git::bounded_diff::BoundedDiff>>> {
+        let hangs = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            state.simulated_scoped_diff_hangs
+        });
+        match hangs {
+            Ok(true) => future::pending().boxed(),
+            Ok(false) => future::ready(Ok(Some(git::bounded_diff::BoundedDiff {
+                text: String::new(),
+                truncated: false,
+            })))
+            .boxed(),
+            Err(error) => future::ready(Err(error)).boxed(),
+        }
     }
 
     fn diff_stat(

@@ -1,4 +1,5 @@
 pub mod blame;
+pub mod bounded_diff;
 pub mod commit;
 mod hosting_provider;
 mod remote;

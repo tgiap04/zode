@@ -117,8 +117,9 @@ pub trait Fs: Send + Sync {
 
     /// Moves a file or directory to the system trash.
     /// Returns a [`TrashedEntry`] that can be used to keep track of the
-    /// location of the trashed item in the system's trash.
-    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<TrashedEntry>;
+    /// location of the trashed item in the system's trash. Returns `Ok(None)`
+    /// only when `options.ignore_if_not_exists` is set and the path is absent.
+    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<Option<TrashedEntry>>;
 
     /// Removes a file from the filesystem.
     /// There is no expectation that the file will be preserved in the system
@@ -292,6 +293,9 @@ pub struct Metadata {
     pub is_dir: bool,
     pub len: u64,
     pub is_fifo: bool,
+    /// An ordinary file, as opposed to a directory, a pipe, a device or a
+    /// socket. For a symlink, what it points to.
+    pub is_regular_file: bool,
     pub is_executable: bool,
 }
 
@@ -796,26 +800,54 @@ impl Fs for RealFs {
         }
     }
 
-    async fn trash(&self, path: &Path, _options: RemoveOptions) -> Result<TrashedEntry> {
-        // We must make the path absolute or trash will make a weird abomination
-        // of the zed working directory (not usually the worktree) and whatever
-        // the path variable holds.
-        let path = self
-            .canonicalize(path)
-            .await
-            .context("Could not canonicalize the path of the file")?;
+    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<Option<TrashedEntry>> {
+        // `symlink_metadata` so a dangling symlink still counts as present.
+        match smol::fs::symlink_metadata(path).await {
+            Err(err) if err.kind() == io::ErrorKind::NotFound && options.ignore_if_not_exists => {
+                return Ok(None);
+            }
+            _ => {}
+        }
 
-        let (tx, rx) = futures::channel::oneshot::channel();
-        std::thread::Builder::new()
-            .name("trash file or dir".to_string())
-            .spawn(|| tx.send(trash::delete_with_info(path)))
-            .expect("The os can spawn threads");
+        let attempt = async {
+            // We must make the path absolute or trash will make a weird abomination
+            // of the zed working directory (not usually the worktree) and whatever
+            // the path variable holds.
+            let absolute = self
+                .canonicalize(path)
+                .await
+                .context("Could not canonicalize the path of the file")?;
 
-        Ok(rx
-            .await
-            .context("Tx dropped or fs.restore panicked")?
-            .context("Could not trash file or dir")?
-            .into())
+            let (tx, rx) = futures::channel::oneshot::channel();
+            std::thread::Builder::new()
+                .name("trash file or dir".to_string())
+                .spawn(|| tx.send(trash::delete_with_info(absolute)))
+                .expect("The os can spawn threads");
+
+            anyhow::Ok(
+                rx.await
+                    .context("Tx dropped or fs.restore panicked")?
+                    .context("Could not trash file or dir")?
+                    .into(),
+            )
+        };
+
+        match attempt.await {
+            Ok(entry) => Ok(Some(entry)),
+            // The path can vanish between the check above and the trash call;
+            // for a caller that allowed a missing path that is the same outcome.
+            Err(error) => {
+                if options.ignore_if_not_exists
+                    && matches!(
+                        smol::fs::symlink_metadata(path).await,
+                        Err(ref err) if err.kind() == io::ErrorKind::NotFound
+                    )
+                {
+                    return Ok(None);
+                }
+                Err(error)
+            }
+        }
     }
 
     async fn open_sync(&self, path: &Path) -> Result<Box<dyn io::Read + Send + Sync>> {
@@ -1029,6 +1061,7 @@ impl Fs for RealFs {
             is_symlink,
             is_dir: metadata.file_type().is_dir(),
             is_fifo,
+            is_regular_file: metadata.file_type().is_file(),
             is_executable,
         }))
     }
@@ -2820,10 +2853,13 @@ impl Fs for FakeFs {
         self.remove_dir_inner(path, options).await.map(|_| ())
     }
 
-    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<TrashedEntry> {
+    async fn trash(&self, path: &Path, options: RemoveOptions) -> Result<Option<TrashedEntry>> {
         let normalized_path = normalize_path(path);
         let parent_path = normalized_path.parent().context("cannot remove the root")?;
-        let base_name = normalized_path.file_name().unwrap();
+        let base_name = normalized_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("path has no UTF-8 file name")?;
         let result = if self.is_dir(path).await {
             self.remove_dir_inner(path, options).await?
         } else {
@@ -2833,15 +2869,16 @@ impl Fs for FakeFs {
         match result {
             Some(fake_entry) => {
                 let trashed_entry = TrashedEntry {
-                    id: base_name.to_str().unwrap().into(),
-                    name: base_name.to_str().unwrap().into(),
+                    id: base_name.into(),
+                    name: base_name.into(),
                     original_parent: parent_path.to_path_buf(),
                 };
 
                 let mut state = self.state.lock();
                 state.trash.push((trashed_entry.clone(), fake_entry));
-                Ok(trashed_entry)
+                Ok(Some(trashed_entry))
             }
+            None if options.ignore_if_not_exists => Ok(None),
             None => anyhow::bail!("{normalized_path:?} does not exist"),
         }
     }
@@ -2958,6 +2995,7 @@ impl Fs for FakeFs {
                     is_dir: false,
                     is_symlink,
                     is_fifo: false,
+                    is_regular_file: true,
                     is_executable: false,
                 },
                 FakeFsEntry::Dir {
@@ -2969,6 +3007,7 @@ impl Fs for FakeFs {
                     is_dir: true,
                     is_symlink,
                     is_fifo: false,
+                    is_regular_file: false,
                     is_executable: false,
                 },
                 FakeFsEntry::Symlink { .. } => unreachable!(),

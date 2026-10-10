@@ -39,8 +39,11 @@ not its process is still running.
   this does not start until a terminal writes something, and stops itself
   again once every terminal has been quiet for a minute.
 
-Subagents need no special handling in an agent tab: a subagent runs inside
-the agent's own CLI process, so its output counts as that tab's output.
+A background subagent in an agent tab also holds the display. While the agent
+waits on one it only repaints a spinner, well under the threshold, so a
+subagent that is still running counts as the tab answering even when the tab
+is quiet. The hold ends once the subagent's task notification arrives, and
+starts again if the subagent is resumed.
 
 ## The status bar switch
 

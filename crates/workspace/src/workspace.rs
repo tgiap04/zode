@@ -1397,6 +1397,9 @@ pub struct Workspace {
     last_active_center_pane: Option<WeakEntity<Pane>>,
     last_active_view_id: Option<proto::ViewId>,
     status_bar: Entity<StatusBar>,
+    /// Set by a feature that must stay visible whatever `status_bar.show`
+    /// says, such as the indicator that another device is in control.
+    status_bar_forced_visible: bool,
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
@@ -1880,6 +1883,7 @@ impl Workspace {
             last_active_center_pane: Some(center_pane.downgrade()),
             last_active_view_id: None,
             status_bar,
+            status_bar_forced_visible: false,
             modal_layer,
             toast_layer,
             titlebar_item: None,
@@ -2878,7 +2882,17 @@ impl Workspace {
     }
 
     pub fn status_bar_visible(&self, cx: &App) -> bool {
-        StatusBarSettings::get_global(cx).show
+        self.status_bar_forced_visible || StatusBarSettings::get_global(cx).show
+    }
+
+    /// Keeps the status bar on screen regardless of `status_bar.show` while
+    /// `forced` is true. For what the person must not be able to miss, such as
+    /// another device being in control of this Zode.
+    pub fn set_status_bar_forced_visible(&mut self, forced: bool, cx: &mut Context<Self>) {
+        if self.status_bar_forced_visible != forced {
+            self.status_bar_forced_visible = forced;
+            cx.notify();
+        }
     }
 
     pub fn multi_workspace(&self) -> Option<&WeakEntity<MultiWorkspace>> {
@@ -10008,6 +10022,9 @@ pub fn workspace_windows_for_location(
                 }
                 (RemoteConnectionOptions::Docker(a), RemoteConnectionOptions::Docker(b)) => {
                     a.container_id == b.container_id
+                }
+                (RemoteConnectionOptions::Relay(a), RemoteConnectionOptions::Relay(b)) => {
+                    a.host_device_id == b.host_device_id
                 }
                 #[cfg(any(test, feature = "test-support"))]
                 (RemoteConnectionOptions::Mock(a), RemoteConnectionOptions::Mock(b)) => {
@@ -17974,6 +17991,42 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             let visible = workspace.status_bar_visible(cx);
             assert!(visible, "Status bar should be visible when show is true");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_status_bar_forced_visible_overrides_the_setting(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.status_bar.get_or_insert_default().show = Some(false);
+            });
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.status_bar_visible(cx))
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_status_bar_forced_visible(true, cx)
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.status_bar_visible(cx),
+                "forced visibility wins over show = false"
+            );
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_status_bar_forced_visible(false, cx)
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.status_bar_visible(cx))
         });
     }
 

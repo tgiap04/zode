@@ -9,7 +9,7 @@ use crate::context_menu::stable_id_for_group;
 use crate::project_list::ListEntry;
 use crate::project_menu::build_project_menu;
 use crate::rail::RAIL_WIDTH;
-use gpui::{AnyElement, Context, SharedString};
+use gpui::{AnyElement, Context, Hsla, SharedString};
 use ui::{Tooltip, prelude::*, right_click_menu};
 use workspace::DraggedProject;
 
@@ -38,14 +38,54 @@ pub(crate) fn project_initials(label: &str) -> SharedString {
     initials.into()
 }
 
-fn rail_tooltip(entry: &ListEntry) -> SharedString {
-    if entry.is_reindexing {
-        format!("{} — re-indexing after waking", entry.label).into()
-    } else if entry.activity == Some(project::ProjectActivity::Hibernated) {
-        format!("{} — hibernated", entry.label).into()
-    } else {
-        entry.label.clone()
+/// What the corner badge says: nothing at 0, the count up to nine, then "9+"
+/// so the label never outgrows the corner of a 32px square.
+fn waiting_badge_label(count: usize) -> Option<SharedString> {
+    match count {
+        0 => None,
+        1..=9 => Some(count.to_string().into()),
+        _ => Some("9+".into()),
     }
+}
+
+/// Black or white, whichever reads better on `background`. A badge sits on a
+/// status fill, and no single theme token is legible on every theme's red.
+fn badge_text_colour(background: Hsla) -> Hsla {
+    if ui::utils::calculate_contrast_ratio(gpui::white(), background)
+        >= ui::utils::calculate_contrast_ratio(gpui::black(), background)
+    {
+        gpui::white()
+    } else {
+        gpui::black()
+    }
+}
+
+fn rail_tooltip(entry: &ListEntry) -> SharedString {
+    tooltip_text(
+        &entry.label,
+        entry.is_reindexing,
+        entry.activity == Some(project::ProjectActivity::Hibernated),
+        entry.waiting_agents,
+    )
+    .into()
+}
+
+/// The exact count, never the badge's "9+": the tooltip is where a person goes
+/// to find out how many.
+fn tooltip_text(label: &str, is_reindexing: bool, is_hibernated: bool, waiting: usize) -> String {
+    let mut text = if is_reindexing {
+        format!("{label} — re-indexing after waking")
+    } else if is_hibernated {
+        format!("{label} — hibernated")
+    } else {
+        label.to_string()
+    };
+    match waiting {
+        0 => {}
+        1 => text.push_str(" · 1 agent waiting"),
+        count => text.push_str(&format!(" · {count} agents waiting")),
+    }
+    text
 }
 
 impl Sidebar {
@@ -57,6 +97,10 @@ impl Sidebar {
     ) -> AnyElement {
         let colors = cx.theme().colors();
         let warning = cx.theme().status().warning;
+        let badge_background = cx.theme().status().error;
+        let badge_text = badge_text_colour(badge_background);
+        // The rail's own fill, so a badge over a red avatar keeps an edge.
+        let badge_ring = colors.title_bar_background;
         let is_active = entry.is_active;
         let is_hibernated = entry.activity == Some(project::ProjectActivity::Hibernated);
 
@@ -98,6 +142,7 @@ impl Sidebar {
         let label = entry.label.clone();
         let tooltip = rail_tooltip(entry);
         let is_reindexing = entry.is_reindexing;
+        let waiting_agents = entry.waiting_agents;
         // One read of the presentation feeds both the avatar and the drag
         // payload below -- it must not be read twice.
         let avatar = self.render_rail_avatar(
@@ -204,14 +249,45 @@ impl Sidebar {
                         )
                     })
                     .child(avatar)
+                    // Sibling of the avatar rather than a child, so the hibernated
+                    // opacity on the square does not dim it. It carries no id or
+                    // handlers: clicks and drags fall through to the row.
+                    .when_some(waiting_badge_label(waiting_agents), |el, text| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(2.0))
+                                .right(px(2.0))
+                                .h(px(16.0))
+                                .min_w(px(16.0))
+                                .px(px(3.0))
+                                .border_1()
+                                .border_color(badge_ring)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(badge_background)
+                                .child(
+                                    Label::new(text)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Custom(badge_text))
+                                        .line_height_style(LineHeightStyle::UiLabel),
+                                )
+                                .debug_selector(move || {
+                                    format!("project-rail-item-waiting-badge:{ix}")
+                                }),
+                        )
+                    })
                     // FR7 parity with the panel rows: a project mid-reindex after
                     // waking gets a corner dot, since the rail has no room for the
-                    // panel's icon-plus-tooltip treatment.
+                    // panel's icon-plus-tooltip treatment. Bottom-right, so it
+                    // never meets the waiting badge in the top-right.
                     .when(is_reindexing, |el| {
                         el.child(
                             div()
                                 .absolute()
-                                .top(px(6.0))
+                                .bottom(px(6.0))
                                 .right(px(6.0))
                                 .size(px(6.0))
                                 .rounded_full()
@@ -244,7 +320,62 @@ impl Sidebar {
 
 #[cfg(test)]
 mod tests {
-    use super::project_initials;
+    use super::{badge_text_colour, project_initials, tooltip_text, waiting_badge_label};
+
+    #[test]
+    fn the_tooltip_names_the_exact_waiting_count() {
+        assert_eq!(tooltip_text("app", false, false, 0), "app");
+        assert_eq!(
+            tooltip_text("app", false, false, 1),
+            "app · 1 agent waiting"
+        );
+        assert_eq!(
+            tooltip_text("app", false, false, 12),
+            "app · 12 agents waiting",
+            "the badge says 9+, the tooltip does not"
+        );
+        assert_eq!(
+            tooltip_text("app", false, true, 2),
+            "app — hibernated · 2 agents waiting"
+        );
+        assert_eq!(
+            tooltip_text("app", true, true, 0),
+            "app — re-indexing after waking",
+            "re-indexing wins over hibernated, as before"
+        );
+    }
+
+    #[test]
+    fn the_badge_text_is_whichever_of_black_and_white_reads_better() {
+        use gpui::{black, hsla, white};
+        let contrast = ui::utils::calculate_contrast_ratio;
+        // A light theme's error red: white on it falls short of 4.5:1.
+        let light_red = hsla(0.0, 0.65, 0.55, 1.0);
+        assert!(contrast(white(), light_red) < 4.5);
+        assert_eq!(badge_text_colour(light_red), black());
+        assert!(contrast(black(), light_red) >= 4.5);
+
+        let dark_red = hsla(0.0, 0.7, 0.3, 1.0);
+        assert_eq!(badge_text_colour(dark_red), white());
+        assert!(contrast(white(), dark_red) >= 4.5);
+
+        for lightness in [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95] {
+            let background = hsla(0.0, 0.7, lightness, 1.0);
+            let chosen = badge_text_colour(background);
+            let other = if chosen == white() { black() } else { white() };
+            assert!(contrast(chosen, background) >= contrast(other, background));
+        }
+    }
+
+    #[test]
+    fn badge_label_caps_at_nine_plus() {
+        let label = |count| waiting_badge_label(count).map(|text| text.to_string());
+        assert_eq!(label(0), None);
+        assert_eq!(label(1).as_deref(), Some("1"));
+        assert_eq!(label(9).as_deref(), Some("9"));
+        assert_eq!(label(10).as_deref(), Some("9+"));
+        assert_eq!(label(12).as_deref(), Some("9+"));
+    }
 
     #[test]
     fn initials_prefer_word_boundaries() {
@@ -693,5 +824,168 @@ mod drag_tests {
             !cx.update(|_, cx| cx.has_active_drag()),
             "and the drag must be over"
         );
+    }
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use crate::Sidebar;
+    use crate::rail_test_support::{
+        TwoProjects, add_waiting_claude_tab, badge_selector as badge, redraw, two_projects,
+    };
+    use agent_ui::TurnEvent;
+    use gpui::TestAppContext;
+    use gpui::{Entity, Focusable as _, Modifiers, VisualTestContext};
+
+    /// Forces the count on a rail entry the same way the re-index tests force
+    /// their flag; the real counting is proven in `contents_tests`.
+    fn force_waiting(
+        sidebar: &Entity<Sidebar>,
+        ix: usize,
+        waiting_agents: usize,
+        cx: &mut VisualTestContext,
+    ) {
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.contents.rail_entries[ix].waiting_agents = waiting_agents;
+            cx.notify();
+        });
+        redraw(cx);
+    }
+
+    fn rail_index(sidebar: &Entity<Sidebar>, active: bool, cx: &mut VisualTestContext) -> usize {
+        sidebar.read_with(cx, |sidebar, _| {
+            sidebar
+                .contents
+                .rail_entries
+                .iter()
+                .position(|entry| entry.is_active == active)
+                .expect("the rail has a project in that state")
+        })
+    }
+
+    #[gpui::test]
+    async fn no_badge_is_drawn_at_zero(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        force_waiting(&sidebar, 0, 0, cx);
+        assert!(cx.debug_bounds(badge(0)).is_none());
+        assert!(cx.debug_bounds(badge(1)).is_none());
+    }
+
+    #[gpui::test]
+    async fn the_active_project_shows_the_badge(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        let active = rail_index(&sidebar, true, cx);
+        force_waiting(&sidebar, active, 1, cx);
+        assert!(cx.debug_bounds(badge(active)).is_some());
+    }
+
+    #[gpui::test]
+    async fn an_inactive_project_shows_the_badge(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        let active = rail_index(&sidebar, true, cx);
+        let inactive = rail_index(&sidebar, false, cx);
+        force_waiting(&sidebar, inactive, 3, cx);
+        assert!(cx.debug_bounds(badge(inactive)).is_some());
+        assert!(
+            cx.debug_bounds(badge(active)).is_none(),
+            "only the project with waiting tabs"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_badge_stays_inside_its_row_even_as_nine_plus(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        force_waiting(&sidebar, 0, 10, cx);
+        let badge_bounds = cx.debug_bounds(badge(0)).expect("the badge is drawn");
+        let row = cx
+            .debug_bounds("project-rail-item:0")
+            .expect("the row is drawn");
+        assert!(
+            row.contains(&badge_bounds.origin) && row.contains(&badge_bounds.bottom_right()),
+            "badge {badge_bounds:?} must stay inside its row {row:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_badge_and_the_reindex_dot_never_overlap(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.contents.rail_entries[0].is_reindexing = true;
+            cx.notify();
+        });
+        force_waiting(&sidebar, 0, 10, cx);
+
+        let badge_bounds = cx.debug_bounds(badge(0)).expect("the badge is drawn");
+        let dot = cx
+            .debug_bounds("project-rail-item-reindex-dot:0")
+            .expect("the dot is drawn");
+        let row = cx
+            .debug_bounds("project-rail-item:0")
+            .expect("the row is drawn");
+        assert!(
+            !badge_bounds.intersects(&dot),
+            "{badge_bounds:?} vs {dot:?}"
+        );
+        assert!(badge_bounds.center().y < row.center().y, "badge on top");
+        assert!(dot.center().y > row.center().y, "dot at the bottom");
+        assert_eq!(row.size.width, crate::rail::RAIL_WIDTH);
+    }
+
+    #[gpui::test]
+    async fn a_click_on_the_badge_still_switches_to_the_project(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                multi_workspace,
+                sidebar,
+                workspace_a,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let inactive = rail_index(&sidebar, false, cx);
+        force_waiting(&sidebar, inactive, 1, cx);
+        assert!(
+            multi_workspace.read_with(cx, |mw, _| mw.workspace() != &workspace_a),
+            "the other project must be in front for the click to prove anything"
+        );
+
+        let badge_bounds = cx
+            .debug_bounds(badge(inactive))
+            .expect("the badge is drawn");
+        cx.simulate_click(badge_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        assert!(
+            multi_workspace.read_with(cx, |mw, _| mw.workspace() == &workspace_a),
+            "the badge must not eat the click meant for the row under it"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_badge_goes_when_the_waiting_tab_is_focused(cx: &mut TestAppContext) {
+        let (
+            TwoProjects {
+                multi_workspace,
+                sidebar,
+                ..
+            },
+            cx,
+        ) = two_projects(cx).await;
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let view = add_waiting_claude_tab(&workspace, &project, cx);
+        view.update(cx, |view, cx| {
+            view.simulate_turn_events(&[TurnEvent::Ended], cx)
+        });
+        redraw(cx);
+        let active = rail_index(&sidebar, true, cx);
+        assert!(cx.debug_bounds(badge(active)).is_some());
+
+        view.update_in(cx, |view, window, cx| {
+            let handle = view.focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds(badge(active)).is_none());
     }
 }

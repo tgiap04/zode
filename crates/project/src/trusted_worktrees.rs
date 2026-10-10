@@ -160,6 +160,12 @@ impl From<RemoteConnectionOptions> for RemoteHostLocation {
                 Some(SharedString::new(docker_connection_options.name)),
                 SharedString::new(docker_connection_options.container_id),
             ),
+            // Trust follows the device, not its display name: a renamed host
+            // keeps its answers, and a second host given the same name does not
+            // inherit them.
+            RemoteConnectionOptions::Relay(relay) => {
+                (None, SharedString::new(relay.host_device_id))
+            }
             #[cfg(feature = "test-support")]
             RemoteConnectionOptions::Mock(mock) => {
                 (None, SharedString::new(format!("mock-{}", mock.id)))

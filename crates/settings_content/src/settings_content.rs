@@ -165,6 +165,10 @@ pub struct SettingsContent {
     /// its CLI exits.
     pub agent_finished_notification: Option<AgentFinishedNotificationContent>,
 
+    /// Lets another of your devices, signed in to the same account, watch and
+    /// type into the agents and terminals running in this Zode.
+    pub remote_control: Option<RemoteControlSettingsContent>,
+
     /// Whether to show the combined CPU and RAM footprint of each tracked
     /// project's child processes in the status bar.
     ///
@@ -1210,23 +1214,54 @@ pub struct ReplSettingsContent {
 /// the two far apart in both `default.json` and the generated settings docs.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct AgentFinishedNotificationContent {
-    /// Whether to post an OS notification when an agent finishes answering or
-    /// its CLI exits. Posted regardless of window focus.
+    /// Whether to post an OS notification when an agent finishes answering,
+    /// is waiting for your approval, or its CLI exits. Posted regardless of
+    /// window focus.
+    ///
+    /// The approval notification is only available for a Claude tab whose
+    /// session Zode is tracking. It is read off Claude's permission dialog on
+    /// screen, so a dialog Zode fails to recognise only loses that one
+    /// notification.
     ///
     /// Default: true
     pub enabled: Option<bool>,
     /// How long an agent must stay quiet after its last output before the
     /// "finished answering" notification fires.
     ///
-    /// This is a debounce sitting on top of another debounce, not a
-    /// guarantee: an agent that pauses longer than this while running a tool
-    /// or waiting on a model reads as finished and notifies early. There is
-    /// no protocol-level "reply finished" signal to read instead -- raise
+    /// Applies to every agent without a transcript signal -- everything except
+    /// a Claude tab with a tracked session, which is notified when its
+    /// transcript records the end of the turn and ignores this value.
+    ///
+    /// For those agents this is a debounce sitting on top of another debounce,
+    /// not a guarantee: an agent that pauses longer than this while running a
+    /// tool or waiting on a model reads as finished and notifies early. There
+    /// is no protocol-level "reply finished" signal to read instead -- raise
     /// this value if early notifications happen often. Floored at 2000 --
     /// anything lower would fire on every pause inside a single reply.
     ///
     /// Default: 12000
     pub quiet_period_ms: Option<u64>,
+}
+
+/// Settings for controlling this Zode from another device.
+///
+/// One object rather than two flat keys: `idle_timeout_minutes` means nothing
+/// without `enabled` beside it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RemoteControlSettingsContent {
+    /// Whether this Zode may be controlled from another device. While this is
+    /// off Zode opens no connection for it and watches no terminal.
+    ///
+    /// Turning it on also needs you to be signed in, and every device that may
+    /// connect has to be approved here first by comparing a six-digit code.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// How many minutes a connected device may go without sending anything
+    /// before it is disconnected. 0 turns the limit off.
+    ///
+    /// Default: 30
+    pub idle_timeout_minutes: Option<u64>,
 }
 
 /// Settings for configuring the which-key popup behaviour.

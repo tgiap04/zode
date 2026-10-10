@@ -2386,7 +2386,7 @@ Example:
 
 ## Agent Finished Notification
 
-- Description: Whether to post an OS notification when an agent finishes answering or its CLI exits -- posted regardless of window focus. `quiet_period_ms` is how long the agent must stay quiet after its last output before the "finished answering" notification fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
+- Description: Whether to post an OS notification when an agent finishes answering, is waiting for your approval, or its CLI exits -- posted regardless of window focus. For a Claude tab with a tracked session, "finished answering" comes from the end of the turn in its transcript and the approval notification from its permission dialog. For every other agent, `quiet_period_ms` is how long it must stay quiet after its last output before "finished answering" fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
 - Setting: `agent_finished_notification`
 - Default:
 
@@ -2403,6 +2403,26 @@ Example:
 
 - `enabled`: `boolean`
 - `quiet_period_ms`: positive `integer` milliseconds, floored at `2000`
+
+## Remote Control
+
+- Description: Whether another of your devices, signed in to the same account, may watch and type into the agents and terminals running in this Zode. Off means Zode opens no connection for it and watches no terminal. Turning it on also needs you to be signed in, and every device that may connect has to be approved once by comparing a six-digit code. While a device is connected the status bar says so and offers a way to disconnect it, and the status bar is shown for as long as one is connected even if `status_bar.show` hides it; a toast announces each device that takes control (in the window you are looking at, or the most recently used one if Zode is in the background); at most four devices may be connected at once; the actions `remote_control::DisconnectAll`, `remote_control::Disable` and `remote_control::ManageDevices` are in the command palette. While a device is connected, Zode holds the display awake on the same terms as `keep_display_awake`. Everything sent between the devices is end-to-end encrypted; the wire format is described in [Remote control protocol](../remote-control-protocol.md).
+- Setting: `remote_control`
+- Default:
+
+```json [settings]
+{
+  "remote_control": {
+    "enabled": false,
+    "idle_timeout_minutes": 30
+  }
+}
+```
+
+**Options**
+
+- `enabled`: `boolean`
+- `idle_timeout_minutes`: `integer` minutes a connected device may send nothing before it is disconnected; `0` turns the limit off
 
 ## Project Footprint Indicator
 

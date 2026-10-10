@@ -1,5 +1,8 @@
 mod dev_container_suggest;
 pub mod disconnected_overlay;
+mod relay_devices;
+mod relay_devices_render;
+mod relay_mirror;
 mod remote_connections;
 mod remote_servers;
 pub mod sidebar_recent_projects;
@@ -1868,6 +1871,7 @@ pub(crate) fn icon_for_remote_connection(options: Option<&RemoteConnectionOption
             RemoteConnectionOptions::Ssh(_) => IconName::Server,
             RemoteConnectionOptions::Wsl(_) => IconName::Linux,
             RemoteConnectionOptions::Docker(_) => IconName::Box,
+            RemoteConnectionOptions::Relay(_) => IconName::Link,
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(_) => IconName::Server,
         },

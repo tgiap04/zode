@@ -13,7 +13,9 @@ path = "src/agent_ui.rs"
 
 [features]
 # Lets another crate's tests stock the shared session store instead of
-# sweeping the real transcripts under the user's home directory.
+# sweeping the real transcripts under the user's home directory, and build
+# agent tabs without spawning a CLI (`AgentView::test_new`, the `simulate_*`
+# hooks, `SessionIntent`).
 test-support = []
 
 [dependencies]

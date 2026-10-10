@@ -88,7 +88,9 @@ async fn a_falling_edge_held_quiet_notifies_once(cx: &mut TestAppContext) {
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();
 
@@ -102,9 +104,11 @@ async fn a_reversed_edge_before_the_period_elapses_notifies_nothing(cx: &mut Tes
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     cx.executor().advance_clock(PERIOD / 2);
-    notifier.update(cx, |n, cx| n.on_activity(id, true, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| n.on_activity(id, true, false, TITLE.into(), cx));
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();
 
@@ -119,13 +123,17 @@ async fn two_answers_notify_twice(cx: &mut TestAppContext) {
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();
     assert_eq!(cx.posted_notifications().len(), 1);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, true, TITLE.into(), cx));
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| n.on_activity(id, true, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();
 
@@ -141,7 +149,9 @@ async fn one_answer_stays_at_one_no_matter_how_long_the_clock_runs(cx: &mut Test
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     cx.executor().advance_clock(PERIOD * 10);
     cx.run_until_parked();
 
@@ -153,7 +163,9 @@ async fn exiting_while_a_quiet_timer_is_armed_notifies_only_the_exit(cx: &mut Te
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     notifier.update(cx, |n, cx| n.fire_exit(id, &TITLE.into(), cx));
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();
@@ -174,7 +186,9 @@ async fn exiting_long_after_a_delivered_answer_notifies_again_with_a_distinct_id
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();
     assert_eq!(cx.posted_notifications().len(), 1);
@@ -195,7 +209,9 @@ async fn disabling_the_setting_mid_period_notifies_nothing(cx: &mut TestAppConte
     let (_workspace, id, cx) = open_tab(cx).await;
     let notifier = notifier(cx);
 
-    notifier.update(cx, |n, cx| n.on_activity(id, false, TITLE.into(), cx));
+    notifier.update(cx, |n, cx| {
+        n.on_activity(id, false, false, TITLE.into(), cx)
+    });
     set_enabled(cx, false);
     cx.executor().advance_clock(PERIOD);
     cx.run_until_parked();

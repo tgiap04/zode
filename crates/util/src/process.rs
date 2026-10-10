@@ -90,3 +90,77 @@ impl Child {
         Ok(())
     }
 }
+
+/// Runs `f` with `SIGCHLD` blocked on the calling thread, restoring the
+/// previous mask afterwards. A no-op off macOS.
+///
+/// Threads inherit the signal mask of the thread that spawns them. Wasmtime's
+/// exception-handler thread on macOS aborts the whole process if a signal
+/// interrupts its `mach_msg` wait, and `SIGCHLD` from an exiting child process
+/// is delivered to whichever thread has it unblocked. Creating the engine
+/// inside this closure makes that thread start with the signal blocked.
+pub fn with_sigchld_blocked<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: the sets are plain, fully initialised by `sigemptyset` before
+        // use, and `pthread_sigmask` only changes the calling thread's mask.
+        let previous = unsafe {
+            let mut blocked: libc::sigset_t = std::mem::zeroed();
+            let mut previous: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut blocked);
+            libc::sigaddset(&mut blocked, libc::SIGCHLD);
+            if libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous) != 0 {
+                return f();
+            }
+            previous
+        };
+        struct Restore(libc::sigset_t);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: `self.0` is the mask `pthread_sigmask` returned for
+                // this same thread.
+                unsafe {
+                    libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut());
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        f()
+    }
+    #[cfg(not(target_os = "macos"))]
+    f()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod sigchld_tests {
+    use super::with_sigchld_blocked;
+
+    fn sigchld_is_blocked() -> bool {
+        // SAFETY: querying the calling thread's mask with a null new set.
+        unsafe {
+            let mut current: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut current);
+            libc::sigismember(&current, libc::SIGCHLD) == 1
+        }
+    }
+
+    #[test]
+    fn blocks_only_inside_the_closure_and_threads_inherit_it() {
+        assert!(!sigchld_is_blocked());
+        let (inside, inherited) = with_sigchld_blocked(|| {
+            let inherited = std::thread::spawn(sigchld_is_blocked).join().unwrap();
+            (sigchld_is_blocked(), inherited)
+        });
+        assert!(inside);
+        assert!(inherited, "a thread born inside starts with it blocked");
+        assert!(!sigchld_is_blocked());
+    }
+
+    #[test]
+    fn an_already_blocked_signal_stays_blocked_afterwards() {
+        with_sigchld_blocked(|| {
+            with_sigchld_blocked(|| {});
+            assert!(sigchld_is_blocked());
+        });
+    }
+}
