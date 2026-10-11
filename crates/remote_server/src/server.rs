@@ -56,7 +56,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, LazyLock},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use thiserror::Error;
 use util::{ResultExt, command::new_command};
@@ -521,14 +521,15 @@ fn stop_terminals_on_termination(project: gpui::WeakEntity<HeadlessProject>, cx:
             .update(cx, |project, _| project.close_all_terminals())
             .log_err()
             .unwrap_or_default();
-        let deadline = Instant::now() + headless_terminals::REAP_GRACE + Duration::from_secs(2);
+        let deadline =
+            Instant::now() + headless_terminals::REAP_GRACE + std::time::Duration::from_secs(2);
         while Instant::now() < deadline
             && !reaped
                 .iter()
                 .all(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
         {
             cx.background_executor()
-                .timer(Duration::from_millis(25))
+                .timer(std::time::Duration::from_millis(25))
                 .await;
         }
         cx.update(|cx| {

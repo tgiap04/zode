@@ -26,7 +26,6 @@ use workspace::{Pane, Workspace};
 use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
 use std::process::ExitStatus;
-use std::sync::Arc;
 use util::ResultExt as _;
 
 /// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
@@ -1095,7 +1094,7 @@ impl AgentView {
     pub fn simulate_subagent_pass(
         &mut self,
         listed: Vec<SubagentSummary>,
-        stopped: &[Arc<str>],
+        stopped: &[std::sync::Arc<str>],
         cx: &mut Context<Self>,
     ) {
         self.subagents
