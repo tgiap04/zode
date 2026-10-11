@@ -495,21 +495,36 @@ mod tests {
         });
     }
 
+    /// Answers one upgrade with `response`, as the relay does: after reading
+    /// the request. Closing a socket with the request still unread makes
+    /// Windows reset the connection, and the client would see that instead of
+    /// the answer.
+    async fn refuse_once(listener: TcpListener, response: Vec<u8>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).await.expect("reads the request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        stream.write_all(&response).await.expect("respond");
+        stream.shutdown().await.expect("shuts down");
+    }
+
     #[test]
     fn a_refusal_carries_the_status() {
         run(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let address = listener.local_addr().expect("address");
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt as _;
-                let (mut stream, _) = listener.accept().await.expect("accept");
-                stream
-                    .write_all(
-                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .await
-                    .expect("respond");
-            });
+            tokio::spawn(refuse_once(
+                listener,
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
+            ));
             let error = connect_websocket(&format!("ws://{address}/api/relay"), "t")
                 .await
                 .err()
@@ -532,20 +547,16 @@ mod tests {
         run(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let address = listener.local_addr().expect("address");
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt as _;
-                let (mut stream, _) = listener.accept().await.expect("accept");
-                let body = br#"{"error":"quota_exceeded"}"#;
-                let head = format!(
-                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                // One write, as the relay does: the body is only seen when it
-                // arrives with the headers.
-                let mut response = head.into_bytes();
-                response.extend_from_slice(body);
-                stream.write_all(&response).await.expect("respond");
-            });
+            let body = br#"{"error":"quota_exceeded"}"#;
+            let head = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            // One write, as the relay does: the body is only seen when it
+            // arrives with the headers.
+            let mut response = head.into_bytes();
+            response.extend_from_slice(body);
+            tokio::spawn(refuse_once(listener, response));
             let error = connect_websocket(&format!("ws://{address}/api/relay"), "t")
                 .await
                 .err()

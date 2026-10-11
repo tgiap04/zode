@@ -883,6 +883,7 @@ mod tests {
         assert!(!queue.has_output());
     }
 
+    #[cfg(unix)]
     mod with_terminals {
         use super::super::*;
         use crate::remote_control_tests::shell_terminal;

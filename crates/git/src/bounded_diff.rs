@@ -557,19 +557,26 @@ mod tests {
     async fn names_that_look_like_patterns_are_taken_literally(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let directory = committed_repository();
-        write(directory.path(), "[a]*.txt", "star\n");
+        // `[a]b.txt` read as a glob would also match `ab.txt`. Both names are
+        // valid on every platform, unlike `*` or `?`.
+        write(directory.path(), "[a]b.txt", "bracket\n");
+        write(directory.path(), "ab.txt", "plain\n");
         run_git(directory.path(), &["add", "."]);
         run_git(directory.path(), &["commit", "-q", "-m", "odd name"]);
-        write(directory.path(), "[a]*.txt", "changed\n");
-        write(directory.path(), "root.txt", "after\n");
+        write(directory.path(), "[a]b.txt", "changed\n");
+        write(directory.path(), "ab.txt", "changed\n");
         let repository = repository(directory.path(), cx);
 
         let scoped = repository
-            .diff_head_to_worktree_scoped(request("", |path| path.as_unix_str() == "[a]*.txt"))
+            .diff_head_to_worktree_scoped(request("", |path| path.as_unix_str() == "[a]b.txt"))
             .await
             .expect("a diff")
             .expect("a commit");
-        assert!(scoped.text.contains("[a]*.txt"));
-        assert!(!scoped.text.contains("root.txt"));
+        assert!(scoped.text.contains("a/[a]b.txt"));
+        assert!(
+            !scoped.text.contains("a/ab.txt"),
+            "the bracket name was taken as a pattern: {}",
+            scoped.text
+        );
     }
 }

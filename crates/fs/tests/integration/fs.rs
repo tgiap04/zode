@@ -609,6 +609,7 @@ async fn test_realfs_broken_symlink_metadata(executor: BackgroundExecutor) {
 
 #[gpui::test]
 async fn test_realfs_metadata_tells_regular_files_from_the_rest(executor: BackgroundExecutor) {
+    executor.allow_parking();
     let tempdir = TempDir::new().unwrap();
     let path = tempdir.path();
     std::fs::write(path.join("file.txt"), "text").unwrap();

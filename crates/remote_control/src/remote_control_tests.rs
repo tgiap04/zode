@@ -6,6 +6,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+#[cfg(unix)]
 use collections::HashMap;
 use futures::AsyncReadExt as _;
 use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal as _};
@@ -21,11 +22,14 @@ use remote_relay_protocol::{
     PairingRequester, build_prologue, random_nonce,
 };
 use settings::{Settings as _, SettingsStore};
+#[cfg(unix)]
 use task::Shell;
+#[cfg(unix)]
 use terminal::{
     Terminal, TerminalBuilder,
     terminal_settings::{AlternateScroll, CursorShape},
 };
+#[cfg(unix)]
 use util::paths::PathStyle;
 use zode_account::{Account, AccountStatus, AccountUser};
 
@@ -175,6 +179,7 @@ async fn rig_with_files(
     }
 }
 
+#[cfg(unix)]
 pub(crate) async fn shell_terminal(script: &str, cx: &mut TestAppContext) -> Entity<Terminal> {
     let builder = cx
         .update(|cx| {
@@ -368,6 +373,7 @@ async fn paired_and_connected(cx: &mut TestAppContext) -> (Rig, Browser, Connect
     (rig, browser, connected)
 }
 
+#[cfg(unix)]
 #[gpui::test]
 async fn while_disabled_no_socket_is_opened_and_no_terminal_is_tapped(cx: &mut TestAppContext) {
     let rig = rig(cx, false).await;
@@ -452,6 +458,7 @@ async fn the_device_key_is_never_sent_anywhere(cx: &mut TestAppContext) {
     );
 }
 
+#[cfg(unix)]
 #[gpui::test]
 async fn a_paired_browser_sees_the_lists_and_can_drive_a_terminal(cx: &mut TestAppContext) {
     let terminal_script = "read line; printf 'got:%s\\\\n' \"$line\"; sleep 30";
@@ -572,6 +579,7 @@ async fn a_paired_browser_sees_the_lists_and_can_drive_a_terminal(cx: &mut TestA
     );
 }
 
+#[cfg(unix)]
 #[gpui::test]
 async fn output_that_outruns_the_relay_is_held_and_resent_without_breaking_the_session(
     cx: &mut TestAppContext,
@@ -736,6 +744,7 @@ async fn a_different_protocol_version_is_refused_and_the_session_closed(cx: &mut
     assert!(rig.host.read_with(cx, |host, _| host.sessions().is_empty()));
 }
 
+#[cfg(unix)]
 #[gpui::test]
 async fn nothing_is_acted_on_before_hello(cx: &mut TestAppContext) {
     let rig = rig(cx, true).await;
@@ -885,6 +894,7 @@ async fn a_device_that_sends_nothing_is_disconnected_after_the_idle_timeout(
 }
 
 /// Attaches the session to the only terminal and returns its id.
+#[cfg(unix)]
 async fn attach_to_a_terminal(
     rig: &Rig,
     browser: &Browser,
@@ -911,6 +921,7 @@ async fn attach_to_a_terminal(
     terminal_id
 }
 
+#[cfg(unix)]
 #[gpui::test]
 async fn input_keeps_a_session_from_going_idle(cx: &mut TestAppContext) {
     let (rig, browser, mut connected) = paired_and_connected(cx).await;
