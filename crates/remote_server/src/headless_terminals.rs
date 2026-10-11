@@ -428,7 +428,7 @@ pub struct HeadlessTerminals {
 }
 
 impl HeadlessTerminals {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn len(&self) -> usize {
         self.live.len()
     }

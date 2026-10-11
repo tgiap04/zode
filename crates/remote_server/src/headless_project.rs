@@ -1325,7 +1325,7 @@ impl HeadlessProject {
         self.terminals.close_all()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn open_terminal_count(&self) -> usize {
         self.terminals.len()
     }
