@@ -6,14 +6,14 @@
 //! disappear, which includes `status_bar.show`: the status bar is kept on
 //! screen for as long as a device is in control.
 
-use gpui::{Anchor, App, Entity, Subscription, WeakEntity, Window};
+use gpui::{Anchor, AnyElement, App, Entity, Subscription, WeakEntity, Window};
 use ui::{ButtonLike, ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, StatusItemView, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
     pairing_modal::PairingModal,
-    remote_host::{RemoteHost, RemoteHostEvent, SessionInfo},
+    remote_host::{HostState, RemoteHost, RemoteHostEvent, SessionInfo, problem_message},
     trusted_devices_modal::TrustedDevicesModal,
 };
 
@@ -34,6 +34,34 @@ pub(crate) fn controlled_by(sessions: &[SessionInfo]) -> String {
         [only] => format!("Controlled by {}", only.device_name),
         several => format!("Controlled by {} devices", several.len()),
     }
+}
+
+/// What the item says while remote control is on and nobody is connected:
+/// a tooltip and how loudly to colour the icon. `None` when it is off, so
+/// nothing shows.
+pub(crate) fn idle_status(state: &HostState) -> Option<(String, Color)> {
+    let status = match state {
+        HostState::Disabled => return None,
+        HostState::Online => (
+            "Remote control is on. Your paired devices can connect.".to_string(),
+            Color::Muted,
+        ),
+        HostState::Starting => (
+            "Remote control is starting\u{2026}".to_string(),
+            Color::Muted,
+        ),
+        HostState::Reconnecting => (
+            "Remote control lost the relay and is reconnecting\u{2026}".to_string(),
+            Color::Warning,
+        ),
+        HostState::Failed(reason) => (
+            format!("Remote control could not start: {reason}"),
+            Color::Error,
+        ),
+        HostState::SignedOut => (problem_message(state)?, Color::Warning),
+        HostState::Halted(_) => (problem_message(state)?, Color::Error),
+    };
+    Some(status)
 }
 
 /// Whether the window that is looking at this decides it is the one to speak.
@@ -197,14 +225,17 @@ impl RemoteControlIndicator {
     fn menu(
         host: Entity<RemoteHost>,
         workspace: WeakEntity<Workspace>,
+        anyone_connected: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<ContextMenu> {
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let disconnect_host = host.clone();
             let manage_host = host.clone();
-            menu.entry("Disconnect all devices", None, move |_window, cx| {
-                disconnect_host.update(cx, |host, cx| host.disconnect_all(cx));
+            menu.when(anyone_connected, |menu| {
+                menu.entry("Disconnect all devices", None, move |_window, cx| {
+                    disconnect_host.update(cx, |host, cx| host.disconnect_all(cx));
+                })
             })
             .entry("Turn off remote control", None, |_window, cx| {
                 crate::disable_remote_control(cx);
@@ -224,43 +255,79 @@ impl RemoteControlIndicator {
     }
 }
 
+impl RemoteControlIndicator {
+    /// A quiet icon while remote control is on and nobody is connected, so
+    /// that "on" is never invisible; nothing at all while it is off. The
+    /// element stays in the bar either way, so it can never be the thing a
+    /// settings toggle forgot to bring back.
+    fn render_idle(&self, cx: &App) -> AnyElement {
+        let Some((tooltip, color)) = idle_status(self.host.read(cx).state()) else {
+            return div().into_any_element();
+        };
+        let host = self.host.clone();
+        let workspace = self.workspace.clone();
+        PopoverMenu::new("remote-control-idle")
+            .menu(move |window, cx| {
+                Some(Self::menu(
+                    host.clone(),
+                    workspace.clone(),
+                    false,
+                    window,
+                    cx,
+                ))
+            })
+            .anchor(Anchor::BottomRight)
+            .trigger_with_tooltip(
+                IconButton::new("remote-control-idle-trigger", IconName::Screen)
+                    .icon_size(IconSize::Small)
+                    .icon_color(color),
+                Tooltip::text(tooltip),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for RemoteControlIndicator {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sessions = self.host.read(cx).sessions();
+        if sessions.is_empty() {
+            return self.render_idle(cx);
+        }
         let label = controlled_by(&sessions);
         let host = self.host.clone();
         let workspace = self.workspace.clone();
 
-        // Empty, not absent, when nobody is connected: the item stays in the bar
-        // so it can never be the thing a settings toggle forgot to bring back.
-        div().when(!sessions.is_empty(), |this| {
-            this.child(
-                PopoverMenu::new("remote-control-indicator")
-                    .menu(move |window, cx| {
-                        Some(Self::menu(host.clone(), workspace.clone(), window, cx))
-                    })
-                    .anchor(Anchor::BottomRight)
-                    .trigger_with_tooltip(
-                        ButtonLike::new("remote-control-trigger")
-                            .style(ButtonStyle::Subtle)
+        PopoverMenu::new("remote-control-indicator")
+            .menu(move |window, cx| {
+                Some(Self::menu(
+                    host.clone(),
+                    workspace.clone(),
+                    true,
+                    window,
+                    cx,
+                ))
+            })
+            .anchor(Anchor::BottomRight)
+            .trigger_with_tooltip(
+                ButtonLike::new("remote-control-trigger")
+                    .style(ButtonStyle::Subtle)
+                    .child(
+                        h_flex()
+                            .gap_1()
                             .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(
-                                        Icon::new(IconName::Screen)
-                                            .size(IconSize::Small)
-                                            .color(Color::Warning),
-                                    )
-                                    .child(
-                                        Label::new(label.clone())
-                                            .size(LabelSize::Small)
-                                            .color(Color::Warning),
-                                    ),
+                                Icon::new(IconName::Screen)
+                                    .size(IconSize::Small)
+                                    .color(Color::Warning),
+                            )
+                            .child(
+                                Label::new(label.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Warning),
                             ),
-                        Tooltip::text(format!("{label}. Click to disconnect or turn it off.")),
                     ),
+                Tooltip::text(format!("{label}. Click to disconnect or turn it off.")),
             )
-        })
+            .into_any_element()
     }
 }
 
@@ -299,6 +366,33 @@ mod tests {
             controlled_by(&[session("a"), session("b"), session("c")]),
             "Controlled by 3 devices"
         );
+    }
+
+    #[test]
+    fn the_idle_icon_shows_only_while_it_is_on_and_says_how_it_is() {
+        assert_eq!(idle_status(&HostState::Disabled), None);
+        assert_eq!(
+            idle_status(&HostState::Online).map(|(_, color)| color),
+            Some(Color::Muted)
+        );
+        assert_eq!(
+            idle_status(&HostState::Reconnecting).map(|(_, color)| color),
+            Some(Color::Warning)
+        );
+        assert_eq!(
+            idle_status(&HostState::SignedOut).map(|(_, color)| color),
+            Some(Color::Warning)
+        );
+        let (tooltip, color) =
+            idle_status(&HostState::Failed("no keychain".into())).expect("shown");
+        assert_eq!(color, Color::Error);
+        assert!(tooltip.contains("no keychain"));
+        let (tooltip, color) = idle_status(&HostState::Halted(
+            remote_relay_client::StopReason::QuotaExceeded,
+        ))
+        .expect("shown");
+        assert_eq!(color, Color::Error);
+        assert!(tooltip.contains("allowance"));
     }
 
     #[test]

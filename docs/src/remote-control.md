@@ -99,6 +99,11 @@ asks you to update both.
 
 ## While you are being controlled
 
+While remote control is on and nobody is connected, the status bar shows a
+small screen icon: grey when it is ready, yellow while it reconnects or nobody
+is signed in, red when it has stopped. Hover it for the reason; click it to turn
+remote control off or manage trusted devices.
+
 - The status bar shows **Controlled by** the device's name (or "N devices"). It
   stays visible even if `status_bar.show` hides the status bar, and a toast
   announces each device that takes control.

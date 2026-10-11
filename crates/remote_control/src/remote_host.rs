@@ -69,7 +69,7 @@ pub enum RemoteHostEvent {
 
 /// What to tell the person when the host ends up in `state`, if it is a state
 /// they did not ask for.
-fn problem_message(state: &HostState) -> Option<String> {
+pub(crate) fn problem_message(state: &HostState) -> Option<String> {
     let message = match state {
         HostState::SignedOut => {
             "Remote control is on, but no one is signed in to a Zode account. Sign in to use it."
