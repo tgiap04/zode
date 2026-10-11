@@ -2945,7 +2945,6 @@ mod tests {
     use smol::channel::Receiver;
     use task::{Shell, ShellBuilder};
 
-    #[cfg(not(target_os = "windows"))]
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
