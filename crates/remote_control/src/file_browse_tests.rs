@@ -750,6 +750,7 @@ async fn a_symlink_is_not_followed_even_to_a_file_inside_the_folder(cx: &mut Tes
 
 /// A folder on the real disk holding `plain.txt` and `swapped.txt`, with
 /// whatever `prepare` adds before the scan sees it.
+#[cfg(unix)]
 async fn real_folder(
     cx: &mut TestAppContext,
     prepare: impl FnOnce(&Path),
