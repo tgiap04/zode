@@ -1,6 +1,7 @@
 use crate::Sidebar;
 use crate::rail::RAIL_ICON_SIZE;
 use gpui::{AnyElement, Context};
+use remote_control::RemoteControlSettings;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use zode_account::{Account, AccountStatus};
 
@@ -66,7 +67,8 @@ impl Sidebar {
                             .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx)),
                     )
                     .menu(move |window, cx| {
-                        Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                        Some(ContextMenu::build(window, cx, move |menu, _window, cx| {
+                            let remote_control_on = RemoteControlSettings::is_enabled(cx);
                             menu.action(
                                 "Sync Settings\u{2026}",
                                 Box::new(zed_actions::account::SyncSettings),
@@ -87,6 +89,31 @@ impl Sidebar {
                             .action(
                                 "Environment Files\u{2026}",
                                 Box::new(zed_actions::env_sync::OpenEnvVault),
+                            )
+                            .separator()
+                            .toggleable_entry(
+                                "Remote Control",
+                                remote_control_on,
+                                IconPosition::Start,
+                                None,
+                                move |window, cx| {
+                                    if remote_control_on {
+                                        window
+                                            .dispatch_action(Box::new(remote_control::Disable), cx)
+                                    } else {
+                                        window.dispatch_action(Box::new(remote_control::Enable), cx)
+                                    }
+                                },
+                            )
+                            .when(remote_control_on, |menu| {
+                                menu.action(
+                                    "Manage Trusted Devices\u{2026}",
+                                    Box::new(remote_control::ManageDevices),
+                                )
+                            })
+                            .action(
+                                "Open a Zode on Your Account\u{2026}",
+                                Box::new(zed_actions::OpenZodeOnAccount),
                             )
                             .separator()
                             .action(

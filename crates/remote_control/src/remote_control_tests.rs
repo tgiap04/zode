@@ -1730,6 +1730,24 @@ async fn turning_it_off_from_the_action_disconnects_at_once_and_stays_off(cx: &m
     drop(events);
 }
 
+#[gpui::test]
+async fn turning_it_on_from_the_action_writes_the_setting_and_connects(cx: &mut TestAppContext) {
+    let rig = rig(cx, false).await;
+    cx.update(|cx| {
+        <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
+        RemoteHost::set_global(rig.host.clone(), cx);
+    });
+
+    cx.update(|cx| crate::enable_remote_control(cx));
+    cx.run_until_parked();
+
+    assert!(cx.update(|cx| crate::RemoteControlSettings::is_enabled(cx)));
+    assert!(
+        rig.relay.is_host_connected(),
+        "the host follows the setting"
+    );
+}
+
 mod with_a_window {
     use super::*;
     use crate::{indicator::RemoteControlIndicator, pairing_modal::PairingModal};

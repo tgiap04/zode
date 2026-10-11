@@ -22,7 +22,8 @@ watches no terminal.
 
 ## Turn it on
 
-You must be signed in to your Zode account. Then either open Settings and
+You must be signed in to your Zode account. Then click the account button at
+the bottom of the sidebar rail and check **Remote Control**, open Settings and
 switch on **Allow Remote Control**, or edit your settings file:
 
 ```json [settings]
@@ -81,8 +82,9 @@ they show are [listed below](#what-is-not-served).
 
 From another machine, in Zode:
 
-1. Open the **Remote Projects** dialog and choose **Open a Zode on your
-   account**.
+1. Click the account button at the bottom of the sidebar rail and choose
+   **Open a Zode on Your Account…** (or, in the **Remote Projects** dialog,
+   choose **Open a Zode on your account**).
 2. Pick the other Zode. If it is not paired yet, choose **Pair…**, compare the
    six digits, and confirm on both machines; otherwise choose **Connect**.
 3. Choose **Open a project on** that Zode.
@@ -104,7 +106,8 @@ asks you to update both.
   control**, or **Manage trusted devices...**.
 - The same are available as the command-palette actions
   `remote_control::DisconnectAll`, `remote_control::Disable` and
-  `remote_control::ManageDevices`.
+  `remote_control::ManageDevices`. The account menu offers turning it off and
+  **Manage Trusted Devices…** at any time, not only while a device is connected.
 - While a device is connected Zode holds the display awake, on the same terms as
   [`keep_display_awake`](./reference/all-settings.md).
 

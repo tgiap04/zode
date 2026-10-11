@@ -23,6 +23,7 @@ menu.workspace = true
 project.workspace = true
 recent_projects.workspace = true
 remote.workspace = true
+remote_control.workspace = true
 remote_connection.workspace = true
 serde.workspace = true
 serde_json.workspace = true

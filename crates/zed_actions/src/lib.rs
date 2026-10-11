@@ -684,6 +684,13 @@ pub struct OpenRemote {
 #[serde(deny_unknown_fields)]
 pub struct OpenDevContainer;
 
+/// Lists the other Zodes on your account, to pair with one or open a project
+/// on it through the relay.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenZodeOnAccount;
+
 /// Where to spawn the task in the UI.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

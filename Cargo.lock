@@ -14146,6 +14146,7 @@ dependencies = [
  "recent_projects",
  "remote",
  "remote_connection",
+ "remote_control",
  "serde",
  "serde_json",
  "settings",

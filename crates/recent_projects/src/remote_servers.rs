@@ -847,6 +847,24 @@ impl RemoteServerProjects {
         )
     }
 
+    /// Opens straight on the Zodes of this account, as if the person had
+    /// chosen that entry in the list of remote servers.
+    pub fn new_relay_devices(
+        fs: Arc<dyn Fs>,
+        window: &mut Window,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(false, fs, window, workspace, cx);
+        this.show_relay_devices(window, cx);
+        this
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_showing_relay_devices(&self) -> bool {
+        matches!(self.mode, Mode::RelayDevices(_))
+    }
+
     /// Creates a new RemoteServerProjects modal that opens directly in dev container creation mode.
     /// Used when suggesting dev container connection from toast notification.
     pub fn new_dev_container(

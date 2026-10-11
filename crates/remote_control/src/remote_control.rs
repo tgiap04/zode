@@ -50,6 +50,9 @@ pub use terminal_mirror::{TerminalMirror, TerminalMirrorEvent};
 actions!(
     remote_control,
     [
+        /// Turns remote control on: this Zode connects to the relay and can be
+        /// paired with, and controlled by, other devices on your account.
+        Enable,
         /// Disconnects every device that is controlling this Zode right now.
         DisconnectAll,
         /// Turns remote control off. Devices that are connected are
@@ -62,6 +65,12 @@ actions!(
     ]
 );
 
+/// Turns remote control on. The host follows the setting, so writing it is
+/// all there is to do.
+pub(crate) fn enable_remote_control(cx: &mut App) {
+    save_enabled(true, cx);
+}
+
 /// Turns remote control off: everything comes down at once, then the setting
 /// is written so it stays off. The two are separate because the write is
 /// asynchronous and can fail, and a device must not stay in control until it
@@ -70,11 +79,15 @@ pub(crate) fn disable_remote_control(cx: &mut App) {
     if let Some(host) = RemoteHost::global(cx) {
         host.update(cx, |host, cx| host.turn_off(cx));
     }
+    save_enabled(false, cx);
+}
+
+fn save_enabled(enabled: bool, cx: &mut App) {
     let written = settings::update_settings_file_with_completion(
         <dyn fs::Fs>::global(cx),
         cx,
-        |content, _| {
-            content.remote_control.get_or_insert_default().enabled = Some(false);
+        move |content, _| {
+            content.remote_control.get_or_insert_default().enabled = Some(enabled);
         },
     );
     cx.spawn(async move |cx| {
@@ -83,16 +96,16 @@ pub(crate) fn disable_remote_control(cx: &mut App) {
             Ok(Err(error)) => format!("{error:#}"),
             Err(_cancelled) => "the settings update was dropped".to_string(),
         };
+        let problem = if enabled {
+            format!("Remote control could not be turned on in your settings: {failure}")
+        } else {
+            format!(
+                "Remote control is off for now, but turning it off could not be saved \
+                 to your settings: {failure}"
+            )
+        };
         if let Some(host) = cx.update(|cx| RemoteHost::global(cx)) {
-            host.update(cx, |host, cx| {
-                host.report_problem(
-                    format!(
-                        "Remote control is off for now, but turning it off could not be saved \
-                         to your settings: {failure}"
-                    ),
-                    cx,
-                );
-            });
+            host.update(cx, |host, cx| host.report_problem(problem, cx));
         }
     })
     .detach();
@@ -147,6 +160,7 @@ fn register_workspace(
             host.update(cx, |host, cx| host.disconnect_all(cx));
         }
     });
+    workspace.register_action(|_, _: &Enable, _window, cx| enable_remote_control(cx));
     workspace.register_action(|_, _: &Disable, _window, cx| disable_remote_control(cx));
     workspace.register_action(|workspace, _: &ManageDevices, window, cx| {
         let Some(host) = RemoteHost::global(cx) else {

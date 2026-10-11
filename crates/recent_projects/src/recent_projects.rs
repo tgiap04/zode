@@ -53,7 +53,7 @@ use workspace::{
     SerializedWorkspaceLocation, Workspace, WorkspaceDb, WorkspaceId,
     notifications::DetachAndPromptErr, with_active_or_new_workspace,
 };
-use zed_actions::{OpenDevContainer, OpenRecent, OpenRemote};
+use zed_actions::{OpenDevContainer, OpenRecent, OpenRemote, OpenZodeOnAccount};
 
 actions!(
     recent_projects,
@@ -450,6 +450,16 @@ pub fn init(cx: &mut App) {
             let fs = workspace.project().read(cx).fs().clone();
             workspace.toggle_modal(window, cx, |window, cx| {
                 RemoteServerProjects::new(create_new_window, fs, window, handle, cx)
+            })
+        });
+    });
+
+    cx.on_action(|_: &OpenZodeOnAccount, cx| {
+        with_active_or_new_workspace(cx, move |workspace, window, cx| {
+            let handle = cx.entity().downgrade();
+            let fs = workspace.project().read(cx).fs().clone();
+            workspace.toggle_modal(window, cx, |window, cx| {
+                RemoteServerProjects::new_relay_devices(fs, window, handle, cx)
             })
         });
     });
@@ -2158,6 +2168,44 @@ mod tests {
     use workspace::{AppState, open_paths};
 
     use super::*;
+
+    #[gpui::test]
+    async fn opening_the_zodes_on_the_account_lands_on_their_list(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(path!("/project"), json!({ "main.rs": "fn main() {}" }))
+            .await;
+        cx.update(|cx| {
+            open_paths(
+                &[PathBuf::from(path!("/project"))],
+                app_state,
+                workspace::OpenOptions::default(),
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+        let multi_workspace = cx.update(|cx| cx.windows()[0].downcast::<MultiWorkspace>().unwrap());
+        cx.run_until_parked();
+
+        // Dispatched while the workspace is being updated, the way the account
+        // menu does it: building the dialog must not read the workspace back.
+        cx.dispatch_action(*multi_workspace, OpenZodeOnAccount);
+        cx.run_until_parked();
+
+        multi_workspace
+            .update(cx, |multi_workspace, _, cx| {
+                let modal = multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .active_modal::<RemoteServerProjects>(cx)
+                    .expect("the dialog is open");
+                assert!(modal.read(cx).is_showing_relay_devices());
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     async fn test_open_dev_container_action_with_single_config(cx: &mut TestAppContext) {
