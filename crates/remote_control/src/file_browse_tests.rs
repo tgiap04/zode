@@ -585,6 +585,35 @@ async fn monorepo(cx: &mut TestAppContext) -> (tempfile::TempDir, Fixture) {
     (directory, fixture)
 }
 
+/// Lets git work started by the test's own commands finish, then lets the
+/// project go, so that nothing is still holding a repository when the test
+/// ends. Each `git` run touches `.git`, and when the worktree is the repository
+/// root the watcher answers with more git work that can still be queued after
+/// the last assertion; on Windows those events arrive late.
+async fn settle(fixture: Fixture, cx: &mut TestAppContext) {
+    for _ in 0..3 {
+        let barriers = fixture.project.update(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|repository| repository.update(cx, |repository, _| repository.barrier()))
+                .collect::<Vec<_>>()
+        });
+        for barrier in barriers {
+            barrier.await.ok();
+        }
+        cx.background_executor
+            .timer(std::time::Duration::from_millis(100))
+            .await;
+        cx.run_until_parked();
+    }
+    drop(fixture);
+    cx.run_until_parked();
+}
+
 async fn diff(fixture: &Fixture, cx: &mut TestAppContext) -> Result<(Vec<u8>, bool), BrowseError> {
     let request = FileRequest::Diff {
         worktree_id: fixture.worktree_id.clone(),
@@ -617,6 +646,7 @@ async fn the_diff_is_the_working_tree_against_head_staged_changes_included(
         text.contains("diff --git a/staged.txt b/staged.txt") && text.contains("-before\n+after\n"),
         "a change that is only staged is still a change: {text}"
     );
+    settle(fixture, cx).await;
 }
 
 #[gpui::test]
@@ -633,6 +663,7 @@ async fn a_diff_over_two_mebibytes_is_cut_and_says_so(cx: &mut TestAppContext) {
     assert!(text.len() <= MAX_DIFF_BYTES);
     assert!(text.starts_with(b"diff --git"));
     assert!(text.ends_with(b"\n"));
+    settle(fixture, cx).await;
 }
 
 #[gpui::test]
@@ -678,6 +709,7 @@ async fn a_repository_with_no_commit_has_no_diff_to_send(cx: &mut TestAppContext
         .await
         .expect_err("nothing to compare with");
     assert_eq!(error.code, error_code::NOT_FOUND);
+    settle(fixture, cx).await;
 }
 
 #[gpui::test]
