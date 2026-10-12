@@ -44,6 +44,10 @@ const HOST_DEVICE: &str = "host-device";
 struct Rig {
     relay: FakeRelay,
     host: Entity<RemoteHost>,
+    #[cfg_attr(
+        not(unix),
+        allow(dead_code, reason = "only the shell-driven tests read it")
+    )]
     terminals: Entity<TerminalMirror>,
     keychain: Arc<InMemoryKeychain>,
     host_public_key: Arc<Mutex<Option<[u8; KEY_LEN]>>>,
