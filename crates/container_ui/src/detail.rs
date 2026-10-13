@@ -298,7 +298,11 @@ impl ContainerPanel {
                             .on_click(cx.listener(|this, _, _window, cx| this.close_detail(cx))),
                     )
                     .child(crate::render::state_dot(resource.state))
-                    .child(Label::new(resource.name.clone()).size(LabelSize::Small))
+                    .child(crate::render::truncated_text(
+                        "container-detail-name",
+                        resource.name.clone(),
+                        Color::Default,
+                    ))
                     .when_some(subtitle, |element, subtitle| {
                         element.child(
                             Label::new(subtitle)

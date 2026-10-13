@@ -670,15 +670,45 @@ pub(crate) fn render_row(resource: &Resource, columns: &[&str]) -> Vec<AnyElemen
         .iter()
         .map(|column| match *column {
             "" => state_dot(resource.state).into_any_element(),
-            "Name" => Label::new(resource.name.clone())
-                .size(LabelSize::Small)
-                .into_any_element(),
-            other => Label::new(detail(other))
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
+            "Name" => truncated_text(
+                cell_id(resource, column),
+                resource.name.clone(),
+                Color::Default,
+            ),
+            other => truncated_text(cell_id(resource, column), detail(other), Color::Muted),
         })
         .collect()
+}
+
+fn cell_id(resource: &Resource, column: &str) -> SharedString {
+    format!("container-cell-{}-{column}", resource.id).into()
+}
+
+/// Text that is cut with an ellipsis when its column is too narrow, and shows
+/// all of itself on hover: container and image names are routinely longer than
+/// the column, and the end is often the part that tells two of them apart.
+pub(crate) fn truncated_text(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    color: Color,
+) -> AnyElement {
+    let text = text.into();
+    if text.is_empty() {
+        return div().into_any_element();
+    }
+    let tooltip = text.clone();
+    div()
+        .id(id)
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(color)
+                .truncate(),
+        )
+        .tooltip(move |_window, cx| ui::Tooltip::simple(tooltip.clone(), cx))
+        .into_any_element()
 }
 
 /// Green for up, amber for frozen, muted for down, and nothing at all for
