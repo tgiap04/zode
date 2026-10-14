@@ -69,6 +69,7 @@ impl ConnectionModal {
                     this.reload_engines(cx);
                     let engine = CatalogueEntry {
                         installed: true,
+                        downloaded: true,
                         ..engine
                     };
                     this.open(engine, window, cx);
@@ -113,6 +114,62 @@ impl ConnectionModal {
             return;
         }
         self.download_driver(engine, window, cx);
+    }
+
+    /// Deletes the driver an engine downloaded, after asking.
+    ///
+    /// Asked about because the driver may serve more than the engine clicked:
+    /// CockroachDB and PostgreSQL share one, and removing it for one removes it
+    /// for both. Nothing is lost that a click cannot fetch back, so a question
+    /// rather than typing a name.
+    pub(crate) fn remove_driver(
+        &mut self,
+        engine: CatalogueEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !engine.downloaded {
+            return;
+        }
+        let driver = engine.driver.clone();
+        let driver_name = driver_registry::global(cx)
+            .read(cx)
+            .get(&driver)
+            .map(|descriptor| descriptor.name.to_string())
+            .unwrap_or_else(|| engine.name.to_string());
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Remove the downloaded {driver_name} driver?"),
+            Some(
+                "Every engine that connects through it will need it downloaded again. \
+                 Connections already open keep working until they are closed.",
+            ),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let removal = this.update(cx, |_, cx| driver_registry::remove_download(driver, cx));
+            let Ok(removal) = removal else {
+                return;
+            };
+            let outcome = removal.await;
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(()) => this.error = None,
+                    Err(error) => {
+                        this.error = Some(
+                            format!("Could not remove the {driver_name} driver: {error:#}").into(),
+                        )
+                    }
+                }
+                this.reload_engines(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// What the progress line says, and how far along the bar is.

@@ -100,6 +100,40 @@ pub fn prune_other_versions(id: &str, keep: &str) -> Result<()> {
     prune_other_versions_in(root(), id, keep)
 }
 
+/// Deletes every downloaded version of a driver, for someone who wants the
+/// disk back. Returns whether there was anything to delete.
+///
+/// The whole `<root>/<id>` directory, not only the running app's version:
+/// what is being asked for is "this driver is gone", and a version an older
+/// app left behind is as much in the way as the current one. The id is refused
+/// unless it is a single plain name, so no id can reach outside the store.
+pub fn remove_in(root: &Path, id: &str) -> Result<bool> {
+    use anyhow::Context as _;
+    use std::path::Component;
+    // Exactly one ordinary component, judged by the platform's own parser: on
+    // Windows `C:` is a prefix, not a name, and joining it would leave `root`.
+    // A backslash is refused everywhere, so an id means the same on every
+    // platform rather than being a name on one and a path on another.
+    let mut components = Path::new(id).components();
+    let plain_name = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(name)), None) if name == std::ffi::OsStr::new(id)
+    ) && !id.contains('\\');
+    anyhow::ensure!(plain_name, "{id:?} is not a driver id");
+    let dir = root.join(id);
+    // `symlink_metadata` rather than `exists`: a dangling link here is still
+    // something to remove, and an unreadable entry is an error, not "absent".
+    match std::fs::symlink_metadata(&dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", dir.display()));
+        }
+        Ok(_) => {}
+    }
+    std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    Ok(true)
+}
+
 /// Makes a freshly unpacked driver executable.
 ///
 /// A no-op on Windows, where being executable is a property of the name.
@@ -186,6 +220,78 @@ mod tests {
             installed_path_in(root.path(), "postgres", "0.1.0").is_some(),
             "pruning one driver must not touch another"
         );
+    }
+
+    #[test]
+    fn removing_a_driver_takes_every_version_and_nothing_else() {
+        let root = tempfile::tempdir().unwrap();
+        plant(root.path(), "mysql", "0.1.0");
+        plant(root.path(), "mysql", "0.1.1");
+        plant(root.path(), "postgres", "0.1.1");
+
+        assert!(remove_in(root.path(), "mysql").unwrap());
+
+        assert!(installed_versions_in(root.path(), "mysql").is_empty());
+        assert!(
+            installed_path_in(root.path(), "postgres", "0.1.1").is_some(),
+            "removing one driver must not touch another"
+        );
+    }
+
+    #[test]
+    fn removing_a_driver_that_is_not_there_says_so() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!remove_in(root.path(), "mongodb").unwrap());
+    }
+
+    /// The id becomes a path under the store, so one that is not a plain name
+    /// could name something that is not a driver at all.
+    #[test]
+    fn an_id_that_is_not_a_plain_name_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let inner = root.path().join("store");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(root.path().join("keep.txt"), b"keep").unwrap();
+        for id in ["", ".", "..", "../keep.txt", "a/b", "a\\b"] {
+            assert!(remove_in(&inner, id).is_err(), "{id:?} must be refused");
+        }
+        assert!(root.path().join("keep.txt").exists());
+    }
+
+    /// A link left where a driver was is removed, not reported as absent and
+    /// left behind -- and only the link goes, never what it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_or_live_link_in_the_store_is_removed_without_following_it() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("keep.txt"), b"keep").unwrap();
+
+        std::os::unix::fs::symlink(elsewhere.path(), root.path().join("postgres")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("gone"), root.path().join("mysql")).unwrap();
+
+        assert!(remove_in(root.path(), "postgres").unwrap());
+        assert!(remove_in(root.path(), "mysql").unwrap());
+        assert!(std::fs::symlink_metadata(root.path().join("postgres")).is_err());
+        assert!(std::fs::symlink_metadata(root.path().join("mysql")).is_err());
+        assert!(
+            elsewhere.path().join("keep.txt").exists(),
+            "the link's target is not the store's to delete"
+        );
+    }
+
+    /// On Windows a drive prefix is not a name, and joining one replaces the
+    /// store root entirely.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_prefix_is_not_a_driver_id() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["C:", "C:x", "\\\\server\\share"] {
+            assert!(
+                remove_in(root.path(), id).is_err(),
+                "{id:?} must be refused"
+            );
+        }
     }
 
     /// Called on every install, including the first.

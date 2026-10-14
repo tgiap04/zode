@@ -58,6 +58,7 @@ fn imported_entry() -> CatalogueEntry {
         description: SharedString::new_static("From a URL"),
         group: SharedString::new_static("Relational"),
         installed: true,
+        downloaded: false,
     }
 }
 
@@ -686,6 +687,7 @@ mod tests {
             description: "An engine".into(),
             group: "Relational".into(),
             installed,
+            downloaded: false,
         }
     }
 
@@ -919,6 +921,80 @@ mod tests {
             .position(|engine| engine.driver == driver)
             .unwrap_or_else(|| panic!("`{driver}` must be listed"));
         modal.select(index, cx);
+    }
+
+    fn postgres_entry(
+        modal: &Entity<ConnectionModal>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> CatalogueEntry {
+        modal.read_with(cx, |modal, _| {
+            modal
+                .engines
+                .iter()
+                .find(|engine| engine.driver == "postgres")
+                .cloned()
+                .expect("postgres is listed")
+        })
+    }
+
+    fn postgres_installed(cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|_window, cx| {
+            driver_registry::global(cx)
+                .read(cx)
+                .get("postgres")
+                .is_some_and(|driver| driver.is_installed())
+        })
+    }
+
+    /// A downloaded driver can be removed, only once the person says so, and
+    /// every way the dialog reads it agrees that it is gone.
+    #[gpui::test]
+    async fn a_downloaded_driver_is_removed_only_when_confirmed(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let store = release_with(cx, Checksum::Correct).await;
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+        });
+        until_the_download_ends(&modal, cx).await;
+        modal.update(cx, |modal, cx| modal.reload_engines(cx));
+        let engine = postgres_entry(&modal, cx);
+        assert!(
+            engine.downloaded,
+            "a driver Zode fetched is one it may remove"
+        );
+        let on_disk = store.path().join("postgres");
+        assert!(on_disk.exists());
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(on_disk.exists(), "cancelling must leave the driver alone");
+        assert!(postgres_installed(cx));
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine, window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Remove");
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if !postgres_installed(cx) {
+                break;
+            }
+            cx.executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(!on_disk.exists(), "every downloaded version is deleted");
+        assert!(!postgres_installed(cx), "the registry no longer offers it");
+        let engine = postgres_entry(&modal, cx);
+        assert!(!engine.installed && !engine.downloaded);
+        modal.read_with(cx, |modal, _| assert_eq!(modal.error, None));
     }
 
     /// The defect this whole path exists for: Zode bundles no drivers, so the

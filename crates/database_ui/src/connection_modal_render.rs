@@ -197,6 +197,21 @@ impl ConnectionModal {
                             ),
                     ),
             )
+            .when(engine.downloaded, |element| {
+                let engine = engine.clone();
+                element.child(
+                    IconButton::new(("database-engine-remove-driver", index), IconName::Trash)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(ui::Tooltip::text("Remove the downloaded driver"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            // The row underneath selects on click; this one only
+                            // removes.
+                            cx.stop_propagation();
+                            this.remove_driver(engine.clone(), window, cx);
+                        })),
+                )
+            })
             .when(!installed, |element| {
                 // Zode bundles no drivers, so "not installed" is the ordinary
                 // state of an engine nobody has used yet -- and for the ones

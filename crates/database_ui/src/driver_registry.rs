@@ -149,6 +149,12 @@ pub struct CatalogueEntry {
     /// known, and none of them is bundled. False here means it has yet to be
     /// downloaded, which is an offer, not a dead end.
     pub installed: bool,
+    /// Whether that driver is one Zode downloaded, and so one Zode may delete.
+    ///
+    /// A driver beside the executable belongs to the bundle or the checkout,
+    /// and one named by `ZODE_DB_<ID>` to whoever named it -- neither is Zode's
+    /// to remove.
+    pub downloaded: bool,
 }
 
 /// The engines Zode knows the names of.
@@ -293,6 +299,9 @@ pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
             installed: registry
                 .get(driver)
                 .is_some_and(|driver| driver.is_installed()),
+            downloaded: registry
+                .get(driver)
+                .is_some_and(|driver| driver.origin() == Some(DriverOrigin::Store)),
         })
         .collect();
 
@@ -312,6 +321,7 @@ pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
             // shape nobody here knows.
             group: SharedString::new_static("Other"),
             installed: true,
+            downloaded: false,
         });
     }
     entries
@@ -355,6 +365,33 @@ pub fn refresh(id: &str, cx: &mut App) -> bool {
             cx.notify();
         }
         registry.get(id).is_some_and(|driver| driver.is_installed())
+    })
+}
+
+/// Deletes a downloaded driver and re-resolves it, so every engine that
+/// speaks through it reads as not downloaded again.
+///
+/// The deletion runs off the main thread: a driver is tens of megabytes. A
+/// connection already running the driver keeps its process; the next one to
+/// start is offered the download again.
+pub fn remove_download(id: SharedString, cx: &mut App) -> gpui::Task<anyhow::Result<()>> {
+    let root = store_root(cx);
+    // A download of the same driver still in flight would unpack into the
+    // directory being deleted, and bring the driver back afterwards.
+    installer(cx).forget(&id);
+    let removal = cx.background_spawn({
+        let id = id.clone();
+        async move { store::remove_in(&root, &id) }
+    });
+    cx.spawn(async move |cx| {
+        let outcome = removal.await.map(|_| ());
+        // Re-resolved whichever way it went: a removal that failed halfway --
+        // Windows will not delete a running executable -- may still have taken
+        // the driver, and the registry must say what is on disk now.
+        cx.update(|cx| {
+            refresh(&id, cx);
+        });
+        outcome
     })
 }
 
