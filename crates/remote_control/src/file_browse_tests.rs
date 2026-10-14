@@ -692,6 +692,7 @@ async fn the_diff_holds_only_this_folders_visible_changes(cx: &mut TestAppContex
     for left_out in ["outside.txt", "secret.env", "hidden.txt"] {
         assert!(!text.contains(left_out), "{left_out} leaked: {text}");
     }
+    settle(fixture, cx).await;
 }
 
 #[gpui::test]
