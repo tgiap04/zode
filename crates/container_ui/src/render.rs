@@ -26,6 +26,9 @@ impl Render for ContainerPanel {
             .when_some(self.config_error.clone(), |element, error| {
                 element.child(self.render_config_error_banner(&error, cx))
             })
+            .when(self.shows_search(cx), |element| {
+                element.child(self.render_search(window, cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -287,19 +290,29 @@ impl ContainerPanel {
     /// tells you less than "Images · 42", and it is the one number that answers
     /// "did the refresh do anything" without reading the table.
     fn render_tools(&self, cx: &mut Context<Self>) -> AnyElement {
+        // "3/42" while a search narrows the list, so a short list is never
+        // mistaken for everything there is.
         let count = match &self.state {
-            ListState::Ready(resources) => Some(resources.len()),
+            ListState::Ready(resources) => {
+                let total = resources.len();
+                // The plain total while a row is open: the field is out of sight
+                // then, and a count narrowed by a filter nobody can see reads
+                // as missing rows.
+                if self.detail.is_some() || self.query(cx).is_empty() {
+                    Some(total.to_string())
+                } else {
+                    Some(format!("{}/{total}", self.visible(resources, cx).len()))
+                }
+            }
             _ => None,
         };
         h_flex()
             .gap_0p5()
             .when_some(count, |element, count| {
                 element.child(
-                    div().mr_1().child(
-                        Label::new(count.to_string())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
+                    div()
+                        .mr_1()
+                        .child(Label::new(count).size(LabelSize::Small).color(Color::Muted)),
                 )
             })
             .child(
@@ -363,8 +376,20 @@ impl ContainerPanel {
                 format!("No {}", self.active_kind.label().to_lowercase()),
             ),
             ListState::Ready(resources) => {
+                let visible: Vec<Resource> =
+                    self.visible(resources, cx).into_iter().cloned().collect();
+                if visible.is_empty() {
+                    return note(
+                        Some(IconName::MagnifyingGlass),
+                        format!(
+                            "No {} match \"{}\"",
+                            self.active_kind.label().to_lowercase(),
+                            self.query(cx)
+                        ),
+                    );
+                }
                 let columns = columns_for(self.active_kind, self.shows_every_column());
-                self.render_list(resources, columns, cx)
+                self.render_list(visible, columns, cx)
             }
         }
     }
@@ -523,7 +548,7 @@ impl ContainerPanel {
     /// knowledge would be wrong for three of the four.
     fn render_list(
         &self,
-        resources: &[Resource],
+        resources: Vec<Resource>,
         columns: &'static [&'static str],
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -535,7 +560,7 @@ impl ContainerPanel {
         let has_trailing = !actions.is_empty() || logs || shell || removable;
         // Handed to the closure as *data*, not as elements: `AnyElement` is not
         // `Clone`, and `uniform_list` asks for a range again on every frame.
-        let resources = std::rc::Rc::new(resources.to_vec());
+        let resources = std::rc::Rc::new(resources);
         let busy_rows = std::rc::Rc::new(self.busy_rows());
         let count = resources.len();
         // One extra column for the buttons, and only when there are buttons: a

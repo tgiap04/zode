@@ -36,6 +36,9 @@ fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings_store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         project::DisableAiSettings::register(cx);
+        // The list's search field is an editor, and the factory behind every
+        // `InputField` is installed here.
+        editor::init(cx);
         // Registers the workspace action, so a test reaches the button the way a
         // click does rather than calling the handler behind it. A button wired
         // to nothing is a defect this repo has shipped once before.
@@ -2468,5 +2471,152 @@ mod config_picker {
                 "docker reads no config file, so the picker draws nothing for it"
             );
         });
+    }
+}
+
+mod search {
+    use super::*;
+    use container::{Resource, RunState};
+    use gpui::Entity;
+    use std::{cell::Cell, rc::Rc};
+
+    fn pod(name: &str, namespace: &str) -> Resource {
+        Resource {
+            kind: ResourceKind::Pod,
+            id: format!("{namespace}/{name}"),
+            name: name.into(),
+            state: RunState::Running,
+            detail: vec![
+                ("Namespace", namespace.into()),
+                ("Status", "Running".into()),
+            ],
+            parent: None,
+        }
+    }
+
+    fn cluster() -> Arc<FakeBackend> {
+        Arc::new(
+            FakeBackend::empty(BackendKind::Kubernetes, &[ResourceKind::Pod]).holding(vec![
+                pod("coredns-5d78c9869d-x2kqp", "kube-system"),
+                pod("nginx-7c5ddbdf54-abcde", "default"),
+                pod("api-6b9f8d7c5-fghij", "default"),
+            ]),
+        )
+    }
+
+    fn type_into_search(panel: &Entity<ContainerPanel>, text: &str, cx: &mut VisualTestContext) {
+        panel.update_in(cx, |panel, window, cx| {
+            let editor = panel.search_field(window, cx).read(cx).editor().clone();
+            editor.set_text(text, window, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    fn visible_names(panel: &Entity<ContainerPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+        panel.read_with(cx, |panel, cx| match &panel.state {
+            ListState::Ready(resources) => panel
+                .visible(resources, cx)
+                .into_iter()
+                .map(|resource| resource.name.clone())
+                .collect(),
+            other => panic!("expected a ready list, got {}", describe(other)),
+        })
+    }
+
+    #[gpui::test]
+    async fn typing_narrows_the_list_and_clearing_brings_it_back(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (panel, cx) = panel_over(cluster(), cx);
+        assert_eq!(
+            visible_names(&panel, cx).len(),
+            3,
+            "nothing typed shows all"
+        );
+
+        type_into_search(&panel, "kube-system", cx);
+        assert_eq!(visible_names(&panel, cx), vec!["coredns-5d78c9869d-x2kqp"]);
+
+        type_into_search(&panel, "default NGINX", cx);
+        assert_eq!(visible_names(&panel, cx), vec!["nginx-7c5ddbdf54-abcde"]);
+
+        type_into_search(&panel, "redis", cx);
+        assert!(visible_names(&panel, cx).is_empty());
+        // Drawing the no-match note must not fall over.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        panel.update_in(cx, |panel, window, cx| panel.clear_search(window, cx));
+        cx.run_until_parked();
+        assert_eq!(visible_names(&panel, cx).len(), 3);
+    }
+
+    /// The list redraws as it is typed into, not only on the next refresh.
+    #[gpui::test]
+    async fn an_edit_in_the_field_redraws_the_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (panel, cx) = panel_over(cluster(), cx);
+        let redraws = Rc::new(Cell::new(0usize));
+        let _observation = cx.update(|_window, cx| {
+            let redraws = redraws.clone();
+            cx.observe(&panel, move |_, _| redraws.set(redraws.get() + 1))
+        });
+
+        type_into_search(&panel, "api", cx);
+        assert!(redraws.get() > 0, "typing must notify the panel");
+    }
+
+    /// A kind switch reloads the list; the field being typed in stays drawn.
+    #[gpui::test]
+    async fn the_field_stays_while_a_switch_reloads(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (panel, cx) = panel_over(cluster(), cx);
+        type_into_search(&panel, "nginx", cx);
+        panel.update(cx, |panel, cx| {
+            panel.state = ListState::Loading;
+            assert!(panel.shows_search(cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn an_empty_list_has_no_field_until_something_is_typed(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (panel, cx) = panel_over(
+            Arc::new(FakeBackend::empty(
+                BackendKind::Kubernetes,
+                &[ResourceKind::Pod],
+            )),
+            cx,
+        );
+        panel.read_with(cx, |panel, cx| assert!(!panel.shows_search(cx)));
+    }
+
+    /// Escape typed in the field empties it; the keystroke is the real one.
+    #[gpui::test]
+    async fn escape_in_the_field_clears_it(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| cx.bind_keys([gpui::KeyBinding::new("escape", menu::Cancel, None)]));
+        let (panel, cx) = panel_over(cluster(), cx);
+        type_into_search(&panel, "nginx", cx);
+        panel.update_in(cx, |panel, window, cx| {
+            let focus = panel
+                .search_field(window, cx)
+                .read(cx)
+                .editor()
+                .focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        assert_eq!(panel.read_with(cx, |panel, cx| panel.query(cx)), "");
+    }
+
+    #[gpui::test]
+    async fn the_search_survives_switching_kinds(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (panel, cx) = panel_over(cluster(), cx);
+        type_into_search(&panel, "nginx", cx);
+        panel.update(cx, |panel, cx| panel.choose_kind(ResourceKind::Pod, cx));
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |panel, cx| panel.query(cx)), "nginx");
     }
 }

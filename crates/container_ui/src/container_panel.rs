@@ -216,6 +216,11 @@ pub struct ContainerPanel {
     /// same reason as `load`: dropping the panel mid-read must not leave a
     /// `kubectl config view` still running for a view that is already gone.
     pub(crate) config_load: Option<Task<()>>,
+    /// The search field over the list, made on first draw.
+    ///
+    /// Kept across engine and kind switches: somebody looking for one thing
+    /// usually goes on looking for it after switching where they look.
+    pub(crate) search: Option<crate::search::Search>,
 }
 
 pub enum ContainerPanelEvent {}
@@ -285,6 +290,7 @@ impl ContainerPanel {
             config_targets: Vec::new(),
             config_error: None,
             config_load: None,
+            search: None,
         }
     }
 
