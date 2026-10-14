@@ -2382,6 +2382,7 @@ dependencies = [
  "futures 0.3.32",
  "gpui",
  "log",
+ "menu",
  "project",
  "settings",
  "task",
