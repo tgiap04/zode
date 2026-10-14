@@ -8,6 +8,8 @@
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::install::store;
+
 /// The name the manifest is published under, at every version.
 pub const MANIFEST_ASSET: &str = "zode-db-drivers-manifest.json";
 
@@ -55,9 +57,60 @@ impl DriverManifest {
             .collect()
     }
 
+    /// Fails closed on a `version` or an `asset` that is not the shape the
+    /// server publishes.
+    ///
+    /// Both arrive from the network and become URL segments, and the version a
+    /// directory name too, so `../x` or `latest` must stop here rather than be
+    /// joined to anything. Every driver is checked, not only the one a caller
+    /// will want: a manifest with one entry the server would never have
+    /// accepted was not published by it.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        serde_json::from_slice(bytes).context("the driver manifest is not the shape Zode expects")
+        let manifest: Self = serde_json::from_slice(bytes)
+            .context("the driver manifest is not the shape Zode expects")?;
+        anyhow::ensure!(
+            store::is_version(&manifest.version),
+            "the driver manifest names {:?} as its version, which is not a published driver \
+             version (MAJOR.MINOR.PATCH, optionally followed by -prerelease)",
+            manifest.version
+        );
+        for driver in &manifest.drivers {
+            anyhow::ensure!(
+                is_archive_asset(&driver.asset),
+                "the driver manifest names {:?} as the asset for `{}` on {}, which is not a \
+                 published driver archive (zode-db-<id>-<target>.tar.gz)",
+                driver.asset,
+                driver.id,
+                driver.target
+            );
+        }
+        Ok(manifest)
     }
+}
+
+/// Whether `name` is an archive name the server accepts when a manifest is
+/// published: `zode-db-<id>-<target>.tar.gz`, in lowercase letters and digits
+/// with `-` or `_` between words, the first separator being the `-` that ends
+/// the id.
+///
+/// Between the fixed prefix and `.tar.gz` nothing but that alphabet is allowed,
+/// so the name cannot carry a `/`, a `\`, a `.` or a `%`, which is what makes it
+/// safe to put in a URL path as it stands.
+fn is_archive_asset(name: &str) -> bool {
+    let Some(stem) = name
+        .strip_prefix("zode-db-")
+        .and_then(|rest| rest.strip_suffix(".tar.gz"))
+    else {
+        return false;
+    };
+    let is_word = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    };
+    stem.split_once('-')
+        .is_some_and(|(id, target)| is_word(id) && target.split(['-', '_']).all(is_word))
 }
 
 /// Lowercase hex, 64 characters. Anything else is refused rather than compared.
@@ -169,6 +222,71 @@ mod tests {
         assert!(parse_sha256("x", &"a".repeat(63)).is_err());
         assert!(parse_sha256("x", &"z".repeat(64)).is_err());
         assert!(parse_sha256("x", "sha256:{}").is_err());
+    }
+
+    /// The version arrives from the network and becomes a URL segment and a
+    /// directory name, so a manifest naming anything else is refused before any
+    /// of that happens.
+    #[test]
+    fn a_manifest_naming_a_version_that_is_not_one_is_refused() {
+        let json_with_version = |version: &str| {
+            let mut manifest = manifest();
+            manifest.version = version.into();
+            serde_json::to_vec(&manifest).unwrap()
+        };
+        for version in ["../escape", "latest", "0.1.4+stable", ""] {
+            let error = DriverManifest::parse(&json_with_version(version))
+                .expect_err("a version that is not a version must not be accepted");
+            let message = error.to_string();
+            assert!(message.contains(&format!("{version:?}")), "{message}");
+        }
+        DriverManifest::parse(&json_with_version("0.1.5-rc.1")).unwrap();
+    }
+
+    /// The asset becomes a URL segment, so a manifest naming anything the server
+    /// would not have accepted as an archive is refused whole -- including when
+    /// the bad entry is not the one this platform would have used.
+    #[test]
+    fn a_manifest_naming_an_asset_that_is_not_an_archive_is_refused() {
+        let json_with_asset = |asset: &str| {
+            let mut manifest = manifest();
+            manifest.drivers[1].asset = asset.into();
+            serde_json::to_vec(&manifest).unwrap()
+        };
+        for asset in [
+            "",
+            "../zode-db-postgres-aarch64-apple-darwin.tar.gz",
+            "nested/zode-db-postgres-aarch64-apple-darwin.tar.gz",
+            "..\\zode-db-postgres-aarch64-apple-darwin.tar.gz",
+            "zode-db-postgres-aarch64-apple-darwin.tar.gz/",
+            "zode-db-postgres-aarch64-apple-darwin.tar.gz?token=1",
+            "zode-db-postgres-aarch64-apple-darwin.tar.gz\n",
+            "zode-db-postgres-aarch64-apple-darwin.zip",
+            "zode-db-postgres.tar.gz",
+            "zode-db-drivers-manifest.json",
+            "ZODE-db-postgres-aarch64-apple-darwin.tar.gz",
+            "zode-db-Postgres-aarch64-apple-darwin.tar.gz",
+            "zode-db-postgres_aarch64.tar.gz",
+            "zode-db-postgres--aarch64.tar.gz",
+            "zode-db--postgres-aarch64.tar.gz",
+            "zode-db-postgres-aarch64-.tar.gz",
+            "zode-db-postgres-aarch64.x.tar.gz",
+            "zode-db-postgres-%2e%2e.tar.gz",
+        ] {
+            let error = DriverManifest::parse(&json_with_asset(asset))
+                .expect_err("an asset that is not an archive name must not be accepted");
+            let message = error.to_string();
+            assert!(message.contains(&format!("{asset:?}")), "{message}");
+        }
+        for asset in [
+            "zode-db-postgres-aarch64-apple-darwin.tar.gz",
+            "zode-db-mysql-x86_64-pc-windows-msvc.tar.gz",
+            "zode-db-sqlite-x86_64-unknown-linux-gnu.tar.gz",
+            "zode-db-a-b_c.tar.gz",
+        ] {
+            DriverManifest::parse(&json_with_asset(asset))
+                .unwrap_or_else(|error| panic!("{asset:?} must be accepted: {error}"));
+        }
     }
 
     #[test]

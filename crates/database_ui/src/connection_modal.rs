@@ -676,7 +676,9 @@ impl Focusable for ConnectionModal {
 mod tests {
     use super::*;
     use crate::database_panel_tests::modal_for_test;
-    use database::install::test_support::{driver_archive, manifest_for, sha256_of};
+    use database::install::test_support::{
+        archive_asset_for, driver_archive, manifest_for, sha256_of,
+    };
     use http_client::{FakeHttpClient, HttpClient};
     use tempfile::TempDir;
 
@@ -843,7 +845,9 @@ mod tests {
 
     // ---- Downloading a driver ---------------------------------------------
 
-    const TEST_VERSION: &str = "0.0.0";
+    /// The version the fake server's manifest names, which is the one its archive
+    /// is then fetched under.
+    const PUBLISHED_VERSION: &str = "0.0.0";
 
     /// A release serving one driver, and nothing else.
     fn release_serving(manifest: Vec<u8>, archive: Vec<u8>) -> std::sync::Arc<dyn HttpClient> {
@@ -854,7 +858,7 @@ mod tests {
                 let path = request.uri().path().to_string();
                 let body = if path.ends_with("zode-db-drivers-manifest.json") {
                     manifest
-                } else if path.ends_with("zode-db-postgres.tar.gz") {
+                } else if path.ends_with(&archive_asset_for("postgres")) {
                     archive
                 } else {
                     return Ok(http_client::Response::builder()
@@ -876,10 +880,10 @@ mod tests {
             Checksum::Correct => sha256_of(&archive),
             Checksum::Wrong => "a".repeat(64),
         };
-        let manifest = manifest_for("postgres", &archive, published, TEST_VERSION);
+        let manifest = manifest_for("postgres", &archive, published, PUBLISHED_VERSION);
         cx.update(|_window, cx| {
             cx.set_http_client(release_serving(manifest, archive));
-            driver_registry::set_installer_for_test(store.path().to_path_buf(), TEST_VERSION, cx);
+            driver_registry::set_installer_for_test(store.path().to_path_buf(), cx);
         });
         store
     }
@@ -1092,7 +1096,7 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            database::install::store::installed_path_in(store.path(), "postgres", TEST_VERSION),
+            database::install::store::installed_path_in(store.path(), "postgres"),
             None,
             "giving up must leave the store as it was"
         );

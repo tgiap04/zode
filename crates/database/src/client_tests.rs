@@ -166,6 +166,10 @@ async fn a_driver_on_the_wrong_version_is_refused_with_both_numbers(cx: &mut Tes
             && message.contains(&crate::PROTOCOL_VERSION.wrapping_add(1).to_string()),
         "the message must name both versions, or nobody can tell which end to fix: {message}"
     );
+    assert!(
+        message.contains("download it again"),
+        "a driver kept across app updates must be told how to be replaced: {message}"
+    );
 }
 
 /// The read-only rejection has to be distinguishable from a syntax error

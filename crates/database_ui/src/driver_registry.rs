@@ -5,7 +5,6 @@ use database::registry::{
 use database::transport::DriverBinary;
 use extension::{ExtensionDatabaseDriver, ExtensionDatabaseDriverProxy, ExtensionHostProxy};
 use gpui::{App, AppContext as _, Entity, Global, SharedString};
-use release_channel::AppVersion;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -38,9 +37,12 @@ const BUILT_IN: &[(&str, &str)] = &[
 ///    run `make drivers` must use the driver it just built, never a downloaded
 ///    one from an older release. It is also the rollback: putting the drivers
 ///    back into the bundle restores the old behaviour with no code change.
-/// 2. **The download store**, under `paths::database_drivers_dir()`, keyed by
-///    the running app's version. This is where a driver fetched on demand lands,
-///    and where someone with no route to the API can put one by hand.
+/// 2. **The download store**, under `paths::database_drivers_dir()`. This is
+///    where a driver fetched on demand lands, and where someone with no route to
+///    the API can put one by hand. It holds whichever published version was
+///    installed most recently, and a driver stays until someone removes it:
+///    there is no update check, and `DriverClient::initialize` is what refuses
+///    one whose protocol no longer matches.
 /// 3. **Whatever `ZODE_DB_<ID>` names** -- a full path to a file, not a name
 ///    resolved on `PATH`. See [`path_override`], which is what actually
 ///    decides this and requires the value to be an existing file.
@@ -55,7 +57,7 @@ const BUILT_IN: &[(&str, &str)] = &[
 /// read as the driver's stderr, and the reconnect loop repeated it. The one
 /// fact worth knowing -- the driver was never installed -- appeared nowhere,
 /// and the message that did appear looked like the driver talking.
-fn resolve_driver(id: &str, version: &str, store_root: &Path) -> DriverState {
+fn resolve_driver(id: &str, store_root: &Path) -> DriverState {
     let executable = store::executable_name(id);
 
     let beside_exe = std::env::current_exe()
@@ -65,7 +67,7 @@ fn resolve_driver(id: &str, version: &str, store_root: &Path) -> DriverState {
         return DriverState::installed(path.clone(), DriverOrigin::BesideExecutable);
     }
 
-    if let Some(path) = store::installed_path_in(store_root, id, version) {
+    if let Some(path) = store::installed_path_in(store_root, id) {
         return DriverState::installed(path, DriverOrigin::Store);
     }
 
@@ -108,26 +110,10 @@ fn path_override(id: &str) -> Option<PathBuf> {
     }
 }
 
-/// The version whose drivers this build of Zode will run.
-///
-/// Part of the store path, so an updated app does not pick up the driver its
-/// previous version downloaded. A driver speaks a pinned protocol
-/// (`database::PROTOCOL_VERSION`), and the release that shipped this app is the
-/// one whose drivers were built against it.
-///
-/// Without its build metadata: the app version carries the release channel
-/// there (`0.1.4+stable`), drivers are published under the bare version, and
-/// the API refuses a version containing `+` outright.
-pub fn driver_version(cx: &App) -> String {
-    let mut version = AppVersion::global(cx);
-    version.build = Default::default();
-    version.to_string()
-}
-
-pub fn built_in_drivers(version: &str, store_root: &Path) -> DriverRegistry {
+pub fn built_in_drivers(store_root: &Path) -> DriverRegistry {
     let mut registry = DriverRegistry::new();
     for (id, name) in BUILT_IN {
-        registry.register_built_in(*id, *name, resolve_driver(id, version, store_root));
+        registry.register_built_in(*id, *name, resolve_driver(id, store_root));
     }
     registry
 }
@@ -364,10 +350,9 @@ pub fn is_publishable(id: &str) -> bool {
 /// Notifies only on a real change, so a re-resolve that found what it already
 /// had does not redraw every window. Returns whether it is now installed.
 pub fn refresh(id: &str, cx: &mut App) -> bool {
-    let version = driver_version(cx);
     let root = store_root(cx);
     global(cx).update(cx, |registry, cx| {
-        if registry.set_state(id, resolve_driver(id, &version, &root)) {
+        if registry.set_state(id, resolve_driver(id, &root)) {
             cx.notify();
         }
         registry.get(id).is_some_and(|driver| driver.is_installed())
@@ -416,7 +401,7 @@ pub fn remove_download(id: SharedString, cx: &mut App) -> gpui::Task<anyhow::Res
 /// yet must still be able to fetch one.
 pub fn installer(cx: &mut App) -> Arc<DriverInstaller> {
     if !cx.has_global::<GlobalDriverInstaller>() {
-        let endpoint = DriverEndpoint::new(zode_account::api_url(), driver_version(cx));
+        let endpoint = DriverEndpoint::new(zode_account::api_url());
         let root = store_root(cx);
         let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), endpoint, root));
         cx.set_global(GlobalDriverInstaller(installer));
@@ -456,9 +441,9 @@ const TEST_API_BASE: &str = "https://api.test.invalid/api";
 /// reads it, the resolver would keep looking somewhere the installer never
 /// wrote.
 #[cfg(test)]
-pub(crate) fn set_installer_for_test(root: PathBuf, version: &str, cx: &mut App) {
+pub(crate) fn set_installer_for_test(root: PathBuf, cx: &mut App) {
     cx.set_global(GlobalDriverStore(root.clone()));
-    let endpoint = DriverEndpoint::new(TEST_API_BASE, version);
+    let endpoint = DriverEndpoint::new(TEST_API_BASE);
     let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), endpoint, root));
     cx.set_global(GlobalDriverInstaller(installer));
 }
@@ -482,9 +467,8 @@ impl Global for GlobalDriverRegistry {}
 /// that never called [`init`] still finds the shipped drivers.
 pub fn global(cx: &mut App) -> Entity<DriverRegistry> {
     if !cx.has_global::<GlobalDriverRegistry>() {
-        let version = driver_version(cx);
         let root = store_root(cx);
-        let registry = cx.new(|_| built_in_drivers(&version, &root));
+        let registry = cx.new(|_| built_in_drivers(&root));
         cx.set_global(GlobalDriverRegistry(registry));
     }
     cx.global::<GlobalDriverRegistry>().0.clone()
@@ -604,33 +588,12 @@ mod tests {
         });
     }
 
-    /// The app version carries its release channel as build metadata, and the
-    /// API refuses a version with a `+` in it -- so a version sent as is never
-    /// downloads anything.
-    #[gpui::test]
-    fn the_driver_version_leaves_out_build_metadata(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            release_channel::init_test(
-                "0.1.4+stable.abc1234".parse().unwrap(),
-                release_channel::ReleaseChannel::Stable,
-                cx,
-            );
-            assert_eq!(driver_version(cx), "0.1.4");
-
-            release_channel::init_test(
-                "0.1.5-rc.1+dev".parse().unwrap(),
-                release_channel::ReleaseChannel::Dev,
-                cx,
-            );
-            assert_eq!(driver_version(cx), "0.1.5-rc.1");
-        });
-    }
-
     /// Every id here is one a settings file may name, and one the tree will
     /// look up on click. A duplicate would make one of them unreachable.
     #[test]
     fn the_built_in_drivers_are_distinct_and_all_registered() {
-        let registry = built_in_drivers("0.0.0-test", store::root());
+        let store = tempfile::tempdir().unwrap();
+        let registry = built_in_drivers(store.path());
         for (id, _) in BUILT_IN {
             assert!(
                 registry.get(id).is_some(),
@@ -651,7 +614,11 @@ mod tests {
     /// fails somewhere far less obvious.
     #[test]
     fn a_driver_nobody_has_downloaded_is_still_a_driver_zode_knows() {
-        let registry = built_in_drivers("0.0.0-no-such-release", store::root());
+        // A store of its own rather than the real one: a driver of any version
+        // resolves, so one the developer running this had downloaded would be
+        // found and read as installed.
+        let store = tempfile::tempdir().unwrap();
+        let registry = built_in_drivers(store.path());
         for (id, _) in BUILT_IN {
             let driver = registry
                 .get(id)
@@ -665,6 +632,36 @@ mod tests {
                 "`{id}` reports being installed and having a binary differently"
             );
         }
+    }
+
+    /// The store's version directory is the published driver set's, which is no
+    /// longer anything the running app can name -- so whichever one was
+    /// installed is the one a driver resolves to.
+    #[gpui::test]
+    fn a_driver_downloaded_under_any_version_is_one_the_registry_finds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = tempfile::tempdir().unwrap();
+        let directory = store::version_dir_in(store.path(), "postgres", "0.9.9");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(store::executable_name("postgres")),
+            b"not really a driver",
+        )
+        .unwrap();
+
+        cx.update(|cx| {
+            set_installer_for_test(store.path().to_path_buf(), cx);
+
+            assert!(refresh("postgres", cx));
+
+            let registry = global(cx);
+            let origin = registry
+                .read(cx)
+                .get("postgres")
+                .and_then(|driver| driver.origin());
+            assert_eq!(origin, Some(DriverOrigin::Store));
+        });
     }
 }
 
