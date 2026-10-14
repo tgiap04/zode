@@ -8,6 +8,7 @@ target_dir="release"
 open_result=false
 local_install=false
 can_code_sign=false
+build_drivers=true
 
 # This must match the team in the provisioning profile.
 IDENTITY="Zed Industries, Inc."
@@ -23,14 +24,16 @@ Options:
   -d    Compile in debug mode
   -o    Open dir with the resulting DMG or launch the app itself in local mode.
   -i    Install the resulting DMG into /Applications.
+  -n    Neither build nor package the database drivers.
   -h    Display this help and exit.
   "
 }
 
-while getopts 'dloih' flag
+while getopts 'dloinh' flag
 do
     case "${flag}" in
         o) open_result=true;;
+        n) build_drivers=false;;
         d)
             export CARGO_INCREMENTAL=true
             export CARGO_BUNDLE_SKIP_BUILD=true
@@ -93,8 +96,17 @@ echo "Compiling zed binaries"
 # they are published as release assets of their own and downloaded on first
 # use, so an install carries only the drivers its user asked for. See
 # `package_database_drivers` below and `script/package-database-drivers`.
+#
+# A string rather than an array: under `set -u`, the bash 3.2 macOS ships treats
+# an empty array as unbound, and `-n` leaves this empty.
+driver_packages=""
+if [[ "$build_drivers" = true ]]; then
+    for driver in "${database_drivers[@]}"; do
+        driver_packages+=" --package ${driver}"
+    done
+fi
 cargo build ${build_flag} --package zode --package cli --package remote_server \
-    --package zode-db-sqlite --package zode-db-postgres --package zode-db-mysql --package zode-db-mongodb \
+    ${driver_packages} \
     --target $target_triple
 
 echo "Creating application bundle"
@@ -372,5 +384,7 @@ cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
 # Beside the app binary: the project server a controlling Zode asks this one to
 # run is looked up next to the running executable.
 cp target/${target_triple}/${target_dir}/remote_server "${app_path}/Contents/MacOS/remote_server"
-package_database_drivers
+if [[ "$build_drivers" = true ]]; then
+    package_database_drivers
+fi
 sign_app_binaries

@@ -114,8 +114,14 @@ fn path_override(id: &str) -> Option<PathBuf> {
 /// previous version downloaded. A driver speaks a pinned protocol
 /// (`database::PROTOCOL_VERSION`), and the release that shipped this app is the
 /// one whose drivers were built against it.
+///
+/// Without its build metadata: the app version carries the release channel
+/// there (`0.1.4+stable`), drivers are published under the bare version, and
+/// the API refuses a version containing `+` outright.
 pub fn driver_version(cx: &App) -> String {
-    AppVersion::global(cx).to_string()
+    let mut version = AppVersion::global(cx);
+    version.build = Default::default();
+    version.to_string()
 }
 
 pub fn built_in_drivers(version: &str, store_root: &Path) -> DriverRegistry {
@@ -595,6 +601,28 @@ mod tests {
                 registry.read(cx).get(claimed).is_some(),
                 "`{claimed}` is shipped, so nothing an extension does may remove it"
             );
+        });
+    }
+
+    /// The app version carries its release channel as build metadata, and the
+    /// API refuses a version with a `+` in it -- so a version sent as is never
+    /// downloads anything.
+    #[gpui::test]
+    fn the_driver_version_leaves_out_build_metadata(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            release_channel::init_test(
+                "0.1.4+stable.abc1234".parse().unwrap(),
+                release_channel::ReleaseChannel::Stable,
+                cx,
+            );
+            assert_eq!(driver_version(cx), "0.1.4");
+
+            release_channel::init_test(
+                "0.1.5-rc.1+dev".parse().unwrap(),
+                release_channel::ReleaseChannel::Dev,
+                cx,
+            );
+            assert_eq!(driver_version(cx), "0.1.5-rc.1");
         });
     }
 
