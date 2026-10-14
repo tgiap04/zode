@@ -21,8 +21,7 @@ builds them.
 
 A checkout without them behaves like a release: the database panel offers to
 download each driver the first time you connect to its engine (see below). Build
-them yourself when you are working on a driver, or when the version you run
-publishes none:
+them yourself when you are working on a driver or have no route to the API:
 
 ```sh
 make drivers                             # beside `make build`
@@ -50,11 +49,22 @@ downloaded one.
 A release build ships no driver binaries at all — the release bundles used to
 build and include them, but they no longer do. Each driver is fetched the
 first time someone connects to the engine it speaks for, from Zode's own API
-rather than from a GitHub release: `{ZODE_API_URL}/drivers/{version}/{asset}`,
-verified against a manifest and its SHA-256 before anything is unpacked (see
-`crates/database/src/install/`). `ZODE_API_URL` defaults to
-`https://api.zodekit.site/api` (`zode_account::api_url()`); point it at a
-backend you're running locally to test the download path end to end, e.g.
+rather than from a GitHub release. The manifest of the latest published driver
+set comes from `{ZODE_API_URL}/drivers/latest/zode-db-drivers-manifest.json`,
+and each archive from `{ZODE_API_URL}/drivers/{version}/{asset}`, where
+`{version}` is the one that manifest names. The archive is verified against the
+manifest and its SHA-256 before anything is unpacked (see
+`crates/database/src/install/`). Development and release builds download the
+same set, whatever version the app itself reports, and the server keeps only
+the set published last — there is no older one to fall back to. When the API
+has no manifest to serve, the download fails with a message that says so and
+points at `script/build-database-drivers` (or `make drivers`), not only the HTTP
+status. A manifest with no build of that driver for your platform names
+installing it by hand (below) as the other way out.
+
+`ZODE_API_URL` defaults to `https://api.zodekit.site/api`
+(`zode_account::api_url()`); point it at a backend you're running locally to
+test the download path end to end, e.g.
 `ZODE_API_URL=http://localhost:8000/api`. This is a public, unauthenticated
 route — the panel must work for someone who has never signed in.
 
@@ -63,52 +73,39 @@ release assets, and CI runs it that way. `-n` skips both the build and the
 packaging; `make bundle` passes it, because a local bundle never carries
 drivers and publishing them is the release job's work.
 
-`{version}` is the app's version without its build metadata. The app version
-carries the release channel there (`0.1.1+dev`, `0.1.4+stable`), but drivers are
-published under the bare `major.minor.patch[-pre]`, and the API refuses a `+`
-outright (400). `driver_version` in `crates/database_ui/src/driver_registry.rs`
-does the stripping, so the URL and the store directory below both use the bare
-form.
-
-A development build's version is the `version` in `crates/zed/Cargo.toml` (0.1.1
-when this was written) — not `0.0.0` — and that version usually has no drivers
-published. Asking it to download then reports the actual fix: run
-`script/build-database-drivers` (or `make drivers`), or install the driver by
-hand (below). It does not report a raw network error. To exercise the download
-path against a version that does publish drivers, set `ZED_APP_VERSION`, which
-`AppVersion::load` (`crates/release_channel/src/lib.rs`) reads at runtime ahead
-of `Cargo.toml`:
-
-```sh
-ZED_APP_VERSION=<a published version> make dev
-```
-
-That changes the version the whole app reports, not only the driver lookup.
-Delete drivers beside the binary first, or they win (above).
-
 Downloaded drivers land under `<data_dir>/database_drivers/<id>/<version>/`,
-keyed by the running app's version, build metadata left off — a driver speaks a
-pinned protocol, and an app that has been updated must not keep running a driver
-built for a different one. `data_dir` is:
+where `<version>` is the one the manifest named — the published driver set's
+version, not the app's. `data_dir` is:
 
 - **macOS**: `~/Library/Application Support/Zode`
 - **Linux**: `$XDG_DATA_HOME/zode` (typically `~/.local/share/zode`)
 - **Windows**: `%LOCALAPPDATA%\Zode`
 
-This is also the manual/offline install path: no route to `api.zodekit.site`,
-or a version this backend doesn't (yet) publish, still works by placing the
-binary at `<data_dir>/database_drivers/<id>/<version>/zode-db-<id>` (add
-`.exe` on Windows, and use the bare version from above) — the executable name
-and directory shape are exactly what the download path itself produces, so a
-driver placed there by hand is indistinguishable from one that was downloaded,
-remove button included.
+A downloaded driver is kept until you remove it: Zode never checks for a newer
+set, and fetches the manifest only when you ask for a download. If more than one version directory is present (an old one could
+not be deleted while its driver was running), the most recently installed one
+wins. Whether a driver works with the app is decided when you connect, by the
+protocol handshake. A driver that speaks a different protocol than this build is
+refused, and the message says to remove it in the connection dialog and download
+it again, or to update Zode if that does not help.
+
+This is also the manual/offline install path: no route to `api.zodekit.site`
+still works by placing the binary at
+`<data_dir>/database_drivers/<id>/<version>/zode-db-<id>` (add `.exe` on
+Windows). `<version>` can be any directory name of the form
+`MAJOR.MINOR.PATCH[-pre]`, e.g. `0.0.0`. Zode does not run a driver from a
+directory with any other name, and the next download of that driver deletes
+every directory under `<id>/` except the version it installs. The
+executable name and directory shape are exactly what the download path itself
+produces, so a driver placed there by hand is indistinguishable from one that
+was downloaded, remove button included.
 
 That button is a trash icon ("Remove the downloaded driver") on an engine row of
 the database panel's connection dialog. It appears only for a driver Zode
 downloaded, since a driver beside the executable belongs to the checkout or the
 bundle, and one named by `ZODE_DB_<ID>` to whoever named it. It deletes
-`<data_dir>/database_drivers/<id>/`, every version rather than only the running
-one, and the next connection to that engine is offered the download again.
+`<data_dir>/database_drivers/<id>/`, every version it holds, and the next
+connection to that engine is offered the download again.
 
 A driver that cannot be found is never started. Connecting to it fails at once
 with ``the `postgres` driver is not installed -- download it from the connection

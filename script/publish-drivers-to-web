@@ -23,6 +23,13 @@
 # `drivers` array. A publish that reports success but serves something short
 # is a bug worth catching in this job, not several days later when a user's
 # download fails.
+#
+# A publish also deletes every other version from the backend, so the version
+# uploaded here is the only driver set the server keeps, and the app downloads
+# whatever `latest` serves -- there is no older set left to fall back to. The
+# last check therefore fetches the `latest` manifest and fails unless it names
+# this version. Failing here stops the release job while the GitHub release is
+# still a draft, instead of failing a user's download once it is public.
 
 set -euo pipefail
 
@@ -200,6 +207,17 @@ expected_count="${archive_count}"
 
 if [[ "${served_count}" -ne "${expected_count}" ]]; then
     echo "error: published manifest lists ${served_count} drivers, expected ${expected_count}" >&2
+    exit 1
+fi
+
+echo "verifying latest serves version ${version}"
+latest_manifest=$(curl --fail --silent --show-error \
+    "${base_url}/drivers/latest/zode-db-drivers-manifest.json")
+
+latest_version=$(jq -r '.version' <<<"${latest_manifest}")
+
+if [[ "${latest_version}" != "${version}" ]]; then
+    echo "error: latest serves version ${latest_version}, but ${version} was just published" >&2
     exit 1
 fi
 

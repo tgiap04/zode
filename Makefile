@@ -92,9 +92,8 @@ build: ## Compile the zode binary only, no drivers (PROFILE=dev, incremental) �
 # Opt-in, never part of `build`: a driver beside the executable is used before
 # any downloaded one, so building them on every `build` left the download path
 # — and removing a downloaded driver — unreachable from a dev build. Without
-# them a dev build downloads from ZODE_API_URL at its own version, which is the
-# one in crates/zed/Cargo.toml and usually not published;
-# `ZED_APP_VERSION=<a published version> make dev` asks for that one instead.
+# them a dev build downloads the latest published driver set from ZODE_API_URL,
+# the same set a release build gets.
 #
 # Drivers built by an earlier run stay beside the binary and keep winning until
 # they are deleted, e.g. `rm target/debug/zode-db-*`.
