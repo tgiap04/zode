@@ -92,7 +92,7 @@ impl Sidebar {
                             .toggleable_entry(
                                 "Remote Control",
                                 remote_control_on,
-                                IconPosition::Start,
+                                IconPosition::End,
                                 None,
                                 move |window, cx| {
                                     if remote_control_on {
