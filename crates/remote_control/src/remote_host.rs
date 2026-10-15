@@ -239,6 +239,22 @@ impl RemoteHost {
         true
     }
 
+    /// Whether the OS should be asked to call the person back to Zode about the
+    /// question for `session_id`, marking it so that no other window asks too.
+    /// Never once the question has been put on screen: that person has seen it.
+    pub fn claim_pairing_notification(&mut self, session_id: u32) -> bool {
+        let Some(running) = self.running.as_mut() else {
+            return false;
+        };
+        if running.pairing_presented == Some(session_id)
+            || running.pairing_notified == Some(session_id)
+        {
+            return false;
+        }
+        running.pairing_notified = Some(session_id);
+        true
+    }
+
     /// Answers the question for `session_id`; an answer for any other session
     /// is ignored.
     pub fn decide_pairing(&mut self, session_id: u32, trust: bool, cx: &mut Context<Self>) {

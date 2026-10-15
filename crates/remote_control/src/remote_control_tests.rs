@@ -2135,6 +2135,219 @@ mod with_a_window {
             "and it goes back to what the setting says when nobody is"
         );
     }
+
+    fn posted_notification_ids(cx: &VisualTestContext) -> Vec<String> {
+        cx.posted_notifications()
+            .iter()
+            .map(|notification| notification.id.to_string())
+            .collect()
+    }
+
+    fn bring_to_front(cx: &mut VisualTestContext) {
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_pairing_request_while_zode_is_in_the_background_posts_one_notification(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+
+        assert!(
+            !pairing_modal_is_open(&workspace, cx),
+            "no window is in front, so nothing is put on screen yet"
+        );
+        let posted = cx.posted_notifications();
+        assert_eq!(posted.len(), 1, "the person is told once");
+        assert_eq!(
+            posted[0].id.to_string(),
+            format!("remote-control-pairing-{session_id}")
+        );
+        assert_eq!(
+            posted[0].title.to_string(),
+            "Ada's browser wants to control this Zode"
+        );
+        assert_eq!(
+            posted[0].body.to_string(),
+            "Switch to Zode to compare the six digits."
+        );
+
+        rig.host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            posted_notification_ids(cx).len(),
+            1,
+            "hearing about the same request again must not tell the person again"
+        );
+
+        bring_to_front(cx);
+        assert!(
+            pairing_modal_is_open(&workspace, cx),
+            "coming to the front is what puts the question on screen"
+        );
+        assert_eq!(
+            posted_notification_ids(cx).len(),
+            1,
+            "and it does not tell the person a second time"
+        );
+    }
+
+    #[gpui::test]
+    async fn two_windows_in_the_background_post_one_notification_between_them(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (_first, cx) = window(cx, &rig).await;
+        let (second, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+
+        assert_eq!(
+            posted_notification_ids(cx),
+            vec![format!("remote-control-pairing-{session_id}")]
+        );
+
+        bring_to_front(cx);
+        assert!(pairing_modal_is_open(&second, cx));
+    }
+
+    #[gpui::test]
+    async fn an_active_window_shows_the_question_and_posts_no_notification(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (workspace, cx) = window(cx, &rig).await;
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+
+        assert!(pairing_modal_is_open(&workspace, cx));
+        assert!(
+            posted_notification_ids(cx).is_empty(),
+            "somebody is looking at Zode, so there is nobody to call back"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_window_in_front_keeps_the_notification_back_from_a_window_behind_it(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (first, cx) = window(cx, &rig).await;
+        let (second, cx) = window(cx, &rig).await;
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+
+        assert!(pairing_modal_is_open(&second, cx), "the front window asks");
+        assert!(
+            !pairing_modal_is_open(&first, cx),
+            "and the one behind it does not"
+        );
+        assert!(
+            posted_notification_ids(cx).is_empty(),
+            "a window behind another of Zode's must not call the person back"
+        );
+    }
+
+    #[gpui::test]
+    async fn leaving_zode_after_the_question_was_shown_does_not_post_a_notification(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (workspace, cx) = window(cx, &rig).await;
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+        assert!(pairing_modal_is_open(&workspace, cx));
+
+        cx.deactivate_window();
+
+        assert!(
+            posted_notification_ids(cx).is_empty(),
+            "the question was already put in front of the person"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_platform_that_cannot_post_notifications_still_asks_when_zode_comes_back(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+
+        assert!(posted_notification_ids(cx).is_empty());
+        assert!(!pairing_modal_is_open(&workspace, cx));
+
+        bring_to_front(cx);
+        assert!(pairing_modal_is_open(&workspace, cx));
+    }
+
+    #[gpui::test]
+    async fn the_call_back_is_forgotten_with_its_question(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (_workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+        assert_eq!(posted_notification_ids(cx).len(), 1);
+        assert!(
+            !rig.host
+                .update(cx, |host, _| host.claim_pairing_notification(session_id)),
+            "the person has been called back already"
+        );
+
+        rig.host
+            .update(cx, |host, cx| host.decide_pairing(session_id, false, cx));
+        cx.run_until_parked();
+
+        assert!(
+            rig.host
+                .update(cx, |host, _| host.claim_pairing_notification(session_id)),
+            "nothing is remembered about a session that is over, so a reused id is announced"
+        );
+        assert!(
+            !rig.host
+                .update(cx, |host, _| host.claim_pairing_notification(session_id)),
+            "and then only once"
+        );
+    }
+
+    #[gpui::test]
+    async fn each_new_request_is_announced_on_its_own(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        let (_workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let first_browser = Browser::new(&rig, "browser-1");
+        let first = ask_the_question(&rig, &first_browser, cx);
+        rig.host
+            .update(cx, |host, cx| host.decide_pairing(first, false, cx));
+        cx.run_until_parked();
+
+        let second_browser = Browser::new(&rig, "browser-2");
+        let second = ask_the_question(&rig, &second_browser, cx);
+
+        assert_eq!(
+            posted_notification_ids(cx),
+            vec![
+                format!("remote-control-pairing-{first}"),
+                format!("remote-control-pairing-{second}"),
+            ]
+        );
+    }
 }
 
 #[gpui::test]

@@ -194,6 +194,9 @@ pub(crate) struct Hosting {
     app_version: String,
     /// The one question on screen has been put in front of somebody.
     pub(crate) pairing_presented: Option<u32>,
+    /// The OS has been asked to call the person back to Zode about this
+    /// question, because no window was in front to put it on.
+    pub(crate) pairing_notified: Option<u32>,
     flush_retry: Option<Task<()>>,
     name_lookup: Option<Task<()>>,
     pub(crate) _housekeeping: Task<()>,
@@ -250,6 +253,7 @@ impl Hosting {
             sessions: HashMap::default(),
             app_version: parts.app_version,
             pairing_presented: None,
+            pairing_notified: None,
             flush_retry: None,
             name_lookup: None,
             _housekeeping: parts.housekeeping,
@@ -296,6 +300,9 @@ impl Hosting {
         self.pairing.session_gone(session_id);
         if self.pairing_presented == Some(session_id) {
             self.pairing_presented = None;
+        }
+        if self.pairing_notified == Some(session_id) {
+            self.pairing_notified = None;
         }
         cx.emit(RemoteHostEvent::Changed);
         was_active

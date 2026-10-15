@@ -6,12 +6,13 @@
 //! disappear, which includes `status_bar.show`: the status bar is kept on
 //! screen for as long as a device is in control.
 
-use gpui::{Anchor, AnyElement, App, Entity, Subscription, WeakEntity, Window};
+use gpui::{Anchor, AnyElement, App, Entity, Notification, Subscription, WeakEntity, Window};
 use ui::{ButtonLike, ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, StatusItemView, Toast, Workspace, notifications::NotificationId};
 
 use crate::{
+    pairing_flow::PendingDecision,
     pairing_modal::PairingModal,
     remote_host::{HostState, RemoteHost, RemoteHostEvent, SessionInfo, problem_message},
     trusted_devices_modal::TrustedDevicesModal,
@@ -97,6 +98,35 @@ fn shows_toast(window: &Window, cx: &App) -> bool {
         stack.as_deref(),
         |handle| handle.downcast::<MultiWorkspace>().is_some(),
     )
+}
+
+/// What the OS shows when somebody asks to pair while Zode is in the
+/// background. The id is how a click is told apart from the agent
+/// notifications', which share the platform's one click handler.
+fn pairing_notification(session_id: u32, device_name: &str) -> Notification {
+    let device_name = device_name.trim();
+    let title = if device_name.is_empty() {
+        "A device wants to control this Zode".to_string()
+    } else {
+        format!("{device_name} wants to control this Zode")
+    };
+    Notification {
+        id: format!("remote-control-pairing-{session_id}").into(),
+        title: title.into(),
+        body: "Switch to Zode to compare the six digits.".into(),
+    }
+}
+
+/// Whether a window that can put the pairing question on screen is in front.
+/// Only workspace windows carry an indicator, so an active window of another
+/// kind is no reason to stay quiet.
+fn a_workspace_window_is_active(cx: &mut App) -> bool {
+    cx.windows().into_iter().any(|handle| {
+        handle
+            .downcast::<MultiWorkspace>()
+            .and_then(|window| window.is_active(cx))
+            .unwrap_or(false)
+    })
 }
 
 impl RemoteControlIndicator {
@@ -203,6 +233,7 @@ impl RemoteControlIndicator {
             return;
         };
         if !window.is_window_active() {
+            self.call_back_about_pairing(&pending, cx);
             return;
         }
         let session_id = pending.session_id;
@@ -220,6 +251,25 @@ impl RemoteControlIndicator {
                 });
             })
             .log_err();
+    }
+
+    /// The question cannot be put on screen because no window is in front, and
+    /// whoever asked to pair is most likely in their browser, with two minutes
+    /// before it gives up. Asks the OS to call them back, once per question and
+    /// from whichever window hears of it first. A click only brings Zode
+    /// forward, and the window coming to the front puts the question on screen.
+    fn call_back_about_pairing(&self, pending: &PendingDecision, cx: &mut Context<Self>) {
+        if !cx.can_post_notifications() || a_workspace_window_is_active(cx) {
+            return;
+        }
+        let session_id = pending.session_id;
+        if !self
+            .host
+            .update(cx, |host, _| host.claim_pairing_notification(session_id))
+        {
+            return;
+        }
+        cx.post_notification(pairing_notification(session_id, &pending.peer_name));
     }
 
     fn menu(
@@ -366,6 +416,30 @@ mod tests {
             controlled_by(&[session("a"), session("b"), session("c")]),
             "Controlled by 3 devices"
         );
+    }
+
+    #[test]
+    fn the_notification_names_the_device_and_is_keyed_by_the_session() {
+        let notification = pairing_notification(7, "Ada's laptop");
+        assert_eq!(notification.id.to_string(), "remote-control-pairing-7");
+        assert_eq!(
+            notification.title.to_string(),
+            "Ada's laptop wants to control this Zode"
+        );
+        assert_eq!(
+            notification.body.to_string(),
+            "Switch to Zode to compare the six digits."
+        );
+    }
+
+    #[test]
+    fn the_notification_falls_back_to_a_device_when_the_name_is_blank() {
+        for blank in ["", "   "] {
+            assert_eq!(
+                pairing_notification(1, blank).title.to_string(),
+                "A device wants to control this Zode"
+            );
+        }
     }
 
     #[test]
