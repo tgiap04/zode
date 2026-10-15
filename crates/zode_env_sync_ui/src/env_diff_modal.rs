@@ -146,8 +146,9 @@ impl Render for EnvDiffModal {
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
             .occlude()
-            .w(rems(58.))
-            .max_h(rems(44.))
+            .w(rems(60.))
+            .max_h(rems(40.))
+            .debug_selector(|| "env-diff-modal".into())
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
                 this.session
                     .update(cx, |session, cx| session.dismiss_pending(cx));
@@ -189,7 +190,7 @@ impl Render for EnvDiffModal {
                                         Icon::new(IconName::LoadCircle)
                                             .size(IconSize::Small)
                                             .color(Color::Muted)
-                                            .with_rotate_animation(3),
+                                            .with_rotate_animation(2),
                                     )
                                 })
                                 .child(
@@ -199,15 +200,13 @@ impl Render for EnvDiffModal {
                                 ),
                         ),
                     )
-                    .footer(
-                        ModalFooter::new().end_slot(
-                            Button::new("env-diff-outcome-close", "Close")
-                                .label_size(LabelSize::Small)
-                                .on_click(
-                                    cx.listener(|_this, _, _window, cx| cx.emit(DismissEvent)),
-                                ),
+                    .footer(ModalFooter::new().end_slot(
+                        h_flex().gap_1().child(
+                            Button::new("env-diff-outcome-close", "Close").on_click(
+                                cx.listener(|_this, _, _window, cx| cx.emit(DismissEvent)),
+                            ),
                         ),
-                    ),
+                    )),
             );
         };
 
@@ -319,7 +318,7 @@ impl Render for EnvDiffModal {
                                     )
                                     .child(
                                         Label::new(reason)
-                                            .size(LabelSize::XSmall)
+                                            .size(LabelSize::Small)
                                             .color(Color::Error),
                                     ),
                             )
@@ -338,7 +337,7 @@ impl Render for EnvDiffModal {
                                         Label::new(format!(
                                             "Shown without any check — {support_note}."
                                         ))
-                                        .size(LabelSize::XSmall)
+                                        .size(LabelSize::Small)
                                         .color(Color::Warning),
                                     ),
                             )
@@ -369,7 +368,6 @@ impl Render for EnvDiffModal {
                                 )
                                 .child(
                                     Button::new("env-diff-reveal", self.reveal_label())
-                                        .label_size(LabelSize::Small)
                                         .start_icon(
                                             Icon::new(IconName::Eye).size(IconSize::Small),
                                         )
@@ -388,7 +386,6 @@ impl Render for EnvDiffModal {
                                 .gap_1()
                                 .child(
                                     Button::new("env-diff-cancel", "Cancel")
-                                        .label_size(LabelSize::Small)
                                         .tooltip(Tooltip::text("Change nothing on either side"))
                                         .on_click(cx.listener(|this, _, _window, cx| {
                                             this.session.update(cx, |session, cx| {
@@ -400,7 +397,6 @@ impl Render for EnvDiffModal {
                                 .child(
                                     Button::new("env-diff-apply", "Write the Server's Copy")
                                         .style(ButtonStyle::Filled)
-                                        .label_size(LabelSize::Small)
                                         .tooltip(Tooltip::text(
                                             "The current file is copied aside first, outside this project",
                                         ))
@@ -484,6 +480,23 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// A window that shows a diff is the large tier of modal widths.
+    #[gpui::test]
+    fn the_window_is_the_large_width(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session_with(Some(divergence(true)), cx);
+        let (_modal, cx) = cx.add_window_view(|_window, cx| EnvDiffModal::new(session, ".env", cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("env-diff-modal")
+            .expect("the modal must be drawn");
+        let large = cx.update(|window, _| rems(60.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, large);
     }
 
     #[gpui::test]

@@ -6,6 +6,8 @@ mod colour_modal;
 mod contents_tests;
 mod context_menu;
 mod initials_modal;
+#[cfg(test)]
+mod modal_tests;
 mod navigation;
 #[cfg(test)]
 mod navigation_tests;

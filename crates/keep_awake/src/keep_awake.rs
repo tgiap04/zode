@@ -77,7 +77,7 @@ use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::{TerminalPanel, TerminalPanelEvent};
 use ui::prelude::*;
-use ui::{ButtonLike, ContextMenu, IconPosition, PopoverMenu, Tooltip};
+use ui::{ContextMenu, IconPosition, PopoverMenu, Tooltip};
 use workspace::{StatusItemView, Workspace};
 
 /// Whether the display may be held awake at all.
@@ -165,6 +165,11 @@ const ACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// covers the pauses that happen inside one answer and still lets the display
 /// sleep on time once the answer is finished.
 const RESPONDING_GRACE: Duration = Duration::from_secs(60);
+
+/// The glyph on the bar. An open eye for "the display is being kept awake";
+/// `BoltOutlined` is the CPU figure's glyph in the footprint item beside it, and
+/// two meanings on one glyph is how a status bar stops being readable.
+pub(crate) const KEEP_AWAKE_ICON: IconName = IconName::Eye;
 
 /// Holds one display-wake lock for as long as an agent is producing an answer.
 pub struct KeepAwake {
@@ -873,13 +878,13 @@ impl Render for KeepAwake {
                 // which is why the one in `agent_usage` states it.)
                 .anchor(Anchor::BottomLeft)
                 .trigger_with_tooltip(
-                    ButtonLike::new("keep-awake-trigger")
-                        .style(ButtonStyle::Subtle)
-                        .child(
-                            Icon::new(IconName::BoltOutlined)
-                                .size(IconSize::Small)
-                                .color(status.icon_color()),
-                        ),
+                    IconButton::new("keep-awake-trigger", KEEP_AWAKE_ICON)
+                        .icon_size(IconSize::Small)
+                        .icon_color(status.icon_color())
+                        // `PopoverMenu` sets the toggle state while the menu is
+                        // open, and a selected `IconButton` draws
+                        // `Color::Selected` unless told otherwise.
+                        .selected_icon_color(status.icon_color()),
                     Tooltip::text(tooltip),
                 ),
         )
@@ -898,7 +903,7 @@ impl KeepAwake {
             // draws `Icon::new(icon.unwrap_or(IconName::Check))`, so passing one
             // would *replace* the checkmark rather than join it.
             menu.toggleable_entry(
-                "Keep display awake while a tab is producing output",
+                "Keep Display Awake While a Tab Is Producing Output",
                 enabled,
                 IconPosition::Start,
                 None,

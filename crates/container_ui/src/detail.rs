@@ -15,7 +15,7 @@
 use container::{Resource, ResourceKind};
 use gpui::{Entity, WeakEntity, Window};
 use terminal_view::TerminalView;
-use ui::prelude::*;
+use ui::{Tab, prelude::*};
 use workspace::Workspace;
 
 use crate::container_panel::ContainerPanel;
@@ -248,16 +248,7 @@ impl ContainerPanel {
                                     .color(Color::Muted),
                             )
                             .into_any_element(),
-                        (None, None) => v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Label::new("Attaching\u{2026}")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .into_any_element(),
+                        (None, None) => crate::render::note(None, "Attaching\u{2026}"),
                     }),
             )
             .into_any_element()
@@ -281,8 +272,10 @@ impl ContainerPanel {
             .map(|(_, value)| value.clone());
 
         h_flex()
-            .flex_shrink_0()
-            .p_1p5()
+            .debug_selector(|| "container-detail-header".into())
+            .flex_none()
+            .h(Tab::container_height(cx))
+            .px_2()
             .gap_1p5()
             .justify_between()
             .border_b_1()

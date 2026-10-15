@@ -13,7 +13,8 @@ use gpui::{AppContext as _, Entity, TestAppContext, UpdateGlobal as _};
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response};
 use parking_lot::Mutex;
 use remote_relay_client::{
-    OpenMode, StopReason, TrustStore, decode_public_key, encode_pairing, encode_public_key,
+    OpenMode, PinnedDevice, StopReason, TrustStore, decode_public_key, encode_pairing,
+    encode_public_key,
     secure_session::{SecureChannel, read_control},
     test_support::{FakeClient, FakeRelay, InMemoryKeychain, StaticCredentials},
 };
@@ -1765,8 +1766,11 @@ async fn turning_it_on_from_the_action_writes_the_setting_and_connects(cx: &mut 
 
 mod with_a_window {
     use super::*;
-    use crate::{indicator::RemoteControlIndicator, pairing_modal::PairingModal};
-    use gpui::VisualTestContext;
+    use crate::{
+        indicator::RemoteControlIndicator, pairing_modal::PairingModal,
+        trusted_devices_modal::TrustedDevicesModal,
+    };
+    use gpui::{Modifiers, VisualTestContext};
     use remote_relay_client::{OpenMode, encode_pairing};
     use workspace::Workspace;
 
@@ -1900,6 +1904,135 @@ mod with_a_window {
                 .read_with(cx, |workspace, cx| workspace
                     .active_modal::<PairingModal>(cx))
                 .is_none()
+        );
+    }
+
+    /// Clicks the element a test probe names, as a person would, and lets
+    /// everything the click set going settle.
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("`{selector}` must be drawn"));
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    fn pairing_modal_is_open(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+        workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_modal::<PairingModal>(cx)
+            })
+            .is_some()
+    }
+
+    #[gpui::test]
+    async fn the_reject_button_refuses_the_device_and_closes_the_question(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+        assert!(pairing_modal_is_open(&workspace, cx));
+
+        click("remote-pairing-reject", cx);
+
+        assert!(!pairing_modal_is_open(&workspace, cx), "answered, so gone");
+        assert!(
+            rig.host
+                .read_with(cx, |host, _| host.pending_pairing().is_none()),
+            "the host is no longer asking"
+        );
+        assert!(
+            rig.host
+                .read_with(cx, |host, _| host.trusted_devices().is_empty()),
+            "Reject must trust nothing"
+        );
+        assert!(
+            browser.client.was_told_closed(session_id),
+            "the other end must be told the pairing is over"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_trust_button_trusts_the_device_and_closes_the_question(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+        assert!(pairing_modal_is_open(&workspace, cx));
+
+        click("remote-pairing-trust", cx);
+
+        assert!(!pairing_modal_is_open(&workspace, cx), "answered, so gone");
+        let trusted = rig.host.read_with(cx, |host, _| host.trusted_devices());
+        assert_eq!(
+            trusted
+                .iter()
+                .map(|device| device.device_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["browser-1"],
+            "Trust It must trust exactly the device that asked"
+        );
+        assert!(
+            browser.client.was_told_closed(session_id),
+            "the other end must be told the pairing is over"
+        );
+    }
+
+    /// Enough devices that their rows cannot fit the card, so the list either
+    /// scrolls inside its bound or pushes the footer out of the modal.
+    #[gpui::test]
+    async fn a_long_list_of_trusted_devices_scrolls_instead_of_growing(cx: &mut TestAppContext) {
+        // Pinned straight into the store rather than paired one by one: a host
+        // answers three pairing requests an hour, which is fewer than a list needs
+        // to overflow.
+        let rig = rig(cx, false).await;
+        let mut store = cx
+            .update(|cx| TrustStore::load(USER_ID.to_string(), cx))
+            .await;
+        for index in 0..16u8 {
+            cx.update(|cx| {
+                store.pin(
+                    PinnedDevice {
+                        device_id: format!("browser-{index}"),
+                        public_key: [index; KEY_LEN],
+                        name: format!("Browser {index}"),
+                        paired_at: 1,
+                    },
+                    cx,
+                )
+            })
+            .expect("room for another device");
+        }
+        cx.update(|cx| {
+            <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
+            RemoteHost::set_global(rig.host.clone(), cx);
+            crate::enable_remote_control(cx);
+        });
+        cx.run_until_parked();
+        let (workspace, cx) = window(cx, &rig).await;
+        assert_eq!(
+            rig.host
+                .read_with(cx, |host, _| host.trusted_devices().len()),
+            16
+        );
+
+        let host = rig.host.clone();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_modal(window, cx, move |window, cx| {
+                TrustedDevicesModal::new(host, window, cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let list = cx
+            .debug_bounds("remote-trusted-devices-list")
+            .expect("the list must be drawn");
+        let bound = cx.update(|window, _| gpui::rems(22.).to_pixels(window.rem_size()));
+        assert!(
+            (list.size.height - bound).abs() < gpui::px(1.),
+            "sixteen rows must fill the list's bound of {bound:?} and scroll past it, \
+             got a list {:?} tall",
+            list.size.height
         );
     }
 

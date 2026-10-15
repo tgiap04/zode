@@ -9,8 +9,8 @@ use crate::context_menu::stable_id_for_group;
 use crate::project_list::ListEntry;
 use crate::project_menu::build_project_menu;
 use crate::rail::RAIL_WIDTH;
-use gpui::{AnyElement, Context, Hsla, SharedString};
-use ui::{Tooltip, prelude::*, right_click_menu};
+use gpui::{AnyElement, Context, FontWeight, Hsla, SharedString};
+use ui::{Indicator, Tooltip, prelude::*, right_click_menu};
 use workspace::DraggedProject;
 
 const RAIL_ITEM_SIZE: Pixels = px(48.0);
@@ -38,13 +38,14 @@ pub(crate) fn project_initials(label: &str) -> SharedString {
     initials.into()
 }
 
-/// What the corner badge says: nothing at 0, the count up to nine, then "9+"
-/// so the label never outgrows the corner of a 32px square.
+/// What the corner badge says: nothing at 0, the count up to ninety-nine, then
+/// "99+". Capped where `ui::CountBadge` caps, so the rail and the dock buttons
+/// do not disagree about what a big number looks like.
 fn waiting_badge_label(count: usize) -> Option<SharedString> {
     match count {
         0 => None,
-        1..=9 => Some(count.to_string().into()),
-        _ => Some("9+".into()),
+        1..=99 => Some(count.to_string().into()),
+        _ => Some("99+".into()),
     }
 }
 
@@ -70,7 +71,7 @@ fn rail_tooltip(entry: &ListEntry) -> SharedString {
     .into()
 }
 
-/// The exact count, never the badge's "9+": the tooltip is where a person goes
+/// The exact count, never the badge's "99+": the tooltip is where a person goes
 /// to find out how many.
 fn tooltip_text(label: &str, is_reindexing: bool, is_hibernated: bool, waiting: usize) -> String {
     let mut text = if is_reindexing {
@@ -96,7 +97,6 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
-        let warning = cx.theme().status().warning;
         let badge_background = cx.theme().status().error;
         let badge_text = badge_text_colour(badge_background);
         // The rail's own fill, so a badge over a red avatar keeps an edge.
@@ -254,23 +254,26 @@ impl Sidebar {
                     // handlers: clicks and drags fall through to the row.
                     .when_some(waiting_badge_label(waiting_agents), |el, text| {
                         el.child(
-                            div()
+                            // `ui::CountBadge`'s box, which cannot be used as it
+                            // stands: it fills with a blend of the error colour
+                            // into the editor background, where the rail wants the
+                            // flat status red and a ring in its own colour.
+                            h_flex()
                                 .absolute()
                                 .top(px(2.0))
                                 .right(px(2.0))
-                                .h(px(16.0))
-                                .min_w(px(16.0))
-                                .px(px(3.0))
-                                .border_1()
-                                .border_color(badge_ring)
-                                .flex()
-                                .items_center()
+                                .p_px()
+                                .h_3p5()
+                                .min_w_3p5()
                                 .justify_center()
                                 .rounded_full()
+                                .border_1()
+                                .border_color(badge_ring)
                                 .bg(badge_background)
                                 .child(
                                     Label::new(text)
-                                        .size(LabelSize::XSmall)
+                                        .size(LabelSize::Custom(rems_from_px(9.)))
+                                        .weight(FontWeight::MEDIUM)
                                         .color(Color::Custom(badge_text))
                                         .line_height_style(LineHeightStyle::UiLabel),
                                 )
@@ -289,9 +292,7 @@ impl Sidebar {
                                 .absolute()
                                 .bottom(px(6.0))
                                 .right(px(6.0))
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(warning)
+                                .child(Indicator::dot().color(Color::Warning))
                                 .debug_selector(move || {
                                     format!("project-rail-item-reindex-dot:{ix}")
                                 }),
@@ -368,13 +369,15 @@ mod tests {
     }
 
     #[test]
-    fn badge_label_caps_at_nine_plus() {
+    fn badge_label_caps_at_ninety_nine_plus() {
         let label = |count| waiting_badge_label(count).map(|text| text.to_string());
         assert_eq!(label(0), None);
         assert_eq!(label(1).as_deref(), Some("1"));
         assert_eq!(label(9).as_deref(), Some("9"));
-        assert_eq!(label(10).as_deref(), Some("9+"));
-        assert_eq!(label(12).as_deref(), Some("9+"));
+        assert_eq!(label(10).as_deref(), Some("10"));
+        assert_eq!(label(99).as_deref(), Some("99"));
+        assert_eq!(label(100).as_deref(), Some("99+"));
+        assert_eq!(label(150).as_deref(), Some("99+"));
     }
 
     #[test]
@@ -835,7 +838,13 @@ mod badge_tests {
     };
     use agent_ui::TurnEvent;
     use gpui::TestAppContext;
-    use gpui::{Entity, Focusable as _, Modifiers, VisualTestContext};
+    use gpui::{Entity, Focusable as _, Modifiers, Pixels, VisualTestContext, px, rems};
+
+    /// Layout snaps edges to device pixels, so a rem-derived size comes back
+    /// rounded: 12.25px is drawn 12.5px.
+    fn within_a_device_pixel(actual: Pixels, expected: Pixels) -> bool {
+        (actual - expected).abs() <= px(0.5)
+    }
 
     /// Forces the count on a rail entry the same way the re-index tests force
     /// their flag; the real counting is proven in `contents_tests`.
@@ -893,9 +902,9 @@ mod badge_tests {
     }
 
     #[gpui::test]
-    async fn the_badge_stays_inside_its_row_even_as_nine_plus(cx: &mut TestAppContext) {
+    async fn the_badge_stays_inside_its_row_even_as_ninety_nine_plus(cx: &mut TestAppContext) {
         let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
-        force_waiting(&sidebar, 0, 10, cx);
+        force_waiting(&sidebar, 0, 150, cx);
         let badge_bounds = cx.debug_bounds(badge(0)).expect("the badge is drawn");
         let row = cx
             .debug_bounds("project-rail-item:0")
@@ -906,6 +915,50 @@ mod badge_tests {
         );
     }
 
+    /// The badge is `ui::CountBadge`'s box -- `h_3p5 min_w_3p5` -- in the rail's own
+    /// colours. Measured against the rem rather than a pixel count, so it holds at
+    /// whatever UI font size the window runs at.
+    #[gpui::test]
+    async fn the_badge_has_the_count_badge_geometry(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        force_waiting(&sidebar, 0, 3, cx);
+        let badge_bounds = cx.debug_bounds(badge(0)).expect("the badge is drawn");
+        let rem_size = cx.update(|window, _| window.rem_size());
+        let count_badge_edge = rems(0.875).to_pixels(rem_size);
+        assert!(
+            within_a_device_pixel(badge_bounds.size.height, count_badge_edge),
+            "badge {badge_bounds:?} must be as tall as `h_3p5`, {count_badge_edge:?}"
+        );
+        assert!(
+            badge_bounds.size.width + px(0.5) >= count_badge_edge,
+            "a one-digit badge keeps `min_w_3p5`, got {badge_bounds:?}"
+        );
+    }
+
+    /// `Indicator::dot` is `w_1p5 h_1p5`; the rail's own 6px square duplicated it.
+    #[gpui::test]
+    async fn the_reindex_dot_is_the_indicator_dot(cx: &mut TestAppContext) {
+        let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.contents.rail_entries[0].is_reindexing = true;
+            cx.notify();
+        });
+        redraw(cx);
+        let dot = cx
+            .debug_bounds("project-rail-item-reindex-dot:0")
+            .expect("the dot is drawn");
+        let rem_size = cx.update(|window, _| window.rem_size());
+        let indicator_edge = rems(0.375).to_pixels(rem_size);
+        assert!(
+            within_a_device_pixel(dot.size.width, indicator_edge),
+            "{dot:?}"
+        );
+        assert!(
+            within_a_device_pixel(dot.size.height, indicator_edge),
+            "{dot:?}"
+        );
+    }
+
     #[gpui::test]
     async fn the_badge_and_the_reindex_dot_never_overlap(cx: &mut TestAppContext) {
         let (TwoProjects { sidebar, .. }, cx) = two_projects(cx).await;
@@ -913,7 +966,7 @@ mod badge_tests {
             sidebar.contents.rail_entries[0].is_reindexing = true;
             cx.notify();
         });
-        force_waiting(&sidebar, 0, 10, cx);
+        force_waiting(&sidebar, 0, 150, cx);
 
         let badge_bounds = cx.debug_bounds(badge(0)).expect("the badge is drawn");
         let dot = cx

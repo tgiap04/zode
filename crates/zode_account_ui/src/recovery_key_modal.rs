@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use editor::Editor;
 use gpui::{
-    App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    SharedString, Subscription, Task, Window,
+    App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString,
+    Subscription, Task, Window,
 };
-use ui::{Checkbox, Tooltip, prelude::*};
+use ui::{Checkbox, KeyBinding, Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
+use ui_input::{ErasedEditorEvent, InputField};
+use util::ResultExt as _;
 use workspace::ModalView;
 use zode_sync::SyncSession;
 
@@ -40,7 +41,7 @@ pub struct RecoveryKeyModal {
     session: Entity<SyncSession>,
     mode: RecoveryKeyMode,
     phrase: Option<SharedString>,
-    input: Entity<Editor>,
+    input: Entity<InputField>,
     /// Live read of what has been typed, so the window can say whether it is a
     /// well-formed key before the user commits to it.
     typed_state: TypedState,
@@ -80,21 +81,27 @@ impl RecoveryKeyModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("ZODE-XXXXX-XXXXX-…", window, cx);
-            editor
-        });
+        let input = cx.new(|cx| InputField::new(window, cx, "ZODE-XXXXX-XXXXX-…"));
 
-        let mut subscriptions = Vec::new();
-        subscriptions.push(cx.subscribe(&input, |this, editor, event, cx| {
-            if matches!(event, editor::EditorEvent::BufferEdited) {
-                let typed = editor.read(cx).text(cx);
-                this.typed_state = classify(&typed);
-                this.error = None;
-                cx.notify();
-            }
-        }));
+        let editor = input.read(cx).editor().clone();
+        let edited = editor.subscribe(
+            Box::new({
+                let this = cx.weak_entity();
+                move |event, _window, cx| {
+                    if event == ErasedEditorEvent::BufferEdited {
+                        this.update(cx, |this, cx| {
+                            let typed = this.input.read(cx).text(cx);
+                            this.typed_state = classify(&typed);
+                            this.error = None;
+                            cx.notify();
+                        })
+                        .log_err();
+                    }
+                }
+            }),
+            window,
+            cx,
+        );
 
         let mut this = Self {
             session: session.clone(),
@@ -106,7 +113,7 @@ impl RecoveryKeyModal {
             copied_reset: None,
             error: None,
             focus_handle: cx.focus_handle(),
-            _subscriptions: subscriptions,
+            _subscriptions: vec![edited],
         };
 
         match mode {
@@ -237,117 +244,116 @@ impl Render for RecoveryKeyModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let copied = self.copied_reset.is_some();
+        let confirm_binding = KeyBinding::for_action_in(&menu::Confirm, &self.focus_handle(cx), cx)
+            .map(|binding| binding.size(rems_from_px(12.)));
 
         // `elevation_3` carries the background, border, radius and shadow.
         // Without it the modal is transparent and whatever is behind it reads
         // straight through the middle of the key.
-        let shell = v_flex()
+        let shell = div()
             .key_context("RecoveryKeyModal")
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
-            .w(rems(30.))
-            .overflow_hidden()
+            .occlude()
+            .w(rems(28.))
+            .max_h(rems(40.))
+            .debug_selector(|| "account-recovery-key-modal".into())
             .on_action(cx.listener(|this, _: &menu::Confirm, _window, cx| this.confirm(cx)))
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
                 if this.can_close() {
                     cx.emit(DismissEvent);
                 }
-            }))
-            .child(
-                v_flex()
-                    .p_3()
-                    .gap_0p5()
-                    .child(Label::new(self.title()).weight(FontWeight::MEDIUM))
-                    .child(
-                        Label::new(match self.mode {
-                            RecoveryKeyMode::Enter => {
-                                "Type the key from a machine that is already syncing."
-                            }
-                            RecoveryKeyMode::Rotate => {
-                                "Your old key no longer opens anything. Every other machine must be given this one."
-                            }
-                            _ => "Zode cannot recover this for you. Nobody can.",
-                        })
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
-            );
+            }));
 
-        let body = match self.mode {
-            RecoveryKeyMode::Enter => v_flex()
-                .p_3()
-                .gap_2()
-                .child(
-                    div()
-                        .w_full()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.editor_background)
-                        .child(self.input.clone()),
-                )
-                .child(match &self.typed_state {
-                    TypedState::Empty => Label::new("Separators and capitalisation do not matter.")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                    TypedState::Incomplete => {
-                        Label::new("Keep going — a recovery key is 53 characters.")
+        let header = ModalHeader::new()
+            .child(Headline::new(self.title()).size(HeadlineSize::Small))
+            .description(match self.mode {
+                RecoveryKeyMode::Enter => "Type the key from a machine that is already syncing.",
+                RecoveryKeyMode::Rotate => {
+                    "Your old key no longer opens anything. Every other machine must be given this one."
+                }
+                _ => "Zode cannot recover this for you. Nobody can.",
+            });
+
+        let modal = Modal::new("account-recovery-key", None).header(header);
+        let modal = match self.mode {
+            RecoveryKeyMode::Enter => modal.section(
+                Section::new()
+                    .child(self.input.clone())
+                    .child(match &self.typed_state {
+                        TypedState::Empty => {
+                            Label::new("Separators and capitalisation do not matter.")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                        }
+                        TypedState::Incomplete => {
+                            Label::new("Keep going — a recovery key is 53 characters.")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                        }
+                        TypedState::Valid => Label::new("That looks like a valid key.")
                             .size(LabelSize::XSmall)
+                            .color(Color::Success),
+                        TypedState::Invalid(reason) => Label::new(reason.clone())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Error),
+                    }),
+            ),
+            _ => modal.child(
+                v_flex()
+                    .w_full()
+                    .py_4()
+                    .px_3()
+                    .gap_1p5()
+                    .items_center()
+                    .bg(colors.editor_background)
+                    .border_y_1()
+                    .border_color(colors.border_variant)
+                    .child(match self.phrase.clone() {
+                        Some(phrase) => Label::new(phrase)
+                            .size(LabelSize::Small)
+                            .buffer_font(cx)
+                            .into_any_element(),
+                        None => Label::new("Generating…")
+                            .size(LabelSize::Small)
                             .color(Color::Muted)
-                    }
-                    TypedState::Valid => Label::new("That looks like a valid key.")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Success),
-                    TypedState::Invalid(reason) => Label::new(reason.clone())
-                        .size(LabelSize::XSmall)
-                        .color(Color::Error),
-                }),
-            _ => v_flex()
-                .w_full()
-                .py_4()
-                .px_3()
-                .gap_2()
-                .items_center()
-                .bg(colors.editor_background)
-                .border_y_1()
-                .border_color(colors.border_variant)
-                .child(match self.phrase.clone() {
-                    Some(phrase) => Label::new(phrase)
-                        .size(LabelSize::Small)
-                        .buffer_font(cx)
-                        .into_any_element(),
-                    None => Label::new("Generating…")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .into_any_element(),
-                })
-                .child(
-                    Button::new("recovery-key-copy", if copied { "Copied" } else { "Copy" })
-                        .label_size(LabelSize::Small)
-                        .color(if copied { Color::Success } else { Color::Muted })
-                        .start_icon(Icon::new(if copied {
-                            IconName::Check
-                        } else {
-                            IconName::Copy
-                        }))
-                        .disabled(self.phrase.is_none())
-                        .on_click(cx.listener(|this, _, _window, cx| this.copy(cx))),
-                ),
+                            .into_any_element(),
+                    })
+                    .child(
+                        Button::new("recovery-key-copy", if copied { "Copied" } else { "Copy" })
+                            .label_size(LabelSize::Small)
+                            .color(if copied { Color::Success } else { Color::Muted })
+                            .start_icon(
+                                Icon::new(if copied {
+                                    IconName::Check
+                                } else {
+                                    IconName::Copy
+                                })
+                                .size(IconSize::Small),
+                            )
+                            .disabled(self.phrase.is_none())
+                            .on_click(cx.listener(|this, _, _window, cx| this.copy(cx))),
+                    ),
+            ),
         };
 
-        let footer = h_flex()
-            .w_full()
-            .p_2()
-            .gap_2()
-            .justify_between()
-            .items_center()
-            .bg(colors.editor_background)
-            .border_t_1()
-            .border_color(colors.border_variant)
-            .child(match self.mode {
-                RecoveryKeyMode::Create | RecoveryKeyMode::Rotate => Checkbox::new("recovery-key-ack", self.acknowledged.into())
+        let modal = modal.children(self.error.clone().map(|error| {
+            Section::new().child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::XCircle)
+                            .size(IconSize::XSmall)
+                            .color(Color::Error),
+                    )
+                    .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+            )
+        }));
+
+        let acknowledgement =
+            matches!(self.mode, RecoveryKeyMode::Create | RecoveryKeyMode::Rotate).then(|| {
+                Checkbox::new("recovery-key-ack", self.acknowledged.into())
                     .label("I have saved this key somewhere safe")
                     .label_size(LabelSize::Small)
                     .disabled(self.phrase.is_none())
@@ -355,16 +361,19 @@ impl Render for RecoveryKeyModal {
                         this.acknowledged = *state == ui::ToggleState::Selected;
                         cx.notify();
                     }))
-                    .into_any_element(),
-                _ => div().into_any_element(),
-            })
-            .child(
+            });
+
+        // `ModalFooter` has no fill of its own, so this band gives it the editor
+        // background the body above it uses.
+        let footer = div().w_full().bg(colors.editor_background).child(
+            ModalFooter::new()
+                .start_slot::<Checkbox>(acknowledgement)
+                .end_slot(
                 h_flex()
                     .gap_1()
                     .when(self.mode == RecoveryKeyMode::Enter, |element| {
                         element.child(
                             Button::new("recovery-key-cancel", "Cancel")
-                                .label_size(LabelSize::Small)
                                 .on_click(cx.listener(|_, _, _window, cx| cx.emit(DismissEvent))),
                         )
                     })
@@ -372,12 +381,12 @@ impl Render for RecoveryKeyModal {
                         Button::new(
                             "recovery-key-confirm",
                             match self.mode {
-                                RecoveryKeyMode::Enter => "Use this key",
+                                RecoveryKeyMode::Enter => "Use This Key",
                                 _ => "Done",
                             },
                         )
                         .style(ButtonStyle::Filled)
-                        .label_size(LabelSize::Small)
+                        .key_binding(confirm_binding)
                         .disabled(match self.mode {
                             RecoveryKeyMode::Enter => self.typed_state != TypedState::Valid,
                             _ => !self.can_close(),
@@ -395,19 +404,10 @@ impl Render for RecoveryKeyModal {
                         )
                         .on_click(cx.listener(|this, _, _window, cx| this.confirm(cx))),
                     ),
-            );
+            ),
+        );
 
-        shell
-            .child(body)
-            .when_some(self.error.clone(), |element, error| {
-                element.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
-                )
-            })
-            .child(footer)
+        shell.child(modal).child(footer)
     }
 }
 
@@ -459,6 +459,62 @@ mod tests {
     #[gpui::test]
     fn the_enter_window_draws(cx: &mut TestAppContext) {
         draw(RecoveryKeyMode::Enter, cx);
+    }
+
+    /// A window that shows a key is the small tier of modal widths.
+    #[gpui::test]
+    fn the_window_is_the_small_width(cx: &mut TestAppContext) {
+        init_test(cx);
+        let session = session(cx);
+        let (_modal, cx) = cx.add_window_view(|window, cx| {
+            RecoveryKeyModal::new(session, RecoveryKeyMode::Reveal, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("account-recovery-key-modal")
+            .expect("the modal must be drawn");
+        let small = cx.update(|window, _| rems(28.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, small);
+    }
+
+    /// The verdict under the field follows what is typed, which is wired through
+    /// the field's own edit event rather than through the editor the window used
+    /// to own.
+    #[gpui::test]
+    fn typing_into_the_field_updates_the_verdict(cx: &mut TestAppContext) {
+        init_test(cx);
+        let session = session(cx);
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            RecoveryKeyModal::new(session, RecoveryKeyMode::Enter, window, cx)
+        });
+        let valid = zode_sync::recovery_key::encode(&zode_sync::Dek::from_bytes([0x42; 32]));
+
+        let type_into_field = |text: &str, cx: &mut gpui::VisualTestContext| {
+            modal.update_in(cx, |modal, window, cx| {
+                modal
+                    .input
+                    .update(cx, |field, cx| field.set_text(text, window, cx));
+            });
+            cx.run_until_parked();
+        };
+
+        type_into_field(&valid, cx);
+        modal.read_with(cx, |modal, _| {
+            assert_eq!(modal.typed_state, TypedState::Valid)
+        });
+
+        type_into_field("ZODE-ABC", cx);
+        modal.read_with(cx, |modal, _| {
+            assert_eq!(modal.typed_state, TypedState::Incomplete)
+        });
+
+        type_into_field("", cx);
+        modal.read_with(cx, |modal, _| {
+            assert_eq!(modal.typed_state, TypedState::Empty)
+        });
     }
 
     /// The one gate in the feature: a user who has not said they saved the key

@@ -2769,7 +2769,7 @@ impl RemoteServerProjects {
                     .inset(true)
                     .spacing(ui::ListItemSpacing::Sparse)
                     .start_slot(Icon::new(IconName::Link).color(Color::Muted))
-                    .child(Label::new("Open a Zode on your account"))
+                    .child(Label::new("Open a Zode on Your Account\u{2026}"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.show_relay_devices(window, cx);
                     })),

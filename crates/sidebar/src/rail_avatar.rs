@@ -7,11 +7,9 @@ use gpui::{AnyElement, Context, Hsla, SharedString};
 use std::path::Path;
 use std::sync::Arc;
 use ui::prelude::*;
-use workspace::project_avatar::ProjectAvatar;
+use workspace::project_avatar::{PROJECT_SQUARE_SIZE, ProjectAvatar};
 
 use crate::Sidebar;
-
-pub(crate) const RAIL_SQUARE_SIZE: Pixels = px(32.0);
 
 impl Sidebar {
     /// The square itself: background, then logo or initials (through
@@ -37,7 +35,7 @@ impl Sidebar {
         div()
             .id(("project-rail-avatar", ix))
             .debug_selector(move || format!("project-rail-avatar:{ix}"))
-            .size(RAIL_SQUARE_SIZE)
+            .size(PROJECT_SQUARE_SIZE)
             .rounded_md()
             .border_1()
             .map(|el| {
@@ -50,7 +48,7 @@ impl Sidebar {
             .when(is_hibernated && !is_active, |el| el.opacity(0.6))
             .child(
                 ProjectAvatar::new(initials, custom_colour, logo)
-                    .size(RAIL_SQUARE_SIZE)
+                    .size(PROJECT_SQUARE_SIZE)
                     .background(square_bg)
                     // A project at rest reads quieter than the active one.
                     // Only the themed fallback dims: initials over a picked
@@ -71,7 +69,9 @@ mod tests {
     use serde_json::json;
     use util::path;
     use workspace::MultiWorkspace;
-    use workspace::project_avatar::{INITIALS_DEBUG_SELECTOR, LOGO_DEBUG_SELECTOR};
+    use workspace::project_avatar::{
+        INITIALS_DEBUG_SELECTOR, LOGO_DEBUG_SELECTOR, PROJECT_SQUARE_SIZE,
+    };
 
     /// One project, registered with a real `MultiWorkspace` and `Sidebar`,
     /// the same setup `rail_item.rs`'s own tests use.
@@ -237,5 +237,18 @@ mod tests {
             avatar.origin.x, rail.origin.x,
             "and still start at its leading edge"
         );
+    }
+
+    /// The square is `workspace`'s `PROJECT_SQUARE_SIZE`, the same constant the
+    /// drag ghost and the avatar's own default read, so the three cannot drift.
+    #[gpui::test]
+    async fn the_rail_square_is_the_shared_project_square(cx: &mut TestAppContext) {
+        let (_multi_workspace, _sidebar, cx) = one_project_on_a_rail(cx).await;
+
+        let square = cx
+            .debug_bounds("project-rail-avatar:0")
+            .expect("the square must be drawn");
+        assert_eq!(square.size.width, PROJECT_SQUARE_SIZE);
+        assert_eq!(square.size.height, PROJECT_SQUARE_SIZE);
     }
 }

@@ -5,7 +5,7 @@ use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Subscription,
     Window,
 };
-use ui::prelude::*;
+use ui::{Modal, ModalFooter, ModalHeader, Section, prelude::*};
 use workspace::ModalView;
 
 use crate::{pairing_flow::PendingDecision, remote_host::RemoteHost};
@@ -90,49 +90,78 @@ impl PairingModal {
 
 impl Render for PairingModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        div()
             .key_context("RemoteControlPairing")
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
+            .occlude()
             .w(rems(28.))
-            .p_4()
-            .gap_3()
+            .max_h(rems(40.))
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.answer(false, cx)))
             .child(
-                Label::new(format!("{} wants to control this Zode", self.device_name))
-                    .weight(FontWeight::MEDIUM),
-            )
-            .child(
-                Label::new(
-                    "Look at the other device. If it shows the same six digits, it is the one \
-                     you meant. Trusting it lets it watch your agents and terminals and type \
-                     into them.",
-                )
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-            )
-            .child(
-                h_flex().justify_center().py_2().child(
-                    Label::new(self.code.clone())
-                        .size(LabelSize::Large)
-                        .weight(FontWeight::BOLD)
-                        .buffer_font(cx),
-                ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("remote-pairing-reject", "Reject")
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _, _window, cx| this.answer(false, cx))),
+                Modal::new("remote-pairing", None)
+                    .header(
+                        ModalHeader::new().child(
+                            Headline::new(format!(
+                                "{} wants to control this Zode",
+                                self.device_name
+                            ))
+                            .size(HeadlineSize::Small),
+                        ),
                     )
-                    .child(
-                        Button::new("remote-pairing-trust", "The digits match: trust it")
-                            .style(ButtonStyle::Filled)
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _, _window, cx| this.answer(true, cx))),
+                    .section(
+                        Section::new()
+                            .child(
+                                Label::new(
+                                    "Look at the other device. If it shows the same six digits, \
+                                     it is the one you meant. Trusting it lets it watch your \
+                                     agents and terminals and type into them.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            )
+                            .child(
+                                v_flex().w_full().py_4().gap_1p5().items_center().child(
+                                    Label::new(self.code.clone())
+                                        .size(LabelSize::Large)
+                                        .weight(FontWeight::MEDIUM)
+                                        .buffer_font(cx),
+                                ),
+                            ),
+                    )
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            h_flex()
+                                .gap_1()
+                                // `Button` has no probe of its own, so each one is
+                                // wrapped for a test to find its bounds and click it.
+                                .child(
+                                    div()
+                                        .debug_selector(|| "remote-pairing-reject".into())
+                                        .child(
+                                            Button::new("remote-pairing-reject", "Reject")
+                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                    this.answer(false, cx)
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| "remote-pairing-trust".into())
+                                        .child(
+                                            Button::new(
+                                                "remote-pairing-trust",
+                                                "The Digits Match: Trust It",
+                                            )
+                                            .style(ButtonStyle::Filled)
+                                            .on_click(
+                                                cx.listener(|this, _, _window, cx| {
+                                                    this.answer(true, cx)
+                                                }),
+                                            ),
+                                        ),
+                                ),
+                        ),
                     ),
             )
     }

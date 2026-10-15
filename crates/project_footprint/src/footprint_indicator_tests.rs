@@ -9,9 +9,11 @@ use gpui::{AppContext as _, EntityId, TestAppContext};
 
 use std::collections::HashMap;
 
+use ui::IconName;
+
 use crate::footprint_popover::{
-    footprints_render_the_same, is_discovery_tick, merge_known_pids, render_project_line,
-    wants_polling,
+    CPU_ICON, MEMORY_ICON, footprints_render_the_same, is_discovery_tick, merge_known_pids,
+    render_project_line, wants_polling,
 };
 use crate::{FootprintRoots, Footprints, ProjectFootprint};
 
@@ -140,4 +142,13 @@ fn a_project_with_nothing_remembered_keeps_its_own_roots(cx: &mut TestAppContext
         vec![7],
         "a project with no remembered PIDs must be left exactly as collected"
     );
+}
+
+/// The two figures sit side by side in one button, and `Database` already means
+/// the database tool everywhere else in the app: a memory glyph borrowed from it
+/// reads as a link to that panel.
+#[test]
+fn memory_and_cpu_have_glyphs_of_their_own() {
+    assert_ne!(MEMORY_ICON, CPU_ICON);
+    assert_ne!(MEMORY_ICON, IconName::Database);
 }

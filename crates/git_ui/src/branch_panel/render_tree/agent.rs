@@ -5,12 +5,13 @@
 //! That is why a branch row carries its agents rather than the tree emitting
 //! them as rows of their own.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use agent_sessions::SubagentSummary;
 use gpui::{AnyElement, ClickEvent};
-use ui::{CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
+use ui::{CommonAnimationExt as _, Disclosure, Indicator, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey};
@@ -51,11 +52,11 @@ fn render_subagent(subagent: &SubagentSummary) -> impl IntoElement {
                                 gpui::ElementId::from("subagent-spinner"),
                                 SharedString::from(id),
                             ),
-                            1,
+                            2,
                         ),
                 ),
         )
-        .child(Label::new(SharedString::from(subagent.kind.clone())).size(LabelSize::XSmall))
+        .child(Label::new(SharedString::from(subagent.kind.clone())).size(LabelSize::Small))
         .child(
             div().flex_1().min_w_0().child(
                 Label::new(SharedString::from(subagent.description.clone()))
@@ -83,6 +84,16 @@ impl BranchPanel {
             return None;
         }
         let count = agents.len();
+        // One handler for the chevron and for the line beside it, which are both
+        // targets. Without `stop_propagation` the click reaches the card too and
+        // checks the branch out -- opening a list is not asking to switch to it.
+        let toggle: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)> =
+            Rc::new(cx.listener(move |panel, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                if let Some(key) = toggle_key.clone() {
+                    panel.toggle_row(key, cx);
+                }
+            }));
 
         Some(
             v_flex()
@@ -92,34 +103,28 @@ impl BranchPanel {
                     h_flex()
                         .id(("branch-agents", ix))
                         .w_full()
-                        .justify_between()
+                        .gap_1()
+                        .child(
+                            div()
+                                .debug_selector(|| "branch-agents-disclosure".into())
+                                .child(
+                                    Disclosure::new(("branch-agents-toggle", ix), expanded)
+                                        .on_click({
+                                            let toggle = toggle.clone();
+                                            move |event, window, cx| toggle(event, window, cx)
+                                        }),
+                                ),
+                        )
                         .child(
                             Label::new(if count == 1 {
                                 "1 agent".to_string()
                             } else {
                                 format!("{count} agents")
                             })
-                            .size(LabelSize::XSmall)
+                            .size(LabelSize::Small)
                             .color(Color::Muted),
                         )
-                        .child(
-                            Icon::new(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
-                        )
-                        .on_click(cx.listener(move |panel, _: &ClickEvent, _, cx| {
-                            // Without this the click reaches the card too and
-                            // checks the branch out -- opening a list is not
-                            // asking to switch to it.
-                            cx.stop_propagation();
-                            if let Some(key) = toggle_key.clone() {
-                                panel.toggle_row(key, cx);
-                            }
-                        })),
+                        .on_click(move |event, window, cx| toggle(event, window, cx)),
                 )
                 .when(expanded, |this| {
                     this.children(
@@ -172,7 +177,7 @@ impl BranchPanel {
                     // Keyed, not caller-located: every running agent in the
                     // list shares this call site, and one id for all of them
                     // is one animation state for all of them.
-                    .with_keyed_rotate_animation(("agent-spinner", ix * 1000 + nth), 1)
+                    .with_keyed_rotate_animation(("agent-spinner", ix * 1000 + nth), 2)
                     .into_any_element(),
                 AgentActivity::Ready => Indicator::dot().color(Color::Success).into_any_element(),
                 AgentActivity::Gone => Indicator::dot().color(Color::Muted).into_any_element(),
@@ -185,7 +190,7 @@ impl BranchPanel {
                     .color(Color::Custom(agent_ui::agent_color(&agent))),
             )
             .child(div().flex_1().min_w_0().child(
-                Label::new(label).size(LabelSize::XSmall).truncate().color(
+                Label::new(label).size(LabelSize::Small).truncate().color(
                     if activity == AgentActivity::Gone {
                         Color::Muted
                     } else {
@@ -271,7 +276,7 @@ impl BranchPanel {
                     .icon(if has_tab {
                         IconName::ArrowUpRight
                     } else {
-                        IconName::PlayOutlined
+                        IconName::PlayFilled
                     })
                     .icon_position(ui::IconPosition::Start)
                     .handler(move |window, cx| {

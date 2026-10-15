@@ -2216,7 +2216,7 @@ impl workspace::item::Item for AgentView {
                     // of them.
                     .with_keyed_rotate_animation(
                         ("agent-tab-spinner", self.self_handle.entity_id()),
-                        1,
+                        2,
                     )
             }))
             .children(self.runs_without_prompts().then(|| {
@@ -2422,66 +2422,76 @@ impl Render for AgentView {
             State::Terminal(terminal) | State::Shell(terminal) => {
                 terminal.clone().into_any_element()
             }
-            State::Starting => centered_message(
-                IconName::ArrowCircle,
-                format!("Starting {}…", self.display_name).into(),
-                None,
-                cx,
-            ),
+            State::Starting => pane_state(
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::Medium)
+                    .color(Color::Muted)
+                    // Keyed by the tab: two agent tabs can be starting side by
+                    // side, and one id for both is one animation state for both.
+                    .with_keyed_rotate_animation(("agent-starting-spinner", cx.entity_id()), 2),
+                format!("Starting {}…", self.display_name),
+                Color::Muted,
+            )
+            .into_any_element(),
             State::MissingBinary(missing) => {
                 crate::missing_binary::render(&cx.entity(), &self.display_name, missing, cx)
             }
-            State::SessionGone => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(Icon::new(IconName::HistoryRerun).color(Color::Muted))
-                .child(
-                    Label::new(format!(
-                        "This {} session is no longer on this machine.",
-                        self.display_name
-                    ))
+            State::SessionGone => pane_state(
+                Icon::new(IconName::HistoryRerun)
+                    .size(IconSize::Medium)
                     .color(Color::Muted),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("start-a-new-session", "Start a New Session").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    // Drops the id rather than keeping it: the
-                                    // session it named is gone and this agent
-                                    // cannot recreate it, so holding the id would
-                                    // only put the tab back here on the next
-                                    // restart.
-                                    // The whole origin, not just the id: the name
-                                    // belonged to the session that is gone, and a
-                                    // fresh conversation must not wear it.
-                                    this.start_new_session(window, cx);
-                                }),
-                            ),
-                        )
-                        .child(
-                            Button::new("close-this-tab", "Close Tab")
-                                .style(ButtonStyle::Subtle)
-                                // Dispatched rather than reaching for the pane:
-                                // which pane holds this tab is the workspace's
-                                // business, and this action already resolves it
-                                // through the focused item.
-                                .on_click(cx.listener(|_, _, window, cx| {
-                                    window.dispatch_action(
-                                        Box::new(workspace::CloseActiveItem {
-                                            save_intent: None,
-                                            close_pinned: true,
-                                        }),
-                                        cx,
-                                    );
-                                })),
-                        ),
-                )
-                .into_any_element(),
-            State::Failed(error) => centered_message(IconName::Warning, error.clone(), None, cx),
+                format!(
+                    "This {} session is no longer on this machine.",
+                    self.display_name
+                ),
+                Color::Muted,
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("start-a-new-session", "Start a New Session")
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                // Drops the id rather than keeping it: the
+                                // session it named is gone and this agent
+                                // cannot recreate it, so holding the id would
+                                // only put the tab back here on the next
+                                // restart.
+                                // The whole origin, not just the id: the name
+                                // belonged to the session that is gone, and a
+                                // fresh conversation must not wear it.
+                                this.start_new_session(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("close-this-tab", "Close Tab")
+                            .style(ButtonStyle::Subtle)
+                            // Dispatched rather than reaching for the pane:
+                            // which pane holds this tab is the workspace's
+                            // business, and this action already resolves it
+                            // through the focused item.
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(workspace::CloseActiveItem {
+                                        save_intent: None,
+                                        close_pinned: true,
+                                    }),
+                                    cx,
+                                );
+                            })),
+                    ),
+            )
+            .into_any_element(),
+            State::Failed(error) => pane_state(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::Medium)
+                    .color(Color::Muted),
+                format!("Could not start {}", self.display_name),
+                Color::Muted,
+            )
+            .child(Label::new(error.clone()).color(Color::Muted))
+            .into_any_element(),
         };
         let colors = cx.theme().colors();
 
@@ -2513,28 +2523,31 @@ impl Render for AgentView {
     }
 }
 
-fn centered_message(
-    icon: IconName,
-    message: SharedString,
-    detail: Option<SharedString>,
-    cx: &App,
-) -> AnyElement {
+/// The frame every full-pane state of an agent tab shares: centred, an icon, and
+/// a title. What goes under the title — a sentence, the buttons that answer it —
+/// is the caller's, so the states differ in content and in nothing else.
+///
+/// `title_color` is the caller's: a missing binary is the one state with
+/// something to act on, so its title is full strength while the others stay
+/// muted, and the layout is not the place to decide that.
+pub(crate) fn pane_state(
+    icon: impl IntoElement,
+    title: impl Into<SharedString>,
+    title_color: Color,
+) -> Div {
     v_flex()
+        .debug_selector(|| "agent-pane-state".into())
         .size_full()
         .items_center()
         .justify_center()
-        .gap_2()
-        .child(Icon::new(icon).color(Color::Muted))
-        .child(Label::new(message).color(Color::Muted))
-        .children(detail.map(|detail| {
-            div()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(cx.theme().colors().element_background)
-                .child(Label::new(detail).size(LabelSize::Small).buffer_font(cx))
-        }))
-        .into_any_element()
+        .p_8()
+        .gap_3()
+        .child(icon)
+        .child(
+            Headline::new(title)
+                .size(HeadlineSize::Small)
+                .color(title_color),
+        )
 }
 
 #[cfg(test)]
@@ -2634,6 +2647,65 @@ mod tests {
             })
         });
         (view, cx)
+    }
+
+    /// Every full-pane state of a tab is drawn in the one shared frame, so the
+    /// states differ in what they say and in nothing else.
+    ///
+    /// Drawn for real, in a pane: three of the four build their icon or their
+    /// buttons from the view's own handle, and only a frame can show that a
+    /// state still renders after that is rearranged.
+    #[gpui::test]
+    async fn every_full_pane_state_draws_in_the_shared_frame(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let handle = workspace.weak_handle();
+            let view = cx.new(|cx| {
+                AgentView::test_new(
+                    agent.clone(),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::default(),
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            view
+        });
+
+        let states = [
+            ("starting", State::Starting),
+            ("session gone", State::SessionGone),
+            (
+                "failed",
+                State::Failed("the process could not be started".into()),
+            ),
+            (
+                "missing binary",
+                State::MissingBinary(AgentBinaryMissing {
+                    agent: agent.clone(),
+                    binary: "claude",
+                    install_command: "curl -fsSL https://claude.ai/install.sh | bash",
+                    docs_url: "https://docs.claude.com",
+                }),
+            ),
+        ];
+        for (name, state) in states {
+            view.update(cx, |view, cx| {
+                view.state = state;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+
+            assert!(
+                cx.debug_bounds("agent-pane-state").is_some(),
+                "the {name} state must be drawn in the shared pane frame"
+            );
+        }
     }
 
     /// The safe default, and the half a constant cannot satisfy.

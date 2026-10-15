@@ -2370,7 +2370,7 @@ mod running_subagents {
 
     /// A panel docked in a real window with one Claude tab open and the
     /// checkout's agent list expanded, so the card draws its agent row.
-    async fn panel_showing_an_agent(
+    pub(super) async fn panel_showing_an_agent(
         cx: &mut TestAppContext,
     ) -> (
         gpui::Entity<BranchPanel>,
@@ -2425,7 +2425,7 @@ mod running_subagents {
 
     /// Lets the window draw and publish the frame, which is what fills in
     /// `debug_bounds`: parking alone leaves it empty.
-    fn draw(cx: &mut VisualTestContext) {
+    pub(super) fn draw(cx: &mut VisualTestContext) {
         cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
         cx.run_until_parked();
     }
@@ -2598,5 +2598,168 @@ mod running_subagents {
                 "a finished session has no running subagents to show"
             );
         });
+    }
+}
+
+/// How the panel is drawn around its rows: the header, the repository heading,
+/// the empty state, and the toggle on a checkout's agents.
+///
+/// Drawn in a real window because the claims are about geometry and about which
+/// element a click lands on, and neither exists until `Render` has run.
+mod panel_chrome {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use super::running_subagents::{draw, panel_showing_an_agent};
+    use super::{BranchPanel, panel, panel_over_a_repo};
+    use crate::branch_panel::tree::RowKey;
+
+    /// Docks the panel, makes it the active one and draws a frame.
+    fn dock(panel: &Entity<BranchPanel>, cx: &mut VisualTestContext) {
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<BranchPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| panel.set_active(true, window, cx));
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not drawn, so it cannot be clicked"));
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    fn row_is_open(panel: &Entity<BranchPanel>, key: &RowKey, cx: &mut VisualTestContext) -> bool {
+        panel.read_with(cx, |panel, cx| panel.row_is_open(key, cx))
+    }
+
+    #[gpui::test]
+    async fn the_header_is_as_tall_as_every_other_panel_header(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        dock(&panel, cx);
+
+        let header = cx
+            .debug_bounds("worktrees-header")
+            .expect("the header was not drawn");
+        let expected = cx.update(|_, cx| ui::Tab::container_height(cx));
+        assert_eq!(
+            header.size.height, expected,
+            "a panel header is one tab bar tall, in every panel"
+        );
+    }
+
+    /// The chevron and the row both toggle, so a click that reached both would
+    /// open the repository and shut it again in one gesture.
+    #[gpui::test]
+    async fn clicking_the_disclosure_toggles_the_repository_once(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        dock(&panel, cx);
+        let key = panel.read_with(cx, |panel, _| RowKey::Repo(panel.repos[0].id));
+
+        assert!(row_is_open(&panel, &key, cx));
+        click("repo-disclosure", cx);
+        assert!(
+            !row_is_open(&panel, &key, cx),
+            "one click on the chevron closes the repository"
+        );
+        click("repo-disclosure", cx);
+        assert!(
+            row_is_open(&panel, &key, cx),
+            "and the next one opens it again"
+        );
+    }
+
+    #[gpui::test]
+    async fn clicking_the_repository_row_toggles_it_too(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        dock(&panel, cx);
+        let key = panel.read_with(cx, |panel, _| RowKey::Repo(panel.repos[0].id));
+
+        click("repo-row", cx);
+        assert!(
+            !row_is_open(&panel, &key, cx),
+            "the whole heading is the target, not only the chevron"
+        );
+    }
+
+    /// Opening a list is not asking to switch to the checkout it sits in.
+    #[gpui::test]
+    async fn the_agents_disclosure_opens_the_list_without_switching_checkout(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, _view, cx) = panel_showing_an_agent(cx).await;
+        draw(cx);
+        let switched = Rc::new(Cell::new(0usize));
+        cx.update(|_, cx| {
+            let switched = switched.clone();
+            cx.on_action(move |_: &zed_actions::SwitchWorktree, _| {
+                switched.set(switched.get() + 1)
+            });
+        });
+        let key = panel.read_with(cx, |panel, _| {
+            let repo = &panel.repos[0];
+            RowKey::WorktreeAgents(repo.id, Arc::from(repo.worktrees[0].path.as_path()))
+        });
+
+        assert!(row_is_open(&panel, &key, cx));
+        click("branch-agents-disclosure", cx);
+        assert!(
+            !row_is_open(&panel, &key, cx),
+            "one click on the chevron closes the list"
+        );
+        click("branch-agents-disclosure", cx);
+        assert!(row_is_open(&panel, &key, cx));
+        assert_eq!(
+            switched.get(),
+            0,
+            "the click must not fall through to the card and check the branch out"
+        );
+    }
+
+    /// One glyph per meaning: worktrees are `GitWorktree` here, in the title bar
+    /// and everywhere else they are drawn.
+    #[gpui::test]
+    async fn the_panel_is_registered_under_the_worktree_glyph(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+
+        let icon = cx.update(|window, cx| panel.read(cx).icon(window, cx));
+
+        assert_eq!(icon, Some(ui::IconName::GitWorktree));
+    }
+
+    /// A project with no repository has nothing to list, and says so in the
+    /// middle of the panel rather than in its corner.
+    #[gpui::test]
+    async fn an_empty_panel_centres_its_message(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        dock(&panel, cx);
+
+        let area = cx
+            .debug_bounds("worktrees-empty")
+            .expect("the empty state was not drawn");
+        let message = cx
+            .debug_bounds("worktrees-empty-message")
+            .expect("the empty message was not drawn");
+        assert!(
+            (area.center().x - message.center().x).abs() < gpui::px(1.),
+            "centred across the panel"
+        );
+        assert!(
+            (area.center().y - message.center().y).abs() < gpui::px(1.),
+            "and down it"
+        );
     }
 }

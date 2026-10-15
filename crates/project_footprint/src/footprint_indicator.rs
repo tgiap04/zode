@@ -257,7 +257,7 @@ impl Render for ProjectFootprintIndicator {
         let (memory, cpu) = footprint_parts(&combined);
         // Spells out which half is which: the two icons are stand-ins (this
         // repo ships no CPU or memory glyph), so the words live here rather
-        // than relying on a reader to decode a bolt and a database.
+        // than relying on a reader to decode a bolt and a string of digits.
         let tooltip: SharedString = format!(
             "RAM {memory} and CPU {cpu} — language servers and terminals for {count} project{}",
             if count == 1 { "" } else { "s" }
@@ -268,21 +268,22 @@ impl Render for ProjectFootprintIndicator {
         div().child(
             PopoverMenu::new("project-footprint")
                 .menu(move |window, cx| Some(build_popover(footprints.clone(), window, cx)))
-                // Above and left-aligned: this item sits on the bar at the
-                // bottom of the window, so anywhere below it is off-screen.
-                .anchor(Anchor::BottomLeft)
+                // Above, since anywhere below this bar is off-screen, and
+                // aligned to the right edge like every other item in the
+                // right-hand group, so the group's menus open the same way.
+                .anchor(Anchor::BottomRight)
                 .trigger_with_tooltip(
                     ButtonLike::new("project-footprint-trigger")
                         .style(ButtonStyle::Subtle)
                         .child(
                             h_flex()
-                                .gap_1p5()
+                                .gap_2()
                                 .child(
                                     h_flex()
-                                        .gap_0p5()
+                                        .gap_1()
                                         .child(
                                             Icon::new(MEMORY_ICON)
-                                                .size(IconSize::XSmall)
+                                                .size(IconSize::Small)
                                                 .color(Color::Muted),
                                         )
                                         .child(
@@ -293,10 +294,10 @@ impl Render for ProjectFootprintIndicator {
                                 )
                                 .child(
                                     h_flex()
-                                        .gap_0p5()
+                                        .gap_1()
                                         .child(
                                             Icon::new(CPU_ICON)
-                                                .size(IconSize::XSmall)
+                                                .size(IconSize::Small)
                                                 .color(Color::Muted),
                                         )
                                         .child(

@@ -8,7 +8,10 @@
 use crate::Sidebar;
 use gpui::{DismissEvent, Entity, EventEmitter, Focusable, Hsla, SharedString, WeakEntity};
 use project::ProjectGroupKey;
-use ui::{COLOR_PICKER_KEY_STEP, ColorChanged, ColorPicker, prelude::*};
+use ui::{
+    COLOR_PICKER_KEY_STEP, ColorChanged, ColorPicker, KeyBinding, Modal, ModalFooter, ModalHeader,
+    Section, prelude::*,
+};
 use workspace::{ModalView, MultiWorkspace};
 
 pub struct ColourModal {
@@ -153,56 +156,49 @@ impl ColourModal {
 
 impl Render for ColourModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
-
-        v_flex()
+        div()
             .key_context("ColourModal")
+            .debug_selector(|| "colour-modal".into())
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .on_key_down(cx.listener(Self::key_down))
             .elevation_3(cx)
-            .w_80()
-            .p_2()
-            .gap_2()
+            .occlude()
+            .w(rems(28.))
+            .max_h(rems(40.))
             .child(
-                Label::new(format!("Colour for {}", self.label))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(self.picker.clone())
-            .child(
-                h_flex()
-                    .w_full()
-                    .pt_1()
-                    .gap_1()
-                    .justify_between()
-                    .border_t_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        // Without a way back, a colour someone regrets is
-                        // permanent by omission.
-                        Button::new("colour-use-default", "Use Default")
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _, _window, cx| this.commit(None, cx))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("colour-cancel", "Cancel")
-                                    .label_size(LabelSize::Small)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.cancel(&menu::Cancel, window, cx)
-                                    })),
+                Modal::new("colour-modal-body", None)
+                    .header(ModalHeader::new().headline(format!("Colour for {}", self.label)))
+                    .section(Section::new().child(self.picker.clone()))
+                    .footer(
+                        ModalFooter::new()
+                            .start_slot(
+                                // Without a way back, a colour someone regrets is
+                                // permanent by omission.
+                                Button::new("colour-use-default", "Use Default").on_click(
+                                    cx.listener(|this, _, _window, cx| this.commit(None, cx)),
+                                ),
                             )
-                            .child(
-                                Button::new("colour-confirm", "Set Colour")
-                                    .label_size(LabelSize::Small)
-                                    .style(ButtonStyle::Filled)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.confirm(&menu::Confirm, window, cx)
-                                    })),
+                            .end_slot(
+                                h_flex()
+                                    .gap_1()
+                                    .child(Button::new("colour-cancel", "Cancel").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.cancel(&menu::Cancel, window, cx)
+                                        }),
+                                    ))
+                                    .child(
+                                        Button::new("colour-confirm", "Set Colour")
+                                            .style(ButtonStyle::Filled)
+                                            .key_binding(
+                                                KeyBinding::for_action(&menu::Confirm, cx)
+                                                    .map(|binding| binding.size(rems_from_px(12.))),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.confirm(&menu::Confirm, window, cx)
+                                            })),
+                                    ),
                             ),
                     ),
             )

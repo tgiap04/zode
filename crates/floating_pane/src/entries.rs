@@ -1,11 +1,11 @@
-//! Everything the floating window can be asked to hold, and the two menus that
-//! offer it.
+//! Everything the floating window can be asked to hold, and the menu that
+//! offers it.
 //!
 //! Cut out of `render.rs` once that file passed ~700 lines, per the note it
 //! left behind for whoever did it. What stayed there is the window chrome
-//! (title bar, grips, drags); what moved here is the one list three surfaces
-//! read -- the window's `+`, the tab bar's `+`, and the empty state -- plus the
-//! two menus built from it.
+//! (title bar, grips, drags); what moved here is the one list two surfaces
+//! read -- the tab bar's `+` and the empty state -- plus the menu built from
+//! it.
 
 use std::sync::LazyLock;
 
@@ -39,8 +39,8 @@ pub(crate) enum Entry {
     Debugger,
 }
 
-/// Built once, not on every render: `render_menu` and `render_empty_state`
-/// both call `Entry::all()` on every frame, and `Entry` is `Copy`, so there is
+/// Built once, not on every render: the `+` menu and `render_empty_state` both
+/// call `Entry::all()` on every frame, and `Entry` is `Copy`, so there is
 /// nothing to gain from a fresh `Vec` each time.
 static ENTRIES: LazyLock<Vec<Entry>> = LazyLock::new(|| {
     let mut entries = vec![Entry::Terminal, Entry::NewNote, Entry::OpenNote];
@@ -162,8 +162,8 @@ impl Entry {
 
 /// The one list, as menu entries.
 ///
-/// Shared so the window's own `+`, the tab bar's `+` and the empty state can
-/// never offer three different sets. That was the whole reason `Entry` exists.
+/// Shared so the tab bar's `+` and the empty state can never offer two
+/// different sets. That was the whole reason `Entry` exists.
 pub(crate) fn entry_items(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>) -> ContextMenu {
     for entry in Entry::all() {
         if entry.opens_a_group() {
@@ -192,9 +192,9 @@ pub(crate) fn entry_items(mut menu: ContextMenu, this: &WeakEntity<FloatingPane>
 /// menu opened in the editor behind the window. It only showed once a tab
 /// existed, because until then the empty state is what fills the pane.
 pub(crate) fn tab_bar_menu(this: WeakEntity<FloatingPane>) -> AnyElement {
-    // Wrapped so a test can tell this `+` from the one in the window's title
-    // bar: `IconButton` names its debug selector after the icon, and both are
-    // a plus.
+    // Wrapped so a test can find this `+` by a name of its own:
+    // `IconButton` names its debug selector after the icon, and `ICON-Plus`
+    // says nothing about which button it is.
     h_flex()
         .debug_selector(|| "floating-pane-tab-bar-add".into())
         .child(menu_for(this))

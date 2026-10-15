@@ -16,13 +16,13 @@ use crate::session::driver_capabilities;
 use database::install::InstallProgress;
 use database::protocol::{ConnectionField, ConnectionForm};
 use database::registry::DriverDescriptor;
-use editor::Editor;
 use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task,
-    WeakEntity, Window,
+    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    Task, WeakEntity, Window,
 };
 use settings::Settings as _;
 use ui::prelude::*;
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::{ModalView, Workspace};
 
 /// What a driver that declares nothing is asked for.
@@ -80,8 +80,8 @@ pub(crate) enum Step {
     Filling {
         engine: CatalogueEntry,
         form: ConnectionForm,
-        /// One editor per field, in the driver's order.
-        inputs: Vec<Entity<Editor>>,
+        /// One input per field, in the driver's order.
+        inputs: Vec<Entity<InputField>>,
     },
     /// The driver could not be started, or would not answer.
     Unreachable {
@@ -108,15 +108,16 @@ pub(crate) struct ConnectionModal {
     /// selects rather than commits -- an engine chosen by a stray click is one
     /// nobody meant to choose.
     pub(crate) selected: usize,
-    pub(crate) search_editor: Entity<Editor>,
+    pub(crate) search_editor: Entity<InputField>,
     pub(crate) step: Step,
     /// What the connection is called. Separate from the driver's fields because
     /// it is Zode's, not the engine's: it is how a project pins a connection.
-    pub(crate) name_editor: Entity<Editor>,
+    pub(crate) name_editor: Entity<InputField>,
     pub(crate) test: TestState,
     pub(crate) error: Option<SharedString>,
     _task: Option<Task<()>>,
     _test_task: Option<Task<()>>,
+    _search_edited: Subscription,
 }
 
 impl ConnectionModal {
@@ -125,23 +126,20 @@ impl ConnectionModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Connection name", window, cx);
-            editor
-        });
-        let search_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Search", window, cx);
-            editor
-        });
+        let name_editor = cx.new(|cx| InputField::new(window, cx, "Connection name"));
+        let search_editor = cx
+            .new(|cx| InputField::new(window, cx, "Search").start_icon(IconName::MagnifyingGlass));
         // Redrawn on every keystroke so the list narrows as it is typed.
-        cx.subscribe(&search_editor, |_this, _editor, event, cx| {
-            if matches!(event, editor::EditorEvent::BufferEdited) {
-                cx.notify();
-            }
-        })
-        .detach();
+        let this = cx.weak_entity();
+        let search_edited = search_editor.read(cx).editor().clone().subscribe(
+            Box::new(move |event, _window, cx| {
+                if event == ErasedEditorEvent::BufferEdited {
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                }
+            }),
+            window,
+            cx,
+        );
 
         let engines = sorted_catalogue(cx);
 
@@ -157,6 +155,7 @@ impl ConnectionModal {
             error: None,
             _task: None,
             _test_task: None,
+            _search_edited: search_edited,
         }
     }
 
@@ -367,21 +366,22 @@ impl ConnectionModal {
         field: &ConnectionField,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<Editor> {
-        let field = field.clone();
-        cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
+    ) -> Entity<InputField> {
+        let placeholder = field.placeholder.as_deref().unwrap_or_default();
+        let input = cx.new(|cx| {
+            let input = InputField::new(window, cx, placeholder);
+            // Only a secret gets the masking control: `masked(false)` still
+            // draws the show/hide button, on a field with nothing to hide.
             if field.secret {
-                editor.set_masked(true, cx);
+                input.masked(true)
+            } else {
+                input
             }
-            if let Some(placeholder) = &field.placeholder {
-                editor.set_placeholder_text(placeholder.as_str(), window, cx);
-            }
-            if let Some(default) = &field.default {
-                editor.set_text(default.as_str(), window, cx);
-            }
-            editor
-        })
+        });
+        if let Some(default) = &field.default {
+            input.update(cx, |input, cx| input.set_text(default, window, cx));
+        }
+        input
     }
 
     /// Reads the form, and says what is missing rather than saving half of it.

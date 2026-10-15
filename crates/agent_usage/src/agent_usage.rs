@@ -418,7 +418,7 @@ impl Render for AgentUsageIndicator {
                     .gap_1()
                     .child(
                         Icon::new(agent_icon(&source.agent))
-                            .size(IconSize::XSmall)
+                            .size(IconSize::Small)
                             .color(Color::Muted),
                     )
                     .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
@@ -457,9 +457,14 @@ fn refresh_glyph(fetching: bool) -> IconName {
     if fetching {
         IconName::LoadCircle
     } else {
-        IconName::ArrowCircle
+        REFRESH_ICON
     }
 }
+
+/// The glyph for "read again", on the bar and on the panel's button. `RotateCw`
+/// is what every other refresh in the app draws; `ArrowCircle` is reserved for
+/// sync.
+pub(crate) const REFRESH_ICON: IconName = IconName::RotateCw;
 
 impl AgentUsageIndicator {
     /// The numbers, wrapped in the popover that opens the panel.
@@ -509,7 +514,7 @@ impl AgentUsageIndicator {
                                 // one way here and another way there is how a
                                 // mark stops carrying information.
                                 let icon = Icon::new(refresh_glyph(fetching))
-                                    .size(IconSize::XSmall)
+                                    .size(IconSize::Small)
                                     .color(if fetching {
                                         Color::Accent
                                     } else {
@@ -724,7 +729,7 @@ mod tests {
     /// reason this one exists.
     #[test]
     fn the_refresh_glyph_changes_while_a_read_is_running() {
-        assert_eq!(refresh_glyph(false), IconName::ArrowCircle);
+        assert_eq!(refresh_glyph(false), IconName::RotateCw);
         // Must stay the glyph `IconButton::loading` draws for the panel's own
         // refresh button, or the two surfaces say the same thing differently.
         assert_eq!(refresh_glyph(true), IconName::LoadCircle);

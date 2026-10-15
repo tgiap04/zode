@@ -1071,3 +1071,9 @@ bunch a repaint over it"]
         assert_eq!(cx.display_wake_reasons().len(), 1);
     }
 }
+
+/// The glyph sits beside the footprint item, which draws `BoltOutlined` for CPU.
+#[test]
+fn the_bar_glyph_is_not_the_one_the_cpu_figure_uses() {
+    assert_ne!(KEEP_AWAKE_ICON, IconName::BoltOutlined);
+}

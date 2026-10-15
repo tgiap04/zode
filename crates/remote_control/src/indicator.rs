@@ -233,15 +233,15 @@ impl RemoteControlIndicator {
             let disconnect_host = host.clone();
             let manage_host = host.clone();
             menu.when(anyone_connected, |menu| {
-                menu.entry("Disconnect all devices", None, move |_window, cx| {
+                menu.entry("Disconnect All Devices", None, move |_window, cx| {
                     disconnect_host.update(cx, |host, cx| host.disconnect_all(cx));
                 })
             })
-            .entry("Turn off remote control", None, |_window, cx| {
+            .entry("Turn Off Remote Control", None, |_window, cx| {
                 crate::disable_remote_control(cx);
             })
             .separator()
-            .entry("Manage trusted devices...", None, move |window, cx| {
+            .entry("Manage Trusted Devices\u{2026}", None, move |window, cx| {
                 let host = manage_host.clone();
                 workspace
                     .update(cx, |workspace, cx| {

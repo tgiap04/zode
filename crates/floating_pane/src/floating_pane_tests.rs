@@ -127,10 +127,11 @@ mod dispatch {
     /// Every edge and every corner claims its own press.
     ///
     /// The top edge was the one reported, but the fault was never specific to
-    /// it: the title bar is 34pt tall and overlaps the north grip, both upper
-    /// corners and the top of both side edges. GPUI dispatches the bubble phase
-    /// in **reverse** registration order, so the grips -- painted after the
-    /// title bar -- ran first and the title bar ran last and overwrote them.
+    /// it: the title bar is `Tab::container_height` tall and overlaps the north
+    /// grip, both upper corners and the top of both side edges. GPUI dispatches
+    /// the bubble phase in **reverse** registration order, so the grips --
+    /// painted after the title bar -- ran first and the title bar ran last and
+    /// overwrote them.
     /// Dragging any of those moved the window instead of resizing it.
     #[gpui::test]
     async fn every_edge_and_corner_claims_its_own_press(cx: &mut TestAppContext) {
@@ -183,7 +184,7 @@ mod dispatch {
             .expect("the canvas measured the layer");
         let bounds = pane.read_with(cx, |pane, _| pane.bounds_within(container));
 
-        // Well below the 6pt north grip, still inside the 34pt title bar.
+        // Well below the 6pt north grip, still inside the title bar.
         cx.simulate_mouse_down(
             Point {
                 x: bounds.origin.x + bounds.size.width / 2.,
@@ -1927,7 +1928,7 @@ mod new_entries {
     use crate::entries::Entry;
 
     /// `Entry` is private to this crate, so this is the only place that can
-    /// pin the "three surfaces, one list" invariant `render.rs`'s own doc
+    /// pin the "two surfaces, one list" invariant `entries.rs`'s own doc
     /// insists on: `Entry::all()` must carry exactly one `Database` and one
     /// `Engine` per `container_ui::engine_marks()` entry, since every surface
     /// that offers this window's contents reads that one list and nothing
@@ -2127,6 +2128,76 @@ mod new_entries {
             assert!(
                 window.is_action_available(&zed_actions::floating_pane::OpenMarkdownNote, cx),
                 "OpenMarkdownNote must reach a registered handler"
+            );
+        });
+    }
+}
+
+/// What the window draws around what it holds.
+mod chrome {
+    use gpui::Modifiers;
+    use ui::IconName;
+    use workspace::SplitDirection;
+
+    use crate::render::SPLIT_DIRECTIONS;
+
+    fn glyph_for(direction: SplitDirection) -> IconName {
+        SPLIT_DIRECTIONS
+            .iter()
+            .find(|(candidate, _, _)| *candidate == direction)
+            .map(|(_, _, icon)| *icon)
+            .expect("every direction has an entry")
+    }
+
+    /// Two menu rows that differ only in a word are the rows people click the
+    /// wrong one of; the glyph is what tells them apart at a glance.
+    #[test]
+    fn no_two_split_directions_share_a_glyph() {
+        let directions = SplitDirection::all();
+        for (index, first) in directions.iter().enumerate() {
+            for second in directions.iter().skip(index + 1) {
+                assert_ne!(
+                    glyph_for(*first),
+                    glyph_for(*second),
+                    "splitting {first} and {second} must not share a glyph"
+                );
+            }
+        }
+    }
+
+    /// A window with nothing in it has no tab bar, and its body already is the
+    /// list of what it can hold. A `+` in the title strip on top of that was
+    /// the same list offered twice.
+    #[gpui::test]
+    async fn an_empty_window_draws_no_plus_beside_its_own_list(cx: &mut gpui::TestAppContext) {
+        let (_window, cx) = super::a_painted_window(cx).await;
+
+        assert!(
+            cx.debug_bounds("floating-pane-empty").is_some(),
+            "an empty window shows its list as the body"
+        );
+        assert!(
+            cx.debug_bounds("ICON-Plus").is_none(),
+            "and offers it nowhere else"
+        );
+    }
+
+    /// The empty list's rows are the only way into a window with nothing in
+    /// it, so a click on one has to open that entry.
+    #[gpui::test]
+    async fn clicking_a_row_in_the_empty_window_opens_it(cx: &mut gpui::TestAppContext) {
+        let (window, cx) = super::a_painted_window(cx).await;
+
+        let row = cx
+            .debug_bounds("floating-pane-entry-floating-pane-new-note")
+            .expect("the empty window lists New Markdown Note");
+        cx.simulate_click(row.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        window.read_with(cx, |window, cx| {
+            assert!(
+                !window.is_empty(cx),
+                "the row must open what it names, in this window"
             );
         });
     }

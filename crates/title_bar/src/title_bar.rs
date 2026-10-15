@@ -34,7 +34,7 @@ use ui::{
     utils::platform_title_bar_height,
 };
 use util::ResultExt;
-use workspace::{MultiWorkspace, ToggleWorktreeSecurity, Workspace};
+use workspace::{MultiWorkspace, ToggleWorktreeSecurity, Workspace, dock::DockPosition};
 
 use zed_actions::OpenRemote;
 
@@ -213,8 +213,8 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
-        children.push(self.render_search_bar(window, cx));
-        children.push(self.render_layout_controls());
+        children.push(self.render_search_bar(cx));
+        children.push(self.render_layout_controls(cx));
 
         if title_bar_settings.show_onboarding_banner {
             if let Some(banner) = &self.banner {
@@ -295,6 +295,13 @@ impl TitleBar {
                 cx.notify()
             }),
         );
+        for dock in [
+            workspace.left_dock(),
+            workspace.bottom_dock(),
+            workspace.right_dock(),
+        ] {
+            subscriptions.push(cx.observe(dock, |_, _, cx| cx.notify()));
+        }
 
         subscriptions.push(cx.observe_window_activation(window, Self::window_activation_changed));
         subscriptions.push(
@@ -354,7 +361,7 @@ impl TitleBar {
     /// title bar that opens the file finder. Wrapped in a flexible spacer so
     /// it stays centred as the project/branch group on its left changes
     /// width.
-    fn render_search_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         // VS Code's command centre shows the folder name rather than a search
         // prompt, and opens quick-open on click -- which is what this does.
@@ -392,15 +399,10 @@ impl TitleBar {
             .child(
                 h_flex()
                     .id("title-bar-search")
-                    // Measured off the bar itself, not `rems_from_px`. That helper
-                    // divides by a fixed 16px base while the window's rem size is
-                    // the UI font size, so a rem height shrinks with the font while
-                    // `platform_title_bar_height` holds its 34px floor -- the box
-                    // ends up far shorter than the number in the source suggests.
-                    //
-                    // 10 rather than 6: at 3px a side the box reads as touching the
-                    // bar's edges even though it measures dead centre.
-                    .h(platform_title_bar_height(window) - px(10.))
+                    .debug_selector(|| "title-bar-search".into())
+                    // The height of the buttons either side of it, taken from the
+                    // same token so resizing one cannot leave the other behind.
+                    .h(ButtonSize::Default.rems())
                     .w(rems_from_px(360.))
                     .max_w_full()
                     .px_2()
@@ -413,7 +415,7 @@ impl TitleBar {
                     .hover(|style| style.bg(colors.element_hover))
                     .child(
                         Icon::new(IconName::MagnifyingGlass)
-                            .size(IconSize::XSmall)
+                            .size(IconSize::Small)
                             .color(Color::Muted),
                     )
                     .child(
@@ -450,7 +452,7 @@ impl TitleBar {
         icon: IconName,
         tooltip: &'static str,
         action: A,
-    ) -> impl IntoElement {
+    ) -> IconButton {
         IconButton::new(id, icon)
             .icon_size(IconSize::Small)
             .icon_color(Color::Muted)
@@ -461,31 +463,62 @@ impl TitleBar {
             .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
     }
 
+    /// Left, bottom and right, in that order.
+    ///
+    /// Read from the docks themselves rather than remembered here: a dock can
+    /// be opened by something other than these buttons, and the toggle should
+    /// show it whichever way it happened. A dock behind another dock's zoomed
+    /// panel is open but not on screen, so it stays unlit, the same call
+    /// `Workspace::toggle_dock` makes when the button is pressed.
+    fn lit_dock_toggles(&self, cx: &App) -> [bool; 3] {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return [false; 3];
+        };
+        let workspace = workspace.read(cx);
+        [
+            DockPosition::Left,
+            DockPosition::Bottom,
+            DockPosition::Right,
+        ]
+        .map(|position| workspace.is_dock_visible(position, cx))
+    }
+
     /// VS Code parks its layout toggles at the far right of the title bar.
     /// Its fourth button opens a "customize layout" menu that has no equivalent
     /// here, so only the three dock toggles are carried over.
-    fn render_layout_controls(&self) -> AnyElement {
+    fn render_layout_controls(&self, cx: &App) -> AnyElement {
+        let [left_lit, bottom_lit, right_lit] = self.lit_dock_toggles(cx);
+
         h_flex()
             .gap_0p5()
             .px_1()
-            .child(Self::render_action_button(
-                "title-bar-toggle-left-dock",
-                IconName::PanelLeft,
-                "Toggle Left Dock",
-                workspace::ToggleLeftDock,
-            ))
-            .child(Self::render_action_button(
-                "title-bar-toggle-bottom-dock",
-                IconName::PanelBottom,
-                "Toggle Bottom Dock",
-                workspace::ToggleBottomDock,
-            ))
-            .child(Self::render_action_button(
-                "title-bar-toggle-right-dock",
-                IconName::PanelRight,
-                "Toggle Right Dock",
-                workspace::ToggleRightDock,
-            ))
+            .child(
+                Self::render_action_button(
+                    "title-bar-toggle-left-dock",
+                    IconName::PanelLeft,
+                    "Toggle Left Dock",
+                    workspace::ToggleLeftDock,
+                )
+                .toggle_state(left_lit),
+            )
+            .child(
+                Self::render_action_button(
+                    "title-bar-toggle-bottom-dock",
+                    IconName::PanelBottom,
+                    "Toggle Bottom Dock",
+                    workspace::ToggleBottomDock,
+                )
+                .toggle_state(bottom_lit),
+            )
+            .child(
+                Self::render_action_button(
+                    "title-bar-toggle-right-dock",
+                    IconName::PanelRight,
+                    "Toggle Right Dock",
+                    workspace::ToggleRightDock,
+                )
+                .toggle_state(right_lit),
+            )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .into_any_element()
     }
@@ -1036,5 +1069,136 @@ impl TitleBar {
                 workspace.update_active_view_for_followers(window, cx);
             })
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::{cell::Cell, rc::Rc};
+    use workspace::{
+        AppState,
+        dock::{PanelEvent, test::TestPanel},
+    };
+
+    /// A workspace with the title bar standing in it the way `init` puts one
+    /// there, so a real draw reaches the bar's own render.
+    async fn workspace_with_title_bar(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, Entity<TitleBar>, &mut VisualTestContext) {
+        let app_state = cx.update(AppState::test);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let title_bar = workspace.update_in(cx, |workspace, window, cx| {
+            let title_bar = cx.new(|cx| TitleBar::new("title-bar", workspace, None, window, cx));
+            workspace.set_titlebar_item(title_bar.clone().into(), window, cx);
+            title_bar
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        (workspace, title_bar, cx)
+    }
+
+    /// The toggles light up from the docks' own state, and `Dock::set_open`
+    /// notifies only the dock itself, so the bar has to observe the docks to hear
+    /// about one opening by a route other than its own buttons.
+    #[gpui::test]
+    async fn the_title_bar_redraws_when_any_dock_opens_or_closes(cx: &mut TestAppContext) {
+        let (workspace, title_bar, cx) = workspace_with_title_bar(cx).await;
+
+        let redraws = Rc::new(Cell::new(0usize));
+        let _subscription = cx.update(|_, cx| {
+            cx.observe(&title_bar, {
+                let redraws = redraws.clone();
+                move |_, _| redraws.set(redraws.get() + 1)
+            })
+        });
+
+        for position in [
+            DockPosition::Left,
+            DockPosition::Bottom,
+            DockPosition::Right,
+        ] {
+            let dock = workspace.read_with(cx, |workspace, _| {
+                workspace.dock_at_position(position).clone()
+            });
+            for open in [true, false] {
+                let before = redraws.get();
+                dock.update_in(cx, |dock, window, cx| dock.set_open(open, window, cx));
+                cx.run_until_parked();
+                assert!(
+                    redraws.get() > before,
+                    "the {position:?} dock going to open={open} must redraw the title bar"
+                );
+            }
+        }
+    }
+
+    /// A dock a zoomed panel is covering is still open, but its toggle must not
+    /// read as showing something: pressing it brings the dock back rather than
+    /// hiding it, which is what `toggle_dock` does with the same state.
+    #[gpui::test]
+    async fn a_dock_behind_a_zoomed_panel_does_not_light_its_toggle(cx: &mut TestAppContext) {
+        let (workspace, title_bar, cx) = workspace_with_title_bar(cx).await;
+
+        let left_panel = workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 101, cx));
+            workspace.add_panel(right_panel, window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            left_panel
+        });
+        cx.run_until_parked();
+        let lit = |cx: &mut VisualTestContext| {
+            title_bar.read_with(cx, |title_bar, cx| title_bar.lit_dock_toggles(cx))
+        };
+        assert_eq!(lit(cx), [true, false, true]);
+
+        let redraws = Rc::new(Cell::new(0usize));
+        let _subscription = cx.update(|_, cx| {
+            cx.observe(&title_bar, {
+                let redraws = redraws.clone();
+                move |_, _| redraws.set(redraws.get() + 1)
+            })
+        });
+
+        left_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .right_dock()
+                .read(cx)
+                .is_open()),
+            "zooming the left panel covers the right dock without closing it"
+        );
+        assert_eq!(lit(cx), [true, false, false]);
+        assert!(
+            redraws.get() > 0,
+            "the bar must redraw when a zoom changes what is covered"
+        );
+
+        left_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomOut));
+        cx.run_until_parked();
+        assert_eq!(lit(cx), [true, false, true]);
+    }
+
+    /// The search field is the height of the buttons beside it. Both read the
+    /// same token, so changing one size moves the other with it.
+    #[gpui::test]
+    async fn the_search_field_is_as_tall_as_the_nav_buttons(cx: &mut TestAppContext) {
+        let (_workspace, _title_bar, cx) = workspace_with_title_bar(cx).await;
+
+        let search = cx
+            .debug_bounds("title-bar-search")
+            .expect("the title bar must draw its search field");
+        let go_back = cx
+            .debug_bounds("ICON-ArrowLeft")
+            .expect("and its back button");
+        assert_eq!(search.size.height, go_back.size.height);
     }
 }

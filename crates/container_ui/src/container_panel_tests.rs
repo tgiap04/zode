@@ -1836,6 +1836,42 @@ mod detail {
     }
 }
 
+/// The panel's own chrome, measured against the other panels'.
+mod chrome {
+    use super::*;
+    use container::{Resource, RunState};
+
+    /// A header is one tab bar tall in every panel, so opening a row must not
+    /// make the bar above it change height.
+    #[gpui::test]
+    async fn the_open_rows_header_is_as_tall_as_the_tab_bar(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (panel, cx) = panel_over(Arc::new(FakeBackend::docker()), cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.open_detail(
+                Resource {
+                    kind: ResourceKind::Container,
+                    id: "c0ffee".into(),
+                    name: "c0ffee-name".into(),
+                    state: RunState::Running,
+                    detail: vec![("Image", "postgres:16".into())],
+                    parent: None,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
+        cx.run_until_parked();
+
+        let header = cx
+            .debug_bounds("container-detail-header")
+            .expect("the open row's header was not drawn");
+        let expected = cx.update(|_, cx| ui::Tab::container_height(cx));
+        assert_eq!(header.size.height, expected);
+    }
+}
+
 /// Removing things. The last phase, and the only one that can lose data.
 mod removal {
     use super::*;

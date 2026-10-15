@@ -168,7 +168,7 @@ impl Panel for BranchPanel {
     }
 
     fn icon(&self, _: &Window, cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::LayoutGrid).filter(|_| BranchPanelSettings::get_global(cx).button)
+        Some(ui::IconName::GitWorktree).filter(|_| BranchPanelSettings::get_global(cx).button)
     }
 
     fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {

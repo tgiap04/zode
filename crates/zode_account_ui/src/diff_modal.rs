@@ -1,8 +1,5 @@
-use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Subscription,
-    Window,
-};
-use ui::{Tooltip, prelude::*};
+use gpui::{App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window};
+use ui::{Modal, ModalFooter, ModalHeader, Tooltip, prelude::*};
 use workspace::ModalView;
 use zode_sync::SyncSession;
 
@@ -53,12 +50,14 @@ impl Render for DiffModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
 
-        let shell = v_flex()
+        let shell = div()
             .key_context("SyncDiffModal")
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
+            .occlude()
             .w(rems(60.))
-            .overflow_hidden()
+            .max_h(rems(40.))
+            .debug_selector(|| "account-sync-diff-modal".into())
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
                 this.session
                     .update(cx, |session, cx| session.dismiss_pending(cx));
@@ -80,92 +79,91 @@ impl Render for DiffModal {
 
         shell
             .child(
-                v_flex()
-                    .p_3()
-                    .gap_0p5()
-                    .child(
-                        Label::new(format!("{kind} differs from the server"))
-                            .weight(FontWeight::MEDIUM),
+                Modal::new("account-sync-diff", None)
+                    .header(
+                        // `ModalHeader::description` is always muted, and this
+                        // sentence turns to a warning when both sides changed.
+                        // So it borrows the description's size and spacing and
+                        // keeps its own colour.
+                        ModalHeader::new().child(
+                            v_flex()
+                                .child(
+                                    Headline::new(format!("{kind} differs from the server"))
+                                        .size(HeadlineSize::Small),
+                                )
+                                .child(
+                                    Label::new(if safe {
+                                        "This machine has not changed it since the last sync, so taking the server's copy loses nothing."
+                                    } else {
+                                        "Both sides changed since the last sync. Whichever you choose, the other is replaced."
+                                    })
+                                    .color(if safe { Color::Muted } else { Color::Warning })
+                                    .mb_2(),
+                                ),
+                        ),
                     )
                     .child(
-                        Label::new(if safe {
-                            "This machine has not changed it since the last sync, so taking the server's copy loses nothing."
-                        } else {
-                            "Both sides changed since the last sync. Whichever you choose, the other is replaced."
-                        })
-                        .size(LabelSize::Small)
-                        .color(if safe { Color::Muted } else { Color::Warning }),
+                        // Wide and scrollable in both directions. A cramped
+                        // diff is a diff people accept without reading, which
+                        // defeats the point of showing it.
+                        div()
+                            .id("sync-diff-body")
+                            .w_full()
+                            .h(rems(24.))
+                            .p_2()
+                            .overflow_y_scroll()
+                            .bg(colors.editor_background)
+                            .border_t_1()
+                            .border_color(colors.border_variant)
+                            .child(Label::new(unified).size(LabelSize::Small).buffer_font(cx)),
                     ),
             )
             .child(
-                // Wide and scrollable in both directions. A cramped diff is a
-                // diff people accept without reading, which defeats the point
-                // of showing it.
-                div()
-                    .id("sync-diff-body")
-                    .w_full()
-                    .h(rems(24.))
-                    .p_2()
-                    .overflow_y_scroll()
-                    .bg(colors.editor_background)
-                    .border_y_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        Label::new(unified)
-                            .size(LabelSize::Small)
-                            .buffer_font(cx),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .justify_between()
-                    .items_center()
-                    .bg(colors.editor_background)
-                    .child(
-                        Label::new(format!("+{added} −{removed}"))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("sync-diff-cancel", "Cancel")
-                                    .label_size(LabelSize::Small)
-                                    .tooltip(Tooltip::text("Change nothing on either side"))
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session
-                                            .update(cx, |session, cx| session.dismiss_pending(cx));
-                                        cx.emit(DismissEvent);
-                                    })),
-                            )
-                            .child(
-                                Button::new("sync-diff-keep-local", "Keep this machine's copy")
-                                    .label_size(LabelSize::Small)
-                                    .tooltip(Tooltip::text("Overwrite the server"))
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session
-                                            .update(cx, |session, cx| session.keep_local(cx));
-                                        cx.emit(DismissEvent);
-                                    })),
-                            )
-                            .child(
-                                Button::new("sync-diff-take-remote", "Take the server's copy")
-                                    .style(ButtonStyle::Filled)
-                                    .label_size(LabelSize::Small)
-                                    .tooltip(Tooltip::text(
-                                        "The current file is copied aside first",
-                                    ))
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.session
-                                            .update(cx, |session, cx| session.apply_pending(cx));
-                                        cx.emit(DismissEvent);
-                                    })),
-                            ),
-                    ),
+                // `ModalFooter` has no fill of its own, so this band gives it the
+                // editor background the body above it uses.
+                div().w_full().bg(colors.editor_background).child(
+                    ModalFooter::new()
+                        .start_slot(
+                            Label::new(format!("+{added} −{removed}"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .end_slot(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("sync-diff-cancel", "Cancel")
+                                        .tooltip(Tooltip::text("Change nothing on either side"))
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.session.update(cx, |session, cx| {
+                                                session.dismiss_pending(cx)
+                                            });
+                                            cx.emit(DismissEvent);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("sync-diff-keep-local", "Keep This Machine's Copy")
+                                        .tooltip(Tooltip::text("Overwrite the server"))
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.session
+                                                .update(cx, |session, cx| session.keep_local(cx));
+                                            cx.emit(DismissEvent);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("sync-diff-take-remote", "Take the Server's Copy")
+                                        .style(ButtonStyle::Filled)
+                                        .tooltip(Tooltip::text(
+                                            "The current file is copied aside first",
+                                        ))
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.session
+                                                .update(cx, |session, cx| session.apply_pending(cx));
+                                            cx.emit(DismissEvent);
+                                        })),
+                                ),
+                        ),
+                ),
             )
     }
 }
@@ -226,6 +224,23 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// A window that shows a diff is the large tier of modal widths.
+    #[gpui::test]
+    fn the_window_is_the_large_width(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session_with(Some(divergence(true)), cx);
+        let (_modal, cx) = cx.add_window_view(|_window, cx| DiffModal::new(session, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("account-sync-diff-modal")
+            .expect("the modal must be drawn");
+        let large = cx.update(|window, _| rems(60.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, large);
     }
 
     #[gpui::test]

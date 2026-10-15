@@ -115,7 +115,7 @@ impl ContainerPanel {
                     )
                     .end_icon(
                         Icon::new(IconName::ChevronDown)
-                            .size(IconSize::XSmall)
+                            .size(IconSize::Small)
                             .color(Color::Muted),
                     ),
                 ui::Tooltip::text("Choose an engine"),
@@ -175,7 +175,7 @@ impl ContainerPanel {
                         )
                         .end_icon(
                             Icon::new(IconName::ChevronDown)
-                                .size(IconSize::XSmall)
+                                .size(IconSize::Small)
                                 .color(Color::Muted),
                         ),
                     ui::Tooltip::text("Choose a kubeconfig"),
@@ -328,7 +328,7 @@ impl ContainerPanel {
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Error)
                         .tooltip(|_window, cx| {
-                            ui::Tooltip::simple("Remove everything unused\u{2026}", cx)
+                            ui::Tooltip::simple("Remove Everything Unused\u{2026}", cx)
                         })
                         .on_click(cx.listener(|this, _, window, cx| this.start_prune(window, cx))),
                 )
@@ -343,7 +343,7 @@ impl ContainerPanel {
                     .icon_size(IconSize::Small)
                     .tooltip(|_window, cx| {
                         ui::Tooltip::for_action(
-                            "Open in a floating window",
+                            "Open in a Floating Window",
                             &zed_actions::container::OpenInFloatingWindow,
                             cx,
                         )
@@ -450,6 +450,7 @@ impl ContainerPanel {
             .child(
                 div().pt_1().child(
                     Button::new("container-refresh-after-error", "Refresh")
+                        .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
                         .loading(self.reloading)
                         .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
                 ),
@@ -463,20 +464,17 @@ impl ContainerPanel {
 /// One function for both empty and loading so the two never drift into different
 /// vertical positions -- a message that jumps when the list arrives reads as a
 /// flicker rather than an answer.
-fn note(icon: Option<IconName>, message: impl Into<SharedString>) -> AnyElement {
+pub(crate) fn note(icon: Option<IconName>, message: impl Into<SharedString>) -> AnyElement {
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
+        .p_4()
         .gap_1()
         .when_some(icon, |element, icon| {
             element.child(Icon::new(icon).size(IconSize::XLarge).color(Color::Muted))
         })
-        .child(
-            Label::new(message)
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        )
+        .child(Label::new(message).color(Color::Muted))
         .into_any_element()
 }
 
@@ -783,7 +781,7 @@ pub(crate) fn render_trailing(
     let id_for_selector = resource.id.clone();
     h_flex()
         .debug_selector(move || format!("container-row-buttons:{id_for_selector}"))
-        .gap_1()
+        .gap_0p5()
         .child(render_actions(resource, actions, handle.clone()))
         .when(logs, |element| {
             let id = resource.id.clone();
@@ -794,7 +792,7 @@ pub(crate) fn render_trailing(
                     SharedString::from(format!("logs-{}", resource.id)),
                     IconName::ListTree,
                 )
-                .icon_size(IconSize::XSmall)
+                .icon_size(IconSize::Small)
                 .tooltip(|_window, cx| ui::Tooltip::simple("Follow logs in a terminal", cx))
                 .on_click(move |_event, window, cx| {
                     handle
@@ -825,7 +823,7 @@ pub(crate) fn render_trailing(
                         SharedString::from(format!("shell-{}", resource.id)),
                         IconName::Terminal,
                     )
-                    .icon_size(IconSize::XSmall)
+                    .icon_size(IconSize::Small)
                     .tooltip(|_window, cx| ui::Tooltip::simple("Open a shell in a terminal", cx))
                     .on_click(move |_event, window, cx| {
                         handle
@@ -851,7 +849,7 @@ pub(crate) fn render_trailing(
                     SharedString::from(format!("remove-{}", resource.id)),
                     IconName::Trash,
                 )
-                .icon_size(IconSize::XSmall)
+                .icon_size(IconSize::Small)
                 .icon_color(Color::Error)
                 .tooltip(|_window, cx| ui::Tooltip::simple("Remove\u{2026}", cx))
                 // Opens the confirmation and nothing else. The button cannot
@@ -884,7 +882,7 @@ fn render_busy(id: &str, busy: Busy) -> AnyElement {
                 })
                 .child(
                     Icon::new(IconName::LoadCircle)
-                        .size(IconSize::XSmall)
+                        .size(IconSize::Small)
                         .color(Color::Accent)
                         // Keyed by the resource, not by its position: a row above
                         // this one going away shifts every position, and a
@@ -895,7 +893,7 @@ fn render_busy(id: &str, busy: Busy) -> AnyElement {
                                 gpui::ElementId::from("container-busy-spinner"),
                                 SharedString::from(id.to_string()),
                             ),
-                            1,
+                            2,
                         ),
                 ),
         )
@@ -913,7 +911,7 @@ fn render_actions(
     handle: gpui::WeakEntity<ContainerPanel>,
 ) -> AnyElement {
     h_flex()
-        .gap_1()
+        .gap_0p5()
         .children(actions.iter().copied().filter_map(|action| {
             if !action_is_useful(action, resource.state) {
                 return None;
@@ -938,7 +936,7 @@ fn render_actions(
                     SharedString::from(format!("act-{}-{}", action.label(), resource.id)),
                     icon,
                 )
-                .icon_size(IconSize::XSmall)
+                .icon_size(IconSize::Small)
                 .tooltip(move |_window, cx| ui::Tooltip::simple(action.label(), cx))
                 .on_click(move |_event, _window, cx| {
                     handle

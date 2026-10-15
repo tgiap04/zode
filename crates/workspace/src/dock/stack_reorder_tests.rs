@@ -111,6 +111,23 @@ fn button_order(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Ve
     })
 }
 
+/// A section's header is the height of the editor's tab bar beside it, like every
+/// other panel header, so the rows across the window line up.
+#[gpui::test]
+async fn a_stack_header_is_as_tall_as_a_panel_header(cx: &mut TestAppContext) {
+    let (_workspace, cx) = stacked_left_dock(&[100, 101], cx).await;
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let expected = cx.update(|_, cx| ui::Tab::container_height(cx));
+    for selector in ["dock-stack-header:0", "dock-stack-header:1"] {
+        let header = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} must be drawn"));
+        assert_eq!(header.size.height, expected, "{selector}");
+    }
+}
+
 /// Moving the second section above the first reorders what is drawn.
 #[gpui::test]
 async fn moving_a_section_reorders_the_stack(cx: &mut TestAppContext) {
@@ -739,7 +756,7 @@ async fn dragging_the_last_header_between_the_first_two(cx: &mut TestAppContext)
 
 /// Releasing over a section's BODY, not its thin header strip.
 ///
-/// A header is a ~24px strip at the top of a section that is otherwise hundreds
+/// A header is one tab bar tall at the top of a section that is otherwise hundreds
 /// of pixels tall, so "drag it between those two" lands on a panel's content far
 /// more often than on a header. If only the header accepts the drop, the gesture
 /// the user actually performs does nothing at all.

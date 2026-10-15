@@ -4401,6 +4401,13 @@ impl Workspace {
         self.dock_at_position(position).read(cx).is_open()
     }
 
+    /// Whether the dock at `position` is on screen: open, and not behind a
+    /// zoomed panel or pane that fills the window in its place.
+    pub fn is_dock_visible(&self, position: DockPosition, cx: &App) -> bool {
+        let covered = self.zoomed.is_some() && self.zoomed_position != Some(position);
+        !covered && self.dock_at_position(position).read(cx).is_open()
+    }
+
     pub fn toggle_dock(
         &mut self,
         dock_side: DockPosition,
@@ -4410,8 +4417,7 @@ impl Workspace {
         let mut focus_center = false;
         let mut reveal_dock = false;
 
-        let other_is_zoomed = self.zoomed.is_some() && self.zoomed_position != Some(dock_side);
-        let was_visible = self.is_dock_at_position_open(dock_side, cx) && !other_is_zoomed;
+        let was_visible = self.is_dock_visible(dock_side, cx);
 
         if let Some(panel) = self.dock_at_position(dock_side).read(cx).active_panel() {
             telemetry::event!(
@@ -16267,6 +16273,11 @@ mod tests {
         let header = cx
             .debug_bounds("dock-header")
             .expect("a right dock showing a panel with an icon must draw its header");
+        assert_eq!(
+            header.size.height,
+            cx.update(|_, cx| ui::Tab::container_height(cx)),
+            "the strip is as tall as every other panel header"
+        );
         // Unique here: `dock-panel` is drawn only by a dock with something to
         // show, and this test opens exactly one.
         let dock_bounds = cx
@@ -16627,6 +16638,57 @@ mod tests {
         workspace.update(cx, |workspace, cx| {
             let right_dock = workspace.right_dock();
             assert!(!right_dock.read(cx).is_open());
+        });
+    }
+
+    /// `toggle_dock` and the title bar's toggles both read this, so an open dock
+    /// that a zoomed panel is covering has to answer the same way to each.
+    #[gpui::test]
+    async fn test_dock_behind_a_zoomed_panel_is_not_visible(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let left_panel = workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 101, cx));
+            workspace.add_panel(right_panel, window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            left_panel
+        });
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_dock_visible(DockPosition::Left, cx));
+            assert!(workspace.is_dock_visible(DockPosition::Right, cx));
+            assert!(
+                !workspace.is_dock_visible(DockPosition::Bottom, cx),
+                "a dock nobody opened is not visible"
+            );
+        });
+
+        left_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.right_dock().read(cx).is_open(),
+                "zooming a panel covers the other docks without closing them"
+            );
+            assert!(workspace.is_dock_visible(DockPosition::Left, cx));
+            assert!(
+                !workspace.is_dock_visible(DockPosition::Right, cx),
+                "the covered dock is open but not on screen"
+            );
+        });
+
+        left_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomOut));
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_dock_visible(DockPosition::Left, cx));
+            assert!(workspace.is_dock_visible(DockPosition::Right, cx));
         });
     }
 

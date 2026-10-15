@@ -1,5 +1,5 @@
 use crate::Sidebar;
-use crate::rail::RAIL_ICON_SIZE;
+use crate::rail::rail_button;
 use gpui::{AnyElement, Context};
 use remote_control::RemoteControlSettings;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
@@ -25,8 +25,7 @@ impl Sidebar {
             AccountStatus::SignedOut | AccountStatus::WaitingForApproval { .. } => {
                 let waiting = matches!(status, AccountStatus::WaitingForApproval { .. });
 
-                IconButton::new("project-rail-account", IconName::Person)
-                    .icon_size(RAIL_ICON_SIZE)
+                rail_button("project-rail-account", IconName::Person)
                     .toggle_state(waiting)
                     .tooltip(move |_window, cx| {
                         Tooltip::with_meta(
@@ -57,8 +56,7 @@ impl Sidebar {
                 // the menu, which is where someone looks for it anyway.
                 PopoverMenu::new("project-rail-account-menu")
                     .trigger(
-                        IconButton::new("project-rail-account", IconName::Person)
-                            .icon_size(RAIL_ICON_SIZE)
+                        rail_button("project-rail-account", IconName::Person)
                             .icon_color(if offline {
                                 Color::Muted
                             } else {
