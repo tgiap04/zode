@@ -5,7 +5,7 @@ use credentials_provider::CredentialsProvider;
 use futures::AsyncReadExt as _;
 use futures::FutureExt as _;
 use futures::future::Shared;
-use gpui::{App, Entity, EventEmitter, Global, SharedString, Task};
+use gpui::{App, AsyncApp, Entity, EventEmitter, Global, SharedString, Task};
 use http_client::{AsyncBody, HttpClient, Request};
 use serde::Deserialize;
 
@@ -289,11 +289,7 @@ impl Account {
                             // memory means the rotated refresh token is lost on
                             // restart, and the old one is already spent — which
                             // the server reads as reuse and revokes the family.
-                            if let Err(error) =
-                                storage::write(&credentials, &user, &fresh, cx).await
-                            {
-                                log::warn!("refreshed the session but could not save it: {error}");
-                            }
+                            save_refreshed_session(&credentials, &user, &fresh, cx).await;
                         }
                         let access_token = fresh.access_token.clone();
                         _ = this.update(cx, |this, _| this.tokens = Some(fresh));
@@ -326,17 +322,55 @@ impl Account {
         let api_url = self.api_url.clone();
 
         cx.spawn(async move |this, cx| {
-            let Some(session) = storage::read(&credentials, cx).await else {
+            let Some(entry) = storage::read(&credentials, cx).await else {
                 return;
             };
-            let remembered = session.user;
+            let stored_user_id = entry.user_id;
+            let remembered = entry.session.user;
+            let presented_refresh_token = entry.session.tokens.refresh_token.clone();
 
-            let refreshed =
-                Self::ensure_fresh(&http_client, &api_url, session.tokens, SystemTime::now()).await;
+            let refreshed = Self::ensure_fresh(
+                &http_client,
+                &api_url,
+                entry.session.tokens,
+                SystemTime::now(),
+            )
+            .await;
             match refreshed {
                 Ok(tokens) => {
+                    // The server spent the token we presented the moment it
+                    // answered. Until the new one is on disk the keychain holds
+                    // a spent token, and the next start presenting it is read as
+                    // theft, which signs the user out everywhere. Hence before
+                    // `/auth/me`: quitting during that call must not lose it, and
+                    // neither must `/auth/me` failing. An entry that remembers
+                    // no user is saved under the id it is already filed under.
+                    let rotated = tokens.refresh_token != presented_refresh_token;
+                    if rotated {
+                        match &remembered {
+                            Some(user) => {
+                                save_refreshed_session(&credentials, user, &tokens, cx).await
+                            }
+                            None => {
+                                save_refreshed_session_without_user(
+                                    &credentials,
+                                    &stored_user_id,
+                                    &tokens,
+                                    cx,
+                                )
+                                .await
+                            }
+                        }
+                    }
+
                     let identity =
                         fetch_identity(&http_client, &api_url, &tokens.access_token).await;
+                    if rotated
+                        && remembered.is_none()
+                        && let Ok(user) = &identity
+                    {
+                        save_refreshed_session(&credentials, user, &tokens, cx).await;
+                    }
                     _ = this.update(cx, |this, cx| match identity {
                         Ok(user) => {
                             this.tokens = Some(tokens);
@@ -516,6 +550,34 @@ impl Account {
 enum RefreshOutcome {
     Rejected,
     Unreachable,
+}
+
+/// Writes a session whose refresh token has just rotated.
+///
+/// A failure is logged, not returned: the session works for this run, and
+/// stopping here would turn a locked keychain into a sign-out. The message names
+/// no token.
+async fn save_refreshed_session(
+    credentials: &Arc<dyn CredentialsProvider>,
+    user: &AccountUser,
+    tokens: &StoredTokens,
+    cx: &AsyncApp,
+) {
+    if let Err(error) = storage::write(credentials, user, tokens, cx).await {
+        log::warn!("refreshed the session but could not save it: {error}");
+    }
+}
+
+/// The same, for an entry that remembers no user and is kept under `user_id`.
+async fn save_refreshed_session_without_user(
+    credentials: &Arc<dyn CredentialsProvider>,
+    user_id: &str,
+    tokens: &StoredTokens,
+    cx: &AsyncApp,
+) {
+    if let Err(error) = storage::write_without_user(credentials, user_id, tokens, cx).await {
+        log::warn!("refreshed the session but could not save it: {error}");
+    }
 }
 
 enum IdentityError {
