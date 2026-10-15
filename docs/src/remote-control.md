@@ -52,8 +52,8 @@ that nobody sits in between.
    remote control on and signed in to the same account) and choose **Pair**.
 2. A shows a prompt: "wants to control this Zode", with six digits.
 3. The controlling device shows six digits too. **If they are the same**, choose
-   **The digits match** in the browser, then **The digits match: trust it** on A.
-   If they differ, choose **Digits differ** (browser) or dismiss the prompt on A.
+   **The digits match** in the browser, then **The Digits Match: Trust It** on A.
+   If they differ, choose **Digits differ** (browser) or **Reject** on A.
 4. Both sides finish the connection. The device is now trusted.
 
 Confirm on A only when you started the pairing yourself. Trusting a device
@@ -83,11 +83,15 @@ they show are [listed below](#what-is-not-served).
 From another machine, in Zode:
 
 1. Click the account button at the bottom of the sidebar rail and choose
-   **Open a Zode on Your Account…** (or, in the **Remote Projects** dialog,
-   choose **Open a Zode on your account**).
+   **Open a Zode on Your Account…** (it is also in the **Remote Projects**
+   dialog).
 2. Pick the other Zode. If it is not paired yet, choose **Pair…**, compare the
-   six digits, and confirm on both machines; otherwise choose **Connect**.
-3. Choose **Open a project on** that Zode.
+   six digits, and confirm on both machines — **The Digits Match** here,
+   **The Digits Match: Trust It** on the other, or **Digits Differ** here if they
+   are not the same; otherwise choose **Connect**. If a Zode's key has changed
+   since you paired, its row offers **Pair Again** instead, which forgets the old
+   key and starts a new pairing.
+3. Choose **Open a Project on** that Zode.
 
 This opens an independent workspace: you edit the project as if it were local,
 and its terminals run on A, not on your machine. It is a separate window from
@@ -107,8 +111,8 @@ remote control off or manage trusted devices.
 - The status bar shows **Controlled by** the device's name (or "N devices"). It
   stays visible even if `status_bar.show` hides the status bar, and a toast
   announces each device that takes control.
-- Click the indicator to **Disconnect all devices**, **Turn off remote
-  control**, or **Manage trusted devices...**.
+- Click the indicator to **Disconnect All Devices**, **Turn Off Remote
+  Control**, or **Manage Trusted Devices…**.
 - The same are available as the command-palette actions
   `remote_control::DisconnectAll`, `remote_control::Disable` and
   `remote_control::ManageDevices`. The account menu offers turning it off and
@@ -120,7 +124,7 @@ remote control off or manage trusted devices.
 
 | Where                                                                                  | What it does                                                                                               |
 | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| On A: **Manage trusted devices...** then **Forget**                                    | Ends that device's session and removes its key; it cannot come back without pairing again.                 |
+| On A: **Manage Trusted Devices…** then **Forget**                                      | Ends that device's session and removes its key; it cannot come back without pairing again.                 |
 | The web devices page, `zodekit.site/account/devices` (**Browsers**, then **Sign out**) | Removes that browser from your account. A's connection to it is closed and the browser deletes its key.    |
 | Signing the device out of your account                                                 | The relay closes its connections; the device deletes its own key and every pairing, so it must pair again. |
 
@@ -163,6 +167,6 @@ The exact rules are in [Remote control protocol](./remote-control-protocol.md#fi
 | "That Zode is not online right now" / the Zode is greyed out        | A is off, asleep, signed out, or has remote control off. Turn it on there.                                                  |
 | "This host's key is not the one expected..." / "Its key changed..." | The other device's key is not the one you paired with. Nothing was opened. If you reinstalled it, forget it and pair again. |
 | "Zode did not start pairing..."                                     | A is busy with another pairing, pairing is locked, remote control is off, or three requests in an hour were already used.   |
-| "Pairing is locked after repeated mismatches"                       | On A: Manage trusted devices, then **Unlock pairing**. The lock never expires by itself.                                    |
+| "Pairing is locked after repeated mismatches"                       | On A: Manage Trusted Devices, then **Unlock Pairing**. The lock never expires by itself.                                    |
 | "The relay's limit for your account was reached" / "Zode is busy"   | Rate or quota limit. Close some tabs or devices, wait, and try again.                                                       |
 | "This browser was signed out of your account..."                    | The browser was revoked. Its key and pairings were deleted; pair again.                                                     |

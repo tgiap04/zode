@@ -87,14 +87,14 @@ attacker who wants to be paired.
   confirm a prompt you did not start.
 - **Nothing is pinned until you say the digits match**, and a host that declines
   leaves nothing pinned.
-- **A pins when you confirm on A.** Choosing **Digits differ** on the other
+- **A pins when you confirm on A.** Saying the digits differ on the other
   device afterwards does not undo that: the relay could hold that message back,
   so A does not wait for it. If you confirmed on A by mistake, remove the device
-  under **Manage trusted devices...**.
+  under **Manage Trusted Devices…**.
 - **Lockouts.** A takes one pairing at a time, a request expires after 120
   seconds, and it takes at most three requests an hour. Three failed attempts
   lock pairing, and the lock does not expire: you unlock it explicitly under
-  **Manage trusted devices...**.
+  **Manage Trusted Devices…**, with **Unlock Pairing**.
 
 | Claim                                                           | Test                                                                                                         |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -118,12 +118,12 @@ not what a shell can read.
 
 ### If a device is lost
 
-1. On A, open **Manage trusted devices...** (status-bar indicator, or the
+1. On A, open **Manage Trusted Devices…** (status-bar indicator, or the
    `remote_control::ManageDevices` action) and choose **Forget** for that
    device. This ends its session at once; it cannot return without pairing again.
 2. For a browser, also sign it out on the web devices page,
    `zodekit.site/account/devices`.
-3. If in doubt, **Disconnect all devices** or **Turn off remote control**.
+3. If in doubt, **Disconnect All Devices** or **Turn Off Remote Control**.
 
 Revocation also wipes credentials on the revoked device itself: a device that
 the relay tells has been revoked deletes its key and every pairing. An ordinary

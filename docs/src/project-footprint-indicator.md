@@ -43,16 +43,17 @@ the buffer-specific controls. It draws nothing, and reserves no space, when
 there is nothing to report — a freshly opened window with no terminals or
 language servers running shows no icon at all. Once a tracked project has a
 child process, the badge shows the combined memory and CPU across every
-tracked project, each behind its own icon: a database glyph for memory, a bolt
-for CPU.
+tracked project, each behind its own icon: a glyph of binary digits for memory,
+a bolt for CPU.
 
 Those two icons are stand-ins. This repository ships no purpose-built CPU or
 memory-module icon, so the badge's tooltip and every popover row spell out
 "RAM" and "CPU" in words rather than leaving the icons to carry the meaning
 by themselves.
 
-Clicking it opens a popover with one line per project: its display name, its
-memory, and its CPU. A value that has not been measured yet — for example, CPU on
+Clicking it opens a popover above the badge, aligned to its right edge, with one
+line per project: its display name, its memory, and its CPU. A value that has
+not been measured yet — for example, CPU on
 the very first sample, before there is an earlier reading to difference
 against — reads "not measured", never "0%", since those mean different
 things: zero says the project is idle, not measured says nothing is known yet.

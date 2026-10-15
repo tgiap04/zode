@@ -47,7 +47,7 @@ starts again if the subagent is resumed.
 
 ## The status bar switch
 
-There is a bolt icon on the status bar. It is lit while the display is being
+There is an eye icon on the status bar. It is lit while the display is being
 held and dimmed when it is not, and clicking it opens a menu with the switch and
 one line saying what is actually happening:
 
@@ -80,7 +80,7 @@ go](#what-lets-it-go).
   **Keep Display Awake** in the menu that opens (see [Status Bar
   settings](./visual-customization.md#status-bar)). This takes effect
   immediately, including on a hold already in place — no restart. It also
-  removes the bolt icon from the bar itself, rather than leaving it dimmed:
+  removes the eye icon from the bar itself, rather than leaving it dimmed:
   hiding a status-bar item this way drops the item's entity, and the icon is
   that entity.
 
