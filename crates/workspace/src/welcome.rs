@@ -425,7 +425,7 @@ impl Render for WelcomePage {
                             .mb_4()
                             .gap_4()
                             .child(
-                                img("images/zode_logo.png")
+                                img("images/zode_app_icon.png")
                                     .size(rems_from_px(45.))
                                     .flex_none(),
                             )

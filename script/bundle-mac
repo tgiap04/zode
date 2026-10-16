@@ -124,7 +124,7 @@ popd
 echo "Bundled ${app_path}"
 
 # DocumentTypes.plist references CFBundleTypeIconFile "Document", so the bundle must contain Document.icns.
-# We use the app icon as a placeholder document icon for now.
+# It carries its own artwork, a page with the app icon on it, rather than the app icon itself.
 document_icon_source="crates/zed/resources/Document.icns"
 document_icon_target="${app_path}/Contents/Resources/Document.icns"
 if [[ -f "${document_icon_source}" ]]; then
