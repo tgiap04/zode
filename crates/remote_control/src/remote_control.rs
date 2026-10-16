@@ -22,6 +22,7 @@ mod pairing_flow;
 mod pairing_modal;
 mod remote_control_settings;
 mod remote_host;
+mod session_history;
 mod session_router;
 mod terminal_mirror;
 mod trusted_devices_modal;
@@ -30,6 +31,8 @@ mod trusted_devices_modal;
 mod file_browse_tests;
 #[cfg(test)]
 mod remote_control_tests;
+#[cfg(test)]
+mod session_history_tests;
 
 use std::sync::Arc;
 
@@ -138,6 +141,7 @@ pub fn init(cx: &mut App) {
             cx,
         )
     });
+    host.update(cx, |host, _| host.set_sessions_available(true));
     RemoteHost::set_global(host.clone(), cx);
 
     cx.observe_new(move |workspace: &mut Workspace, window, cx| {

@@ -25,7 +25,7 @@ use crate::{
     agent_mirror::{AgentMirror, AgentMirrorEvent},
     file_browse::{BrowseError, FileBrowser, FileReply},
     host_environment::{HostEnvironment, RegisteringCredentials},
-    hosting::{HOUSEKEEPING_INTERVAL, Hosting, HostingParts},
+    hosting::{HOUSEKEEPING_INTERVAL, Hosting, HostingParts, RequestSlot},
     pairing_flow::PendingDecision,
     remote_control_settings::RemoteControlSettings,
     terminal_mirror::{TerminalMirror, TerminalMirrorEvent},
@@ -111,6 +111,9 @@ pub struct RemoteHost {
     terminals: Entity<TerminalMirror>,
     /// Answers file requests; without it the host does not offer `files`.
     files: Option<Entity<FileBrowser>>,
+    /// Whether the host offers its agent session history. Off until whoever
+    /// builds the host says it should be.
+    sessions_available: bool,
     app_version: String,
     running: Option<Hosting>,
     state: HostState,
@@ -172,6 +175,7 @@ impl RemoteHost {
             agents,
             terminals,
             files,
+            sessions_available: false,
             app_version,
             running: None,
             state: HostState::Disabled,
@@ -189,6 +193,15 @@ impl RemoteHost {
 
     pub fn state(&self) -> &HostState {
         &self.state
+    }
+
+    /// Offers, or stops offering, the agent session history to devices. Takes
+    /// effect for a connection that is up as well as for the next one.
+    pub(crate) fn set_sessions_available(&mut self, available: bool) {
+        self.sessions_available = available;
+        if let Some(running) = self.running.as_mut() {
+            running.set_sessions_available(available);
+        }
     }
 
     /// The devices in control right now: ones that have proven they hold the
@@ -501,6 +514,7 @@ impl RemoteHost {
             agents: self.agents.clone(),
             terminals: self.terminals.clone(),
             files: self.files.clone(),
+            sessions_available: self.sessions_available,
             app_version: self.app_version.clone(),
             housekeeping,
             subscriptions,
@@ -610,6 +624,19 @@ impl RemoteHost {
     ) {
         if let Some(running) = self.running.as_mut() {
             running.finish_file_request(session_id, ticket, request_id, reply, cx);
+        }
+    }
+
+    pub(crate) fn finish_session_request(
+        &mut self,
+        session_id: u32,
+        slot: RequestSlot,
+        request_id: u32,
+        reply: Result<Vec<Control>, BrowseError>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(running) = self.running.as_mut() {
+            running.finish_session_request(session_id, slot, request_id, reply, cx);
         }
     }
 
@@ -753,5 +780,10 @@ impl RemoteHost {
     /// really did drop the connection.
     pub fn has_relay_client(&self) -> bool {
         self.running.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn offers_sessions(&self) -> bool {
+        self.sessions_available
     }
 }

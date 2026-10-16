@@ -27,8 +27,9 @@ pub use agent_view::{
 pub use agent_view::SessionIntent;
 pub use permission_bypass::PermissionBypassStore;
 pub use session_history::{
-    AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, delete_all_detail, delete_session,
-    execute_session_deletion, plan_delete_all, resume_session, sessions_in_project,
+    AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, ResumeRefusal, delete_all_detail,
+    delete_session, execute_session_deletion, plan_delete_all, resume_refusal, resume_session,
+    sessions_in_project,
 };
 pub use session_store::SessionStore;
 pub use turn_tracker::TurnEvent;

@@ -2377,6 +2377,12 @@ mod project_server {
     use crate::ide_bridge::{IdeLaunch, IdeLaunchOverride};
     use std::{os::unix::fs::PermissionsExt as _, path::Path};
 
+    /// How long a test gives, in real time, to something outside the test's own
+    /// process. A budget counted in scheduler polls is not a duration: what a
+    /// poll costs depends on what the test does in it and on how busy the
+    /// machine is.
+    const REAL_TIME_LIMIT: Duration = Duration::from_secs(20);
+
     /// A stand-in for the project server: it records that it ran and how, starts
     /// a long-lived process in the place the real server's daemon would be, and
     /// then does `ending`.
@@ -2397,8 +2403,7 @@ mod project_server {
                  echo \"$@\" > \"{root}/args-$3\"\n\
                  touch \"{root}/started\"\n\
                  mkdir -p \"{state}/$3\"\n\
-                 sh -c 'sleep 1000; :' daemon \"{state}/$3/server.pid\" >/dev/null 2>&1 </dev/null &\n\
-                 echo $! > \"{state}/$3/server.pid\"\n\
+                 sh -c 'echo $$ > \"$1\"; sleep 1000; :' daemon \"{state}/$3/server.pid\" >/dev/null 2>&1 </dev/null &\n\
                  {ending}\n",
                 root = root.display(),
                 state = state.display(),
@@ -2441,10 +2446,43 @@ mod project_server {
                 .expect("the project server was started")
         }
 
-        fn pid_of(&self, file: &Path) -> Option<String> {
-            std::fs::read_to_string(file)
+        /// The pid the stand-in's proxy recorded for itself.
+        fn proxy_pid(&self, identifier: &str) -> String {
+            wait_for_pid(&self.path().join(format!("proxy-{identifier}.pid")))
+        }
+
+        /// The pid the stand-in's daemon recorded for itself.
+        ///
+        /// The daemon writes it from the process that already holds its final
+        /// command line, as the real server does, and the host stops only a
+        /// process that looks like the server. Stopping it any sooner -- the
+        /// shell's `$!` is a process that has forked and not yet exec'd -- asks
+        /// the host to stop something it rightly declines to touch, and the
+        /// daemon then outlives the test.
+        fn daemon_pid(&self, identifier: &str) -> String {
+            wait_for_pid(&self.path().join(format!("state/{identifier}/server.pid")))
+        }
+    }
+
+    /// Waits off the scheduler: the process that writes the file is not driven
+    /// by it.
+    fn wait_for_pid(file: &Path) -> String {
+        let give_up = std::time::Instant::now() + REAL_TIME_LIMIT;
+        loop {
+            // A file that exists and is still empty is being written.
+            let written = std::fs::read_to_string(file)
                 .ok()
                 .map(|text| text.trim().to_string())
+                .filter(|pid| !pid.is_empty());
+            if let Some(pid) = written {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < give_up,
+                "{} was never written",
+                file.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -2462,7 +2500,8 @@ mod project_server {
     }
 
     async fn wait_for(cx: &mut TestAppContext, mut done: impl FnMut() -> bool) -> bool {
-        for _ in 0..500 {
+        let give_up = std::time::Instant::now() + REAL_TIME_LIMIT;
+        loop {
             cx.background_executor
                 .timer(Duration::from_millis(10))
                 .await;
@@ -2470,8 +2509,10 @@ mod project_server {
             if done() {
                 return true;
             }
+            if std::time::Instant::now() >= give_up {
+                return false;
+            }
         }
-        false
     }
 
     /// A paired, greeted browser, with the stand-in as the project server.
@@ -2706,16 +2747,8 @@ mod project_server {
 
         let session_id = connected.session_id;
         let identifier = fixture.identifier();
-        let proxy = fixture
-            .pid_of(&fixture.path().join(format!("proxy-{identifier}.pid")))
-            .expect("the proxy recorded its pid");
-        let daemon = fixture
-            .pid_of(
-                &fixture
-                    .path()
-                    .join(format!("state/{identifier}/server.pid")),
-            )
-            .expect("the daemon recorded its pid");
+        let proxy = fixture.proxy_pid(&identifier);
+        let daemon = fixture.daemon_pid(&identifier);
         assert!(is_running(&proxy) && is_running(&daemon));
 
         browser.client.close(session_id);
@@ -2734,16 +2767,8 @@ mod project_server {
         open(&browser, &mut connected, 3, 5, cx);
         assert!(echoed(&browser, &mut connected, 5, b"up\n", cx).await);
         let identifier = fixture.identifier();
-        let proxy = fixture
-            .pid_of(&fixture.path().join(format!("proxy-{identifier}.pid")))
-            .expect("the proxy recorded its pid");
-        let daemon = fixture
-            .pid_of(
-                &fixture
-                    .path()
-                    .join(format!("state/{identifier}/server.pid")),
-            )
-            .expect("the daemon recorded its pid");
+        let proxy = fixture.proxy_pid(&identifier);
+        let daemon = fixture.daemon_pid(&identifier);
 
         rig.relay.revoke_device("browser-1");
         assert!(
@@ -2758,13 +2783,7 @@ mod project_server {
         connected.controls(&browser);
         open(&browser, &mut connected, 3, 5, cx);
         assert!(echoed(&browser, &mut connected, 5, b"up\n", cx).await);
-        let proxy = fixture
-            .pid_of(
-                &fixture
-                    .path()
-                    .join(format!("proxy-{}.pid", fixture.identifier())),
-            )
-            .expect("the proxy recorded its pid");
+        let proxy = fixture.proxy_pid(&fixture.identifier());
 
         rig.host.update(cx, |host, cx| host.turn_off(cx));
         assert!(wait_for(cx, || !is_running(&proxy)).await);
@@ -2778,11 +2797,7 @@ mod project_server {
         connected.controls(&browser);
         open(&browser, &mut connected, 3, 5, cx);
         assert!(wait_for(cx, || !fixture.identifiers().is_empty()).await);
-        let pid_file = fixture
-            .path()
-            .join(format!("state/{}/server.pid", fixture.identifier()));
-        assert!(wait_for(cx, || pid_file.exists()).await);
-        let daemon = fixture.pid_of(&pid_file).expect("the daemon's pid");
+        let daemon = fixture.daemon_pid(&fixture.identifier());
         assert!(is_running(&daemon));
 
         let mut seen: Vec<(InnerKind, u32, Vec<u8>)> = Vec::new();
@@ -2844,9 +2859,7 @@ mod project_server {
         open(&browser, &mut connected, 3, 5, cx);
         assert!(echoed(&browser, &mut connected, 5, b"first\n", cx).await);
         let first = fixture.identifier();
-        let first_daemon = fixture
-            .pid_of(&fixture.path().join(format!("state/{first}/server.pid")))
-            .expect("the first daemon's pid");
+        let first_daemon = fixture.daemon_pid(&first);
 
         connected.send_data(&browser, 5, b"");
         cx.run_until_parked();
@@ -2859,9 +2872,7 @@ mod project_server {
             .into_iter()
             .find(|identifier| *identifier != first)
             .expect("a second identifier");
-        let second_daemon = fixture
-            .pid_of(&fixture.path().join(format!("state/{second}/server.pid")))
-            .expect("the second daemon's pid");
+        let second_daemon = fixture.daemon_pid(&second);
         assert!(
             wait_for(cx, || !is_running(&first_daemon)).await,
             "the old server was stopped"
@@ -2886,9 +2897,7 @@ mod project_server {
         assert!(echoed(&browser, &mut connected, 5, b"up\n", cx).await);
         let identifier = fixture.identifier();
         let state = fixture.path().join(format!("state/{identifier}"));
-        let genuine = fixture
-            .pid_of(&state.join("server.pid"))
-            .expect("the daemon's pid");
+        let genuine = fixture.daemon_pid(&identifier);
 
         let mut bystander = util::command::new_command("sleep")
             .arg("1000")
@@ -3080,16 +3089,11 @@ mod project_server {
             );
             outgoing_tx.unbounded_send(envelope(41)).expect("sent");
             let mut echoed_back = None;
-            for _ in 0..500 {
-                cx.background_executor
-                    .timer(Duration::from_millis(10))
-                    .await;
-                cx.run_until_parked();
-                if let Ok(reply) = incoming_rx.try_recv() {
-                    echoed_back = Some(reply);
-                    break;
-                }
-            }
+            wait_for(cx, || {
+                echoed_back = incoming_rx.try_recv().ok();
+                echoed_back.is_some()
+            })
+            .await;
             assert_eq!(echoed_back.map(|reply| reply.id), Some(41));
             assert!(fixture.started());
 
@@ -3151,16 +3155,8 @@ mod project_server {
                 .read_with(cx, |host, _| host.sessions().last().map(|s| s.session_id))
                 .expect("the project session is in control");
             let identifier = fixture.identifier();
-            let proxy = fixture
-                .pid_of(&fixture.path().join(format!("proxy-{identifier}.pid")))
-                .expect("the proxy recorded its pid");
-            let daemon = fixture
-                .pid_of(
-                    &fixture
-                        .path()
-                        .join(format!("state/{identifier}/server.pid")),
-                )
-                .expect("the daemon recorded its pid");
+            let proxy = fixture.proxy_pid(&identifier);
+            let daemon = fixture.daemon_pid(&identifier);
             assert!(is_running(&proxy) && is_running(&daemon));
 
             connection.kill().await.expect("killed");
@@ -3275,3 +3271,4 @@ mod project_server {
 }
 
 mod file_requests;
+mod session_requests;

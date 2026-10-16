@@ -54,6 +54,14 @@ pub struct AgentSummary {
     pub status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The agent's own id for the conversation this tab is writing, when it
+    /// owns one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// `claude`, `codex`, `copilot` or `opencode`; absent for an agent the
+    /// host has no name for. The same words as [`SessionEntry::agent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +92,40 @@ pub struct FileEntry {
     /// the id to name in later requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_id: Option<String>,
+}
+
+/// Where a page of [`SessionEntry`] ends. Exclusive: the next page starts with
+/// the entry after this one in `(updated_at descending, id ascending)` order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCursor {
+    /// Unix milliseconds.
+    pub updated_at: u64,
+    pub id: String,
+}
+
+/// One past agent conversation in a folder open on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEntry {
+    /// What the agent's own resume takes, and what `session_resume` names.
+    pub id: String,
+    /// `claude`, `codex`, `copilot` or `opencode`.
+    pub agent: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// The open folder the session ran in, as `files_list` names it.
+    pub worktree_id: String,
+    /// That folder's name followed by the path inside it. Never absolute.
+    pub folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Unix milliseconds.
+    pub updated_at: u64,
+    #[serde(default)]
+    pub can_fork: bool,
+    /// The tab already running this session, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_agent_id: Option<String>,
 }
 
 /// A message inside the encrypted channel.
@@ -227,6 +269,42 @@ pub enum Control {
         /// The diff is cut: what follows on the stream is only its start.
         #[serde(default)]
         truncated: bool,
+    },
+    /// Asks for past agent sessions in the folders open on the host, newest
+    /// first. Without `before` it starts from the newest; `limit` defaults to
+    /// 50 and is clamped to 1 through 200.
+    SessionsList {
+        request_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<SessionCursor>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// A page too long for one message arrives as several, in order, each
+    /// repeating `request_id`; every one but the last has `more` set, and only
+    /// the last carries `next`, and only when another page exists.
+    SessionsListReply {
+        request_id: u32,
+        sessions: Vec<SessionEntry>,
+        #[serde(default)]
+        more: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<SessionCursor>,
+    },
+    /// Opens a tab on a past session, or on a fork of it. The host takes
+    /// nothing but the id from the device and finds the rest itself.
+    SessionResume {
+        request_id: u32,
+        session_id: String,
+        #[serde(default)]
+        fork: bool,
+    },
+    /// The host did what was asked. `open_agent_id` names the tab that already
+    /// ran the session, in which case nothing new was opened.
+    SessionResumed {
+        request_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_agent_id: Option<String>,
     },
 }
 

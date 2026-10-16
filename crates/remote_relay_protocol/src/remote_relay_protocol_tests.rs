@@ -127,6 +127,8 @@ fn sample_controls() -> Vec<Control> {
         name: "Claude".into(),
         status: AgentStatus::WaitingForInput,
         title: Some("Fix the build".into()),
+        session_id: Some("0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f".into()),
+        agent: Some("claude".into()),
     };
     vec![
         Control::Hello {
@@ -232,7 +234,51 @@ fn sample_controls() -> Vec<Control> {
             stream_id: 11,
             truncated: true,
         },
+        Control::SessionsList {
+            request_id: 8,
+            before: Some(cursor()),
+            limit: Some(50),
+        },
+        Control::SessionsListReply {
+            request_id: 8,
+            sessions: vec![session_entry()],
+            more: true,
+            next: Some(cursor()),
+        },
+        Control::SessionResume {
+            request_id: 9,
+            session_id: SESSION_ID.into(),
+            fork: true,
+        },
+        Control::SessionResumed {
+            request_id: 9,
+            open_agent_id: Some("terminal-42".into()),
+        },
     ]
+}
+
+const SESSION_ID: &str = "0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f";
+
+fn cursor() -> SessionCursor {
+    SessionCursor {
+        updated_at: 1_760_572_800_000,
+        id: SESSION_ID.into(),
+    }
+}
+
+fn session_entry() -> SessionEntry {
+    SessionEntry {
+        id: SESSION_ID.into(),
+        agent: "claude".into(),
+        title: "Fix the terminal snapshot".into(),
+        preview: Some("Carry the scroll region".into()),
+        worktree_id: "3".into(),
+        folder: "zode/crates/terminal".into(),
+        branch: Some("main".into()),
+        updated_at: 1_760_572_800_000,
+        can_fork: true,
+        open_agent_id: Some("terminal-42".into()),
+    }
 }
 
 #[test]
@@ -245,7 +291,135 @@ fn every_control_message_round_trips() {
         let tag = value["t"].as_str().expect("tagged").to_string();
         assert!(tags.insert(tag), "two messages share a tag");
     }
-    assert_eq!(tags.len(), 21);
+    assert_eq!(tags.len(), 25);
+}
+
+fn assert_encodes_to(control: &Control, expected: &str) {
+    let bytes = encode_control(control).expect("encodes");
+    assert_eq!(std::str::from_utf8(&bytes).expect("utf-8"), expected);
+    assert_eq!(&decode_control(&bytes).expect("decodes"), control);
+}
+
+/// The strings the browser asserts too; a change to either side breaks both.
+#[test]
+fn the_session_messages_encode_to_the_published_vectors() {
+    assert_encodes_to(
+        &Control::SessionsList {
+            request_id: 7,
+            before: None,
+            limit: None,
+        },
+        r#"{"t":"sessions_list","request_id":7}"#,
+    );
+    assert_encodes_to(
+        &Control::SessionsList {
+            request_id: 8,
+            before: Some(cursor()),
+            limit: Some(50),
+        },
+        r#"{"t":"sessions_list","request_id":8,"before":{"updated_at":1760572800000,"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f"},"limit":50}"#,
+    );
+    assert_encodes_to(
+        &Control::SessionsListReply {
+            request_id: 7,
+            sessions: vec![session_entry()],
+            more: false,
+            next: Some(cursor()),
+        },
+        r#"{"t":"sessions_list_reply","request_id":7,"sessions":[{"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","agent":"claude","title":"Fix the terminal snapshot","preview":"Carry the scroll region","worktree_id":"3","folder":"zode/crates/terminal","branch":"main","updated_at":1760572800000,"can_fork":true,"open_agent_id":"terminal-42"}],"more":false,"next":{"updated_at":1760572800000,"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f"}}"#,
+    );
+    assert_encodes_to(
+        &Control::SessionResume {
+            request_id: 9,
+            session_id: SESSION_ID.into(),
+            fork: false,
+        },
+        r#"{"t":"session_resume","request_id":9,"session_id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","fork":false}"#,
+    );
+    assert_encodes_to(
+        &Control::SessionResumed {
+            request_id: 9,
+            open_agent_id: None,
+        },
+        r#"{"t":"session_resumed","request_id":9}"#,
+    );
+    assert_encodes_to(
+        &Control::SessionResumed {
+            request_id: 9,
+            open_agent_id: Some("terminal-42".into()),
+        },
+        r#"{"t":"session_resumed","request_id":9,"open_agent_id":"terminal-42"}"#,
+    );
+    assert_encodes_to(
+        &Control::AgentUpdate {
+            agent: AgentSummary {
+                id: "terminal-42".into(),
+                name: "Claude Code".into(),
+                status: AgentStatus::Working,
+                title: Some("Fix the terminal snapshot".into()),
+                session_id: Some(SESSION_ID.into()),
+                agent: Some("claude".into()),
+            },
+        },
+        r#"{"t":"agent_update","agent":{"id":"terminal-42","name":"Claude Code","status":"working","title":"Fix the terminal snapshot","session_id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","agent":"claude"}}"#,
+    );
+}
+
+#[test]
+fn a_session_entry_with_nothing_optional_to_say_omits_it_but_always_says_whether_it_forks() {
+    let entry = SessionEntry {
+        preview: None,
+        branch: None,
+        can_fork: false,
+        open_agent_id: None,
+        ..session_entry()
+    };
+    let json = serde_json::to_string(&entry).expect("encodes");
+    assert!(!json.contains("preview"), "{json}");
+    assert!(!json.contains("branch"), "{json}");
+    assert!(!json.contains("open_agent_id"), "{json}");
+    assert!(json.contains(r#""can_fork":false"#), "{json}");
+}
+
+#[test]
+fn a_resume_request_that_leaves_out_fork_continues_the_session() {
+    assert_eq!(
+        decode_control(br#"{"t":"session_resume","request_id":1,"session_id":"a"}"#)
+            .expect("decodes"),
+        Control::SessionResume {
+            request_id: 1,
+            session_id: "a".into(),
+            fork: false,
+        }
+    );
+}
+
+#[test]
+fn an_agent_summary_from_before_sessions_existed_still_decodes() {
+    let control = decode_control(
+        br#"{"t":"agent_update","agent":{"id":"a","name":"n","status":"idle","title":"t"}}"#,
+    )
+    .expect("decodes");
+    let Control::AgentUpdate { agent } = control else {
+        panic!("wrong variant");
+    };
+    assert_eq!((agent.session_id, agent.agent), (None, None));
+
+    let bytes = encode_control(&Control::AgentUpdate {
+        agent: AgentSummary {
+            id: "a".into(),
+            name: "n".into(),
+            status: AgentStatus::Idle,
+            title: None,
+            session_id: None,
+            agent: None,
+        },
+    })
+    .expect("encodes");
+    assert_eq!(
+        std::str::from_utf8(&bytes).expect("utf-8"),
+        r#"{"t":"agent_update","agent":{"id":"a","name":"n","status":"idle"}}"#
+    );
 }
 
 #[test]

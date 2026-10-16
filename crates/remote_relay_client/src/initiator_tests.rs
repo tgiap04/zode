@@ -476,6 +476,8 @@ async fn pings_are_answered_and_lists_are_remembered(cx: &mut TestAppContext) {
                     name: "Agent".into(),
                     status: remote_relay_protocol::AgentStatus::Working,
                     title: None,
+                    session_id: None,
+                    agent: None,
                 },
             },
             cx,

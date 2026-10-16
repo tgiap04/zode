@@ -21,7 +21,8 @@ pub use frame::{
 };
 pub use messages::{
     AgentStatus, AgentSummary, Control, FileEntry, FileKind, MessageError, PairingMessage,
-    TerminalSummary, decode_control, encode_control, error_code, reject_unknown_version,
+    SessionCursor, SessionEntry, TerminalSummary, decode_control, encode_control, error_code,
+    reject_unknown_version,
 };
 pub use noise_session::{
     DeviceKeypair, HANDSHAKE_TIMEOUT, Handshake, HandshakeParameters, KEY_LEN,

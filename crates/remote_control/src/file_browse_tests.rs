@@ -282,6 +282,52 @@ fn a_listing_that_serializes_past_the_reservation_is_cut_and_says_so() {
     assert!(total <= MAX_DIFF_BYTES, "{total} bytes");
 }
 
+/// A name no frame can carry is left out, so what is sent is not the whole
+/// directory and the reader has to be told.
+#[test]
+fn an_entry_too_large_for_any_message_is_left_out_and_the_listing_says_so() {
+    let entry = |name: String| remote_relay_protocol::FileEntry {
+        name,
+        kind: FileKind::File,
+        size: None,
+        worktree_id: None,
+    };
+    let sent_names = |entries: Vec<remote_relay_protocol::FileEntry>| {
+        let mut names = Vec::new();
+        let mut flags = Vec::new();
+        for reply in list_replies(
+            4,
+            Listing {
+                entries,
+                truncated: false,
+            },
+        ) {
+            encode_control(&reply).expect("what is sent fits one frame");
+            let Control::FilesListReply {
+                entries, truncated, ..
+            } = reply
+            else {
+                panic!("not a listing reply");
+            };
+            flags.push(truncated);
+            names.extend(entries.into_iter().map(|entry| entry.name));
+        }
+        (names, flags)
+    };
+
+    let (names, flags) = sent_names(vec![
+        entry("a.txt".to_string()),
+        entry("n".repeat(MAX_INNER_PAYLOAD_LEN)),
+        entry("b.txt".to_string()),
+    ]);
+    assert_eq!(names, ["a.txt", "b.txt"]);
+    assert!(flags.iter().all(|truncated| *truncated), "{flags:?}");
+
+    let (names, flags) = sent_names(vec![entry("a.txt".to_string()), entry("b.txt".to_string())]);
+    assert_eq!(names, ["a.txt", "b.txt"]);
+    assert!(flags.iter().all(|truncated| !*truncated), "{flags:?}");
+}
+
 #[gpui::test]
 async fn a_text_file_is_read(cx: &mut TestAppContext) {
     init(cx);

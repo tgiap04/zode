@@ -49,7 +49,7 @@ pub struct BrowseError {
 }
 
 impl BrowseError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -60,17 +60,17 @@ impl BrowseError {
         Self::new(error_code::NOT_FOUND, "there is no such file or folder")
     }
 
-    fn internal(message: &str) -> Self {
+    pub(crate) fn internal(message: &str) -> Self {
         Self::new(error_code::INTERNAL, message)
     }
 }
 
 /// The reply to a request, or an `internal` error if `deadline` finishes first.
 /// The request is dropped, which stops it where it can be stopped.
-pub(crate) async fn answer_within(
+pub(crate) async fn answer_within<Reply>(
     deadline: impl Future<Output = ()>,
-    reply: impl Future<Output = Result<FileReply, BrowseError>>,
-) -> Result<FileReply, BrowseError> {
+    reply: impl Future<Output = Result<Reply, BrowseError>>,
+) -> Result<Reply, BrowseError> {
     match select(pin!(reply), pin!(deadline)).await {
         Either::Left((reply, _)) => reply,
         Either::Right(((), _)) => Err(BrowseError::internal("the request took too long")),
@@ -467,28 +467,39 @@ async fn read_text(
     Ok(bytes)
 }
 
-/// A listing as the control messages that carry it: as many as it takes to keep
-/// each under one frame, every one but the last marked `more`.
-pub fn list_replies(request_id: u32, listing: Listing) -> Vec<Control> {
-    let Listing {
-        entries,
-        mut truncated,
-    } = listing;
-    let budget = MAX_INNER_PAYLOAD_LEN - LIST_REPLY_OVERHEAD;
-    let mut batches: Vec<Vec<FileEntry>> = vec![Vec::new()];
+/// `items` cut into batches whose serialized size, with `overhead` bytes of
+/// message around each, fits one frame; and whether any item was left out.
+/// `json_len` is what an item weighs once serialized, or `None` if it cannot be.
+///
+/// There is always at least one batch, so an empty answer is still an answer.
+/// An item that cannot be measured is not one that can be sent either, and
+/// neither is one too large for a frame of its own: both are left out, so a
+/// single bad item cannot make the whole message unsendable. Reaching
+/// `total_limit` bytes of items leaves out the rest.
+pub(crate) fn batch_by_json_size<Item>(
+    items: impl IntoIterator<Item = Item>,
+    json_len: impl Fn(&Item) -> Option<usize>,
+    overhead: usize,
+    total_limit: usize,
+) -> (Vec<Vec<Item>>, bool) {
+    let budget = MAX_INNER_PAYLOAD_LEN - overhead;
+    let mut batches: Vec<Vec<Item>> = vec![Vec::new()];
     let mut used = 0;
-    let mut total = 0;
-    for entry in entries {
-        // Each entry costs its JSON and a comma. An entry that cannot be
-        // measured is not one that can be sent either.
-        let Some(cost) = serde_json::to_vec(&entry)
-            .log_err()
-            .map(|json| json.len() + 1)
-        else {
+    let mut total: usize = 0;
+    let mut cut = false;
+    for item in items {
+        // Each item costs its JSON and a comma.
+        let Some(cost) = json_len(&item).map(|length| length + 1) else {
+            cut = true;
             continue;
         };
-        if total + cost > MAX_LIST_BYTES {
-            truncated = true;
+        if cost > budget {
+            log::warn!("leaving out an item of {cost} bytes, which no message can carry");
+            cut = true;
+            continue;
+        }
+        if total.saturating_add(cost) > total_limit {
+            cut = true;
             break;
         }
         total += cost;
@@ -499,9 +510,23 @@ pub fn list_replies(request_id: u32, listing: Listing) -> Vec<Control> {
         }
         used += cost;
         if let Some(batch) = batches.last_mut() {
-            batch.push(entry);
+            batch.push(item);
         }
     }
+    (batches, cut)
+}
+
+/// A listing as the control messages that carry it: as many as it takes to keep
+/// each under one frame, every one but the last marked `more`.
+pub fn list_replies(request_id: u32, listing: Listing) -> Vec<Control> {
+    let Listing { entries, truncated } = listing;
+    let (batches, cut) = batch_by_json_size(
+        entries,
+        |entry| serde_json::to_vec(entry).log_err().map(|json| json.len()),
+        LIST_REPLY_OVERHEAD,
+        MAX_LIST_BYTES,
+    );
+    let truncated = truncated || cut;
     let last = batches.len() - 1;
     batches
         .into_iter()

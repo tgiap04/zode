@@ -12,11 +12,14 @@
 
 use std::collections::HashMap;
 
+use agent_sessions::AgentKind;
 use agent_ui::{AgentView, AgentViewEvent};
 use gpui::{App, Context, EntityId, EventEmitter, Subscription, WeakEntity};
 use project::builtin_agent;
 use remote_relay_protocol::{AgentStatus, AgentSummary};
 use util::ResultExt as _;
+
+use crate::session_history::wire_agent;
 
 /// The id a terminal is listed and attached under.
 pub fn terminal_id(entity_id: EntityId) -> String {
@@ -96,6 +99,9 @@ fn summarize(view: &AgentView, view_id: EntityId, cx: &App) -> AgentSummary {
             view.awaiting_approval(),
         ),
         title: Some(view.tab_label().to_string()),
+        session_id: view.session_id().map(str::to_string),
+        agent: AgentKind::from_builtin_agent_id(agent.as_ref())
+            .map(|kind| wire_agent(kind).to_string()),
     }
 }
 
@@ -238,6 +244,27 @@ impl AgentMirror {
             cx.emit(AgentMirrorEvent::Removed { id: previous.id });
         }
         cx.emit(AgentMirrorEvent::Changed(summary));
+    }
+
+    /// The id a tab running `session_id` is listed under, if one is.
+    ///
+    /// Running, not merely open: a tab whose CLI ended is a screen of scrollback
+    /// that nothing writes to any more, and resuming the session must still
+    /// start it. `is_working` is only true while the CLI's terminal task runs,
+    /// so it is also what says the tab has a terminal a device can attach to.
+    /// With two such tabs the older one is named, so the answer does not move
+    /// between calls.
+    pub fn running_agent_for_session(&self, session_id: &str, cx: &App) -> Option<String> {
+        self.agents
+            .iter()
+            .filter_map(|(id, tracked)| {
+                let view = tracked.view.upgrade()?;
+                let view = view.read(cx);
+                (view.session_id() == Some(session_id) && view.is_working(cx))
+                    .then(|| (*id, summarize(view, *id, cx).id))
+            })
+            .min_by_key(|(id, _)| id.as_u64())
+            .map(|(_, listed_as)| listed_as)
     }
 
     /// Every tab as it reads right now, in a stable order.
@@ -439,6 +466,103 @@ mod tests {
             recorded.events.borrow()
         );
         assert!(mirror.read_with(cx, |mirror, cx| mirror.summaries(cx).is_empty()));
+    }
+
+    fn open_session_tab(
+        workspace: &Entity<Workspace>,
+        agent: &str,
+        session_id: Option<&str>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<AgentView> {
+        let before = workspace.read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<AgentView>(cx).count()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let intent = session_id.map_or(agent_ui::SessionIntent::Untracked, |id| {
+                agent_ui::SessionIntent::Tracked(id.to_string().into())
+            });
+            AgentView::open_tracked(
+                workspace,
+                agent,
+                agent_ui::SessionOrigin::new(intent, Some("A past conversation")),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let tabs: Vec<_> = workspace.items_of_type::<AgentView>(cx).collect();
+            assert_eq!(tabs.len(), before + 1, "the tab opened");
+            tabs.into_iter()
+                .max_by_key(|tab| tab.entity_id().as_u64())
+                .expect("a tab")
+        })
+    }
+
+    const SESSION: &str = "0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f";
+
+    #[gpui::test]
+    async fn a_summary_says_which_session_and_which_agent_the_tab_runs(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace(cx).await;
+        let mirror = cx.update(|_, cx| cx.new(AgentMirror::new));
+        open_session_tab(&workspace, "claude-acp", Some(SESSION), cx);
+        open_session_tab(&workspace, "codex-acp", None, cx);
+
+        let summaries = mirror.read_with(cx, |mirror, cx| mirror.summaries(cx));
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].session_id.as_deref(), Some(SESSION));
+        assert_eq!(summaries[0].agent.as_deref(), Some("claude"));
+        assert_eq!(summaries[1].session_id, None, "an untracked tab has no id");
+        assert_eq!(summaries[1].agent.as_deref(), Some("codex"));
+    }
+
+    #[gpui::test]
+    async fn only_a_tab_whose_cli_runs_counts_as_running_its_session(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace(cx).await;
+        let mirror = cx.update(|_, cx| cx.new(AgentMirror::new));
+        let tab = open_session_tab(&workspace, "claude-acp", Some(SESSION), cx);
+        let running = |cx: &mut VisualTestContext, id: &str| {
+            mirror.read_with(cx, |mirror, cx| mirror.running_agent_for_session(id, cx))
+        };
+
+        assert_eq!(running(cx, SESSION), None, "not started");
+        tab.update(cx, |tab, cx| tab.simulate_cli_alive(true, cx));
+        let listed_as = running(cx, SESSION).expect("its CLI runs");
+        let summaries = mirror.read_with(cx, |mirror, cx| mirror.summaries(cx));
+        assert_eq!(listed_as, summaries[0].id);
+        assert_eq!(running(cx, "another-session"), None);
+
+        tab.update(cx, |tab, cx| tab.simulate_cli_alive(false, cx));
+        assert_eq!(running(cx, SESSION), None, "its CLI ended");
+    }
+
+    #[gpui::test]
+    async fn a_tab_with_no_session_runs_no_session(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace(cx).await;
+        let mirror = cx.update(|_, cx| cx.new(AgentMirror::new));
+        let tab = open_session_tab(&workspace, "codex-acp", None, cx);
+        tab.update(cx, |tab, cx| tab.simulate_cli_alive(true, cx));
+        assert_eq!(
+            mirror.read_with(cx, |mirror, cx| mirror.running_agent_for_session("", cx)),
+            None
+        );
+    }
+
+    #[gpui::test]
+    async fn with_two_tabs_on_one_session_the_older_is_named(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace(cx).await;
+        let mirror = cx.update(|_, cx| cx.new(AgentMirror::new));
+        let older = open_session_tab(&workspace, "claude-acp", Some(SESSION), cx);
+        let newer = open_session_tab(&workspace, "claude-acp", Some(SESSION), cx);
+        for tab in [&older, &newer] {
+            tab.update(cx, |tab, cx| tab.simulate_cli_alive(true, cx));
+        }
+        let listed_as = mirror
+            .read_with(cx, |mirror, cx| {
+                mirror.running_agent_for_session(SESSION, cx)
+            })
+            .expect("running");
+        assert_eq!(listed_as, agent_id_without_terminal(older.entity_id()));
     }
 
     #[gpui::test]

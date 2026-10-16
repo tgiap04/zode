@@ -22,7 +22,8 @@ use remote_relay_client::{
 };
 use remote_relay_protocol::{
     Control, DeviceKeypair, InnerFrame, InnerKind, MAX_INNER_PAYLOAD_LEN, PAIRING_EXPIRY,
-    PairingMessage, build_prologue, decode_control, encode_control, error_code, random_nonce,
+    PairingMessage, SessionCursor, build_prologue, decode_control, encode_control, error_code,
+    random_nonce,
 };
 
 use crate::{
@@ -32,6 +33,7 @@ use crate::{
     pairing_flow::PairingFlow,
     remote_control_settings::RemoteControlSettings,
     remote_host::{RemoteHost, RemoteHostEvent},
+    session_history::{self, SessionRequest},
     session_router::{
         HOST_STREAM_BASE, HostFacts, MAX_ATTACHMENTS_PER_SESSION, RouterAction, RouterState,
         route_control,
@@ -71,6 +73,15 @@ const MAX_UNFINISHED_SESSIONS: usize = 16;
 
 /// File requests one device may have being worked on at once.
 const MAX_FILE_REQUESTS_PER_SESSION: usize = 4;
+
+/// How long after a session was opened for a device it must wait before it may
+/// have another opened. The tab a resume opens is added a moment after the
+/// answer, and an agent counts as running only once its process is, so a device
+/// asking again straight away would be answered by a second process on the same
+/// transcript, and a device asking over and over by as many processes as it
+/// likes. `ActiveSession::resume` keeps it to one at a time while one is being
+/// opened; this is what keeps the next from following at once.
+pub(crate) const RESUME_COOLDOWN: Duration = Duration::from_secs(3);
 
 /// Bytes of answers one device may have waiting for the relay. A request is
 /// let in only if the answers already waiting, plus the largest answer each
@@ -119,10 +130,21 @@ pub(crate) struct ActiveSession {
     /// Answers to file requests, in the order the device must see them.
     outbound: VecDeque<Outbound>,
     outbound_bytes: usize,
-    /// Work answering file requests, by ticket. Ending the session drops it,
-    /// which cancels the work and its deadline.
+    /// Work answering file requests and session listings, by ticket. Ending
+    /// the session drops it, which cancels the work and its deadline.
     file_tasks: HashMap<u64, Task<()>>,
+    /// The session being opened for this device, at most one. Dropped with the
+    /// session, so a tab is never opened for a device that has gone.
+    resume: Option<Task<()>>,
     next_host_stream: u32,
+}
+
+/// What a finished request had been holding, so that it can be given back.
+pub(crate) enum RequestSlot {
+    /// One of the requests in `file_tasks`.
+    Ticket(u64),
+    /// The session being opened.
+    Resume,
 }
 
 /// One frame of an answer, sealed only when the relay has room for it.
@@ -149,6 +171,17 @@ impl Outbound {
 }
 
 impl ActiveSession {
+    /// Whether one more request that may be answered with [`MAX_REPLY_BYTES`]
+    /// fits this device's allowance: how many it may have being worked on, and
+    /// how much it may have waiting for the relay on top of what the ones
+    /// already running may yet add.
+    fn has_room_for_a_request(&self) -> bool {
+        let running = self.file_tasks.len();
+        let reserved = (running + 1) * MAX_REPLY_BYTES;
+        running < MAX_FILE_REQUESTS_PER_SESSION
+            && self.outbound_bytes + reserved <= MAX_QUEUED_REPLY_BYTES
+    }
+
     fn enqueue(&mut self, item: Outbound) {
         self.outbound_bytes += item.weight();
         self.outbound.push_back(item);
@@ -184,6 +217,14 @@ pub(crate) struct Hosting {
     pub(crate) agents: Entity<AgentMirror>,
     pub(crate) terminals: Entity<TerminalMirror>,
     files: Option<Entity<FileBrowser>>,
+    /// Whether this host answers for its agent session history.
+    pub(crate) sessions_available: bool,
+    /// When each device may next have a session opened for it, by device id.
+    /// Bounded by the number of paired devices, because a session only opens for
+    /// a paired one. An entry that has run out is not removed on its own: a
+    /// lookup compares it with the clock, and the next insert drops what has
+    /// passed.
+    resume_cooldowns: HashMap<String, Instant>,
     /// Numbers the file requests of every session, so that an answer can tell
     /// whether the request it answers is still waiting.
     next_file_ticket: u64,
@@ -214,6 +255,7 @@ pub(crate) struct HostingParts {
     pub(crate) agents: Entity<AgentMirror>,
     pub(crate) terminals: Entity<TerminalMirror>,
     pub(crate) files: Option<Entity<FileBrowser>>,
+    pub(crate) sessions_available: bool,
     pub(crate) app_version: String,
     pub(crate) housekeeping: Task<()>,
     pub(crate) subscriptions: Vec<Subscription>,
@@ -246,6 +288,8 @@ impl Hosting {
             agents: parts.agents,
             terminals: parts.terminals,
             files: parts.files,
+            sessions_available: parts.sessions_available,
+            resume_cooldowns: HashMap::default(),
             next_file_ticket: 0,
             pairing: PairingFlow::default(),
             handshakes: ResponderHandshakes::default(),
@@ -679,6 +723,7 @@ impl Hosting {
                 outbound: VecDeque::new(),
                 outbound_bytes: 0,
                 file_tasks: HashMap::default(),
+                resume: None,
                 next_host_stream: HOST_STREAM_BASE,
             },
         );
@@ -747,6 +792,7 @@ impl Hosting {
             app_version: &self.app_version,
             ide_available: ide_bridge::locate(cx).is_some(),
             files_available: self.files.is_some(),
+            sessions_available: self.sessions_available,
             proto_version: rpc::PROTOCOL_VERSION,
         };
         let actions = route_control(&mut session.router, control, &facts);
@@ -802,6 +848,10 @@ impl Hosting {
                 request_id,
                 request,
             } => self.serve_files(session_id, request_id, request, cx),
+            RouterAction::Sessions {
+                request_id,
+                request,
+            } => self.serve_sessions(session_id, request_id, request, cx),
             RouterAction::ReportSize { terminal_id } => {
                 let size = self
                     .terminals
@@ -1067,11 +1117,7 @@ impl Hosting {
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
-        let running = session.file_tasks.len();
-        let reserved = (running + 1) * MAX_REPLY_BYTES;
-        if running >= MAX_FILE_REQUESTS_PER_SESSION
-            || session.outbound_bytes + reserved > MAX_QUEUED_REPLY_BYTES
-        {
+        if !session.has_room_for_a_request() {
             let refusal = Control::Error {
                 code: error_code::RATE_LIMITED.to_string(),
                 message: "too many file requests are waiting; ask again when they are answered"
@@ -1098,6 +1144,189 @@ impl Hosting {
         });
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.file_tasks.insert(ticket, task);
+        }
+    }
+
+    fn serve_sessions(
+        &mut self,
+        session_id: u32,
+        request_id: u32,
+        request: SessionRequest,
+        cx: &mut Context<RemoteHost>,
+    ) {
+        match request {
+            SessionRequest::List { before, limit } => {
+                self.serve_session_list(session_id, request_id, before, limit, cx);
+            }
+            SessionRequest::Resume {
+                session_id: wanted,
+                fork,
+            } => {
+                self.serve_session_resume(session_id, request_id, wanted, fork, cx);
+            }
+        }
+    }
+
+    fn rate_limited(request_id: u32) -> Control {
+        Control::Error {
+            code: error_code::RATE_LIMITED.to_string(),
+            message: "too many requests are waiting; ask again when they are answered".to_string(),
+            request_id: Some(request_id),
+        }
+    }
+
+    fn resume_cooling_down(request_id: u32) -> Control {
+        Control::Error {
+            code: error_code::RATE_LIMITED.to_string(),
+            message: "a session was just opened; ask again in a few seconds".to_string(),
+            request_id: Some(request_id),
+        }
+    }
+
+    /// A listing draws on the same allowance as a file request: it is work for
+    /// the host and a reply that has to wait for the relay.
+    fn serve_session_list(
+        &mut self,
+        session_id: u32,
+        request_id: u32,
+        before: Option<SessionCursor>,
+        limit: usize,
+        cx: &mut Context<RemoteHost>,
+    ) {
+        let Some(session) = self.sessions.get(&session_id) else {
+            return;
+        };
+        if !session.has_room_for_a_request() {
+            self.queue_control(session_id, Self::rate_limited(request_id), cx);
+            return;
+        }
+        let ticket = self.next_file_ticket;
+        self.next_file_ticket += 1;
+        let agents = self.agents.clone();
+        let task = cx.spawn(async move |this: WeakEntity<RemoteHost>, cx| {
+            let deadline = cx
+                .background_executor()
+                .timer(file_browse::REQUEST_DEADLINE);
+            let reply = file_browse::answer_within(
+                deadline,
+                session_history::list(request_id, before, limit, agents, cx),
+            )
+            .await;
+            this.update(cx, |host, cx| {
+                host.finish_session_request(
+                    session_id,
+                    RequestSlot::Ticket(ticket),
+                    request_id,
+                    reply,
+                    cx,
+                );
+            })
+            .ok();
+        });
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.file_tasks.insert(ticket, task);
+        }
+    }
+
+    /// One session at a time is opened for a device -- across all the
+    /// connections it has, and with [`RESUME_COOLDOWN`] between one and the
+    /// next -- because each is a process on this machine that the person at it
+    /// did not start.
+    fn serve_session_resume(
+        &mut self,
+        session_id: u32,
+        request_id: u32,
+        wanted: String,
+        fork: bool,
+        cx: &mut Context<RemoteHost>,
+    ) {
+        let Some(session) = self.sessions.get(&session_id) else {
+            return;
+        };
+        let device_id = &session.peer_device_id;
+        let device_name = session.peer_name.clone();
+        let one_is_opening = self
+            .sessions
+            .values()
+            .any(|other| other.peer_device_id == *device_id && other.resume.is_some());
+        if one_is_opening || session.outbound_bytes >= MAX_QUEUED_REPLY_BYTES {
+            self.queue_control(session_id, Self::rate_limited(request_id), cx);
+            return;
+        }
+        let now = Self::now(cx);
+        if self
+            .resume_cooldowns
+            .get(device_id)
+            .is_some_and(|until| now < *until)
+        {
+            self.queue_control(session_id, Self::resume_cooling_down(request_id), cx);
+            return;
+        }
+        let agents = self.agents.clone();
+        let task = cx.spawn(async move |this: WeakEntity<RemoteHost>, cx| {
+            let deadline = cx
+                .background_executor()
+                .timer(file_browse::REQUEST_DEADLINE);
+            let reply = file_browse::answer_within(
+                deadline,
+                session_history::resume(request_id, wanted, fork, device_name, agents, cx),
+            )
+            .await;
+            this.update(cx, |host, cx| {
+                host.finish_session_request(session_id, RequestSlot::Resume, request_id, reply, cx);
+            })
+            .ok();
+        });
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.resume = Some(task);
+        }
+    }
+
+    /// Queues the answer to a session request, if the session that asked for
+    /// it is still the one that did.
+    pub(crate) fn finish_session_request(
+        &mut self,
+        session_id: u32,
+        slot: RequestSlot,
+        request_id: u32,
+        reply: Result<Vec<Control>, BrowseError>,
+        cx: &mut Context<RemoteHost>,
+    ) {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return;
+        };
+        let was_waiting = match slot {
+            RequestSlot::Ticket(ticket) => session.file_tasks.remove(&ticket).is_some(),
+            RequestSlot::Resume => session.resume.take().is_some(),
+        };
+        if !was_waiting {
+            return;
+        }
+        if matches!(slot, RequestSlot::Resume)
+            && reply
+                .as_ref()
+                .is_ok_and(|controls| session_history::opened_a_tab(controls))
+        {
+            let now = Self::now(cx);
+            self.resume_cooldowns.retain(|_, until| *until > now);
+            self.resume_cooldowns
+                .insert(session.peer_device_id.clone(), now + RESUME_COOLDOWN);
+        }
+        match reply {
+            Err(error) => {
+                let control = Control::Error {
+                    code: error.code.to_string(),
+                    message: error.message,
+                    request_id: Some(request_id),
+                };
+                self.queue_control(session_id, control, cx);
+            }
+            Ok(controls) => {
+                for control in controls {
+                    session.enqueue(Outbound::control(control));
+                }
+                self.flush(session_id, cx);
+            }
         }
     }
 
@@ -1479,6 +1708,12 @@ impl Hosting {
                 self.end_session(session_id, cx);
             }
         }
+    }
+
+    /// Sets whether this host answers for its agent session history, for the
+    /// connection that is up and for any that follows.
+    pub(crate) fn set_sessions_available(&mut self, available: bool) {
+        self.sessions_available = available;
     }
 
     #[cfg(test)]

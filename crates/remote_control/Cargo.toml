@@ -13,6 +13,7 @@ path = "src/remote_control.rs"
 doctest = false
 
 [dependencies]
+agent_sessions.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
 fs.workspace = true

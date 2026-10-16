@@ -8,12 +8,16 @@ use remote_relay_protocol::{
     Control, RELAY_PROTOCOL_VERSION, RPC_PROTOCOL_VERSION, error_code, reject_unknown_version,
 };
 
-use crate::file_browse::FileRequest;
+use crate::{
+    file_browse::FileRequest,
+    session_history::{SessionRequest, clamp_limit, is_plausible_session_id},
+};
 
-/// What this host always does for a device. Files and the project server are
-/// not in the list: advertising what is not served would only invite requests
-/// that have to be refused. They are added by [`HostFacts::files_available`]
-/// and [`HostFacts::ide_available`].
+/// What this host always does for a device. Files, the project server and
+/// session history are not in the list: advertising what is not served would
+/// only invite requests that have to be refused. They are added by
+/// [`HostFacts::files_available`], [`HostFacts::ide_available`] and
+/// [`HostFacts::sessions_available`].
 pub const HOST_CAPABILITIES: [&str; 1] = ["terminal"];
 
 /// The capability that says this host lists, reads and diffs the folders open
@@ -22,6 +26,10 @@ pub const FILES_CAPABILITY: &str = "files";
 
 /// The capability that says this host can run the project server for a device.
 pub const IDE_CAPABILITY: &str = "ide";
+
+/// The capability that says this host lists the agent sessions of the folders
+/// open on it, and opens a tab on one for a device.
+pub const SESSIONS_CAPABILITY: &str = "sessions";
 
 /// The code for a request that is understood and not served. Not one of the
 /// protocol's seven: a recognised message the host declines is a different
@@ -54,6 +62,9 @@ pub struct HostFacts<'a> {
     /// Whether this host can browse its open folders, which is what decides if
     /// the `files` capability is truthful.
     pub files_available: bool,
+    /// Whether this host serves its agent session history, which is what
+    /// decides if the `sessions` capability is truthful.
+    pub sessions_available: bool,
     /// The version of the project server's own protocol, which only identical
     /// builds speak to each other.
     pub proto_version: u32,
@@ -89,6 +100,12 @@ pub enum RouterAction {
     Files {
         request_id: u32,
         request: FileRequest,
+    },
+    /// List the agent sessions of the open folders, or open a tab on one, and
+    /// answer `request_id`.
+    Sessions {
+        request_id: u32,
+        request: SessionRequest,
     },
 }
 
@@ -131,6 +148,9 @@ pub fn hello_ack(facts: &HostFacts<'_>) -> Control {
     }
     if facts.ide_available {
         capabilities.push(IDE_CAPABILITY.to_string());
+    }
+    if facts.sessions_available {
+        capabilities.push(SESSIONS_CAPABILITY.to_string());
     }
     Control::HelloAck {
         relay_protocol: RELAY_PROTOCOL_VERSION,
@@ -206,6 +226,40 @@ fn files_action(
             "that request names a folder",
             request_id,
         )),
+    }
+}
+
+fn sessions_action(
+    facts: &HostFacts<'_>,
+    request_id: u32,
+    request: SessionRequest,
+) -> RouterAction {
+    if !facts.sessions_available {
+        return RouterAction::Reply(request_error(
+            UNSUPPORTED,
+            "this Zode does not serve that request",
+            request_id,
+        ));
+    }
+    // What a device names is looked up in this host's own index, so an id that
+    // could not be one is simply a session there is not. That goes for the id a
+    // page is asked to start after as much as for one to open.
+    let names_an_id_that_cannot_exist = match &request {
+        SessionRequest::Resume { session_id, .. } => !is_plausible_session_id(session_id),
+        SessionRequest::List { before, .. } => before
+            .as_ref()
+            .is_some_and(|cursor| !is_plausible_session_id(&cursor.id)),
+    };
+    if names_an_id_that_cannot_exist {
+        return RouterAction::Reply(request_error(
+            error_code::NOT_FOUND,
+            "there is no such session",
+            request_id,
+        ));
+    }
+    RouterAction::Sessions {
+        request_id,
+        request,
     }
 }
 
@@ -288,6 +342,27 @@ pub fn route_control(
             request_id,
             worktree_id.map(|worktree_id| FileRequest::Diff { worktree_id }),
         )],
+        Control::SessionsList {
+            request_id,
+            before,
+            limit,
+        } => vec![sessions_action(
+            facts,
+            request_id,
+            SessionRequest::List {
+                before,
+                limit: clamp_limit(limit),
+            },
+        )],
+        Control::SessionResume {
+            request_id,
+            session_id,
+            fork,
+        } => vec![sessions_action(
+            facts,
+            request_id,
+            SessionRequest::Resume { session_id, fork },
+        )],
         // A peer's own error is its business; there is nothing to answer.
         Control::Error { .. } => Vec::new(),
         // Messages only this side sends. A device sending one is confused
@@ -301,7 +376,9 @@ pub fn route_control(
         | Control::IdeOpened { .. }
         | Control::FilesListReply { .. }
         | Control::FileReadReply { .. }
-        | Control::DiffReply { .. } => vec![RouterAction::Reply(error(
+        | Control::DiffReply { .. }
+        | Control::SessionsListReply { .. }
+        | Control::SessionResumed { .. } => vec![RouterAction::Reply(error(
             error_code::MALFORMED,
             "that message is not one a device sends",
         ))],
@@ -311,13 +388,42 @@ pub fn route_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use remote_relay_protocol::SessionCursor;
 
     fn facts(ide_available: bool) -> HostFacts<'static> {
         HostFacts {
             app_version: "9.9.9",
             ide_available,
             files_available: false,
+            sessions_available: false,
             proto_version: 68,
+        }
+    }
+
+    fn sessions_facts() -> HostFacts<'static> {
+        HostFacts {
+            sessions_available: true,
+            ..facts(false)
+        }
+    }
+
+    fn sessions_list(
+        request_id: u32,
+        before: Option<SessionCursor>,
+        limit: Option<u32>,
+    ) -> Control {
+        Control::SessionsList {
+            request_id,
+            before,
+            limit,
+        }
+    }
+
+    fn session_resume(request_id: u32, session_id: &str, fork: bool) -> Control {
+        Control::SessionResume {
+            request_id,
+            session_id: session_id.into(),
+            fork,
         }
     }
 
@@ -779,6 +885,207 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn the_sessions_capability_comes_last_and_only_when_sessions_are_served() {
+        let advertised = |facts: &HostFacts<'_>| {
+            let mut state = RouterState::default();
+            let actions = route_control(&mut state, hello(1), facts);
+            let [RouterAction::Reply(Control::HelloAck { capabilities, .. })] = &actions[..] else {
+                panic!("{actions:?}");
+            };
+            capabilities.clone()
+        };
+        assert_eq!(advertised(&facts(false)), ["terminal"]);
+        assert_eq!(advertised(&sessions_facts()), ["terminal", "sessions"]);
+        let everything = HostFacts {
+            ide_available: true,
+            files_available: true,
+            sessions_available: true,
+            ..facts(false)
+        };
+        assert_eq!(
+            advertised(&everything),
+            ["terminal", "files", "ide", "sessions"]
+        );
+    }
+
+    #[test]
+    fn session_requests_become_actions_when_sessions_are_served() {
+        let mut state = greeted();
+        let cursor = SessionCursor {
+            updated_at: 1_760_572_800_000,
+            id: "a".into(),
+        };
+        assert_eq!(
+            route_control(
+                &mut state,
+                sessions_list(1, Some(cursor.clone()), Some(25)),
+                &sessions_facts()
+            ),
+            vec![RouterAction::Sessions {
+                request_id: 1,
+                request: SessionRequest::List {
+                    before: Some(cursor),
+                    limit: 25
+                }
+            }]
+        );
+        assert_eq!(
+            route_control(
+                &mut state,
+                session_resume(2, "0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f", true),
+                &sessions_facts()
+            ),
+            vec![RouterAction::Sessions {
+                request_id: 2,
+                request: SessionRequest::Resume {
+                    session_id: "0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f".into(),
+                    fork: true
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn a_page_size_is_defaulted_and_clamped_before_the_host_sees_it() {
+        let mut state = greeted();
+        for (asked, wanted) in [
+            (None, 50),
+            (Some(0), 1),
+            (Some(1), 1),
+            (Some(200), 200),
+            (Some(201), 200),
+            (Some(u32::MAX), 200),
+        ] {
+            let actions =
+                route_control(&mut state, sessions_list(1, None, asked), &sessions_facts());
+            assert_eq!(
+                actions,
+                vec![RouterAction::Sessions {
+                    request_id: 1,
+                    request: SessionRequest::List {
+                        before: None,
+                        limit: wanted
+                    }
+                }],
+                "{asked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_requests_without_the_capability_are_unsupported_and_name_their_request() {
+        let mut state = greeted();
+        for (request_id, request) in [
+            (6, sessions_list(6, None, None)),
+            (7, session_resume(7, "a", false)),
+        ] {
+            let actions = route_control(&mut state, request, &facts(false));
+            assert_eq!(actions.len(), 1);
+            assert_eq!(error_code_of(&actions[0]), UNSUPPORTED);
+            assert!(matches!(
+                &actions[0],
+                RouterAction::Reply(Control::Error { request_id: Some(id), .. }) if *id == request_id
+            ));
+        }
+    }
+
+    #[test]
+    fn a_resume_naming_something_that_cannot_be_an_id_is_not_found_and_the_session_lives() {
+        let mut state = greeted();
+        for session_id in [
+            "",
+            "..",
+            "a/b",
+            "a b",
+            "../../etc/passwd",
+            "--resume",
+            &"x".repeat(129),
+        ] {
+            let actions = route_control(
+                &mut state,
+                session_resume(8, session_id, false),
+                &sessions_facts(),
+            );
+            assert_eq!(actions.len(), 1, "{session_id:?}");
+            assert_eq!(error_code_of(&actions[0]), error_code::NOT_FOUND);
+            assert!(matches!(
+                &actions[0],
+                RouterAction::Reply(Control::Error {
+                    request_id: Some(8),
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_page_cursor_naming_something_that_cannot_be_an_id_is_not_found_and_the_session_lives() {
+        let mut state = greeted();
+        for id in ["", "..", "../x", "-rf", "a b", &"x".repeat(129)] {
+            let cursor = SessionCursor {
+                updated_at: 1,
+                id: id.into(),
+            };
+            let actions = route_control(
+                &mut state,
+                sessions_list(9, Some(cursor), None),
+                &sessions_facts(),
+            );
+            assert_eq!(actions.len(), 1, "{id:?}");
+            assert_eq!(error_code_of(&actions[0]), error_code::NOT_FOUND, "{id:?}");
+            assert!(matches!(
+                &actions[0],
+                RouterAction::Reply(Control::Error {
+                    request_id: Some(9),
+                    ..
+                })
+            ));
+        }
+        let cursor = SessionCursor {
+            updated_at: 1,
+            id: "ses_1f2e3d4c".into(),
+        };
+        assert!(matches!(
+            route_control(
+                &mut state,
+                sessions_list(10, Some(cursor), None),
+                &sessions_facts()
+            )[..],
+            [RouterAction::Sessions { request_id: 10, .. }]
+        ));
+    }
+
+    #[test]
+    fn answers_to_session_requests_are_refused_from_a_device() {
+        let mut state = greeted();
+        for message in [
+            Control::SessionsListReply {
+                request_id: 1,
+                sessions: Vec::new(),
+                more: false,
+                next: None,
+            },
+            Control::SessionResumed {
+                request_id: 1,
+                open_agent_id: None,
+            },
+        ] {
+            let actions = route_control(&mut state, message, &sessions_facts());
+            assert_eq!(error_code_of(&actions[0]), error_code::MALFORMED);
+        }
+    }
+
+    #[test]
+    fn nothing_about_sessions_is_acted_on_before_hello() {
+        for message in [sessions_list(1, None, None), session_resume(2, "a", false)] {
+            let mut state = RouterState::default();
+            let actions = route_control(&mut state, message, &sessions_facts());
+            assert!(matches!(&actions[0], RouterAction::Refuse(_)));
+            assert_eq!(error_code_of(&actions[0]), error_code::MALFORMED);
+        }
     }
 
     #[test]

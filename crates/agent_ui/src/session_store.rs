@@ -63,6 +63,18 @@ impl SessionStore {
         store
     }
 
+    /// Installs a store that sweeps `providers` instead of the real ones, which
+    /// read the developer's home directory.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_global_for_test(
+        providers: Vec<Arc<dyn SessionProvider>>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let store = cx.new(|_| Self::new(providers));
+        cx.set_global(GlobalSessionStore(store.clone()));
+        store
+    }
+
     /// The store if one has been created, without creating one. For read-only
     /// callers that must not bring the scan into existence.
     pub fn try_global(cx: &App) -> Option<Entity<Self>> {
@@ -456,6 +468,32 @@ mod tests {
             0,
             "an empty forget must not notify"
         );
+    }
+
+    /// A test that needs the global must be able to give it providers of its own:
+    /// the real ones read the developer's home directory.
+    #[gpui::test]
+    async fn an_installed_store_sweeps_only_the_providers_it_was_given(cx: &mut TestAppContext) {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(CountingProvider {
+            list_calls: list_calls.clone(),
+            sessions: vec![session("only", "/repo/main")],
+        });
+        let installed = cx.update(|cx| SessionStore::install_global_for_test(vec![provider], cx));
+
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_eq!(global.entity_id(), installed.entity_id());
+        assert_eq!(installed.read_with(cx, |store, _| store.generation()), 0);
+
+        installed.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+
+        assert_eq!(list_calls.load(Ordering::SeqCst), 1);
+        installed.read_with(cx, |store, _| {
+            assert_eq!(store.generation(), 1);
+            assert_eq!(store.index().len(), 1);
+            assert!(store.index().find("only").is_some());
+        });
     }
 
     /// The store outlives every panel that reads it. If it ever holds one, the

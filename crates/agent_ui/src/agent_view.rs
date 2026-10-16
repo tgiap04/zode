@@ -260,24 +260,31 @@ enum State {
     /// The agent's own CLI is not on this machine. Carries what the install
     /// screen needs, so the view never has to ask which agent it is showing for.
     MissingBinary(AgentBinaryMissing),
-    /// This tab owns a session id, the agent's store no longer holds it, and this
-    /// agent cannot be told to start one under that id.
+    /// What the tab was opened onto is not there to open, and nothing honest
+    /// can stand in for it. Two ways in:
     ///
-    /// Reachable for Codex and Copilot only. Claude's `--session-id` means
-    /// `new_session_command` always answers, so the branch that leads here is
-    /// unreachable for it — deliberately left as a real state rather than an
-    /// assertion, so the day Claude drops that flag this simply starts working.
+    /// - A tab that owns a session id, whose store no longer holds it, for an
+    ///   agent that cannot be told to start one under that id. That is Codex and
+    ///   Copilot only: Claude's `--session-id` means `new_session_command` always
+    ///   answers, so this branch is unreachable for a Claude tab — deliberately
+    ///   left as a real state rather than an assertion, so the day Claude drops
+    ///   that flag this simply starts working.
+    /// - A fork whose source is gone from the store or cannot be read from it.
+    ///   Any agent that can fork gets here, Claude included, because a fork has
+    ///   no id of its own to start fresh under.
     ///
     /// Silently opening a blank session instead would be worse: a tab that looks
-    /// like a continuation and has none of the context is the failure this whole
-    /// feature exists to prevent.
+    /// like a continuation or a branch and has none of the context is the failure
+    /// this whole feature exists to prevent.
     SessionGone,
     Failed(SharedString),
     /// The agent's CLI ended and the tab handed back a shell in its folder.
     ///
-    /// Still this agent's tab: the name, the icon and the session id are all
-    /// untouched, so the existing restart puts the agent back on the same
-    /// conversation. The only thing that changed is what the pty holds.
+    /// Still this agent's tab: the name, the icon and the session origin are all
+    /// untouched, so the existing restart runs the same launch again. For a
+    /// tracked tab that is the same conversation; for a fork it is a new branch
+    /// off the same source, since the branch the CLI minted was never recorded.
+    /// The only thing that changed is what the pty holds.
     Shell(Entity<TerminalView>),
 }
 
@@ -344,7 +351,7 @@ impl AgentView {
     /// transcript this editor cannot name, so nothing can be matched to it.
     pub fn session_id(&self) -> Option<&str> {
         match &self.origin.intent {
-            SessionIntent::Untracked => None,
+            SessionIntent::Untracked | SessionIntent::Fork(_) => None,
             SessionIntent::Tracked(id) => Some(id),
         }
     }
@@ -1756,6 +1763,11 @@ pub enum SessionIntent {
     /// assigned to a tab nobody has typed in yet has no session on disk, and that
     /// is a normal state rather than an error.
     Tracked(SharedString),
+    /// A new conversation branched off the session with this id, which is the
+    /// source and not something this tab owns: the CLI mints an id of its own
+    /// for the branch and never says what it is, so the tab is untracked from
+    /// the moment it runs. The source is only read to build the launch command.
+    Fork(SharedString),
 }
 
 /// What a tab knows about the session it is opening onto.
@@ -1786,7 +1798,7 @@ impl SessionOrigin {
     /// title straight past the filter and onto a tab.
     pub fn new(intent: SessionIntent, title: Option<&str>) -> Self {
         let title = match &intent {
-            SessionIntent::Untracked => None,
+            SessionIntent::Untracked | SessionIntent::Fork(_) => None,
             SessionIntent::Tracked(_) => title
                 .map(str::trim)
                 .filter(|title| !title.is_empty())
@@ -1856,19 +1868,22 @@ fn intent_for_new_tab(agent: &AgentId) -> SessionIntent {
 /// asks the agent's own store: a session that is there is resumed, and one that
 /// is not is started fresh **under the same id**, which is what keeps a tab that
 /// was opened and never typed in from coming back broken — Claude writes its
-/// transcript only after the first message.
+/// transcript only after the first message. A `Fork` one asks the store for its
+/// source and branches off it.
 ///
-/// Every failure lands on `None`, which spawns the agent with no session
-/// arguments. That is the same thing every tab did before this feature existed,
-/// so the worst case is the old behaviour rather than a dead tab.
+/// A store that cannot be read lands a `Tracked` tab on `Fresh`, which spawns the
+/// agent with no session arguments: the same thing every tab did before this
+/// feature existed, so the worst case is the old behaviour rather than a dead
+/// tab. A `Fork` has nothing to fall back to, so it lands on `Gone`.
 async fn resolve_session(
     agent: &AgentId,
     intent: &SessionIntent,
     default_cwd: Option<std::path::PathBuf>,
     cx: &mut gpui::AsyncApp,
 ) -> SessionStart {
-    let SessionIntent::Tracked(id) = intent else {
-        return SessionStart::Fresh;
+    let id = match intent {
+        SessionIntent::Untracked => return SessionStart::Fresh,
+        SessionIntent::Tracked(id) | SessionIntent::Fork(id) => id.to_string(),
     };
     let Some(kind) = AgentKind::from_builtin_agent_id(agent.as_ref()) else {
         // A user-configured agent: this editor reads three stores and has no
@@ -1876,20 +1891,76 @@ async fn resolve_session(
         return SessionStart::Fresh;
     };
     let provider = agent_sessions::provider_for(kind);
-    let id = id.to_string();
+    let intent = intent.clone();
     cx.background_spawn(async move {
-        match provider.find(&id) {
-            Ok(found) => session_start(provider.as_ref(), &id, default_cwd, found),
-            // An unreadable store is not the same as a deleted session, and
-            // refusing to start on a transient failure would strand the tab. Fall
-            // back to the behaviour every tab had before this feature existed.
-            Err(error) => {
-                log::warn!("looking up session {id}: {error}");
-                SessionStart::Fresh
-            }
-        }
+        let lookup = provider.find(&id);
+        start_after_lookup(provider.as_ref(), &intent, default_cwd, &id, lookup)
     })
     .await
+}
+
+/// What `intent` comes to once the store has been asked for the session it names
+/// -- including when the store could not answer.
+fn start_after_lookup(
+    provider: &dyn agent_sessions::SessionProvider,
+    intent: &SessionIntent,
+    default_cwd: Option<std::path::PathBuf>,
+    id: &str,
+    lookup: anyhow::Result<Option<agent_sessions::SessionSummary>>,
+) -> SessionStart {
+    match lookup {
+        Ok(found) => start_for_intent(provider, intent, default_cwd, found),
+        Err(error) => {
+            log::warn!("looking up session {id}: {error}");
+            match intent {
+                // An unreadable store is not the same as a deleted session, and
+                // refusing to start on a transient failure would strand a tab
+                // that owns its id. Fall back to the behaviour every tab had
+                // before this feature existed.
+                SessionIntent::Untracked | SessionIntent::Tracked(_) => SessionStart::Fresh,
+                // A fork has no id of its own to keep, only a source to branch
+                // off. Without the source a blank session would sit under a
+                // label that says it is a branch of something, and "Start a New
+                // Session" is the honest way to ask for one.
+                SessionIntent::Fork(_) => SessionStart::Gone,
+            }
+        }
+    }
+}
+
+/// What `intent` comes to once the store has answered for the session it names.
+fn start_for_intent(
+    provider: &dyn agent_sessions::SessionProvider,
+    intent: &SessionIntent,
+    default_cwd: Option<std::path::PathBuf>,
+    found: Option<agent_sessions::SessionSummary>,
+) -> SessionStart {
+    match intent {
+        SessionIntent::Untracked => SessionStart::Fresh,
+        SessionIntent::Tracked(id) => session_start(provider, id, default_cwd, found),
+        SessionIntent::Fork(_) => fork_start(provider, found),
+    }
+}
+
+/// The command that branches a new session off `found`.
+///
+/// A source the store no longer holds is not replaced by a blank session: a tab
+/// that presents itself as a branch and has none of the conversation is the
+/// failure [`State::SessionGone`] exists to name.
+fn fork_start(
+    provider: &dyn agent_sessions::SessionProvider,
+    found: Option<agent_sessions::SessionSummary>,
+) -> SessionStart {
+    let Some(session) = found else {
+        return SessionStart::Gone;
+    };
+    provider
+        .resume_command(&session, Fork::New)
+        .map(SessionStart::Command)
+        // An agent with no fork cannot be asked for one. The callers that offer
+        // a fork check that first, so this is not a state a person reaches;
+        // starting fresh beats refusing to start.
+        .unwrap_or(SessionStart::Fresh)
 }
 
 /// The decision, once the store has answered.
@@ -1947,7 +2018,8 @@ enum SessionStart {
     /// the tab.
     Fresh,
     Command(AgentCommand),
-    /// Tracked, gone, and unrecoverable for this agent. See [`State::SessionGone`].
+    /// Tracked, gone, and unrecoverable for this agent; or a fork whose source
+    /// is gone or cannot be read. See [`State::SessionGone`].
     Gone,
 }
 
@@ -2074,7 +2146,7 @@ fn no_mapping_refusal(name: &str, prompts: PermissionPrompts) -> SharedString {
 /// What a verified, absent or unprobeable flag means for the launch.
 ///
 /// Split from the I/O that feeds it so the decision can be tested without a
-/// window, a store, or the agent's CLI installed -- the same reason phase 01's
+/// window, a store, or the agent's CLI installed -- the same reason the flag
 /// parser is a free function. Every arm that is not `Present` refuses, and each
 /// says which of the two it was, because "the flag is gone" and "nobody could
 /// tell" call for different next moves from the reader.
@@ -2388,7 +2460,7 @@ impl workspace::item::SerializableItem for AgentView {
             mode: mode_name(self.mode).to_string(),
             name: self.custom_name.as_ref().map(|name| name.to_string()),
             session_id: match &self.origin.intent {
-                SessionIntent::Untracked => None,
+                SessionIntent::Untracked | SessionIntent::Fork(_) => None,
                 SessionIntent::Tracked(id) => Some(id.to_string()),
             },
             session_title: self.origin.title.as_ref().map(|title| title.to_string()),
@@ -2441,7 +2513,7 @@ impl Render for AgentView {
                     .size(IconSize::Medium)
                     .color(Color::Muted),
                 format!(
-                    "This {} session is no longer on this machine.",
+                    "This {} session is not available on this machine.",
                     self.display_name
                 ),
                 Color::Muted,
@@ -2931,9 +3003,49 @@ mod tests {
         });
     }
 
+    /// A restart re-runs the launch, so a fork tab branches off its source
+    /// again rather than coming back as a blank untracked tab. The branch the CLI
+    /// minted the first time was never recorded, so the source is the only
+    /// thing there is to start from -- this pins that as the choice it is.
+    #[gpui::test]
+    async fn restarting_a_fork_tab_forks_from_its_source_again(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let source = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::new(SessionIntent::Fork(source.into()), Some("a name")),
+                    cx,
+                )
+            })
+        });
+
+        view.update_in(cx, |view, window, cx| view.restart(window, cx));
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.origin.intent, SessionIntent::Fork(source.into()));
+            assert_eq!(view.session_id(), None, "a fork still owns no session");
+            let provider = agent_sessions::provider_for(AgentKind::Claude);
+            let SessionStart::Command(command) = start_for_intent(
+                provider.as_ref(),
+                &view.origin.intent,
+                None,
+                Some(summary(AgentKind::Claude, source)),
+            ) else {
+                panic!("the intent a restart starts from must still be a fork");
+            };
+            assert_eq!(command.args, ["--resume", source, "--fork-session"]);
+        });
+    }
+
     /// The precedence the cwd hoist could have inverted: a resumed session's own
     /// directory wins over the window's worktree, and a fresh session falls back
-    /// to it. Held here because the rule left `agent_task` in phase 03 and would
+    /// to it. Held here because the rule moved out of `agent_task` and would
     /// otherwise be tested by nothing.
     #[test]
     fn a_resumed_session_runs_where_it_ran_before() {
@@ -3532,8 +3644,8 @@ mod tests {
     /// this is where a wrong `cwd` would send the CLI at the wrong tree.
     ///
     /// No project and no filesystem any more: `agent_task` stopped reading the
-    /// project when phase 03 hoisted the cwd out of it, so a `FakeFs` here would
-    /// say this needs one when it does not.
+    /// project once the cwd was hoisted out of it, so a `FakeFs` here would say
+    /// this needs one when it does not.
     #[test]
     fn a_resumed_session_runs_its_own_arguments_in_its_own_directory() {
         let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
@@ -3628,9 +3740,9 @@ mod tests {
         }
     }
 
-    /// The reachability claim on `State::SessionGone`, asserted rather than left
-    /// as prose: Claude can always start under its own id, so the branch that
-    /// leads to that state never fires for it.
+    /// The reachability claim on `State::SessionGone` for a tracked tab, asserted
+    /// rather than left as prose: Claude can always start under its own id, so
+    /// that branch never fires for it.
     #[test]
     fn a_claude_session_that_vanished_starts_fresh_under_the_same_id() {
         let provider = agent_sessions::provider_for(AgentKind::Claude);
@@ -3695,6 +3807,145 @@ mod tests {
             std::path::PathBuf::from("/w/one"),
             "the directory comes back with the session, not from this window"
         );
+    }
+
+    /// The bug this asserts against: a fork opened as an untracked tab started
+    /// the CLI with no arguments, so nothing was forked and the tab held an
+    /// unrelated empty conversation.
+    #[test]
+    fn a_fork_is_launched_with_the_agents_own_fork_arguments_in_the_sources_directory() {
+        let id = "88888888-8888-8888-8888-888888888888";
+        for (kind, expected) in [
+            (
+                AgentKind::Claude,
+                ["--resume", id, "--fork-session"].as_slice(),
+            ),
+            (AgentKind::OpenCode, ["-s", id, "--fork"].as_slice()),
+        ] {
+            let provider = agent_sessions::provider_for(kind);
+            let SessionStart::Command(command) = start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Fork(id.into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                Some(summary(kind, id)),
+            ) else {
+                panic!("{} can fork, so a fork has a command", kind.label());
+            };
+            assert_eq!(command.args, expected, "{}", kind.label());
+            assert_eq!(
+                command.cwd,
+                std::path::PathBuf::from("/w/one"),
+                "a fork runs where its source ran, not where this window is pointed"
+            );
+        }
+    }
+
+    #[test]
+    fn continuing_a_session_never_carries_a_fork_argument() {
+        let id = "99999999-9999-9999-9999-999999999999";
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let SessionStart::Command(command) = start_for_intent(
+            provider.as_ref(),
+            &SessionIntent::Tracked(id.into()),
+            None,
+            Some(summary(AgentKind::Claude, id)),
+        ) else {
+            panic!("a session the store holds is resumed");
+        };
+        assert_eq!(command.args, ["--resume", id]);
+    }
+
+    #[test]
+    fn a_fork_whose_source_has_vanished_is_gone_rather_than_a_blank_session() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        assert!(matches!(
+            start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Fork("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                None,
+            ),
+            SessionStart::Gone
+        ));
+    }
+
+    /// The bug this asserts against: a fork whose source could not even be
+    /// looked up fell through to a blank session, which is the tab that presents
+    /// itself as a branch and holds none of the conversation.
+    #[test]
+    fn a_fork_whose_source_cannot_be_looked_up_is_gone_rather_than_a_blank_session() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        assert!(matches!(
+            start_after_lookup(
+                provider.as_ref(),
+                &SessionIntent::Fork(id.into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                id,
+                Err(anyhow::anyhow!("the store is unreadable")),
+            ),
+            SessionStart::Gone
+        ));
+    }
+
+    /// The other half of the same decision: a tracked tab owns its id, so a store
+    /// that cannot answer must not strand it -- it opens as every tab did before
+    /// sessions were tracked.
+    #[test]
+    fn a_tracked_tab_whose_lookup_fails_still_opens() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        assert!(matches!(
+            start_after_lookup(
+                provider.as_ref(),
+                &SessionIntent::Tracked(id.into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                id,
+                Err(anyhow::anyhow!("the store is unreadable")),
+            ),
+            SessionStart::Fresh
+        ));
+    }
+
+    #[test]
+    fn an_agent_that_cannot_fork_starts_fresh_rather_than_refusing_to_start() {
+        let id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let provider = agent_sessions::provider_for(AgentKind::Codex);
+        assert!(matches!(
+            start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Fork(id.into()),
+                None,
+                Some(summary(AgentKind::Codex, id)),
+            ),
+            SessionStart::Fresh
+        ));
+    }
+
+    #[test]
+    fn a_tab_with_no_session_is_never_looked_up() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        assert!(matches!(
+            start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Untracked,
+                Some(std::path::PathBuf::from("/w/here")),
+                Some(summary(
+                    AgentKind::Claude,
+                    "cccccccc-cccc-cccc-cccc-cccccccccccc"
+                )),
+            ),
+            SessionStart::Fresh
+        ));
+    }
+
+    /// A fork's source is a launch input, not an identity: writing it down as
+    /// the tab's session would bring the tab back on the original conversation.
+    #[test]
+    fn a_fork_owns_no_session_and_inherits_no_name() {
+        let origin = SessionOrigin::new(SessionIntent::Fork("source".into()), Some("a name"));
+        assert_eq!(origin.title, None);
+        assert_eq!(origin.intent, SessionIntent::Fork("source".into()));
     }
 
     /// **The commission.** Two tabs of one agent, two conversations, and each has
