@@ -1630,7 +1630,7 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 
 ## Status Bar
 
-- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere — the search, language-server and diagnostics buttons live under `editor.search.button`, `global_lsp_settings.button` and `diagnostics.button`, and the CPU/RAM badge and the keep-display-awake indicator under the top-level `project_footprint_indicator` and `keep_display_awake`.
+- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere — the search, language-server and diagnostics buttons live under `editor.search.button`, `global_lsp_settings.button` and `diagnostics.button`, the CPU/RAM badge under the top-level `project_footprint_indicator`, and the keep-display-awake indicator under the top-level `keep_display_awake` and `keep_display_awake_always` — it is shown while either is on.
 - Setting: `status_bar`
 - Default:
 
@@ -1656,7 +1656,7 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 Right-clicking an empty part of the status bar opens a menu of these switches, grouped by which
 side of the bar the item sits on. Hiding an item through that menu writes the same setting a hand
 edit would, and does not merely stop drawing it: the item is removed from the bar and its entity
-dropped, so any polling or background work it was doing stops with it.
+dropped, so any polling or background work it was doing stops with it. Keep Display Awake is governed by two settings, and hiding it turns both `keep_display_awake` and `keep_display_awake_always` off, which releases any hold.
 
 `active_encoding_button` takes `always`, `non_utf8` or `never` rather than a boolean; the right-click
 menu treats `never` as off and turns it back on as `non_utf8`, so a value of `always` is not
@@ -2379,6 +2379,16 @@ Example:
 - Description: Whether to keep the display lit while a terminal — agent, task, or shell — is actively producing output. Released automatically while running on battery, and whenever nothing is producing output. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
 - Setting: `keep_display_awake`
 - Default: `true`
+
+**Options**
+
+`boolean` values
+
+## Keep Display Awake Always
+
+- Description: Whether to keep the display lit for as long as a Zode window is open, until this is turned off. Independent of `keep_display_awake`, and held on battery too. There is no time limit, and the screen will not lock on idle for as long as it is on. Toggle it from the status bar eye icon's menu (**Always Keep Display Awake**) or with the `keep_awake::ToggleAlwaysOn` action in the command palette, which has no default key binding and, like the icon, exists only where the platform can hold the display. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
+- Setting: `keep_display_awake_always`
+- Default: `false`
 
 **Options**
 

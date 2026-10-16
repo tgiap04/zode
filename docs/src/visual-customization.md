@@ -311,7 +311,9 @@ TBD: Centered layout related settings
 
 `claude_usage_button` and `codex_usage_button` are also reachable by right-clicking the status bar's usage indicator; `agent_usage_display` is reachable from the Detailed/Compact switch in the usage panel (left-click the indicator to open it) — see [Agent Usage Indicator](./agent-usage.md) for the panel and menu that go with them.
 
-Right-clicking an _empty_ part of the status bar (not on any button) opens a menu of every switchable item below, plus four more that live outside `status_bar` — the search, language-server, diagnostics, project-footprint and keep-display-awake buttons. See [All Settings § Status Bar](./reference/all-settings.md#status-bar) for the full list, how the menu groups them by side, and what hiding an item through it actually does (it drops the item's entity, not just its render).
+Right-clicking an _empty_ part of the status bar (not on any button) opens a menu of every switchable item below, plus five more that live outside `status_bar` — the search, language-server, diagnostics, project-footprint and keep-display-awake buttons. See [All Settings § Status Bar](./reference/all-settings.md#status-bar) for the full list, how the menu groups them by side, and what hiding an item through it actually does (it drops the item's entity, not just its render).
+
+Hiding **Keep Display Awake** this way turns both of its switches off, `keep_display_awake` and `keep_display_awake_always`, so it ends any hold, including an always-on one. The icon is shown while either switch is on. See [Keeping the Display Awake](./keep-display-awake.md#what-lets-it-go).
 
 ```json [settings]
   "status_bar": {
