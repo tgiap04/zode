@@ -1174,7 +1174,10 @@ fn open_about_window(cx: &mut App) {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            // The app version, not `CARGO_PKG_VERSION`: a release reports its tag,
+            // and a manifest that was not bumped for it would put an older number
+            // in the headline than in the line underneath.
+            let version = AppVersion::display(cx);
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"

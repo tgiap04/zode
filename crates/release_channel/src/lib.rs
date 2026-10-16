@@ -4,7 +4,7 @@
 
 use std::{env, str::FromStr, sync::LazyLock};
 
-use gpui::{App, Global};
+use gpui::{App, Global, SharedString};
 use semver::Version;
 
 /// stable | dev | nightly | preview
@@ -124,6 +124,23 @@ impl AppVersion {
             Version::new(0, 0, 0)
         }
     }
+
+    /// The version as people read it: `0.1.5`, or `0.1.5-beta.1` for a
+    /// prerelease.
+    ///
+    /// The build metadata `load` attaches -- channel, build number, commit --
+    /// is dropped. Every surface that shows a version names the channel and the
+    /// commit separately or not at all, and a `+stable.42.<sha>` suffix beside
+    /// them reads as noise. The About window's "Version" line keeps the full
+    /// form, because that one is for bug reports.
+    pub fn display(cx: &App) -> SharedString {
+        without_build_metadata(Self::global(cx)).to_string().into()
+    }
+}
+
+fn without_build_metadata(mut version: Version) -> Version {
+    version.build = semver::BuildMetadata::EMPTY;
+    version
 }
 
 /// A Zed release channel.
@@ -244,5 +261,24 @@ impl FromStr for ReleaseChannel {
             "stable" => ReleaseChannel::Stable,
             _ => return Err(InvalidReleaseChannel),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_metadata_is_dropped() {
+        let version: Version = "0.1.5+stable.42.abcdef0".parse().unwrap();
+        assert_eq!(without_build_metadata(version).to_string(), "0.1.5");
+    }
+
+    /// A prerelease must still read as one: a beta that displayed as plain
+    /// `0.1.5` would claim to be the release it precedes.
+    #[test]
+    fn a_prerelease_keeps_its_suffix() {
+        let version: Version = "0.1.5-beta.1+preview.7".parse().unwrap();
+        assert_eq!(without_build_metadata(version).to_string(), "0.1.5-beta.1");
     }
 }

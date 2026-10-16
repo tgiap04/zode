@@ -1591,6 +1591,8 @@
     "vim_mode_button": true,
     // Whether to show the image info button in the status bar.
     "image_info_button": true,
+    // Whether to show Zode's version in the status bar.
+    "app_version_button": true,
   },
   // Settings specific to the terminal
   "terminal": {

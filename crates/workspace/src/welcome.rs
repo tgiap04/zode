@@ -11,6 +11,7 @@ use gpui::{
     ParentElement, Render, Styled, Task, Window, actions, img,
 };
 use menu::{SelectNext, SelectPrevious};
+use release_channel::AppVersion;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -429,12 +430,19 @@ impl Render for WelcomePage {
                                     .flex_none(),
                             )
                             .child(
-                                v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .italic(),
-                                ),
+                                v_flex()
+                                    .child(Headline::new(welcome_label))
+                                    .child(
+                                        Label::new("The editor for what's next")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .italic(),
+                                    )
+                                    .child(
+                                        Label::new(format!("Version {}", AppVersion::display(cx)))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
                             ),
                     )
                     .child(first_section.render(Default::default(), &self.focus_handle))

@@ -1,6 +1,7 @@
 use crate::Sidebar;
 use crate::rail::rail_button;
 use gpui::{AnyElement, Context};
+use release_channel::AppVersion;
 use remote_control::RemoteControlSettings;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use zode_account::{Account, AccountStatus};
@@ -120,6 +121,11 @@ impl Sidebar {
                             )
                             .separator()
                             .action("Sign Out", Box::new(zed_actions::account::SignOut))
+                            .separator()
+                            .action(
+                                format!("About Zode (v{})", AppVersion::display(cx)),
+                                Box::new(zed_actions::About),
+                            )
                         }))
                     })
                     .into_any_element()

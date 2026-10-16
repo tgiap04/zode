@@ -1,4 +1,4 @@
-//! The table of the fifteen items `initialize_workspace` puts on the status
+//! The table of the sixteen items `initialize_workspace` puts on the status
 //! bar, moved out of `zed.rs` so each one can carry a [`StatusBarItemSpec`]
 //! and be shown, hidden and rebuilt from settings instead of only ever being
 //! built once at startup.
@@ -31,8 +31,11 @@
 //!   over one indicator's handle -- a rebuilt indicator would otherwise leave
 //!   a captured handle pointing at a dropped entity.
 
+mod app_version_indicator;
+
 use activity_indicator::ActivityIndicator;
 use agent_usage::AgentUsageIndicator;
+use app_version_indicator::AppVersionIndicator;
 use diagnostics::items::DiagnosticIndicator;
 use editor::EditorSettings;
 use encoding_selector::ActiveBufferEncoding;
@@ -273,14 +276,27 @@ const IMAGE_INFO: ItemDescriptor = ItemDescriptor {
     },
 };
 
-/// The fifteen, in the order they render. `keep_awake` is included even
+const APP_VERSION: ItemDescriptor = ItemDescriptor {
+    id: "app_version",
+    label: "App Version",
+    side: StatusBarSide::Right,
+    is_shown: |cx| StatusBarSettings::get_global(cx).app_version_button,
+    set_shown: |content, on| {
+        content
+            .status_bar
+            .get_or_insert_default()
+            .app_version_button = Some(on)
+    },
+};
+
+/// The sixteen, in the order `register` adds them. `keep_awake` is included even
 /// though `register` may skip adding it to a real bar -- the descriptor
 /// itself is platform-independent, only its registration is not.
 ///
 /// Test-only: `register` builds each `StatusBarItemSpec` from its own named
 /// descriptor above, so nothing outside `#[cfg(test)]` needs this list.
 #[cfg(test)]
-const ALL_DESCRIPTORS: [ItemDescriptor; 15] = [
+const ALL_DESCRIPTORS: [ItemDescriptor; 16] = [
     SEARCH_BUTTON,
     LSP_BUTTON,
     DIAGNOSTIC_SUMMARY,
@@ -288,6 +304,7 @@ const ALL_DESCRIPTORS: [ItemDescriptor; 15] = [
     ACTIVITY_INDICATOR,
     AGENT_USAGE,
     KEEP_AWAKE,
+    APP_VERSION,
     PROJECT_FOOTPRINT,
     ACTIVE_BUFFER_ENCODING,
     ACTIVE_BUFFER_LANGUAGE,
@@ -363,6 +380,7 @@ pub(crate) fn register(
     let vim_mode_indicator = cx.new(|cx| ModeIndicator::new(window, cx));
     let cursor_position = cx.new(|_| CursorPosition::new(workspace));
     let image_info = cx.new(|_| ImageInfo::new(workspace));
+    let app_version = cx.new(|cx| AppVersionIndicator::new(cx));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
         let rank = status_bar.add_left_item(search_button, window, cx);
@@ -487,10 +505,23 @@ pub(crate) fn register(
             ));
         }
 
-        // Leftmost of the right-hand group: a running total the eye can rest
-        // on, kept clear of the buffer-specific controls that follow and out
-        // of the left group, which grows and shifts as activity indicators
-        // come and go.
+        // Right items render in reverse of the order they are added, so the
+        // first added sits furthest right. The version goes first: a fact about
+        // the editor rather than any buffer. Only the dock buttons, and the
+        // remote-control indicator while remote control is on, are added
+        // earlier and so sit to its right.
+        let rank = status_bar.add_right_item(app_version, window, cx);
+        status_bar.register_toggleable_item(APP_VERSION.spec(
+            rank,
+            Box::new(|status_bar, rank, window, cx| {
+                let item = cx.new(|cx| AppVersionIndicator::new(cx));
+                status_bar.insert_item_at_rank(StatusBarSide::Right, rank, item, window, cx);
+            }),
+        ));
+
+        // Next to it, the footprint: a running total the eye can rest on, kept
+        // clear of the buffer-specific controls added after it and out of the
+        // left group, which grows and shifts as activity indicators come and go.
         let rank = status_bar.add_right_item(project_footprint, window, cx);
         status_bar.register_toggleable_item(PROJECT_FOOTPRINT.spec(
             rank,
@@ -778,7 +809,7 @@ mod tests {
 
             for item in ALL_DESCRIPTORS {
                 // `active_file_name` and `line_ending_indicator` default to
-                // `false` in `default.json` today; asserting all fifteen
+                // `false` in `default.json` today; asserting all sixteen
                 // `true` would be wrong and would have shipped broken.
                 let expected = !matches!(item.id, "active_file_name" | "line_ending_indicator");
                 assert_eq!(

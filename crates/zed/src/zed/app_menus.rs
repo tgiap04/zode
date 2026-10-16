@@ -305,6 +305,8 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                     },
                 ),
                 MenuItem::action("Zode Repository", feedback::OpenZedRepo),
+                MenuItem::separator(),
+                MenuItem::action("About Zode", zed_actions::About),
             ],
         },
     ]
