@@ -12710,6 +12710,7 @@ dependencies = [
  "anyhow",
  "collections",
  "db",
+ "dunce",
  "editor",
  "fs",
  "futures 0.3.32",

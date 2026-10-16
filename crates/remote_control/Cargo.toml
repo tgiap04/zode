@@ -45,6 +45,7 @@ zode_account.workspace = true
 [dev-dependencies]
 collections.workspace = true
 db = { workspace = true, features = ["test-support"] }
+dunce.workspace = true
 task.workspace = true
 tempfile.workspace = true
 agent_ui = { workspace = true, features = ["test-support"] }

@@ -101,7 +101,11 @@ struct Folder {
 impl Folder {
     fn new() -> Self {
         let directory = tempfile::tempdir().expect("a temporary folder");
-        let root = directory.path().canonicalize().expect("it exists");
+        // `dunce`, not `std::fs::canonicalize`: on Windows the standard one
+        // returns a `\\?\C:\...` verbatim path, while a worktree's path has that
+        // prefix stripped (`SanitizedPath`), so no session under this folder
+        // would ever be found inside it.
+        let root = dunce::canonicalize(directory.path()).expect("it exists");
         for inside in ["crates/terminal", "crates/ui", "vault/keys", "dist/out"] {
             std::fs::create_dir_all(root.join(inside)).expect("a directory");
         }
