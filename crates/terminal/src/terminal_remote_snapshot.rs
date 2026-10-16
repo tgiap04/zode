@@ -12,9 +12,15 @@
 //! while the emulator holds some of them back -- inside a synchronized update
 //! (DEC mode 2026) or halfway through an escape sequence -- has a sequence that
 //! covers bytes the screen does not show yet, and the reader of the mirror sees
-//! the stale or partial screen until the program next redraws. Consumers that
-//! snapshot while output is flowing should follow up with another snapshot
-//! once it settles.
+//! the stale or partial screen until the program next redraws. Programs that
+//! only redraw what changed make that permanent. A consumer therefore takes one
+//! more snapshot once the output has gone quiet, and when
+//! [`RemoteSnapshot::sync_pending`] says the emulator was inside an update, it
+//! waits for the update to end first (see `Terminal::remote_sync_pending`).
+//!
+//! What the snapshot carries is listed on `render_snapshot`: besides the
+//! cells and modes, the cursor state a redraw that only touches what changed
+//! relies on -- the scroll region, the saved cursor and the character sets.
 
 use std::sync::{
     Arc,
@@ -25,13 +31,13 @@ use alacritty_terminal::{
     Term,
     event::EventListener,
     event_loop::OutputTap,
-    grid::Dimensions,
-    index::{Column, Line},
+    grid::{Charsets, Cursor, Dimensions},
+    index::{Column, Line, Point},
     term::{
         TermMode,
         cell::{Cell, Flags},
     },
-    vte::ansi::{Color, CursorShape, NamedColor},
+    vte::ansi::{CharsetIndex, Color, CursorShape, NamedColor, StandardCharset},
 };
 use parking_lot::Mutex;
 use smol::channel::{self, Receiver, RecvError, Sender, TryRecvError, TrySendError};
@@ -201,6 +207,10 @@ pub struct RemoteSnapshot {
     pub sequence: u64,
     pub columns: u16,
     pub rows: u16,
+    /// The emulator was inside a synchronized update when this was taken, so
+    /// bytes covered by `sequence` are being held back and the screen is behind
+    /// them.
+    pub sync_pending: bool,
     pub bytes: Vec<u8>,
 }
 
@@ -232,10 +242,18 @@ const PRIVATE_MODES: [(TermMode, u16); 11] = [
 /// Describes `term` as bytes that rebuild it on any emulator, whatever state
 /// that emulator was in: they open with a full reset.
 ///
+/// Beyond the cells it carries what programs that redraw only what changed
+/// lean on, because anything missing makes their later output land on the wrong
+/// rows for good: the scroll region, the cursor saved with `ESC 7` together
+/// with its attributes and character sets, and the character sets in use with
+/// the one shifted in.
+///
 /// Limits, so nobody is surprised later: a screen in the alternate buffer is
-/// sent without the primary buffer behind it, scroll regions, underline colour
-/// and hyperlinks are not carried, and a snapshot cut while the child was
-/// halfway through an escape sequence cannot say so.
+/// sent without the primary buffer behind it, underline colour and hyperlinks
+/// are not carried, the saved cursor does not remember that it was waiting to
+/// wrap, the only character set besides ASCII is line drawing (the only one the
+/// emulator has), and a snapshot cut while the child was halfway through an
+/// escape sequence cannot say so.
 pub(crate) fn render_snapshot<T: EventListener>(term: &Term<T>, history_limit: usize) -> Vec<u8> {
     let grid = term.grid();
     let columns = grid.columns();
@@ -287,15 +305,30 @@ pub(crate) fn render_snapshot<T: EventListener>(term: &Term<T>, history_limit: u
     }
     pen.reset(&mut out);
 
-    // Origin mode homes the cursor when it is set, so it goes first and the
-    // cursor is placed after it. Scroll regions are not carried, which makes
-    // the origin the top left of the screen either way.
-    if mode.contains(TermMode::ORIGIN) {
+    // The saved cursor is positioned with the full screen as its region and
+    // origin mode still off, so its point is absolute.
+    push_saved_cursor(&mut out, &grid.saved_cursor);
+    // Setting the region and origin mode both home the cursor, so they go
+    // first and the cursor is placed after them.
+    push_scroll_region(&mut out, term);
+    let origin_mode = mode.contains(TermMode::ORIGIN);
+    if origin_mode {
         push_private_mode(&mut out, 6, true);
     }
     let cursor = grid.cursor.point;
+    // In origin mode rows count from the top of the region.
+    let top = if origin_mode {
+        term.scroll_region().start.0
+    } else {
+        0
+    };
     out.extend_from_slice(
-        format!("\x1b[{};{}H", cursor.line.0 + 1, cursor.column.0 + 1).as_bytes(),
+        format!(
+            "\x1b[{};{}H",
+            (cursor.line.0 - top).max(0) + 1,
+            cursor.column.0 + 1
+        )
+        .as_bytes(),
     );
     if grid.cursor.input_needs_wrap && mode.contains(TermMode::LINE_WRAP) {
         // Positioning the cursor clears "the next character wraps first". The
@@ -333,6 +366,9 @@ pub(crate) fn render_snapshot<T: EventListener>(term: &Term<T>, history_limit: u
     } else {
         b"\x1b[4l"
     });
+    // After the cells: text written before this point was written as ASCII,
+    // and must stay what it was.
+    push_current_charsets(&mut out, &grid.cursor.charsets, term.active_charset());
     push_keyboard_mode(&mut out, mode);
     push_cursor_style(&mut out, term);
     push_private_mode(&mut out, 25, mode.contains(TermMode::SHOW_CURSOR));
@@ -358,6 +394,91 @@ fn push_keyboard_mode(out: &mut Vec<u8>, mode: TermMode) {
         out.extend_from_slice(b"\x1b[>");
         push_number(out, flags);
         out.push(b'u');
+    }
+}
+
+/// Restores `ESC 7`'s state: where the cursor was, how it drew, and which
+/// character sets it had, without leaving any of that on the cursor in use.
+fn push_saved_cursor(out: &mut Vec<u8>, saved: &Cursor<Cell>) {
+    let pen = Pen::of(&saved.template);
+    // Compared field by field: the cursor also carries fields that say nothing
+    // about what a later `ESC 8` would do on the screen being rebuilt.
+    if saved.point == Point::default()
+        && saved.charsets == Charsets::default()
+        && pen == Pen::default()
+    {
+        return;
+    }
+    out.extend_from_slice(
+        format!(
+            "\x1b[{};{}H",
+            saved.point.line.0 + 1,
+            saved.point.column.0 + 1
+        )
+        .as_bytes(),
+    );
+    let mut current = Pen::default();
+    current.move_to(&saved.template, out);
+    push_charset_designations(out, &saved.charsets);
+    out.extend_from_slice(b"\x1b7");
+    current.reset(out);
+    push_charset_resets(out, &saved.charsets);
+}
+
+/// The scroll region, unless it is the whole screen. Setting it homes the
+/// cursor.
+fn push_scroll_region<T: EventListener>(out: &mut Vec<u8>, term: &Term<T>) {
+    let region = term.scroll_region();
+    let whole_screen = Line(0)..Line(term.screen_lines() as i32);
+    if *region == whole_screen {
+        return;
+    }
+    out.extend_from_slice(format!("\x1b[{};{}r", region.start.0 + 1, region.end.0).as_bytes());
+}
+
+/// The intermediate byte that designates each slot: `ESC (` is G0, `ESC )` is
+/// G1, `ESC *` is G2 and `ESC +` is G3.
+const CHARSET_SLOTS: [(CharsetIndex, u8); 4] = [
+    (CharsetIndex::G0, b'('),
+    (CharsetIndex::G1, b')'),
+    (CharsetIndex::G2, b'*'),
+    (CharsetIndex::G3, b'+'),
+];
+
+/// Designates the line-drawing slots. ASCII is what a reset leaves in all of
+/// them, so those need nothing.
+fn push_charset_designations(out: &mut Vec<u8>, charsets: &Charsets) {
+    for (slot, intermediate) in CHARSET_SLOTS {
+        if charsets[slot] == StandardCharset::SpecialCharacterAndLineDrawing {
+            out.extend_from_slice(&[0x1b, intermediate, b'0']);
+        }
+    }
+}
+
+/// Puts ASCII back in every slot [`push_charset_designations`] changed.
+fn push_charset_resets(out: &mut Vec<u8>, charsets: &Charsets) {
+    for (slot, intermediate) in CHARSET_SLOTS {
+        if charsets[slot] == StandardCharset::SpecialCharacterAndLineDrawing {
+            out.extend_from_slice(&[0x1b, intermediate, b'B']);
+        }
+    }
+}
+
+/// The character sets of the cursor in use, and which slot is shifted in.
+fn push_current_charsets(out: &mut Vec<u8>, charsets: &Charsets, active: CharsetIndex) {
+    push_charset_designations(out, charsets);
+    // The parser of the emulator being mirrored, and of the Zode client that
+    // reads the mirror (vte), handles `SI` and `SO` and ignores `ESC n` and
+    // `ESC o`, so for them only G0 or G1 is ever shifted in and the two arms
+    // below are never reached. They are there for xterm.js in the browser,
+    // which does shift G2 and G3, and so that this stays right for any emulator
+    // that reports one.
+    match active {
+        // What a reset leaves shifted in.
+        CharsetIndex::G0 => {}
+        CharsetIndex::G1 => out.push(0x0e),
+        CharsetIndex::G2 => out.extend_from_slice(b"\x1bn"),
+        CharsetIndex::G3 => out.extend_from_slice(b"\x1bo"),
     }
 }
 
@@ -398,7 +519,7 @@ fn is_trailing_blank(cell: &Cell) -> bool {
 }
 
 /// The attributes currently in force on the emulator being written to.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Pen {
     foreground: Color,
     background: Color,
@@ -416,12 +537,16 @@ impl Default for Pen {
 }
 
 impl Pen {
-    fn move_to(&mut self, cell: &Cell, out: &mut Vec<u8>) {
-        let wanted = Pen {
+    fn of(cell: &Cell) -> Self {
+        Pen {
             foreground: cell.fg,
             background: cell.bg,
             flags: cell.flags & RENDERING_FLAGS,
-        };
+        }
+    }
+
+    fn move_to(&mut self, cell: &Cell, out: &mut Vec<u8>) {
+        let wanted = Pen::of(cell);
         if wanted == *self {
             return;
         }
@@ -536,7 +661,7 @@ mod tests {
         grid::Dimensions,
         index::Point,
         term::Config,
-        vte::ansi::{Processor, StdSyncHandler},
+        vte::ansi::{Processor, StandardCharset, StdSyncHandler},
     };
 
     struct Size {
@@ -606,7 +731,7 @@ mod tests {
             "cursor"
         );
         let relevant = PRIVATE_MODES.iter().fold(
-            TermMode::ALT_SCREEN | TermMode::APP_KEYPAD,
+            TermMode::ALT_SCREEN | TermMode::APP_KEYPAD | TermMode::ORIGIN,
             |all, (flag, _)| all | *flag,
         );
         assert_eq!(
@@ -614,6 +739,51 @@ mod tests {
             *original.mode() & relevant,
             "modes"
         );
+        assert_eq!(
+            replayed.scroll_region(),
+            original.scroll_region(),
+            "scroll region"
+        );
+        assert_eq!(
+            replayed.active_charset(),
+            original.active_charset(),
+            "active charset"
+        );
+        assert_eq!(
+            replayed_grid.cursor.charsets, original_grid.cursor.charsets,
+            "charsets"
+        );
+        let saved = |grid: &alacritty_terminal::Grid<Cell>| {
+            (
+                grid.saved_cursor.point,
+                Pen::of(&grid.saved_cursor.template),
+                grid.saved_cursor.charsets,
+            )
+        };
+        assert_eq!(saved(replayed_grid), saved(original_grid), "saved cursor");
+    }
+
+    fn continue_both(
+        original: &mut Term<VoidListener>,
+        replayed: &mut Term<VoidListener>,
+        bytes: &[u8],
+    ) {
+        feed(original, bytes);
+        feed(replayed, bytes);
+    }
+
+    fn fill_rows(term: &mut Term<VoidListener>) {
+        for row in 1..=term.screen_lines() {
+            feed(term, format!("\x1b[{row};1Hrow{row:02}").as_bytes());
+        }
+    }
+
+    fn text_of_row(term: &Term<VoidListener>, line: i32) -> String {
+        (0..term.columns())
+            .map(|column| term.grid()[Line(line)][Column(column)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
     }
 
     fn round_trip(original: &Term<VoidListener>) -> Term<VoidListener> {
@@ -839,6 +1009,56 @@ mod tests {
             assert!(!terminal.read_with(cx, |terminal, _| terminal.has_remote_tap()));
         }
 
+        async fn wait_until(
+            cx: &mut TestAppContext,
+            what: &str,
+            mut condition: impl FnMut(&mut TestAppContext) -> bool,
+        ) {
+            for _ in 0..500 {
+                if condition(cx) {
+                    return;
+                }
+                cx.background_executor
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+            panic!("timed out waiting for {what}");
+        }
+
+        #[gpui::test]
+        async fn a_snapshot_says_when_the_emulator_is_inside_a_synchronized_update(
+            cx: &mut TestAppContext,
+        ) {
+            cx.executor().allow_parking();
+            // The child leaves inside the update, so the emulator stays inside
+            // it for good. An update that ends on its own after a fraction of a
+            // second would make this a race.
+            let syncing = shell_terminal("printf 'before\\n\\033[?2026hheld back'", cx).await;
+            wait_until(cx, "the update to begin", |cx| {
+                syncing.read_with(cx, |terminal, _| terminal.remote_sync_pending())
+            })
+            .await;
+
+            let snapshot = syncing.read_with(cx, |terminal, _| terminal.remote_snapshot());
+            assert!(snapshot.sync_pending);
+            let text = String::from_utf8_lossy(&snapshot.bytes).into_owned();
+            assert!(text.contains("before"), "{text:?}");
+            assert!(
+                !text.contains("held back"),
+                "the held-back bytes are not on the screen yet: {text:?}"
+            );
+
+            let quiet = shell_terminal("printf 'plain\\n'; sleep 5", cx).await;
+            wait_until(cx, "the output", |cx| {
+                quiet.read_with(cx, |terminal, _| {
+                    String::from_utf8_lossy(&terminal.remote_snapshot().bytes).contains("plain")
+                })
+            })
+            .await;
+            assert!(!quiet.read_with(cx, |terminal, _| terminal.remote_sync_pending()));
+            assert!(!quiet.read_with(cx, |terminal, _| terminal.remote_snapshot().sync_pending));
+        }
+
         #[gpui::test]
         async fn a_terminal_nobody_mirrors_has_no_tap(cx: &mut TestAppContext) {
             cx.executor().allow_parking();
@@ -906,6 +1126,271 @@ mod tests {
         assert!(replayed.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC));
         assert!(replayed.mode().contains(TermMode::ORIGIN));
         assert_eq!(replayed.grid().cursor.point, original.grid().cursor.point);
+    }
+
+    #[test]
+    fn the_scroll_region_is_carried_and_keeps_scrolling_inside_it() {
+        let mut original = term(20, 10);
+        fill_rows(&mut original);
+        feed(&mut original, b"\x1b[3;8r\x1b[8;1H");
+        let mut replayed = round_trip(&original);
+
+        assert_eq!(replayed.scroll_region(), original.scroll_region());
+        assert_eq!(*replayed.scroll_region(), Line(2)..Line(8));
+        assert_same_screen(&original, &replayed);
+
+        // A newline at the bottom of the region and a reverse index at its top:
+        // the two ways a region changes where lines go.
+        continue_both(
+            &mut original,
+            &mut replayed,
+            b"\r\nscrolled\x1b[3;1H\x1bM\x1b[5;1Htail",
+        );
+        assert_same_screen(&original, &replayed);
+        assert_eq!(text_of_row(&replayed, 0), "row01", "above the region");
+        assert_eq!(text_of_row(&replayed, 9), "row10", "below the region");
+        assert_eq!(text_of_row(&replayed, 7), "row08", "the region scrolled");
+    }
+
+    /// Every byte of what a screen with nothing special about it is described
+    /// as. A change here is a change to what every reader of a mirror is sent,
+    /// so it is made on purpose.
+    #[test]
+    fn a_default_screen_is_described_by_exactly_these_bytes() {
+        let original = term(20, 5);
+        let bytes = render_snapshot(&original, REMOTE_SNAPSHOT_HISTORY_LINES);
+        let expected: &[u8] = concat!(
+            // A full reset, then one empty row after another.
+            "\x1bc\r\n\r\n\r\n\r\n",
+            // The cursor at the top left. No saved cursor, scroll region or charset.
+            "\x1b[1;1H",
+            // Application cursor, line wrap, the five mouse modes and focus
+            // reporting, alternate scroll, bracketed paste.
+            "\x1b[?1l\x1b[?7h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l",
+            "\x1b[?1007h\x1b[?2004l",
+            // Numeric keypad, no new line mode, no insert mode.
+            "\x1b>\x1b[20l\x1b[4l",
+            // A steady block, and the cursor shown.
+            "\x1b[2 q\x1b[?25h",
+        )
+        .as_bytes();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            String::from_utf8_lossy(expected)
+        );
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn the_saved_cursor_is_carried_with_its_attributes() {
+        let mut original = term(20, 8);
+        feed(
+            &mut original,
+            b"\x1b[1;31m\x1b[4;6H\x1b7\x1b[0m\x1b[1;1Hplain\x1b[8;1H",
+        );
+        let mut replayed = round_trip(&original);
+        assert_same_screen(&original, &replayed);
+
+        continue_both(&mut original, &mut replayed, b"\x1b8hello\x1b[0m");
+        assert_same_screen(&original, &replayed);
+        let cell = &replayed.grid()[Line(3)][Column(5)];
+        assert_eq!(cell.c, 'h');
+        assert!(
+            cell.flags.contains(Flags::BOLD),
+            "the saved attributes apply"
+        );
+        assert_eq!(cell.fg, Color::Named(NamedColor::Red));
+    }
+
+    #[test]
+    fn a_saved_cursor_at_home_with_only_a_charset_is_still_carried() {
+        let mut original = term(20, 4);
+        feed(&mut original, b"\x1b(0\x1b7\x1b(B\x1b[3;3Hascii");
+        let mut replayed = round_trip(&original);
+        assert_same_screen(&original, &replayed);
+
+        continue_both(&mut original, &mut replayed, b"\x1b8qx");
+        assert_same_screen(&original, &replayed);
+        assert_eq!(replayed.grid()[Line(0)][Column(0)].c, '─');
+        assert_eq!(replayed.grid()[Line(0)][Column(1)].c, '│');
+    }
+
+    #[test]
+    fn a_charset_designated_before_the_snapshot_still_applies_after_it() {
+        let mut original = term(20, 4);
+        // The same letters before the snapshot are drawn as plain text: they
+        // must not be turned into line-drawing characters on the way back.
+        feed(&mut original, b"qx plain\x1b)0");
+        let mut replayed = round_trip(&original);
+        assert_same_screen(&original, &replayed);
+        assert_eq!(replayed.grid()[Line(0)][Column(0)].c, 'q');
+
+        continue_both(&mut original, &mut replayed, b"\x0eqx\x0fqx");
+        assert_same_screen(&original, &replayed);
+        let row = text_of_row(&replayed, 0);
+        assert!(row.ends_with("─│qx"), "{row:?}");
+    }
+
+    #[test]
+    fn a_shifted_charset_stays_shifted() {
+        let mut original = term(20, 4);
+        feed(&mut original, b"top\x1b)0\x0e");
+        let mut replayed = round_trip(&original);
+        assert_eq!(replayed.active_charset(), CharsetIndex::G1);
+        assert_same_screen(&original, &replayed);
+
+        continue_both(&mut original, &mut replayed, b"qx");
+        assert_same_screen(&original, &replayed);
+        assert_eq!(text_of_row(&replayed, 0), "top─│");
+    }
+
+    #[test]
+    fn charsets_are_designated_and_shifted_by_slot() {
+        let mut charsets = Charsets::default();
+        charsets[CharsetIndex::G0] = StandardCharset::SpecialCharacterAndLineDrawing;
+        charsets[CharsetIndex::G2] = StandardCharset::SpecialCharacterAndLineDrawing;
+        charsets[CharsetIndex::G3] = StandardCharset::SpecialCharacterAndLineDrawing;
+
+        let mut out = Vec::new();
+        push_current_charsets(&mut out, &charsets, CharsetIndex::G0);
+        assert_eq!(out, b"\x1b(0\x1b*0\x1b+0");
+
+        out.clear();
+        push_current_charsets(&mut out, &charsets, CharsetIndex::G1);
+        assert_eq!(out, b"\x1b(0\x1b*0\x1b+0\x0e");
+        out.clear();
+        push_current_charsets(&mut out, &charsets, CharsetIndex::G2);
+        assert_eq!(out, b"\x1b(0\x1b*0\x1b+0\x1bn");
+        out.clear();
+        push_current_charsets(&mut out, &charsets, CharsetIndex::G3);
+        assert_eq!(out, b"\x1b(0\x1b*0\x1b+0\x1bo");
+
+        out.clear();
+        push_charset_resets(&mut out, &charsets);
+        assert_eq!(out, b"\x1b(B\x1b*B\x1b+B");
+    }
+
+    #[test]
+    fn a_program_that_saved_the_cursor_and_scrolls_a_region_survives_the_snapshot() {
+        // A status block drawn below a scroll region, the cursor saved on the
+        // input line, output scrolled inside the region, then the cursor
+        // restored and everything below it erased: all of it relative to state
+        // that was set before anyone attached.
+        let mut original = term(30, 10);
+        feed(
+            &mut original,
+            b"\x1b[1;7r\x1b[8;1Hstatus line\x1b[9;1H------\x1b[10;1H> typed\x1b7\
+              \x1b[7;1Hone\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\neight",
+        );
+        let mut replayed = round_trip(&original);
+        assert_same_screen(&original, &replayed);
+
+        continue_both(
+            &mut original,
+            &mut replayed,
+            b"\x1b8\x1b[J\x1b[1;1Hnew top\x1b[7;1H\r\nmore\x1b[10;1H\x1b[2K> next",
+        );
+        assert_same_screen(&original, &replayed);
+        assert_eq!(text_of_row(&replayed, 9), "> next");
+    }
+
+    #[test]
+    fn the_cursor_is_placed_relative_to_the_region_in_origin_mode() {
+        let mut original = term(20, 8);
+        fill_rows(&mut original);
+        feed(&mut original, b"\x1b[3;6r\x1b[?6h\x1b[2;4Hhi");
+        assert_eq!(original.grid().cursor.point.line, Line(3));
+        let mut replayed = round_trip(&original);
+        assert!(replayed.mode().contains(TermMode::ORIGIN));
+        assert_same_screen(&original, &replayed);
+
+        // Rows are counted from the top of the region now, and clamp at its
+        // bottom.
+        continue_both(
+            &mut original,
+            &mut replayed,
+            b"\x1b[1;1HX\x1b[4;1HY\x1b[9;1HZ",
+        );
+        assert_same_screen(&original, &replayed);
+        assert_eq!(replayed.grid()[Line(2)][Column(0)].c, 'X');
+        assert_eq!(replayed.grid()[Line(5)][Column(0)].c, 'Z');
+    }
+
+    #[test]
+    fn a_saved_cursor_is_carried_alongside_a_scroll_region_and_origin_mode() {
+        let mut original = term(20, 10);
+        fill_rows(&mut original);
+        // The cursor is saved in bold red at the second row of the region, which
+        // is the fourth of the screen, and then left somewhere else with its
+        // attributes reset.
+        feed(
+            &mut original,
+            b"\x1b[3;8r\x1b[?6h\x1b[1;31m\x1b[2;4H\x1b7\x1b[0m\x1b[5;1Hmoved",
+        );
+        assert_eq!(
+            original.grid().saved_cursor.point,
+            Point::new(Line(3), Column(3))
+        );
+        let mut replayed = round_trip(&original);
+        assert!(replayed.mode().contains(TermMode::ORIGIN));
+        assert_same_screen(&original, &replayed);
+        assert_eq!(
+            replayed.grid().saved_cursor.point,
+            Point::new(Line(3), Column(3)),
+            "the saved point is a point of the screen and not of the region"
+        );
+
+        // Restored, the saved attributes and point apply; then a row counted
+        // from the top of the region.
+        continue_both(&mut original, &mut replayed, b"\x1b8S\x1b[1;1HT");
+        assert_same_screen(&original, &replayed);
+        let saved_to = &replayed.grid()[Line(3)][Column(3)];
+        assert_eq!(saved_to.c, 'S');
+        assert!(saved_to.flags.contains(Flags::BOLD));
+        assert_eq!(saved_to.fg, Color::Named(NamedColor::Red));
+        assert_eq!(replayed.grid()[Line(2)][Column(0)].c, 'T');
+    }
+
+    #[test]
+    fn a_cursor_waiting_to_wrap_at_the_bottom_of_a_region_in_origin_mode_wraps_inside_it() {
+        let mut original = term(10, 8);
+        fill_rows(&mut original);
+        feed(&mut original, b"\x1b[3;6r\x1b[?6h\x1b[4;1H0123456789");
+        assert!(original.grid().cursor.input_needs_wrap);
+        assert_eq!(original.grid().cursor.point.line, Line(5));
+        let mut replayed = round_trip(&original);
+        assert!(
+            replayed.grid().cursor.input_needs_wrap,
+            "the next character must wrap first, as it would have"
+        );
+        assert_same_screen(&original, &replayed);
+
+        // The wrap scrolls the region and leaves what is above and below it.
+        continue_both(&mut original, &mut replayed, b"K");
+        assert_same_screen(&original, &replayed);
+        assert_eq!(text_of_row(&replayed, 5), "K");
+        assert_eq!(text_of_row(&replayed, 4), "0123456789");
+        assert_eq!(text_of_row(&replayed, 0), "row01", "above the region");
+        assert_eq!(text_of_row(&replayed, 6), "row07", "below the region");
+    }
+
+    #[test]
+    fn the_alternate_screen_keeps_its_saved_cursor_and_region() {
+        let mut original = term(20, 8);
+        feed(
+            &mut original,
+            b"shell\r\n\x1b[?1049h\x1b[2;6r\x1b[4;3H\x1b7\x1b[6;1Happ",
+        );
+        let mut replayed = round_trip(&original);
+        assert!(replayed.mode().contains(TermMode::ALT_SCREEN));
+        assert_eq!(*replayed.scroll_region(), Line(1)..Line(6));
+        assert_same_screen(&original, &replayed);
+
+        // `Z` lands on the saved point, and the three newlines then scroll the
+        // region once, which moves it up a row.
+        continue_both(&mut original, &mut replayed, b"\x1b8Z\r\n\r\n\r\n");
+        assert_same_screen(&original, &replayed);
+        assert_eq!(replayed.grid()[Line(2)][Column(2)].c, 'Z');
     }
 
     #[test]

@@ -1796,8 +1796,17 @@ impl Terminal {
             sequence,
             columns: u16::try_from(term.columns()).unwrap_or(u16::MAX),
             rows: u16::try_from(term.screen_lines()).unwrap_or(u16::MAX),
+            sync_pending: term.is_sync_pending(),
             bytes: render_snapshot(&term, REMOTE_SNAPSHOT_HISTORY_LINES),
         }
+    }
+
+    /// Whether the emulator is holding output back inside a synchronized
+    /// update, which is how a caller that took a snapshot in that state knows
+    /// when the screen has caught up. It stays true if the child exits inside
+    /// an update, so a caller must bound how long it waits.
+    pub fn remote_sync_pending(&self) -> bool {
+        self.term.lock_unfair().is_sync_pending()
     }
 
     pub fn toggle_vi_mode(&mut self) {

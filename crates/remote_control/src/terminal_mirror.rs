@@ -8,6 +8,13 @@
 //! thrown away whole and replaced by a fresh snapshot, which is also how a
 //! resize and a tap that had to drop a chunk are answered.
 //!
+//! A snapshot can be ahead of the screen: the tap sees bytes before the emulator
+//! has drawn them, so one taken while output was flowing, or inside a
+//! synchronized update, may stand for output the screen does not show yet. Such
+//! a snapshot is taken once more when the output has been quiet for a while, or
+//! after a cap if it never is, and waits for an open update to end first. That
+//! repeat is never itself repeated.
+//!
 //! Finding terminals is always on and costs a weak handle each. Following them
 //! -- subscribing to their events, and above all tapping them -- happens only
 //! while remote control is on and a device is attached, so a terminal nobody
@@ -34,10 +41,25 @@ pub const SESSION_QUEUE_LIMIT: usize = 1024 * 1024;
 /// overflow would render the whole screen again under the emulator lock.
 pub(crate) const MIN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long after a snapshot taken while output was flowing the screen is sent
-/// once more. The tap sees bytes before the emulator parses them, so such a
-/// snapshot can stand for output the screen does not show yet; by now it does.
-pub(crate) const FOLLOW_UP_SNAPSHOT_DELAY: Duration = Duration::from_millis(400);
+/// How long the output has to stay quiet before a snapshot that may have been
+/// taken ahead of the screen is sent once more. The tap sees bytes before the
+/// emulator parses them, so such a snapshot can stand for output the screen
+/// does not show yet; once the output stops, it does. Every chunk that arrives
+/// restarts the wait.
+pub(crate) const SETTLE_QUIET: Duration = Duration::from_millis(400);
+
+/// The most the quiet period can be stretched, counted from the snapshot, so a
+/// program that never stops writing -- a spinner -- still gets its repair.
+pub(crate) const SETTLE_MAX_WAIT: Duration = Duration::from_secs(2);
+
+/// How long to wait before looking again when the repair is due but the
+/// emulator is still inside a synchronized update, which holds output back until
+/// it ends or times out.
+pub(crate) const SETTLE_SYNC_RECHECK_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How many times to look again before taking the repair anyway. The wait is
+/// bounded because a child that exits inside an update never ends it.
+pub(crate) const SETTLE_SYNC_RECHECKS: u32 = 20;
 
 /// Most chunks taken from the tap in one go, so one burst cannot hold the
 /// foreground for long.
@@ -150,16 +172,73 @@ impl OutputQueue {
     }
 }
 
+/// A snapshot that may have been taken ahead of the screen, and so is to be
+/// taken again once the output has settled.
+struct Settle {
+    armed_at: Instant,
+    /// Pushed out by every chunk the tap delivers, so a burst keeps it waiting.
+    quiet_until: Instant,
+    /// Set once the wait is over but the emulator is still inside a
+    /// synchronized update: when to look again.
+    recheck_at: Option<Instant>,
+    rechecks: u32,
+}
+
+impl Settle {
+    fn armed(now: Instant) -> Self {
+        Self {
+            armed_at: now,
+            quiet_until: now + SETTLE_QUIET,
+            recheck_at: None,
+            rechecks: 0,
+        }
+    }
+
+    fn on_output(&mut self, now: Instant) {
+        // Once the quiet period has been given up on, all that is left to wait
+        // for is the update.
+        if self.recheck_at.is_none() {
+            self.quiet_until = now + SETTLE_QUIET;
+        }
+    }
+
+    fn due_at(&self) -> Instant {
+        self.recheck_at
+            .unwrap_or_else(|| self.quiet_until.min(self.armed_at + SETTLE_MAX_WAIT))
+    }
+
+    /// Whether the snapshot is to be taken again now. `sync_pending` is asked
+    /// only when it is due, and an update that is still open pushes it back a
+    /// little, up to [`SETTLE_SYNC_RECHECKS`] times.
+    fn ready(&mut self, now: Instant, sync_pending: impl FnOnce() -> bool) -> bool {
+        if now < self.due_at() {
+            return false;
+        }
+        if self.rechecks < SETTLE_SYNC_RECHECKS && sync_pending() {
+            self.rechecks += 1;
+            self.recheck_at = Some(now + SETTLE_SYNC_RECHECK_INTERVAL);
+            return false;
+        }
+        true
+    }
+}
+
+struct ScheduledWake {
+    at: Instant,
+    _task: Task<()>,
+}
+
 struct Attachment {
     stream_id: u32,
     queue: OutputQueue,
     last_snapshot: Option<Instant>,
-    /// The next snapshot is the follow-up to one taken while output flowed, and
-    /// does not earn another.
-    next_snapshot_is_follow_up: bool,
+    /// Set when the snapshot just taken may have been ahead of the screen.
+    settle: Option<Settle>,
+    /// The next snapshot is the repeat for a settle, and does not earn another.
+    next_snapshot_is_settle: bool,
     /// Wakes the session at a later time: to retry a snapshot that was too
-    /// soon, or to send the follow-up. One at a time.
-    wake: Option<Task<()>>,
+    /// soon, or to take the settle. One at a time, whichever is wanted first.
+    wake: Option<ScheduledWake>,
 }
 
 impl Attachment {
@@ -168,7 +247,8 @@ impl Attachment {
             stream_id,
             queue: OutputQueue::awaiting_snapshot(),
             last_snapshot: None,
-            next_snapshot_is_follow_up: false,
+            settle: None,
+            next_snapshot_is_settle: false,
             wake: None,
         }
     }
@@ -180,13 +260,19 @@ impl Attachment {
             .checked_sub(elapsed)
             .filter(|wait| !wait.is_zero())
     }
-}
 
-enum Wake {
-    /// A snapshot was held back; ask again.
-    Retry,
-    /// Send the screen once more, now that the output has settled.
-    FollowUp,
+    /// When this session next needs waking: to retry a snapshot that was held
+    /// back, or to take the settle, whichever comes first.
+    fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let retry = self
+            .queue
+            .needs_snapshot()
+            .then(|| self.snapshot_wait(now))
+            .flatten()
+            .map(|wait| now + wait);
+        let settle = self.settle.as_ref().map(Settle::due_at);
+        retry.into_iter().chain(settle).min()
+    }
 }
 
 struct Mirrored {
@@ -522,7 +608,11 @@ impl TerminalMirror {
             mirrored.last_sequence = last.sequence;
         }
         let lost = dropped || gap;
+        let now = cx.background_executor().now();
         for attachment in mirrored.attachments.values_mut() {
+            if let Some(settle) = attachment.settle.as_mut() {
+                settle.on_output(now);
+            }
             if lost {
                 attachment.queue.invalidate();
                 continue;
@@ -641,24 +731,22 @@ impl TerminalMirror {
             let Some(attachment) = mirrored.attachments.get_mut(&session_id) else {
                 continue;
             };
-            let mut wake = None;
-            if attachment.queue.needs_snapshot() {
-                if let Some(wait) = attachment.snapshot_wait(now) {
-                    wake = Some((wait, Wake::Retry));
-                } else if let Some(terminal) = terminal {
-                    let snapshot = terminal.read(cx).remote_snapshot();
-                    attachment
-                        .queue
-                        .install_snapshot(snapshot.sequence, &snapshot.bytes);
-                    attachment.last_snapshot = Some(now);
-                    // Output the foreground has not been handed yet means the
-                    // child was writing as the screen was read.
-                    let output_was_flowing = snapshot.sequence > last_sequence;
-                    if output_was_flowing && !attachment.next_snapshot_is_follow_up {
-                        wake = Some((FOLLOW_UP_SNAPSHOT_DELAY, Wake::FollowUp));
-                    }
-                    attachment.next_snapshot_is_follow_up = false;
-                }
+            if attachment.queue.needs_snapshot()
+                && attachment.snapshot_wait(now).is_none()
+                && let Some(terminal) = terminal
+            {
+                let snapshot = terminal.read(cx).remote_snapshot();
+                attachment
+                    .queue
+                    .install_snapshot(snapshot.sequence, &snapshot.bytes);
+                attachment.last_snapshot = Some(now);
+                // Output the foreground has not been handed yet means the child
+                // was writing as the screen was read, and an open synchronized
+                // update means the screen is behind what the tap has seen.
+                let may_be_ahead = snapshot.sequence > last_sequence || snapshot.sync_pending;
+                attachment.settle = (may_be_ahead && !attachment.next_snapshot_is_settle)
+                    .then(|| Settle::armed(now));
+                attachment.next_snapshot_is_settle = false;
             }
             let popped = if attachment.queue.needs_snapshot() {
                 None
@@ -666,8 +754,9 @@ impl TerminalMirror {
                 attachment.queue.pop()
             };
             let stream_id = attachment.stream_id;
-            if let Some((delay, kind)) = wake {
-                self.schedule_wake(id, session_id, delay, kind, cx);
+            let next_wake = attachment.next_wake(now);
+            if let Some(at) = next_wake {
+                self.schedule_wake(id, session_id, at, cx);
             }
             if let Some(bytes) = popped {
                 self.last_served.insert(session_id, id);
@@ -677,12 +766,12 @@ impl TerminalMirror {
         None
     }
 
+    /// Wakes the session at `at`, unless it is already set to wake no later.
     fn schedule_wake(
         &mut self,
         id: EntityId,
         session_id: u32,
-        delay: Duration,
-        kind: Wake,
+        at: Instant,
         cx: &mut Context<Self>,
     ) {
         let Some(attachment) = self
@@ -692,30 +781,57 @@ impl TerminalMirror {
         else {
             return;
         };
-        if attachment.wake.is_some() {
+        if attachment
+            .wake
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.at <= at)
+        {
             return;
         }
-        attachment.wake = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            this.update(cx, |this, cx| this.wake(id, session_id, kind, cx))
-                .log_err();
-        }));
+        let delay = at.saturating_duration_since(cx.background_executor().now());
+        attachment.wake = Some(ScheduledWake {
+            at,
+            _task: cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                this.update(cx, |this, cx| this.wake(id, session_id, cx))
+                    .log_err();
+            }),
+        });
     }
 
-    fn wake(&mut self, id: EntityId, session_id: u32, kind: Wake, cx: &mut Context<Self>) {
-        let Some(attachment) = self
-            .terminals
-            .get_mut(&id)
-            .and_then(|mirrored| mirrored.attachments.get_mut(&session_id))
-        else {
+    fn wake(&mut self, id: EntityId, session_id: u32, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let Some(mirrored) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        let terminal = mirrored.terminal.upgrade();
+        let Some(attachment) = mirrored.attachments.get_mut(&session_id) else {
             return;
         };
         attachment.wake = None;
-        if matches!(kind, Wake::FollowUp) {
-            attachment.queue.invalidate();
-            attachment.next_snapshot_is_follow_up = true;
+        // A snapshot that was held back is asked for again whatever woke us.
+        let mut announce = attachment.queue.needs_snapshot();
+        if let Some(settle) = attachment.settle.as_mut()
+            && settle.ready(now, || {
+                terminal.is_some_and(|terminal| terminal.read(cx).remote_sync_pending())
+            })
+        {
+            attachment.settle = None;
+            // A snapshot that is already wanted is a fresh one and decides for
+            // itself whether it needs a repeat.
+            if !attachment.queue.needs_snapshot() {
+                attachment.queue.invalidate();
+                attachment.next_snapshot_is_settle = true;
+            }
+            announce = true;
         }
-        cx.emit(TerminalMirrorEvent::OutputReady { session_id });
+        let next_wake = attachment.next_wake(now);
+        if let Some(at) = next_wake {
+            self.schedule_wake(id, session_id, at, cx);
+        }
+        if announce {
+            cx.emit(TerminalMirrorEvent::OutputReady { session_id });
+        }
     }
 
     /// Whether any terminal still has a tap. For tests and for the host's own
@@ -881,6 +997,112 @@ mod tests {
         drain(&mut queue);
         assert_eq!(queue.chunk_bytes, 0);
         assert!(!queue.has_output());
+    }
+
+    const MILLISECOND: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn a_settle_is_due_once_the_output_has_been_quiet_for_a_while() {
+        let start = Instant::now();
+        let mut settle = Settle::armed(start);
+        assert_eq!(settle.due_at(), start + SETTLE_QUIET);
+        assert!(!settle.ready(start + SETTLE_QUIET - MILLISECOND, || {
+            panic!("the emulator is not asked before it is due")
+        }));
+        assert!(settle.ready(start + SETTLE_QUIET, || false));
+    }
+
+    #[test]
+    fn every_chunk_restarts_the_quiet_period_but_the_cap_still_holds() {
+        let start = Instant::now();
+        let mut settle = Settle::armed(start);
+        let step = SETTLE_QUIET / 2;
+        let mut now = start;
+        while now + step < start + SETTLE_MAX_WAIT {
+            now += step;
+            settle.on_output(now);
+            assert_eq!(
+                settle.due_at(),
+                (now + SETTLE_QUIET).min(start + SETTLE_MAX_WAIT)
+            );
+        }
+        assert_eq!(settle.due_at(), start + SETTLE_MAX_WAIT);
+        assert!(!settle.ready(start + SETTLE_MAX_WAIT - MILLISECOND, || false));
+        assert!(settle.ready(start + SETTLE_MAX_WAIT, || false));
+    }
+
+    #[test]
+    fn a_settle_waits_for_a_synchronized_update_to_end() {
+        let start = Instant::now();
+        let due = start + SETTLE_QUIET;
+        let mut settle = Settle::armed(start);
+
+        assert!(!settle.ready(due, || true), "the update is still open");
+        assert_eq!(settle.due_at(), due + SETTLE_SYNC_RECHECK_INTERVAL);
+        assert!(
+            !settle.ready(due + SETTLE_SYNC_RECHECK_INTERVAL - MILLISECOND, || {
+                panic!("the emulator is only asked when the recheck is due")
+            })
+        );
+        assert!(!settle.ready(due + SETTLE_SYNC_RECHECK_INTERVAL, || true));
+        assert!(
+            settle.ready(due + SETTLE_SYNC_RECHECK_INTERVAL * 2, || false),
+            "the update ended, so the screen has caught up"
+        );
+    }
+
+    #[test]
+    fn an_update_that_never_ends_is_waited_for_a_bounded_time() {
+        let start = Instant::now();
+        let due = start + SETTLE_QUIET;
+        let mut settle = Settle::armed(start);
+        let mut now = due;
+        let mut waits = 0;
+        while !settle.ready(now, || true) {
+            waits += 1;
+            assert!(waits <= SETTLE_SYNC_RECHECKS, "it must give up");
+            now = settle.due_at();
+        }
+        assert_eq!(waits, SETTLE_SYNC_RECHECKS);
+        assert_eq!(
+            now,
+            due + SETTLE_SYNC_RECHECK_INTERVAL * SETTLE_SYNC_RECHECKS
+        );
+    }
+
+    #[test]
+    fn output_while_waiting_out_an_update_does_not_restart_the_wait() {
+        let start = Instant::now();
+        let due = start + SETTLE_QUIET;
+        let mut settle = Settle::armed(start);
+        assert!(!settle.ready(due, || true));
+        settle.on_output(due + MILLISECOND * 10);
+        assert_eq!(
+            settle.due_at(),
+            due + SETTLE_SYNC_RECHECK_INTERVAL,
+            "the quiet period already passed; only the update is being waited for"
+        );
+    }
+
+    #[test]
+    fn a_session_wakes_for_whichever_of_a_retry_and_a_settle_comes_first() {
+        let start = Instant::now();
+        let now = start + MILLISECOND * 100;
+        let mut attachment = Attachment::new(1);
+        attachment.last_snapshot = Some(start);
+        attachment.settle = Some(Settle::armed(start));
+        assert!(attachment.queue.needs_snapshot());
+        assert_eq!(
+            attachment.next_wake(now),
+            Some(start + MIN_SNAPSHOT_INTERVAL),
+            "the held-back snapshot is due before the settle"
+        );
+
+        attachment.queue.install_snapshot(0, b"screen");
+        assert_eq!(attachment.next_wake(now), Some(start + SETTLE_QUIET));
+
+        attachment.settle = None;
+        assert_eq!(attachment.next_wake(now), None);
     }
 
     #[cfg(unix)]
@@ -1129,7 +1351,7 @@ mod tests {
             recorded.events.borrow_mut().clear();
 
             cx.executor()
-                .advance_clock(FOLLOW_UP_SNAPSHOT_DELAY + Duration::from_millis(10));
+                .advance_clock(SETTLE_QUIET + Duration::from_millis(10));
             cx.run_until_parked();
             assert!(
                 recorded.events.borrow().iter().any(|event| matches!(
@@ -1151,12 +1373,12 @@ mod tests {
             cx.run_until_parked();
             assert!(
                 pop_all(&mirror, 1, cx).is_empty() && recorded.events.borrow().is_empty(),
-                "the follow-up is not itself followed up"
+                "the repeat is not itself repeated"
             );
         }
 
         #[gpui::test]
-        async fn a_terminal_that_was_quiet_gets_no_follow_up_snapshot(cx: &mut TestAppContext) {
+        async fn a_terminal_that_was_quiet_gets_no_repeat_snapshot(cx: &mut TestAppContext) {
             let (mirror, recorded) = mirror(cx);
             mirror.update(cx, |mirror, cx| mirror.activate(cx));
             let _terminal = shell_terminal("printf 'quiet\\n'; sleep 30", cx).await;
@@ -1172,6 +1394,264 @@ mod tests {
             cx.run_until_parked();
             assert!(recorded.events.borrow().is_empty());
             assert!(pop_all(&mirror, 1, cx).is_empty());
+        }
+
+        fn push_output(
+            mirror: &Entity<TerminalMirror>,
+            entity_id: EntityId,
+            cx: &mut TestAppContext,
+        ) {
+            mirror.update(cx, |mirror, cx| {
+                let sequence = mirror
+                    .terminals
+                    .get(&entity_id)
+                    .map_or(0, |mirrored| mirrored.last_sequence)
+                    + 1;
+                let chunk = RemoteOutputChunk {
+                    sequence,
+                    bytes: b"x".to_vec(),
+                };
+                mirror.on_chunks(entity_id, vec![chunk], false, cx);
+            });
+        }
+
+        fn full_redraws(frames: &[Vec<u8>]) -> usize {
+            frames
+                .iter()
+                .filter(|frame| frame.starts_with(b"\x1bc"))
+                .count()
+        }
+
+        #[gpui::test]
+        async fn output_that_never_goes_quiet_still_gets_exactly_one_repeat_at_the_cap(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded, terminal, _id) = attached_while_output_is_in_flight(cx).await;
+            let entity_id = terminal.entity_id();
+            pop_all(&mirror, 1, cx);
+            cx.run_until_parked();
+            pop_all(&mirror, 1, cx);
+
+            // Something arrives more often than the quiet period, for longer
+            // than the cap.
+            let step = SETTLE_QUIET / 4;
+            let mut waited = Duration::ZERO;
+            let mut repeats = 0;
+            while waited < SETTLE_MAX_WAIT + SETTLE_QUIET {
+                push_output(&mirror, entity_id, cx);
+                cx.executor().advance_clock(step);
+                cx.run_until_parked();
+                waited += step;
+                repeats += full_redraws(&pop_all(&mirror, 1, cx));
+                if waited < SETTLE_MAX_WAIT {
+                    assert_eq!(repeats, 0, "still inside the cap at {waited:?}");
+                }
+            }
+            assert_eq!(repeats, 1, "one repeat once the cap was reached");
+
+            recorded.events.borrow_mut().clear();
+            cx.executor().advance_clock(Duration::from_secs(10));
+            cx.run_until_parked();
+            assert!(
+                full_redraws(&pop_all(&mirror, 1, cx)) == 0 && recorded.events.borrow().is_empty(),
+                "the repeat is not itself repeated"
+            );
+        }
+
+        /// A terminal whose emulator is inside a synchronized update and stays
+        /// there: the child leaves inside it, so nothing ends it. An update
+        /// that ends by itself after a fraction of a second would make a test
+        /// of what happens inside one a race.
+        async fn terminal_inside_an_update(cx: &mut TestAppContext) -> Entity<Terminal> {
+            let terminal = shell_terminal("printf 'before\\n\\033[?2026hheld back'", cx).await;
+            for _ in 0..500 {
+                if terminal.read_with(cx, |terminal, _| terminal.remote_sync_pending()) {
+                    break;
+                }
+                cx.background_executor
+                    .timer(Duration::from_millis(10))
+                    .await;
+                cx.run_until_parked();
+            }
+            assert!(terminal.read_with(cx, |terminal, _| terminal.remote_sync_pending()));
+            terminal
+        }
+
+        #[gpui::test]
+        async fn a_snapshot_taken_inside_a_synchronized_update_is_repeated_when_the_wait_ends(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let _terminal = terminal_inside_an_update(cx).await;
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+
+            let first = pop_all(&mirror, 1, cx).concat();
+            let first_text = String::from_utf8_lossy(&first).into_owned();
+            assert!(first.starts_with(b"\x1bc"));
+            assert!(first_text.contains("before"), "{first_text:?}");
+            assert!(
+                !first_text.contains("held back"),
+                "the update holds those bytes back: {first_text:?}"
+            );
+            recorded.events.borrow_mut().clear();
+
+            // Nothing is flowing, yet the snapshot is not trusted: it is due
+            // after the quiet period, but the update is still open. Here it
+            // never ends, so the repeat waits a bounded number of looks and
+            // then goes ahead anyway.
+            let look = SETTLE_SYNC_RECHECK_INTERVAL + Duration::from_millis(1);
+            cx.executor()
+                .advance_clock(SETTLE_QUIET + Duration::from_millis(10));
+            cx.run_until_parked();
+            for number in 1..SETTLE_SYNC_RECHECKS {
+                assert!(
+                    pop_all(&mirror, 1, cx).is_empty() && recorded.events.borrow().is_empty(),
+                    "still waiting for the update at look {number}"
+                );
+                cx.executor().advance_clock(look);
+                cx.run_until_parked();
+            }
+            assert!(pop_all(&mirror, 1, cx).is_empty());
+            cx.executor().advance_clock(look);
+            cx.run_until_parked();
+            assert!(
+                recorded.events.borrow().iter().any(|event| matches!(
+                    event,
+                    TerminalMirrorEvent::OutputReady { session_id: 1 }
+                )),
+                "the host is told there is a screen to send"
+            );
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+
+            recorded.events.borrow_mut().clear();
+            cx.executor().advance_clock(Duration::from_secs(10));
+            cx.run_until_parked();
+            assert!(
+                pop_all(&mirror, 1, cx).is_empty() && recorded.events.borrow().is_empty(),
+                "the repeat is not itself repeated, even though it was taken inside the update too"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_held_back_snapshot_is_not_delayed_by_a_repeat_that_is_further_off(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded, _terminal, _id) = attached_while_output_is_in_flight(cx).await;
+            pop_all(&mirror, 1, cx);
+            cx.run_until_parked();
+            pop_all(&mirror, 1, cx);
+
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            mirror.update(cx, |mirror, _| {
+                for mirrored in mirror.terminals.values_mut() {
+                    if let Some(attachment) = mirrored.attachments.get_mut(&1) {
+                        attachment.queue.invalidate();
+                    }
+                }
+            });
+            assert!(
+                pop_all(&mirror, 1, cx).is_empty(),
+                "too soon after the last"
+            );
+            recorded.events.borrow_mut().clear();
+
+            // The retry is due before the repeat is, and must not wait for it.
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL - Duration::from_millis(90));
+            cx.run_until_parked();
+            assert!(
+                recorded.events.borrow().iter().any(|event| matches!(
+                    event,
+                    TerminalMirrorEvent::OutputReady { session_id: 1 }
+                )),
+                "the held-back snapshot is asked for again on time"
+            );
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+
+            // Taken at rest, that snapshot is trustworthy: the repeat that was
+            // waiting for the older one is no longer needed.
+            recorded.events.borrow_mut().clear();
+            cx.executor().advance_clock(Duration::from_secs(10));
+            cx.run_until_parked();
+            assert!(pop_all(&mirror, 1, cx).is_empty() && recorded.events.borrow().is_empty());
+        }
+
+        /// Whether the session has a repeat waiting, whether its next snapshot
+        /// is that repeat, and whether a snapshot is wanted.
+        fn session_state(
+            mirror: &Entity<TerminalMirror>,
+            cx: &mut TestAppContext,
+        ) -> (bool, bool, bool) {
+            mirror.read_with(cx, |mirror, _| {
+                let attachment = mirror
+                    .terminals
+                    .values()
+                    .find_map(|mirrored| mirrored.attachments.get(&1))
+                    .expect("session 1 is attached");
+                (
+                    attachment.settle.is_some(),
+                    attachment.next_snapshot_is_settle,
+                    attachment.queue.needs_snapshot(),
+                )
+            })
+        }
+
+        #[gpui::test]
+        async fn a_repeat_that_comes_due_while_a_snapshot_is_still_wanted_leaves_that_snapshot_to_decide_for_itself(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, _recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let _terminal = terminal_inside_an_update(cx).await;
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+            assert_eq!(
+                session_state(&mirror, cx),
+                (true, false, false),
+                "taken inside an update, so it is not trusted"
+            );
+
+            // The session is asked for a fresh snapshot and nobody takes it, as
+            // when the relay is backed up.
+            mirror.update(cx, |mirror, _| {
+                for mirrored in mirror.terminals.values_mut() {
+                    if let Some(attachment) = mirrored.attachments.get_mut(&1) {
+                        attachment.queue.invalidate();
+                    }
+                }
+            });
+
+            // The update never ends, so the repeat gives up waiting for it
+            // after a bounded number of looks.
+            let look = SETTLE_SYNC_RECHECK_INTERVAL + Duration::from_millis(1);
+            cx.executor()
+                .advance_clock(SETTLE_QUIET + Duration::from_millis(10));
+            cx.run_until_parked();
+            for _ in 0..=SETTLE_SYNC_RECHECKS {
+                if !session_state(&mirror, cx).0 {
+                    break;
+                }
+                cx.executor().advance_clock(look);
+                cx.run_until_parked();
+            }
+            assert_eq!(
+                session_state(&mirror, cx),
+                (false, false, true),
+                "the repeat is spent, and the snapshot that is wanted is not marked as one"
+            );
+
+            // That snapshot is taken inside the update too, and earns a repeat
+            // of its own, which it could not if it had been taken for the old one.
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+            assert_eq!(session_state(&mirror, cx), (true, false, false));
         }
 
         #[gpui::test]
