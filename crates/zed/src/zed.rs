@@ -373,6 +373,13 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         agent_notify::init(cx);
     }
 
+    // Gated the way the status-bar indicator is: where the OS will not hold
+    // the display, the always-on action would be a palette entry that can
+    // never do anything.
+    if cx.can_keep_display_awake() {
+        keep_awake::init(cx);
+    }
+
     // Switched off by default, and built to do nothing while it is: no
     // connection is opened and no terminal is watched until the
     // `remote_control` setting is on and an account is signed in.
@@ -5126,6 +5133,7 @@ mod tests {
                 "highlights_tree_view",
                 "image_viewer",
                 "journal",
+                "keep_awake",
                 "keymap_editor",
                 "keystroke_input",
                 "language_selector",

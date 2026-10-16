@@ -124,11 +124,16 @@
   // Whether to enable helix mode and key bindings.
   // Enabling this mode will automatically enable vim mode.
   "helix_mode": false,
-  // Whether to keep the display lit while an agent's CLI is still working.
-  // While this holds, the machine will not dim, sleep or reach a time-based lock
-  // screen -- an editor left in a public place stays readable. Released
-  // automatically while running on battery, and whenever no agent is working.
+  // Whether to keep the display lit while a tab -- agent, task or shell -- is
+  // producing output. While this holds, the machine will not dim, sleep or reach
+  // a time-based lock screen -- an editor left in a public place stays readable.
+  // Released automatically while running on battery, and whenever nothing is
+  // producing output.
   "keep_display_awake": true,
+  // Whether to keep the display lit for as long as a Zode window is open, until
+  // this is turned off. Independent of `keep_display_awake`, and held on battery
+  // too.
+  "keep_display_awake_always": false,
   // Whether to post an OS notification when an agent finishes answering, is
   // waiting for your approval, or its CLI exits -- posted regardless of window
   // focus. For a Claude tab with a tracked session, "finished answering" comes

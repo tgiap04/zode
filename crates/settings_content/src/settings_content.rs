@@ -149,17 +149,28 @@ pub struct SettingsContent {
     /// Default: false
     pub helix_mode: Option<bool>,
 
-    /// Whether to keep the display lit while an agent's CLI is still working.
+    /// Whether to keep the display lit while a tab -- agent, task or shell -- is
+    /// producing output.
     ///
     /// While this holds, the machine will not dim, sleep or reach a
     /// time-based lock screen. That is the point of it, and it is also the cost:
     /// an editor left in a public place stays readable.
     ///
-    /// Released automatically while running on battery, and whenever no agent is
-    /// working.
+    /// Released automatically while running on battery, and whenever nothing is
+    /// producing output.
     ///
     /// Default: true
     pub keep_display_awake: Option<bool>,
+
+    /// Whether to keep the display lit for as long as a Zode window is open,
+    /// whatever the tabs are doing, until this is turned off.
+    ///
+    /// Independent of `keep_display_awake`, and not released on battery: it is
+    /// switched on by hand, so it is held on the user's word rather than on a
+    /// guess about whether anything needs the screen.
+    ///
+    /// Default: false
+    pub keep_display_awake_always: Option<bool>,
 
     /// Whether to post an OS notification when an agent finishes answering or
     /// its CLI exits.

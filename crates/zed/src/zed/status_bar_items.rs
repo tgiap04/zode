@@ -39,7 +39,7 @@ use encoding_selector::ActiveBufferEncoding;
 use go_to_line::cursor_position::CursorPosition;
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use image_viewer::ImageInfo;
-use keep_awake::{KeepAwake, KeepDisplayAwakeSetting};
+use keep_awake::{KeepAwake, KeepDisplayAwakeAlwaysSetting, KeepDisplayAwakeSetting};
 use language_selector::ActiveBufferLanguage;
 use language_tools::lsp_button::{self, LspButton};
 use line_ending_selector::LineEndingIndicator;
@@ -155,8 +155,20 @@ const KEEP_AWAKE: ItemDescriptor = ItemDescriptor {
     id: "keep_awake",
     label: "Keep Display Awake",
     side: StatusBarSide::Left,
-    is_shown: |cx| KeepDisplayAwakeSetting::get_global(cx).0,
-    set_shown: |content, on| content.keep_display_awake = Some(on),
+    // Shown while either switch is on, and hiding it turns both off: an icon
+    // hidden over a display still being held is the one state nobody can see or
+    // undo from the bar.
+    is_shown: |cx| {
+        KeepDisplayAwakeSetting::get_global(cx).0 || KeepDisplayAwakeAlwaysSetting::get_global(cx).0
+    },
+    set_shown: |content, on| {
+        content.keep_display_awake = Some(on);
+        // Only written when it is on, so hiding the row does not add a key the
+        // user never set to their settings file.
+        if !on && content.keep_display_awake_always == Some(true) {
+            content.keep_display_awake_always = Some(false);
+        }
+    },
 };
 
 const PROJECT_FOOTPRINT: ItemDescriptor = ItemDescriptor {
@@ -698,6 +710,7 @@ mod tests {
             ProjectSettings::register(cx);
             StatusBarSettings::register(cx);
             KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
             ProjectFootprintSetting::register(cx);
 
             for item in ALL_DESCRIPTORS {
@@ -720,6 +733,37 @@ mod tests {
         });
     }
 
+    /// The keep-awake row reads two switches, and the round trip above only
+    /// ever moves one of them. With only the always-on switch on, the row must
+    /// show, and hiding it must turn that switch off -- otherwise "hide" would
+    /// leave the row and the hold exactly where they were.
+    #[gpui::test]
+    fn hiding_keep_awake_turns_off_the_always_on_switch_too(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
+
+            cx.update_global::<SettingsStore, ()>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.keep_display_awake = Some(false);
+                    content.keep_display_awake_always = Some(true);
+                });
+            });
+            assert!(
+                (KEEP_AWAKE.is_shown)(cx),
+                "the icon has to show while the always-on switch holds"
+            );
+
+            cx.update_global::<SettingsStore, ()>(|store, cx| {
+                store.update_user_settings(cx, |content| (KEEP_AWAKE.set_shown)(content, false));
+            });
+            assert!(!(KEEP_AWAKE.is_shown)(cx));
+            assert!(!KeepDisplayAwakeAlwaysSetting::get_global(cx).0);
+        });
+    }
+
     #[gpui::test]
     fn is_shown_matches_todays_defaults(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -729,6 +773,7 @@ mod tests {
             ProjectSettings::register(cx);
             StatusBarSettings::register(cx);
             KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
             ProjectFootprintSetting::register(cx);
 
             for item in ALL_DESCRIPTORS {

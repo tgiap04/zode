@@ -34,6 +34,7 @@ fn init_settings(cx: &mut TestAppContext) {
         let store = settings::SettingsStore::test(cx);
         cx.set_global(store);
         KeepDisplayAwakeSetting::register(cx);
+        KeepDisplayAwakeAlwaysSetting::register(cx);
     });
 }
 
@@ -42,6 +43,16 @@ fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |content| {
                 content.keep_display_awake = Some(enabled);
+            });
+        });
+    });
+}
+
+fn set_always(cx: &mut TestAppContext, on: bool) {
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                content.keep_display_awake_always = Some(on);
             });
         });
     });
@@ -500,6 +511,256 @@ fn the_reason_names_one_agent_and_counts_several(cx: &mut TestAppContext) {
     assert_eq!(holds.reason(), "2 tabs are producing output");
 }
 
+/// The manual switch beside the rate rule. It is the user's word, so it holds
+/// whatever the tabs, the battery or the automatic switch say -- and turning it
+/// off must let go at once without taking a hold a tab still needs.
+mod always_on {
+    use super::a_real_tab::{build_keep_awake, workspace_without_keep_awake};
+    use super::*;
+
+    /// Off unless turned on. Asserted through a real settings store so a change
+    /// to `default.json` shows up here rather than holding every display.
+    #[gpui::test]
+    fn the_always_switch_defaults_off(cx: &mut TestAppContext) {
+        init_settings(cx);
+        let mut holds = Holds::default();
+
+        cx.update(|cx| {
+            assert!(!KeepDisplayAwakeAlwaysSetting::is_enabled(cx));
+            assert!(!holds.sync(cx), "nothing running and nothing asked for");
+        });
+        assert!(cx.display_wake_reasons().is_empty());
+    }
+
+    #[gpui::test]
+    fn always_takes_the_lock_with_nothing_running(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_always(cx, true);
+        let mut holds = Holds::default();
+
+        cx.update(|cx| {
+            assert!(holds.sync(cx));
+            assert_eq!(holds.status(cx), Status::Holding);
+        });
+        assert_eq!(cx.display_wake_reasons(), vec![ALWAYS_ON_REASON]);
+    }
+
+    /// The battery guard is for a guess about what needs the screen. A switch
+    /// turned on by hand -- to present from a laptop, say -- must not be
+    /// second-guessed by it.
+    #[gpui::test]
+    fn always_holds_on_battery(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_always(cx, true);
+        cx.set_on_battery(Some(true));
+        let mut holds = Holds::default();
+
+        cx.update(|cx| assert!(holds.sync(cx)));
+
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+    }
+
+    /// The two switches are independent: turning the automatic one off must
+    /// not quietly turn the manual one off with it.
+    #[gpui::test]
+    fn always_holds_with_the_automatic_switch_off(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_enabled(cx, false);
+        set_always(cx, true);
+        let mut holds = Holds::default();
+
+        cx.update(|cx| {
+            assert!(holds.sync(cx));
+            assert_eq!(holds.status(cx), Status::Holding);
+        });
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+    }
+
+    #[gpui::test]
+    fn turning_always_off_releases_when_nothing_runs(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_always(cx, true);
+        let mut holds = Holds::default();
+        cx.update(|cx| holds.sync(cx));
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+
+        set_always(cx, false);
+        cx.update(|cx| assert!(holds.sync(cx), "the hold must end with the switch"));
+
+        assert!(cx.display_wake_reasons().is_empty());
+    }
+
+    /// The pair that would break if turning the switch off released
+    /// unconditionally rather than falling back to the rate rule.
+    #[gpui::test]
+    fn turning_always_off_keeps_a_tab_that_is_still_producing_output(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_enabled(cx, true);
+        cx.set_on_battery(Some(false));
+        let claude = tab(cx);
+        let mut holds = Holds::default();
+        cx.update(|cx| holds.set(claude, "Claude Code".into(), cx));
+
+        set_always(cx, true);
+        cx.update(|cx| assert!(!holds.sync(cx), "already held, so nothing changes hands"));
+        set_always(cx, false);
+        cx.update(|cx| assert!(!holds.sync(cx), "the tab still needs the display"));
+
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+    }
+
+    /// "Turned off" has to mean both switches. With only the automatic one off,
+    /// the manual one is still holding, and saying "turned off" over it would
+    /// contradict the lit icon.
+    #[gpui::test]
+    fn disabled_means_both_switches_off(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_enabled(cx, false);
+        let mut holds = Holds::default();
+        cx.update(|cx| {
+            holds.sync(cx);
+            assert_eq!(holds.status(cx), Status::Disabled);
+        });
+
+        set_always(cx, true);
+        cx.update(|cx| {
+            holds.sync(cx);
+            assert_eq!(holds.status(cx), Status::Holding);
+        });
+    }
+
+    /// With the switch on, every reason to hold is true whatever else is going
+    /// on, so a missing lock can only be a refusal. "Nothing is producing
+    /// output" or "turned off" would each explain it wrongly.
+    #[gpui::test]
+    fn a_refused_always_hold_reads_unsupported(cx: &mut TestAppContext) {
+        init_settings(cx);
+        set_always(cx, true);
+        cx.set_display_wake_supported(false);
+        let mut holds = Holds::default();
+
+        cx.update(|cx| {
+            assert!(
+                !holds.sync(cx),
+                "nothing was taken, so nothing changed hands"
+            );
+            assert_eq!(holds.status(cx), Status::Unsupported, "not Idle");
+        });
+        set_enabled(cx, false);
+        cx.update(|cx| {
+            assert_eq!(holds.status(cx), Status::Unsupported, "not Disabled");
+        });
+        assert!(cx.display_wake_reasons().is_empty());
+    }
+
+    /// Through the palette action as `init` registers it, so deleting the
+    /// registration fails here too. It writes the inverse of the saved switch,
+    /// both ways round.
+    #[gpui::test]
+    fn the_action_flips_the_saved_switch_both_ways(cx: &mut TestAppContext) {
+        init_settings(cx);
+        cx.update(|cx| {
+            <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
+            init(cx);
+            cx.dispatch_action(&ToggleAlwaysOn);
+        });
+        cx.run_until_parked();
+        assert!(cx.update(|cx| KeepDisplayAwakeAlwaysSetting::is_enabled(cx)));
+
+        cx.update(|cx| cx.dispatch_action(&ToggleAlwaysOn));
+        cx.run_until_parked();
+        assert!(!cx.update(|cx| KeepDisplayAwakeAlwaysSetting::is_enabled(cx)));
+    }
+
+    /// Two presses before the first write lands must cancel out, not both
+    /// write "on" from the same stale reading.
+    #[gpui::test]
+    fn two_quick_toggles_cancel_out(cx: &mut TestAppContext) {
+        init_settings(cx);
+        cx.update(|cx| {
+            <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
+            toggle_always_on(cx);
+            toggle_always_on(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(!cx.update(|cx| KeepDisplayAwakeAlwaysSetting::is_enabled(cx)));
+    }
+
+    /// A switch saved on, read when the indicator is built. Nothing else would
+    /// take the lock: no settings change arrives at startup, and none arrives
+    /// when the status bar rebuilds the indicator after the row is shown again.
+    #[gpui::test]
+    async fn a_persisted_always_switch_holds_from_the_start(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace_without_keep_awake(cx).await;
+        set_always(cx, true);
+
+        let keep_awake = build_keep_awake(&workspace, cx);
+
+        keep_awake.read_with(cx, |keep_awake, cx| {
+            assert!(keep_awake.is_holding());
+            assert_eq!(keep_awake.status(cx), Status::Holding);
+        });
+        assert_eq!(cx.display_wake_reasons(), vec![ALWAYS_ON_REASON]);
+    }
+
+    /// Through the settings observer, the path the menu and the palette
+    /// action both end in.
+    #[gpui::test]
+    async fn turning_always_on_takes_the_lock_at_once(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace_without_keep_awake(cx).await;
+        let keep_awake = build_keep_awake(&workspace, cx);
+        assert!(cx.display_wake_reasons().is_empty());
+
+        set_always(cx, true);
+        cx.run_until_parked();
+
+        keep_awake.read_with(cx, |keep_awake, _| assert!(keep_awake.is_holding()));
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+    }
+
+    /// The OS can refuse at the worst moment -- at login, before the session
+    /// bus answers -- and with no tab producing output nothing else would ask
+    /// again. The power-check timer does, and stops once the hold is taken.
+    #[gpui::test]
+    async fn a_refused_always_hold_is_asked_for_again(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace_without_keep_awake(cx).await;
+        set_always(cx, true);
+        cx.set_display_wake_supported(false);
+        let keep_awake = build_keep_awake(&workspace, cx);
+        keep_awake.read_with(cx, |keep_awake, _| assert!(!keep_awake.is_holding()));
+
+        cx.set_display_wake_supported(true);
+        cx.executor().advance_clock(POWER_CHECK_INTERVAL);
+        cx.run_until_parked();
+
+        keep_awake.read_with(cx, |keep_awake, _| {
+            assert!(keep_awake.is_holding(), "the retry must take the hold");
+            assert!(
+                keep_awake.power_check.is_none(),
+                "and the timer must end with nothing left to ask for"
+            );
+        });
+        assert_eq!(cx.display_wake_reasons(), vec![ALWAYS_ON_REASON]);
+    }
+
+    /// The other direction. A switch that only stopped the *next* hold would
+    /// leave the display lit until the window closed.
+    #[gpui::test]
+    async fn turning_always_off_lets_go_at_once(cx: &mut TestAppContext) {
+        let (workspace, cx) = workspace_without_keep_awake(cx).await;
+        set_always(cx, true);
+        let keep_awake = build_keep_awake(&workspace, cx);
+        assert_eq!(cx.display_wake_reasons().len(), 1);
+
+        set_always(cx, false);
+        cx.run_until_parked();
+
+        keep_awake.read_with(cx, |keep_awake, _| assert!(!keep_awake.is_holding()));
+        assert!(cx.display_wake_reasons().is_empty());
+    }
+}
+
 /// The grace that keeps one answer from flapping the lock.
 ///
 /// An agent reading a file or waiting on a model writes nothing for seconds at
@@ -555,6 +816,17 @@ mod a_real_tab {
         gpui::Entity<workspace::Workspace>,
         &mut VisualTestContext,
     ) {
+        let (workspace, cx) = workspace_without_keep_awake(cx).await;
+        let keep_awake = build_keep_awake(&workspace, cx);
+        (keep_awake, workspace, cx)
+    }
+
+    /// The workspace alone, so a test can change a setting before `KeepAwake`
+    /// exists. Changing it afterwards would go through the settings observer
+    /// and prove nothing about what `KeepAwake::new` does on its own.
+    pub(super) async fn workspace_without_keep_awake(
+        cx: &mut TestAppContext,
+    ) -> (gpui::Entity<workspace::Workspace>, &mut VisualTestContext) {
         cx.update(|cx| {
             let store = settings::SettingsStore::test(cx);
             cx.set_global(store);
@@ -562,6 +834,7 @@ mod a_real_tab {
             editor::init(cx);
             terminal_view::init(cx);
             KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
             project::DisableAiSettings::register(cx);
         });
         let fs = fs::FakeFs::new(cx.executor());
@@ -569,12 +842,17 @@ mod a_real_tab {
         let (multi, cx) = cx
             .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
         let workspace = multi.read_with(cx, |multi, _| multi.workspace().clone());
+        (workspace, cx)
+    }
 
-        let keep_awake = workspace.update(cx, |workspace, cx| {
+    pub(super) fn build_keep_awake(
+        workspace: &gpui::Entity<workspace::Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Entity<KeepAwake> {
+        workspace.update(cx, |workspace, cx| {
             let handle = cx.entity();
             cx.new(|cx| KeepAwake::new(workspace, &handle, cx))
-        });
-        (keep_awake, workspace, cx)
+        })
     }
 
     /// A tab with no CLI behind it. There is no agent binary in a test, so the

@@ -1,4 +1,5 @@
-//! Keeps the display lit while an agent is producing an answer.
+//! Keeps the display lit while an agent is producing an answer -- or, on a
+//! switch turned on by hand, for as long as a window is open.
 //!
 //! The question is narrower than it looks, and there are two ways to get it
 //! wrong, one behind the other.
@@ -64,14 +65,20 @@
 //!
 //! A later change must not reach for that heuristic to "fix" a case the rate
 //! rule already covers.
+//!
+//! Beside the rate rule sits a manual switch, `keep_display_awake_always`, that
+//! holds the display for as long as a window is open. It is the user's word
+//! rather than a guess about what needs the screen, so neither output nor
+//! battery ends it -- and it is read in the same `sync`, so the lock still has
+//! one owner.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use agent_ui::{AgentView, RESPONDING_WINDOW, responding_at};
 use gpui::{
-    Anchor, App, Context, DisplayWakeLock, Entity, EntityId, IntoElement, Render, SharedString,
-    Subscription, Task, WeakEntity, Window, div,
+    Action as _, Anchor, App, Context, DisplayWakeLock, Entity, EntityId, IntoElement, Render,
+    SharedString, Subscription, Task, WeakEntity, Window, actions, div,
 };
 use settings::{RegisterSetting, Settings, SettingsContent, SettingsStore};
 use terminal_view::TerminalView;
@@ -100,6 +107,59 @@ impl KeepDisplayAwakeSetting {
     }
 }
 
+/// Whether the display is held awake for as long as a window is open, whatever
+/// the tabs are doing.
+///
+/// Read through `try_get` with a `false` fallback. Like
+/// [`KeepDisplayAwakeSetting`], the fallback is the shipped default -- here
+/// that means a context with no settings store never holds the display on a
+/// switch nobody turned on.
+#[derive(RegisterSetting)]
+pub struct KeepDisplayAwakeAlwaysSetting(pub bool);
+
+impl Settings for KeepDisplayAwakeAlwaysSetting {
+    fn from_settings(content: &SettingsContent) -> Self {
+        Self(content.keep_display_awake_always.unwrap())
+    }
+}
+
+impl KeepDisplayAwakeAlwaysSetting {
+    fn is_enabled(cx: &App) -> bool {
+        Self::try_get(cx).map(|setting| setting.0).unwrap_or(false)
+    }
+}
+
+actions!(
+    keep_awake,
+    [
+        /// Keeps the display awake for as long as a window is open, whatever
+        /// the tabs are doing -- or stops doing so.
+        ToggleAlwaysOn,
+    ]
+);
+
+/// Registers the command-palette action. Only called where the platform can
+/// hold the display at all, for the same reason the indicator is only built
+/// there: a switch that can never do anything is worse than no switch.
+pub fn init(cx: &mut App) {
+    cx.on_action(|_: &ToggleAlwaysOn, cx| toggle_always_on(cx));
+}
+
+/// Flips the always-on switch in the user's settings file. The setting is the
+/// only state: every `KeepAwake` reads it on the change, so one write moves the
+/// lock and the icon in every window together.
+fn toggle_always_on(cx: &App) {
+    // Read inside the update rather than when this is called. Writes are
+    // queued and applied in order, so a read taken here would miss one still
+    // in the queue -- two presses in quick succession would both write "on".
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, |content, cx| {
+        content.keep_display_awake_always = Some(!KeepDisplayAwakeAlwaysSetting::is_enabled(cx));
+    });
+}
+
+/// The OS-visible reason for a hold taken because the always-on switch is on.
+const ALWAYS_ON_REASON: &str = "the display is kept awake until turned off";
+
 /// Why the display is, or is not, being held awake.
 ///
 /// One value rather than a handful of booleans on the indicator, because the
@@ -108,13 +168,14 @@ impl KeepDisplayAwakeSetting {
 /// explanation is the thing people file bugs about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
-    /// A lock is held for at least one tab producing output.
+    /// A lock is held, for a tab producing output or because the always-on
+    /// switch is on.
     Holding,
     /// Nothing is producing output, so there is nothing to hold it for.
     Idle,
     /// An agent is working, but the machine is on battery.
     OnBattery,
-    /// The user turned it off.
+    /// The user turned both switches off.
     Disabled,
     /// Everything says yes and the request was still refused.
     ///
@@ -171,7 +232,8 @@ const RESPONDING_GRACE: Duration = Duration::from_secs(60);
 /// two meanings on one glyph is how a status bar stops being readable.
 pub(crate) const KEEP_AWAKE_ICON: IconName = IconName::Eye;
 
-/// Holds one display-wake lock for as long as an agent is producing an answer.
+/// Holds one display-wake lock for as long as an agent is producing an answer,
+/// or the always-on switch is on.
 pub struct KeepAwake {
     holds: Holds,
     watched: HashMap<EntityId, Watched>,
@@ -180,8 +242,9 @@ pub struct KeepAwake {
     /// `None` until then, since the panel does not exist when `new` runs.
     _terminal_panel: Option<Subscription>,
     _settings: Subscription,
-    /// Re-reads the power source while a lock is held, and does not exist
-    /// otherwise -- an idle editor must not wake for this.
+    /// Re-reads the power source while a tab is producing output, and asks
+    /// again for an always-on hold the OS refused. Does not exist otherwise --
+    /// an idle editor must not wake for this.
     power_check: Option<Task<()>>,
     /// Asks each live tab whether it is answering. Exists only while some tab
     /// has a live CLI, so an editor with no agent running wakes for nothing.
@@ -300,15 +363,20 @@ impl Holds {
         self.sync(cx)
     }
 
-    /// Brings the lock in line with `running`. The only place a lock is taken or
-    /// dropped, so there is exactly one answer to "why is the display awake".
+    /// Brings the lock in line with `running` and the two switches. The only
+    /// place a lock is taken or dropped, so there is exactly one answer to "why
+    /// is the display awake".
     fn sync(&mut self, cx: &App) -> bool {
-        // Cheapest test first, and the one that is true most of the time: with no
-        // agent working there is nothing to ask the settings store or the OS.
+        // The always-on switch is read first because it overrides everything
+        // after it, battery included: it was turned on by hand. Below it, the
+        // cheapest test comes first and is the one true most of the time -- with
+        // nothing producing output there is nothing to ask the OS -- and
         // `on_battery` is only consulted when a lock would otherwise be held.
-        if self.running.is_empty()
-            || !KeepDisplayAwakeSetting::is_enabled(cx)
-            || cx.on_battery() == Some(true)
+        let always = KeepDisplayAwakeAlwaysSetting::is_enabled(cx);
+        if !always
+            && (self.running.is_empty()
+                || !KeepDisplayAwakeSetting::is_enabled(cx)
+                || cx.on_battery() == Some(true))
         {
             // Nothing eligible to hold for. Clearing the latch here, rather than
             // only on a timeout, is what makes the setting being toggled or the
@@ -334,11 +402,20 @@ impl Holds {
             // its foreground stall for a call almost certain to fail again.
             return false;
         }
-        let reason = self.reason();
+        let reason = if always {
+            ALWAYS_ON_REASON.to_string()
+        } else {
+            self.reason()
+        };
         self.lock = cx.keep_display_awake(&reason);
         if self.lock.is_none() {
+            // Logged on the first refusal only. The always-on hold is retried
+            // every minute for as long as it is on, and a machine with nothing
+            // answering the request would otherwise log the same line forever.
+            if self.last_failed_at.is_none() {
+                log::warn!("this platform refused to keep the display awake ({reason})");
+            }
             self.last_failed_at = Some(cx.background_executor().now());
-            log::warn!("this platform will not keep the display awake for {reason}");
             return false;
         }
         self.last_failed_at = None;
@@ -360,15 +437,22 @@ impl Holds {
     /// was demonstrably still being held awake -- an explanation contradicting
     /// what `pmset -g assertions` would show.
     ///
-    /// Below the lock, the order is the order the reasons matter in: the setting
-    /// is the user's own answer, and `Unsupported` is what is left when every
-    /// reason to hold is true and there is still no lock.
+    /// Below the lock, the order is the order the reasons matter in: the
+    /// switches are the user's own answer, and `Unsupported` is what is left
+    /// when every reason to hold is true and there is still no lock. The
+    /// always-on switch is every reason to hold on its own -- it outranks
+    /// output, battery and the automatic switch in `sync` -- so with it on and
+    /// no lock, the only explanation is a refusal.
     fn status(&self, cx: &App) -> Status {
         if self.lock.is_some() {
             return Status::Holding;
         }
-        if !KeepDisplayAwakeSetting::is_enabled(cx) {
+        let always = KeepDisplayAwakeAlwaysSetting::is_enabled(cx);
+        if !always && !KeepDisplayAwakeSetting::is_enabled(cx) {
             return Status::Disabled;
+        }
+        if always {
+            return Status::Unsupported;
         }
         if self.running.is_empty() {
             return Status::Idle;
@@ -462,6 +546,13 @@ impl KeepAwake {
         for view in terminals {
             this.watch_terminal(view, cx);
         }
+        // A saved always-on switch has no later settings change to take the lock
+        // on, and neither does one turned on while the icon was hidden: the
+        // status bar builds this entity afresh each time the row is shown again.
+        // `settled` then arms the retry if the OS refused it -- at login the
+        // session bus may not be answering yet.
+        this.holds.sync(cx);
+        this.settled(false, cx);
         this
     }
 
@@ -566,7 +657,8 @@ impl KeepAwake {
     }
 
     /// Applies a change in `holds`, keeping the power-check timer's existence tied
-    /// to whether any agent is working. Every caller that touches `holds` goes
+    /// to `power_check_wanted`: whether any agent is working, or an always-on
+    /// hold is waiting on a refusal. Every caller that touches `holds` goes
     /// through here, so there is one place where the timer can leak or go missing.
     ///
     /// Tied to *working agents* and not to *holding the lock*, which is the
@@ -605,25 +697,32 @@ impl KeepAwake {
             }));
         }
 
-        let watching_wanted = !self.holds.running.is_empty();
-        if !watching_wanted {
+        if !self.power_check_wanted(cx) {
             // Dropping the task cancels it. Safe from here because every path
-            // that empties `running` is a different task from the timer's own.
+            // that reaches this is a different task from the timer's own.
             self.power_check = None;
         } else if self.power_check.is_none() {
             self.power_check = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(POWER_CHECK_INTERVAL).await;
                     // Deliberately not `settled`: that could drop this very task
-                    // from inside itself. Only `sync` runs here, and the paths
-                    // that empty `running` cancel this task on their own.
-                    let working = this.update(cx, |this, cx| {
+                    // from inside itself. Only `sync` runs here.
+                    let wanted = this.update(cx, |this, cx| {
                         if this.holds.sync(cx) {
                             cx.notify();
                         }
-                        !this.holds.running.is_empty()
+                        let wanted = this.power_check_wanted(cx);
+                        // Cleared on the loop's own way out, for the same reason
+                        // `activity_check` is: a retried always-on hold that
+                        // succeeds ends this loop with no other path to notice,
+                        // and a finished task left in the field would stop
+                        // `settled` from ever arming a new one.
+                        if !wanted {
+                            this.power_check = None;
+                        }
+                        wanted
                     });
-                    if !matches!(working, Ok(true)) {
+                    if !matches!(wanted, Ok(true)) {
                         break;
                     }
                 }
@@ -632,6 +731,15 @@ impl KeepAwake {
         if changed {
             cx.notify();
         }
+    }
+
+    /// Whether the power-check timer has anything to do. A tab producing
+    /// output needs it because the charger can come and go under it. An
+    /// always-on hold the OS refused needs it because nothing else would ask
+    /// again: no tab is driving `sync`, and a settings change may never come.
+    fn power_check_wanted(&self, cx: &App) -> bool {
+        !self.holds.running.is_empty()
+            || (self.holds.lock.is_none() && KeepDisplayAwakeAlwaysSetting::is_enabled(cx))
     }
 
     fn watch(&mut self, view: Entity<AgentView>, cx: &mut Context<Self>) {
@@ -856,7 +964,11 @@ impl Render for KeepAwake {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.holds.status(cx);
         let holders: Vec<SharedString> = self.holders().cloned().collect();
+        let always = KeepDisplayAwakeAlwaysSetting::is_enabled(cx);
         let tooltip: SharedString = match (status, holders.as_slice()) {
+            // Named first: with the switch on, closing every tab would not end
+            // the hold, so naming a tab would point at the wrong thing to stop.
+            (Status::Holding, _) if always => "Keeping the display awake until turned off".into(),
             (Status::Holding, [one]) => {
                 format!("Keeping the display awake while {one} works").into()
             }
@@ -892,16 +1004,18 @@ impl Render for KeepAwake {
 }
 
 impl KeepAwake {
-    /// The click menu: one switch, and one line saying what is actually going on.
+    /// The click menu: two switches, and one line saying what is actually going
+    /// on.
     ///
-    /// Built fresh on every open so the tick reflects the setting at that moment.
-    /// A menu kept between opens would show the previous answer.
+    /// Built fresh on every open so the ticks reflect the settings at that
+    /// moment. A menu kept between opens would show the previous answer.
     fn build_menu(status: Status, window: &mut Window, cx: &mut App) -> Entity<ContextMenu> {
         ContextMenu::build(window, cx, move |menu, _window, cx| {
             let enabled = KeepDisplayAwakeSetting::is_enabled(cx);
-            // `None` for the icon is what makes the tick appear: `ContextMenu`
-            // draws `Icon::new(icon.unwrap_or(IconName::Check))`, so passing one
-            // would *replace* the checkmark rather than join it.
+            let always = KeepDisplayAwakeAlwaysSetting::is_enabled(cx);
+            // The fourth argument is an action, drawn only as its key binding;
+            // the tick comes from `toggled`. The automatic switch has no action,
+            // so it passes `None`.
             menu.toggleable_entry(
                 "Keep Display Awake While a Tab Is Producing Output",
                 enabled,
@@ -920,6 +1034,13 @@ impl KeepAwake {
                         },
                     );
                 },
+            )
+            .toggleable_entry(
+                "Always Keep Display Awake",
+                always,
+                IconPosition::Start,
+                Some(ToggleAlwaysOn.boxed_clone()),
+                |_window, cx| toggle_always_on(cx),
             )
             .separator()
             // A label, not an entry: there is nothing to click. It exists because
