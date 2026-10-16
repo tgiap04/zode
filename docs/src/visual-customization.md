@@ -358,7 +358,11 @@ Hiding **Keep Display Awake** this way turns both of its switches off, `keep_dis
     "vim_mode_button": true,
     // Show/hide image dimensions and size for the active image.
     // Defaults to true.
-    "image_info_button": true
+    "image_info_button": true,
+    // Show/hide Zode's version at the right end of the status bar.
+    // Clicking it opens the About window.
+    // Defaults to true.
+    "app_version_button": true
   },
   "global_lsp_settings": {
     // Show/hide the LSP button in the status bar.

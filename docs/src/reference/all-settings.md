@@ -1648,7 +1648,8 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
     "activity_indicator": true,
     "active_toolchain_button": true,
     "vim_mode_button": true,
-    "image_info_button": true
+    "image_info_button": true,
+    "app_version_button": true
   }
 }
 ```
@@ -1661,6 +1662,14 @@ dropped, so any polling or background work it was doing stops with it. Keep Disp
 `active_encoding_button` takes `always`, `non_utf8` or `never` rather than a boolean; the right-click
 menu treats `never` as off and turns it back on as `non_utf8`, so a value of `always` is not
 preserved across a hide and show.
+
+`app_version_button` shows Zode's version, such as `v0.1.5`, at the right end of the bar. A
+prerelease keeps its suffix (`v0.1.5-beta.1`); build metadata is never shown. Hovering it shows
+`Zode 0.1.5` (the Preview and Nightly channels name themselves, as in `Zode Preview 0.1.5-beta.1`)
+and the short commit when the build knows it, and clicking it opens the About window. Only the dock
+buttons, and the remote-control indicator while remote control is on, sit further right. The
+right-click menu lists it as **App Version**, and the Settings window as **App Version Button**
+under Window & Layout.
 
 There is an experimental setting that completely hides the status bar. This causes major usability problems (you will be unable to use many of Zode's features), but is provided for those who value screen real-estate above all else.
 
