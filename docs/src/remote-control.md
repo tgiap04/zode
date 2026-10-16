@@ -71,12 +71,41 @@ Open `zodekit.site/remote`, sign in, pick a paired Zode and choose **Connect**.
 | You get                | Notes                                                                                          |
 | ---------------------- | ---------------------------------------------------------------------------------------------- |
 | **Agents**             | The agents and terminals open on A, with their status (running, awaiting approval, idle, ...). |
-| Mirrored terminals     | Open one to see its screen live and type into it. Its size follows the host's terminal.        |
+| **History**            | Past agent sessions of the projects open on A. See [History](#history).                        |
+| Mirrored terminals     | Open one to see its screen live and type into it. Its grid follows the host's terminal.        |
 | **Files**, **Changes** | Read-only tabs: browse the open folders, read a file, see the uncommitted diff.                |
-| Mobile key bar         | Enter, Escape, Tab, arrows, 1, 2, 3 and Control C, plus a line box you send with **Send**.     |
+| Mobile key bar         | Enter, Escape, Tab, Up, Down, 1, 2, 3 and Control C, plus a line box you send with **Send**.   |
+
+The terminal sizes its text so the whole screen fits the pane, and follows the
+site's Light or Dark theme. On a narrow screen such as a phone, an open terminal
+fills the screen as a sheet with the key bar under it; **Back to agents** closes
+it.
 
 Nothing in the Files and Changes tabs writes or runs anything. Limits on what
 they show are [listed below](#what-is-not-served).
+
+### History
+
+The **History** tab lists the past agent sessions of the projects open on A,
+newest first, grouped by agent and folder. Each row shows the session's title,
+when it was last used and its branch, if it has one. The tab appears only when A
+supports it; with an older Zode it is not there and nothing else changes.
+**Show older sessions** loads the next page.
+
+| Button     | What it does                                                                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Resume** | Continues the session in a new tab on A, and opens that tab's terminal in the browser.                                                         |
+| **Open**   | Replaces Resume when the session is already running in a tab on A. It takes you to that tab and starts nothing.                                |
+| **Fork**   | Branches the conversation into a new session, in a new tab, and opens it. Offered for Claude Code and opencode. Codex and Copilot cannot fork. |
+
+- Resume and Fork start an agent on A, as if you had picked the session in the
+  history panel there. A shows a [toast](#while-you-are-being-controlled) saying
+  which device did it.
+- A refuses a Resume or Fork from your browser for 3 seconds after the previous
+  one opened a tab, and the page asks you to try again.
+- A session appears only if it ran in a folder open on A, and not under a path
+  A keeps private or hides from the scan. See
+  [What is not served](#what-is-not-served).
 
 ## Control A from another Zode
 
@@ -111,6 +140,11 @@ remote control off or manage trusted devices.
 - The status bar shows **Controlled by** the device's name (or "N devices"). It
   stays visible even if `status_bar.show` hides the status bar, and a toast
   announces each device that takes control.
+- When a device resumes or forks a past session, a toast names the device and
+  the session, for example `My phone resumed “Fix the build”`. It appears where
+  the tab opens, and in the window's front workspace too when that is a
+  different one, and goes away after five seconds. Opening a session that is
+  already running shows no toast.
 - Click the indicator to **Disconnect All Devices**, **Turn Off Remote
   Control**, or **Manage Trusted Devices…**.
 - The same are available as the command-palette actions
@@ -138,7 +172,8 @@ If a device is lost or stolen, revoke it first and ask questions afterwards.
 | Controlling devices connected, per account | 8                                                          |
 | Sessions open to one host                  | 4 (A also stops at four connected devices)                 |
 | Bandwidth through the relay                | A daily byte quota per account (2 GiB by default)          |
-| File requests being worked on, per device  | 4 at once; past that, requests are answered `rate_limited` |
+| File and session list requests, per device | 4 at once; past that, requests are answered `rate_limited` |
+| Session resumes, per device                | One at a time, 3 seconds apart; sooner is `rate_limited`   |
 | Idle disconnect                            | `idle_timeout_minutes`, 30 by default                      |
 
 The relay's numbers are its defaults and can be changed by whoever runs it. When
@@ -156,8 +191,13 @@ Browsing is read-only and goes through what A has already scanned, not its disk.
   untracked files are not in it, and a folder that is not a git repository has
   no diff.
 - A folder listing shows at most 2000 entries.
+- History lists only sessions that ran in a folder open on A. Sessions under a
+  path in `private_files` or `file_scan_exclusions` are not listed and cannot be
+  resumed, and neither are sessions of projects that are not on A's own disk,
+  such as a remote project.
 
-The exact rules are in [Remote control protocol](./remote-control-protocol.md#files).
+The exact rules are in [Remote control protocol](./remote-control-protocol.md#files)
+and, for History, [Sessions](./remote-control-protocol.md#sessions).
 
 ## Troubleshooting
 
@@ -170,3 +210,6 @@ The exact rules are in [Remote control protocol](./remote-control-protocol.md#fi
 | "Pairing is locked after repeated mismatches"                       | On A: Manage Trusted Devices, then **Unlock Pairing**. The lock never expires by itself.                                    |
 | "The relay's limit for your account was reached" / "Zode is busy"   | Rate or quota limit. Close some tabs or devices, wait, and try again.                                                       |
 | "This browser was signed out of your account..."                    | The browser was revoked. Its key and pairings were deleted; pair again.                                                     |
+| "A session was just opened. Try again in a few seconds."            | A allows one Resume or Fork per device every 3 seconds. Wait a moment and try again.                                        |
+| "That session is no longer on this Zode, or its folder is closed."  | The session was deleted, its folder is gone, or no window on A has it open any more. Pick another session.                  |
+| "Zode resumed the session, but its terminal has not appeared..."    | The tab was opened on A but its terminal did not show up in time. It is listed under **Agents** when it does.               |

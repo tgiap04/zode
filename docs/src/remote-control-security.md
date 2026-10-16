@@ -116,6 +116,31 @@ user: whatever you can do on that machine, it can do. Neither the viewer limits
 nor `private_files` change this: those restrict what the web file browser shows,
 not what a shell can read.
 
+A paired browser can also resume and fork your past agent sessions. It can list
+the sessions of the folders open on this Zode, with their titles and the start of
+each conversation, and start one again. That starts another agent on this
+machine, in the folder the session ran in, under the permission setting this
+machine has for it. A device cannot change that setting, so if you chose **Run
+Agents Without Permission Prompts** for the checkout a session ran in, a session
+a device starts there runs without prompts too. The device already had a shell,
+so this does not widen what it can do, but it does mean your session history is
+visible to it.
+
+The reach is limited to the open projects. Sessions outside the folders open on
+this Zode, and sessions under a `private_files` path or a path hidden by
+`file_scan_exclusions`, are not listed and cannot be started. A device names a
+session by its id alone; the host looks up everything else itself. A device may
+start one session at a time and no more than one every 3 seconds, and each time
+a toast on this screen names the device and the session.
+
+| Claim                                                                    | Test                                                                                                          |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| A session under a private or excluded path is neither listed nor started | `a_session_under_a_private_or_excluded_path_is_neither_listed_nor_opened` (`crates/remote_control`)           |
+| A session outside the open folders, or unknown, starts nothing           | `a_session_the_host_does_not_hold_or_may_not_open_is_not_found_and_opens_nothing` (`crates/remote_control`)   |
+| A name that cannot be a session id is refused before any lookup          | `a_resume_naming_something_that_cannot_be_an_id_is_not_found_and_the_session_lives` (`crates/remote_control`) |
+| One session is opened at a time for a device, across its connections     | `one_device_has_one_session_opened_at_a_time_however_many_connections_it_has` (`crates/remote_control`)       |
+| A session opened a moment ago blocks the next until the cooldown passes  | `a_session_opened_a_moment_ago_cannot_be_opened_again_until_the_cooldown_passes` (`crates/remote_control`)    |
+
 ### If a device is lost
 
 1. On A, open **Manage Trusted Devices…** (status-bar indicator, or the

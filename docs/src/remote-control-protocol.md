@@ -185,33 +185,48 @@ Requests carry a `request_id` chosen by the sender, and the reply repeats it.
 File contents, diffs and terminal output do not travel in a control message but
 in data frames on the `stream_id` the reply names.
 
-| `t`                 | Fields                                                                              | Direction         |
-| ------------------- | ----------------------------------------------------------------------------------- | ----------------- |
-| `hello`             | `relay_protocol`, `app_version`, `rpc_protocol`, `capabilities`                     | browser → Zode    |
-| `hello_ack`         | same as `hello`                                                                     | Zode → browser    |
-| `error`             | `code`, `message`, optional `request_id`                                            | either            |
-| `ping` / `pong`     | none                                                                                | either            |
-| `agent_list`        | `agents`: `[{id, name, status, title?}]`                                            | Zode → browser    |
-| `agent_update`      | `agent`: `{id, name, status, title?}`                                               | Zode → browser    |
-| `terminal_list`     | `terminals`: `[{id, title, columns, rows}]`                                         | Zode → browser    |
-| `terminal_attach`   | `terminal_id`, `stream_id`                                                          | browser → Zode    |
-| `terminal_attached` | `terminal_id`, `stream_id`, `columns`, `rows`                                       | Zode → browser    |
-| `terminal_detach`   | `terminal_id`                                                                       | browser → Zode    |
-| `terminal_resized`  | `terminal_id`, `columns`, `rows`                                                    | either            |
-| `terminal_closed`   | `terminal_id`, optional `exit_code`                                                 | Zode → browser    |
-| `ide_open`          | `request_id`, `path`, optional `line`, `stream_id`, `app_version`, `proto_version`  | controller → Zode |
-| `ide_opened`        | `request_id`, `stream_id`, `path_style`, `shell`, `default_shell`                   | Zode → controller |
-| `files_list`        | `request_id`, optional `worktree_id`, `path`                                        | browser → Zode    |
-| `files_list_reply`  | `request_id`, `entries`: `[{name, kind, size?, worktree_id?}]`, `truncated`, `more` | Zode → browser    |
-| `file_read`         | `request_id`, `worktree_id`, `path`                                                 | browser → Zode    |
-| `file_read_reply`   | `request_id`, `size`, `stream_id`                                                   | Zode → browser    |
-| `diff_request`      | `request_id`, `worktree_id`                                                         | browser → Zode    |
-| `diff_reply`        | `request_id`, `stream_id`, `truncated`                                              | Zode → browser    |
+| `t`                   | Fields                                                                              | Direction         |
+| --------------------- | ----------------------------------------------------------------------------------- | ----------------- |
+| `hello`               | `relay_protocol`, `app_version`, `rpc_protocol`, `capabilities`                     | browser → Zode    |
+| `hello_ack`           | same as `hello`                                                                     | Zode → browser    |
+| `error`               | `code`, `message`, optional `request_id`                                            | either            |
+| `ping` / `pong`       | none                                                                                | either            |
+| `agent_list`          | `agents`: `[{id, name, status, title?, session_id?, agent?}]`                       | Zode → browser    |
+| `agent_update`        | `agent`: `{id, name, status, title?, session_id?, agent?}`                          | Zode → browser    |
+| `terminal_list`       | `terminals`: `[{id, title, columns, rows}]`                                         | Zode → browser    |
+| `terminal_attach`     | `terminal_id`, `stream_id`                                                          | browser → Zode    |
+| `terminal_attached`   | `terminal_id`, `stream_id`, `columns`, `rows`                                       | Zode → browser    |
+| `terminal_detach`     | `terminal_id`                                                                       | browser → Zode    |
+| `terminal_resized`    | `terminal_id`, `columns`, `rows`                                                    | either            |
+| `terminal_closed`     | `terminal_id`, optional `exit_code`                                                 | Zode → browser    |
+| `ide_open`            | `request_id`, `path`, optional `line`, `stream_id`, `app_version`, `proto_version`  | controller → Zode |
+| `ide_opened`          | `request_id`, `stream_id`, `path_style`, `shell`, `default_shell`                   | Zode → controller |
+| `files_list`          | `request_id`, optional `worktree_id`, `path`                                        | browser → Zode    |
+| `files_list_reply`    | `request_id`, `entries`: `[{name, kind, size?, worktree_id?}]`, `truncated`, `more` | Zode → browser    |
+| `file_read`           | `request_id`, `worktree_id`, `path`                                                 | browser → Zode    |
+| `file_read_reply`     | `request_id`, `size`, `stream_id`                                                   | Zode → browser    |
+| `diff_request`        | `request_id`, `worktree_id`                                                         | browser → Zode    |
+| `diff_reply`          | `request_id`, `stream_id`, `truncated`                                              | Zode → browser    |
+| `sessions_list`       | `request_id`, optional `before`, `limit`                                            | browser → Zode    |
+| `sessions_list_reply` | `request_id`, `sessions`: `[entry]`, `more`, optional `next`                        | Zode → browser    |
+| `session_resume`      | `request_id`, `session_id`, `fork`                                                  | browser → Zode    |
+| `session_resumed`     | `request_id`, optional `open_agent_id`                                              | Zode → browser    |
 
 `status` is one of `working`, `waiting_for_input`, `idle`, `finished`,
 `failed`; a value a reader does not know is read as unknown rather than
 failing the whole list. `kind` is one of `file`, `directory`, `symlink`, and
 likewise degrades to `other`.
+
+An agent summary may also carry `session_id`, the agent's own id for the
+conversation the tab is writing, when the tab has one, and `agent`, which is
+`claude`, `codex`, `copilot` or `opencode` and is left out for a custom agent. A
+tab opened as a fork has no `session_id`. A reader that does not know the two
+fields ignores them.
+
+`capabilities` in `hello_ack` lists what the host serves: `terminal` always,
+then `files`, `ide` and `sessions` in that order, each only when it is served. A
+request whose capability is missing is answered with `error` code
+`unsupported`.
 
 After `terminal_attach`, terminal output flows Zode → browser and keystrokes
 browser → Zode as data frames on the attach's `stream_id`, until
@@ -220,23 +235,41 @@ browser → Zode as data frames on the attach's `stream_id`, until
 The first bytes on a terminal stream are a snapshot of the screen: a full reset
 (`ESC c`), the scrollback and screen redrawn, then the terminal's modes
 (including the kitty keyboard flags the program asked for), the cursor, and the
-pending-wrap state. After it, the raw output follows, and the two never overlap:
+pending-wrap state. It also carries what a program that redraws only what
+changed depends on: the scroll region, the cursor saved with `ESC 7` along with
+its attributes and character sets, and the character sets in use with the one
+shifted in. After it, the raw output follows, and the two never overlap:
 output the snapshot already drew is not sent again. Treat a stream as **bytes**,
 not text: a snapshot larger than one frame is cut into frames at arbitrary
 offsets, which may fall inside a UTF-8 character or an escape sequence, and the
 same goes for live output.
 
 A new snapshot (starting with `ESC c` again) replaces the screen whenever the
-host's size changes, a slow reader fell too far behind, or output was lost; at
-most one every 250 ms per terminal and device. Not carried: scroll regions,
-underline colour and hyperlinks, and the primary screen behind an alternate one.
+host's size changes, a slow reader fell too far behind, output was lost, or a
+settle snapshot (below) is due; at most one every 250 ms per terminal and
+device. Not carried: underline colour, hyperlinks, the primary screen behind an
+alternate one, and whether the saved cursor was waiting to wrap. Of the
+character sets, only ASCII and line drawing exist on the host, so only those are
+carried.
 
 Limitation: the host's emulator sees bytes before it has drawn them. A snapshot
 taken while a program is in the middle of a synchronized update (DEC mode 2026)
 or an escape sequence can stand for output the screen does not show yet. When a
-snapshot is taken while output is flowing, the host therefore sends one more
-about 400 ms later, which repairs it; a client should be ready for that second
-reset and draw it without flicker if it can.
+snapshot is taken while output is flowing, or while a synchronized update is
+open, the host therefore sends one more, the settle snapshot, which repairs it:
+
+- It is sent once the output has been quiet for 400 ms. Every new chunk of
+  output restarts that wait, but it never runs past 2 s after the snapshot it
+  repairs.
+- If a synchronized update is still open when it is due, the host looks again
+  every 50 ms, up to 20 times (about a second), and then sends it anyway, since
+  a program that exits inside an update never ends it.
+- A settle snapshot is not followed by another. A snapshot taken for another
+  reason while one is waiting replaces it, and brings its own repeat only if it
+  too was taken ahead of the screen.
+
+A client should be ready for that second reset and draw it without flicker if it
+can.
 
 ### Project server stream
 
@@ -350,6 +383,123 @@ program is run to produce a diff.
   being worked on. A request that is not finished
   after 30 seconds is answered with `internal` and its place is freed. A
   request missing `worktree_id` where it is needed is `malformed`.
+
+### Sessions
+
+Lists the past agent conversations of the folders open on the host, and starts
+one again for a device. The host's own record of each session decides which
+agent it belongs to, where it ran and how it is resumed; the device names a
+session by its id and nothing else.
+
+A listing, then a resume of the session it shows as already running: the host
+opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
+
+```text
+→ {"t":"sessions_list","request_id":7}
+← {"t":"sessions_list_reply","request_id":7,"sessions":[{"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","agent":"claude","title":"Fix the terminal snapshot","preview":"Carry the scroll region","worktree_id":"3","folder":"zode/crates/terminal","branch":"main","updated_at":1760572800000,"can_fork":true,"open_agent_id":"terminal-42"}],"more":false,"next":{"updated_at":1760572800000,"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f"}}
+→ {"t":"session_resume","request_id":9,"session_id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","fork":false}
+← {"t":"session_resumed","request_id":9,"open_agent_id":"terminal-42"}
+```
+
+- **Capability.** The host lists `sessions` in `hello_ack` `capabilities` when
+  it serves these requests. Without it, `sessions_list` and `session_resume` are
+  answered with `error` code `unsupported` and the `request_id`. These messages
+  came without a new `rpc_protocol`, so a client sends them only to a host that
+  lists the capability.
+- **Scope.** A session is listed only if the directory it ran in lies inside a
+  visible folder of a local project open in a window on the host, matched by
+  whole path components. A directory that climbs out with `..` belongs to no
+  folder, and where open folders nest, the deepest one owns the session.
+  `folder` is that folder's name followed by the path inside it, joined with
+  `/`; a folder with no name of its own is called `root`. Absolute paths are
+  never sent.
+- **Hidden paths.** A session whose directory is at or under a path its folder
+  marks `private_files`, or leaves out with `file_scan_exclusions`, is treated as
+  not there: it is not listed, and resuming it is `not_found`. These are the two
+  checks the file browser makes, taken from the settings of the folder that owns
+  the directory.
+- **Listing.** `sessions_list` answers with the sessions newest first: by
+  `updated_at` descending, then `id` ascending. `limit` defaults to 50 and is
+  held to 1 through 200. `before` is `{updated_at, id}`, copied from the `next`
+  of an earlier reply, and the page starts after that entry. A request without
+  `before` makes the host read the agents' session stores again first; later
+  pages are read without another scan.
+- **Long pages.** A page that does not fit one control message arrives as
+  several `sessions_list_reply` messages with the same `request_id`, in order.
+  Every one but the last has `more` set, and only the last carries `next`, and
+  only when another page exists. Append their `sessions`.
+- **Entries.** Each entry in `sessions` has these fields. `title`, `preview`,
+  `folder` and `branch` are cut to 200 characters, the last being `…` when
+  anything was cut.
+
+| Field           | Meaning                                                                                      |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| `id`            | The agent's own id for the session, which `session_resume` takes.                            |
+| `agent`         | `claude`, `codex`, `copilot` or `opencode`.                                                  |
+| `title`         | What the session is called. When that is empty, its `preview`.                               |
+| `preview`       | The start of the conversation. Left out when empty.                                          |
+| `worktree_id`   | The open folder it ran in, as `files_list` names it.                                         |
+| `folder`        | The folder's name and the path inside it.                                                    |
+| `branch`        | The branch the session recorded, when it recorded one.                                       |
+| `updated_at`    | When the session was last updated, in Unix milliseconds.                                     |
+| `can_fork`      | Whether `fork` may be set for it: true for Claude Code and opencode. Always sent.            |
+| `open_agent_id` | The `id` in `agent_list` of a tab already running this session. Left out when there is none. |
+
+- **Already open.** `open_agent_id` is set when a tab in `agent_list` has a
+  `session_id` equal to the entry's `id` and its agent is running in it. A tab
+  whose agent has exited does not count.
+- **Trust.** `session_id` is checked for its shape before it is looked up: 1 to
+  128 bytes of ASCII letters, digits, `.`, `_` and `-`, the first a letter or a
+  digit, so it can never read as a flag or as `.` or `..`. The `id` inside
+  `before` must have the same shape, and a session whose id does not is not
+  listed. An id that does not fit is `not_found`.
+- **Resuming.** `session_resume` with `fork` false, which is also the default,
+  continues the session. If a tab already runs it, the host answers
+  `session_resumed` with that tab's `open_agent_id` and opens nothing. Otherwise
+  it opens a tab on the session in the window whose folder holds the directory,
+  and answers `session_resumed` without `open_agent_id`. The tab is added after
+  the answer and arrives like any other, as an `agent_update` whose
+  `session_id` is the one asked for.
+- **Forking.** With `fork` true the host always opens a new tab, and the agent
+  branches the conversation: Claude Code is started with
+  `--resume <id> --fork-session` and opencode with `-s <id> --fork`. The agent
+  chooses the id of the branch and does not report it, so the new tab's summary
+  has no `session_id`. If the source has gone from the agent's store by the time
+  the tab starts, the tab says the session is not available and does not open a
+  blank one. `fork` on a session whose `can_fork` is false is `unsupported`.
+- **Limits.** A `sessions_list` counts against the same allowance as a file
+  request: four being worked on at once, and the 8 MiB of answers waiting for the
+  relay, as described under Files. A device may have one `session_resume` being
+  worked on at a time, counted across all its connections. After one that opened
+  a tab has been answered, the next from that device is answered `rate_limited`
+  for 3 seconds, whichever session it names and whatever its `fork`. The tab is
+  added after the answer and an agent counts as running only once its process
+  is, so until then nothing else says the session is open. An answer that only
+  points at a running tab, and an error, open nothing and start no wait. A
+  request not finished after 30 seconds is answered with `internal`.
+- **Notice on the host.** When a session is opened for a device, the host shows
+  a notice, `<device> resumed “<title>”` or `<device> forked “<title>”`, in the
+  workspace that receives the tab and also in the one in front when that is a
+  different one. The title is cut to 60 characters and the device name to 40.
+  Each notice is separate, so a second does not replace the first, and each goes
+  away after five seconds. An answer that only points at a running tab shows
+  none.
+
+Errors, in the `error` message with the `request_id`:
+
+| Request          | `code`         | When                                                                                                                                                                         |
+| ---------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| either           | `unsupported`  | The host does not serve sessions.                                                                                                                                            |
+| `sessions_list`  | `not_found`    | `before.id` cannot be a session id.                                                                                                                                          |
+| `sessions_list`  | `rate_limited` | The file and session allowance is used up.                                                                                                                                   |
+| `sessions_list`  | `internal`     | The deadline passed.                                                                                                                                                         |
+| `session_resume` | `not_found`    | The id cannot be a session id or names no session, the session is outside the open folders or under a private or excluded path, its directory is gone, or the window closed. |
+| `session_resume` | `unsupported`  | The agent cannot resume it, or `fork` was set where `can_fork` is false.                                                                                                     |
+| `session_resume` | `rate_limited` | A resume for this device is already being worked on, one was opened for it in the last 3 seconds, or its waiting answers are over the allowance.                             |
+| `session_resume` | `internal`     | The deadline passed, or the host failed for another reason.                                                                                                                  |
+
+A device that sends `sessions_list_reply` or `session_resumed` gets `malformed`:
+they are answers, not requests.
 
 ### Errors
 

@@ -53,7 +53,7 @@ type in it and the id becomes real.
 
 **A session you deleted.** Deleting a session from the history panel removes the
 conversation, not the tab that was in it. A Claude tab starts fresh under its own
-id. A Codex, Copilot or opencode tab says the session is no longer on this
+id. A Codex, Copilot or opencode tab says the session is not available on this
 machine and offers to start a new one, rather than quietly opening a blank
 session that looks like a continuation.
 
@@ -66,10 +66,20 @@ the sweep includes an opencode session.
 
 ## Forked sessions are not tracked
 
-Forking (`--fork-session` for Claude Code, `--fork` for opencode) tells the CLI
-to make a **new** session id, and it does not say which. A forked tab therefore
-comes back empty rather than resuming the session it was forked from, which is
-the one thing that would be actively misleading.
+**Continue in New Session…** in the history panel forks a session. The tab
+starts the CLI in the folder the session ran in with the agent's own fork flag
+(`--resume <id> --fork-session` for Claude Code, `-s <id> --fork` for opencode),
+so the new tab starts from the conversation so far. Codex and Copilot have no
+fork, so the entry is disabled for them. If the original is gone from the
+agent's store, the tab says the session is not available rather than opening a
+blank one.
+
+The CLI makes a **new** session id for the branch, and it does not say which, so
+Zode cannot write it down. A forked tab is therefore not tracked: after you
+restart Zode it comes back empty rather than resuming the branch, which is the
+one thing that would be actively misleading. Starting the agent again in that
+tab, after its CLI has ended, forks the original once more and gives a new
+branch.
 
 ## What starting looks like
 
