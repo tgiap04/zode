@@ -6,14 +6,15 @@ use crate::tasks::workflows::{
     vars::{StepOutput, WorkflowInput},
 };
 
-/// The token the commit and the tag are made with.
+/// The token the commit and the tag are made with, here and when the release
+/// workflow moves develop's manifest up to a pushed tag.
 ///
 /// `GITHUB_TOKEN` can do both, but GitHub deliberately does not start a workflow run
 /// from anything that token pushed -- so the tag would appear and `release` would
 /// never fire. Set `RELEASE_TAG_TOKEN` to a PAT (or app token) with `contents: write`
 /// to get the release chained automatically; without it the bump still lands and the
 /// tag still exists, and the release has to be started by hand.
-const TAG_TOKEN: &str = "${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}";
+pub(crate) const TAG_TOKEN: &str = "${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}";
 
 pub fn bump_patch_version() -> Workflow {
     let branch = WorkflowInput::string("branch", None).description("Branch name to run on");

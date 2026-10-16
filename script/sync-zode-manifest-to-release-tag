@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Moves the app's version in `crates/zed/Cargo.toml` and in zode's `Cargo.lock`
+# stanza up to a stable release tag, so a checkout of develop reports the version
+# that was last shipped.
+#
+#   script/sync-zode-manifest-to-release-tag <tag>     (run from the repository root)
+#
+# Releases are cut straight from a tag, so the tag commit on main still carries the
+# previous number. The release workflow runs this against develop afterwards.
+#
+# It only ever moves the version up. A tag that is a prerelease, or that is older than
+# the manifest, leaves both files alone: develop may already be ahead of the tag, and
+# a prerelease is not a version develop should adopt.
+#
+# Writes `changed=` and `version=` to $GITHUB_OUTPUT when it is set. Exits 1 when the
+# files are not shaped the way it expects, and in that case edits neither of them.
+#
+# Because it never moves down, a stable tag pushed by mistake (say v0.1.50 for v0.1.5)
+# leaves develop ahead of every real tag after it, and each later run skips. Deleting
+# the tag does not undo that: revert the "chore: bump zode to ..." commit on develop.
+
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "usage: $0 <tag>" >&2
+    exit 1
+fi
+
+tag="$1"
+manifest="crates/zed/Cargo.toml"
+lockfile="Cargo.lock"
+
+report() {
+    local changed="$1" version="$2"
+    if [[ -n "${GITHUB_OUTPUT-}" ]]; then
+        {
+            echo "changed=${changed}"
+            echo "version=${version}"
+        } >> "$GITHUB_OUTPUT"
+    fi
+}
+
+# Orders two non-negative integers without bash arithmetic: a component past 18 digits
+# would wrap around into a smaller number and read as a downgrade. Neither side has a
+# leading zero (the patterns below refuse one), so digit count and then text is exact.
+compare_integers() {
+    local left="$1" right="$2"
+    if [[ ${#left} -lt ${#right} ]]; then
+        echo lt
+    elif [[ ${#left} -gt ${#right} ]]; then
+        echo gt
+    elif [[ "$left" < "$right" ]]; then
+        echo lt
+    elif [[ "$left" > "$right" ]]; then
+        echo gt
+    else
+        echo eq
+    fi
+}
+
+# Replaces one line and nothing else. Both edits go through here so the same check
+# stands behind each: the edited copy differs from the original by exactly one line.
+assert_single_line_changed() {
+    local original="$1" edited="$2" label="$3"
+    local status=0 changes removed added
+    # diff exits 1 when the files differ, which is the expected case.
+    changes=$(diff "$original" "$edited") || status=$?
+    if [[ "$status" -gt 1 ]]; then
+        echo "error: could not compare ${label} with its edited copy" >&2
+        exit 1
+    fi
+    removed=$(grep -c '^<' <<<"$changes" || true)
+    added=$(grep -c '^>' <<<"$changes" || true)
+    if [[ "$removed" -ne 1 || "$added" -ne 1 ]]; then
+        echo "error: editing ${label} would remove ${removed} lines and add ${added}; expected exactly one of each" >&2
+        exit 1
+    fi
+}
+
+# A component with a leading zero is not valid semver and cargo rejects the manifest it
+# lands in, so such a tag is treated as not stable rather than copied in.
+number='(0|[1-9][0-9]*)'
+stable_tag="^v${number}[.]${number}[.]${number}\$"
+if [[ ! "$tag" =~ $stable_tag ]]; then
+    echo "${tag} is not a stable release tag (vMAJOR.MINOR.PATCH); leaving the manifest alone"
+    report false ""
+    exit 0
+fi
+tag_core=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+tag_version="${tag#v}"
+
+# The first `version =` in the manifest is the one under [package].
+manifest_line=$(awk '/^version = / { print; exit }' "$manifest")
+manifest_version_pattern="^version = \"${number}[.]${number}[.]${number}(-[^\"]*)?\"\$"
+if [[ ! "$manifest_line" =~ $manifest_version_pattern ]]; then
+    echo "error: the first 'version =' line in ${manifest} is missing or is not MAJOR.MINOR.PATCH[-pre]: '${manifest_line}'" >&2
+    exit 1
+fi
+manifest_core=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+manifest_prerelease="${BASH_REMATCH[4]}"
+manifest_version="${manifest_line#version = \"}"
+manifest_version="${manifest_version%\"}"
+
+order=eq
+for index in 0 1 2; do
+    order=$(compare_integers "${manifest_core[index]}" "${tag_core[index]}")
+    if [[ "$order" != eq ]]; then
+        break
+    fi
+done
+
+if [[ "$order" == gt ]]; then
+    echo "${manifest} is at ${manifest_version}, ahead of ${tag}; leaving it alone"
+    report false "$manifest_version"
+    exit 0
+fi
+if [[ "$order" == eq && -z "$manifest_prerelease" ]]; then
+    echo "${manifest} is already at ${manifest_version}"
+    report false "$manifest_version"
+    exit 0
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+awk -v version="$tag_version" '
+    !replaced && /^version = / { print "version = \"" version "\""; replaced = 1; next }
+    { print }
+' "$manifest" > "${work}/manifest"
+assert_single_line_changed "$manifest" "${work}/manifest" "$manifest"
+
+# Cargo.lock lists every workspace member, and several are named `zode-*` or `zode_*`
+# with the same version. Only the line right after an exact `name = "zode"` is ours.
+if ! awk -v version="$tag_version" '
+    after_name && /^version = / { print "version = \"" version "\""; after_name = 0; replaced = 1; next }
+    { after_name = ($0 == "name = \"zode\""); print }
+    END { exit (replaced ? 0 : 1) }
+' "$lockfile" > "${work}/lockfile"; then
+    echo "error: ${lockfile} has no 'name = \"zode\"' stanza followed by a version line" >&2
+    exit 1
+fi
+assert_single_line_changed "$lockfile" "${work}/lockfile" "$lockfile"
+
+# Written back in place, after both edits were checked, so a failure above leaves the
+# two files exactly as they were rather than bumping one of them.
+cat "${work}/manifest" > "$manifest"
+cat "${work}/lockfile" > "$lockfile"
+
+echo "${manifest} and ${lockfile}: ${manifest_version} -> ${tag_version}"
+report true "$tag_version"

@@ -1,12 +1,13 @@
-use gh_workflow::{Event, Push, Run, Step, Use, Workflow, ctx::Context};
+use gh_workflow::{Event, Expression, Push, Run, Step, Use, Workflow, ctx::Context};
 use indoc::formatdoc;
 
 use crate::tasks::workflows::{
+    bump_patch_version::TAG_TOKEN,
     run_bundling::{bundle_linux, bundle_mac, bundle_windows},
     run_tests,
     runners::{self, Arch, Platform, ReleaseChannel},
     steps::{self, FluentBuilder, NamedJob, dependant_job, named, release_job},
-    vars::{self, assets},
+    vars::{self, StepOutput, assets},
 };
 
 pub(crate) fn release() -> Workflow {
@@ -31,6 +32,7 @@ pub(crate) fn release() -> Workflow {
     let check_scripts = run_tests::check_scripts();
 
     let create_draft_release = create_draft_release();
+    let bump_manifest_on_develop = bump_manifest_on_develop();
 
     let gate: &[&NamedJob] = &[&linux_tests, &linux_clippy, &check_scripts];
     let ungated: &[&NamedJob] = &[];
@@ -64,6 +66,7 @@ pub(crate) fn release() -> Workflow {
         .add_job(linux_clippy.name, linux_clippy.job)
         .add_job(check_scripts.name, check_scripts.job)
         .add_job(create_draft_release.name, create_draft_release.job)
+        .add_job(bump_manifest_on_develop.name, bump_manifest_on_develop.job)
         .map(|mut workflow| {
             for job in bundle.into_jobs() {
                 workflow = workflow.add_job(job.name, job.job);
@@ -296,9 +299,10 @@ fn create_draft_release() -> NamedJob {
     // The tag is the source of truth for a published version: `crates/zed/build.rs` stamps
     // RELEASE_VERSION into the binary, so a Cargo.toml that disagrees no longer yields a
     // build that misreports itself. A divergence is still worth saying out loud, because
-    // the repo and the release then name different versions and whoever reads the manifest
-    // next is misled. Warn, never fail -- releasing straight from a tag without a bump
-    // commit is a deliberate property of this fork (see script/determine-release-channel).
+    // the tag commit then names a different version than the release built from it. Warn,
+    // never fail -- releasing straight from a tag without a bump commit is a deliberate
+    // property of this fork (see script/determine-release-channel). Develop does not stay
+    // behind: `bump_manifest_on_develop` moves its manifest up to the tag afterwards.
     fn warn_on_version_divergence() -> Step<Run> {
         named::bash!(indoc::indoc! {r#"
             # The first `version =` in the manifest is the one under [package].
@@ -306,7 +310,7 @@ fn create_draft_release() -> NamedJob {
             if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
                 echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
             else
-                echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml says ${manifest_version}; the binary reports the tag, so consider bumping the manifest to match"
+                echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
             fi
         "#})
     }
@@ -331,6 +335,60 @@ fn create_draft_release() -> NamedJob {
             .add_step(steps::script("mkdir -p target/"))
             .add_step(generate_release_notes())
             .add_step(create_release()),
+    )
+}
+
+/// Moves develop's manifest up to a stable tag, so a build from develop reports the
+/// version that was last shipped rather than the one before it.
+///
+/// Needs nothing and nothing needs it: the bump is bookkeeping about a release, and a
+/// failed or slow bump must never hold one back.
+///
+/// Pushed with plain `git push` rather than a commit-signing action. Those build the
+/// commit from the remote's head at the moment they run, so a develop push that landed
+/// since checkout would lose its changes to these two files, and two tags racing could
+/// stack the older version on top of the newer. A non-forced push is a compare-and-swap
+/// instead: if develop moved, git rejects it, the job fails loudly, and a re-run decides
+/// again from scratch. The cost is no "Verified" badge on the bot commit.
+fn bump_manifest_on_develop() -> NamedJob {
+    fn sync_manifest_to_tag() -> Step<Run> {
+        named::bash!("script/sync-zode-manifest-to-release-tag \"$GITHUB_REF_NAME\"").id("sync")
+    }
+
+    // The version comes in through the environment, never interpolated into the script:
+    // it is derived from a tag name, which is text somebody else chose.
+    fn commit_and_push(changed: &StepOutput, version: &StepOutput) -> Step<Run> {
+        named::bash!(indoc::indoc! {r#"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: bump zode to $VERSION" -- crates/zed/Cargo.toml Cargo.lock
+            git push origin HEAD:refs/heads/develop
+        "#})
+        .if_condition(Expression::new(format!("{} == 'true'", changed.expr())))
+        .add_env(("VERSION", version.to_string()))
+    }
+
+    let sync_step = sync_manifest_to_tag();
+    // The script appends both outputs itself, so they cannot be found in its command line.
+    let changed = StepOutput::new_unchecked(&sync_step, "changed");
+    let version = StepOutput::new_unchecked(&sync_step, "version");
+
+    named::job!(
+        steps::writes_to_releases(release_job(&[]))
+            // Two lines edited and one push: a run that takes longer is stuck on
+            // the network, and the release default would let it hold a runner for
+            // hours.
+            .timeout_minutes(10u32)
+            .runs_on(runners::LINUX_SMALL)
+            // The checkout's persisted credentials are what `git push` uses, so this is
+            // where the token that may start CI on develop has to be set.
+            .add_step(
+                steps::checkout_repo()
+                    .with_ref("develop")
+                    .with_token_expression(TAG_TOKEN),
+            )
+            .add_step(sync_step)
+            .add_step(commit_and_push(&changed, &version)),
     )
 }
 
@@ -576,5 +634,360 @@ mod tests {
             !gh_upload.contains("driver-artifacts"),
             "gh release upload must not read from driver-artifacts/: {gh_upload}"
         );
+    }
+
+    /// The bump is bookkeeping about the release, not part of it: if it could hold a job
+    /// back, a develop push that raced it would be able to hold a release back too. And it
+    /// must push without force, because the rejected push is what stops it from rewinding
+    /// a develop that moved while the job ran.
+    #[test]
+    fn the_manifest_bump_targets_develop_and_blocks_nothing() {
+        const BUMP: &str = "bump_manifest_on_develop";
+        let jobs = jobs_of(release());
+        let job = &jobs[BUMP];
+        assert!(!job.is_null(), "release has no {BUMP} job");
+
+        assert!(
+            needs_of(&jobs, BUMP).is_empty(),
+            "{BUMP} waits on {:?}, so a slow job upstream delays the bump",
+            needs_of(&jobs, BUMP)
+        );
+        for (name, _) in jobs.as_mapping().expect("jobs is a mapping") {
+            let name = name.as_str().expect("job names are strings");
+            assert!(
+                !needs_of(&jobs, name).iter().any(|need| need == BUMP),
+                "{name} waits on {BUMP}, so a failed bump would hold a release back"
+            );
+        }
+
+        assert_eq!(
+            job["permissions"]["contents"].as_str(),
+            Some("write"),
+            "{BUMP} cannot push without contents: write"
+        );
+        assert!(
+            job["if"]
+                .as_str()
+                .is_some_and(|guard| guard.contains("github.repository_owner")),
+            "{BUMP} lost the repository owner guard: {:?}",
+            job["if"]
+        );
+
+        let steps = job["steps"].as_sequence().expect("the job has steps");
+        let checkout = steps
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            })
+            .expect("the job checks the repository out");
+        assert_eq!(
+            checkout["with"]["ref"].as_str(),
+            Some("develop"),
+            "the bump must start from develop, not from the tag"
+        );
+        assert_eq!(
+            checkout["with"]["token"].as_str(),
+            Some(TAG_TOKEN),
+            "the push uses the checkout's credentials, so the checkout needs the release token"
+        );
+
+        let sync = steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some("sync"))
+            .expect("the script step has the id the push step reads");
+        assert!(
+            sync["run"].as_str().is_some_and(|command| {
+                command.contains("script/sync-zode-manifest-to-release-tag")
+                    && command.contains("\"$GITHUB_REF_NAME\"")
+            }),
+            "the sync step does not run the script on the tag: {:?}",
+            sync["run"]
+        );
+
+        let push = steps
+            .iter()
+            .find(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("git push"))
+            })
+            .expect("the job pushes");
+        assert!(
+            push["if"]
+                .as_str()
+                .is_some_and(|condition| condition.contains("steps.sync.outputs.changed == 'true'")),
+            "the push is not guarded by the script's `changed` output: {:?}",
+            push["if"]
+        );
+        let push_script = push["run"].as_str().expect("the push step has a script");
+        assert!(
+            push_script.contains("git push origin HEAD:refs/heads/develop"),
+            "the push does not target develop: {push_script}"
+        );
+        assert!(
+            !push_script.contains("--force"),
+            "a forced push would rewind a develop that moved during the job: {push_script}"
+        );
+        assert!(
+            !push_script.contains("${{"),
+            "an expression interpolated into the script is injectable; pass it through env: {push_script}"
+        );
+        assert!(
+            push["env"]["VERSION"]
+                .as_str()
+                .is_some_and(|version| version.contains("steps.sync.outputs.version")),
+            "the commit message does not read the version the script reported: {:?}",
+            push["env"]
+        );
+    }
+
+    /// The script runs against a scratch checkout holding only the two files it edits.
+    /// Unix only: the script is executed directly through its shebang, which Windows does
+    /// not do, and the release job that runs it is on Linux.
+    #[cfg(unix)]
+    mod manifest_sync {
+        use indoc::formatdoc;
+        use std::{
+            fs,
+            path::{Path, PathBuf},
+            process::Output,
+        };
+
+        struct Checkout {
+            root: PathBuf,
+        }
+
+        impl Checkout {
+            fn new(label: &str, manifest: &str, lockfile: &str) -> Self {
+                let root = std::env::temp_dir()
+                    .join(format!("zode-manifest-sync-{}-{label}", std::process::id()));
+                // A directory left behind by a crashed run must not leak into this one.
+                if root.exists() {
+                    fs::remove_dir_all(&root).expect("clearing a stale scratch checkout");
+                }
+                fs::create_dir_all(root.join("crates/zed")).expect("creating the scratch checkout");
+                // Built before the writes so `Drop` cleans up even if one of them fails.
+                let checkout = Self { root };
+                fs::write(checkout.manifest_path(), manifest).expect("writing the manifest");
+                fs::write(checkout.lockfile_path(), lockfile).expect("writing the lockfile");
+                fs::write(checkout.output_path(), "").expect("creating GITHUB_OUTPUT");
+                checkout
+            }
+
+            fn manifest_path(&self) -> PathBuf {
+                self.root.join("crates/zed/Cargo.toml")
+            }
+
+            fn lockfile_path(&self) -> PathBuf {
+                self.root.join("Cargo.lock")
+            }
+
+            fn output_path(&self) -> PathBuf {
+                self.root.join("github-output")
+            }
+
+            fn manifest(&self) -> String {
+                fs::read_to_string(self.manifest_path()).expect("reading the manifest")
+            }
+
+            fn lockfile(&self) -> String {
+                fs::read_to_string(self.lockfile_path()).expect("reading the lockfile")
+            }
+
+            /// The last value the script appended for `key`, as GitHub would read it.
+            fn reported(&self, key: &str) -> Option<String> {
+                let output = fs::read_to_string(self.output_path()).expect("reading GITHUB_OUTPUT");
+                output
+                    .lines()
+                    .rev()
+                    .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                    .map(str::to_owned)
+            }
+        }
+
+        impl Drop for Checkout {
+            fn drop(&mut self) {
+                if let Err(error) = fs::remove_dir_all(&self.root) {
+                    eprintln!("could not remove {}: {error}", self.root.display());
+                }
+            }
+        }
+
+        /// `decoy` is the version of the lines the script must leave alone. Giving it the
+        /// value the real line has before the edit is what catches a replace-everything
+        /// implementation: it would drag the decoy along.
+        fn manifest(version: &str, decoy: &str) -> String {
+            formatdoc! {r#"
+                [package]
+                name = "zed"
+                version = "{version}"
+                edition.workspace = true
+
+                [dependencies.decoy]
+                version = "{decoy}"
+            "#}
+        }
+
+        fn lockfile(version: &str, decoy: &str, with_zode: bool) -> String {
+            let zode = if with_zode {
+                formatdoc! {r#"
+                    [[package]]
+                    name = "zode"
+                    version = "{version}"
+                    dependencies = [
+                     "zode-db-mysql",
+                    ]
+
+                "#}
+            } else {
+                String::new()
+            };
+            let header = formatdoc! {r#"
+                # This file is automatically @generated by Cargo.
+                version = 4
+
+                [[package]]
+                name = "serde"
+                version = "1.0.219"
+
+            "#};
+            let siblings = formatdoc! {r#"
+                [[package]]
+                name = "zode-db-mysql"
+                version = "{decoy}"
+
+                [[package]]
+                name = "zode_account"
+                version = "{decoy}"
+            "#};
+            format!("{header}{zode}{siblings}")
+        }
+
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "A test of a shell script has to run it, and nothing else is on this thread"
+        )]
+        fn run_script(checkout: &Checkout, tag: &str) -> Output {
+            let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../script/sync-zode-manifest-to-release-tag");
+            std::process::Command::new(&script)
+                .arg(tag)
+                .current_dir(&checkout.root)
+                .env("GITHUB_OUTPUT", checkout.output_path())
+                .output()
+                .unwrap_or_else(|error| panic!("running {}: {error}", script.display()))
+        }
+
+        fn describe(output: &Output) -> String {
+            format!(
+                "{}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }
+
+        /// The manifest is only ever lifted to a stable tag. A downgrade would make develop
+        /// report an older version than the build before it, and a prerelease tag is not a
+        /// version develop should adopt.
+        #[test]
+        fn the_manifest_sync_script_never_moves_backwards() {
+            // (manifest version, tag, version the manifest ends at -- None if it must not move)
+            let cases: [(&str, &str, Option<&str>); 11] = [
+                ("0.1.1", "v0.1.5", Some("0.1.5")),
+                ("0.1.5", "v0.1.5", None),
+                ("0.1.6", "v0.1.5", None),
+                // Numeric, not lexical: "9" sorts after "10" as text.
+                ("0.1.9", "v0.1.10", Some("0.1.10")),
+                ("0.1.10", "v0.1.9", None),
+                // Past what bash arithmetic holds: a comparison that wrapped would
+                // read the larger number as smaller.
+                (
+                    "0.1.5",
+                    "v0.1.99999999999999999999",
+                    Some("0.1.99999999999999999999"),
+                ),
+                ("0.1.99999999999999999999", "v0.1.5", None),
+                // `sort -V` ranks the prerelease above the release; semver does not.
+                ("0.1.5-pre", "v0.1.5", Some("0.1.5")),
+                ("0.1.4", "v0.1.5-beta.1", None),
+                ("0.1.4", "release-0.1.5", None),
+                // Not valid semver; copied into the manifest it would stop cargo reading it.
+                ("0.1.4", "v0.1.05", None),
+            ];
+
+            for (index, (manifest_version, tag, bumped_to)) in cases.into_iter().enumerate() {
+                let before_manifest = manifest(manifest_version, manifest_version);
+                let before_lockfile = lockfile(manifest_version, manifest_version, true);
+                let checkout =
+                    Checkout::new(&index.to_string(), &before_manifest, &before_lockfile);
+
+                let output = run_script(&checkout, tag);
+                let context = format!(
+                    "manifest {manifest_version}, tag {tag}: {}",
+                    describe(&output)
+                );
+                assert!(output.status.success(), "the script failed for {context}");
+
+                match bumped_to {
+                    Some(version) => {
+                        assert_eq!(
+                            checkout.reported("changed").as_deref(),
+                            Some("true"),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            checkout.reported("version").as_deref(),
+                            Some(version),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            checkout.manifest(),
+                            manifest(version, manifest_version),
+                            "only the package version may change in the manifest: {context}"
+                        );
+                        assert_eq!(
+                            checkout.lockfile(),
+                            lockfile(version, manifest_version, true),
+                            "only zode's own stanza may change in the lockfile: {context}"
+                        );
+                    }
+                    None => {
+                        assert_eq!(
+                            checkout.reported("changed").as_deref(),
+                            Some("false"),
+                            "{context}"
+                        );
+                        assert_eq!(checkout.manifest(), before_manifest, "{context}");
+                        assert_eq!(checkout.lockfile(), before_lockfile, "{context}");
+                    }
+                }
+            }
+
+            // A lockfile with no `zode` stanza means the script cannot keep the two files in
+            // step. It must fail and edit neither, rather than bump the manifest alone and
+            // leave a lock that `cargo --locked` then rejects.
+            let before_manifest = manifest("0.1.1", "0.1.1");
+            let before_lockfile = lockfile("0.1.1", "0.1.1", false);
+            let checkout = Checkout::new("no-stanza", &before_manifest, &before_lockfile);
+            let output = run_script(&checkout, "v0.1.5");
+            assert!(
+                !output.status.success(),
+                "a lockfile without zode must fail the script: {}",
+                describe(&output)
+            );
+            assert_eq!(
+                checkout.manifest(),
+                before_manifest,
+                "the manifest was edited anyway"
+            );
+            assert_eq!(
+                checkout.lockfile(),
+                before_lockfile,
+                "the lockfile was edited anyway"
+            );
+        }
     }
 }
