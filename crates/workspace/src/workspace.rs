@@ -102,8 +102,8 @@ pub use persistence::{
 };
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WorktreeSettings,
+    DirectoryLister, Project, ProjectActivity, ProjectEntryId, ProjectPath, ResolvedPath, Worktree,
+    WorktreeId, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     project_settings::ProjectSettings,
     toolchain_store::ToolchainStoreEvent,
@@ -6103,6 +6103,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.refresh_active_item_state(focus_changed, cx);
+        self.update_window_title(window, cx);
+    }
+
+    /// Everything `active_item_path_changed` does except retitle the window,
+    /// for a workspace that is not the one on screen: the title belongs to the
+    /// project in front, but the active path and repository are this project's.
+    fn refresh_active_item_state(&mut self, focus_changed: bool, cx: &mut Context<Self>) {
         cx.emit(Event::ActiveItemChanged);
         let active_entry = self.active_project_path(cx);
         self.project.update(cx, |project, cx| {
@@ -6115,8 +6123,6 @@ impl Workspace {
                 git_store.set_active_repo_for_path(project_path, cx);
             });
         }
-
-        self.update_window_title(window, cx);
     }
 
     fn update_window_title(&mut self, window: &mut Window, cx: &mut App) {
@@ -6931,15 +6937,37 @@ impl Workspace {
         cx: &mut Context<Workspace>,
     ) {
         self.panes.retain(|p| p != pane);
-        if let Some(focus_on) = focus_on {
-            focus_on.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
-        } else if self.active_pane() == pane {
-            let fallback_pane = self.panes.last().unwrap().clone();
-            if self.has_active_modal(window, cx) {
-                self.set_active_pane(&fallback_pane, window, cx);
+        let replacement = if self.active_pane() == pane {
+            focus_on.clone().or_else(|| self.panes.last().cloned())
+        } else {
+            None
+        };
+        // Made active here rather than left to the `Focus` event the focus below
+        // raises: a background project in a multi-project window paints
+        // nothing, so that event never reaches it, and `active_pane` would go on
+        // naming the pane just removed -- every tab opened into it would land
+        // where nobody can see it.
+        if let Some(replacement) = &replacement {
+            if self.project.read(cx).activity() == ProjectActivity::Active {
+                self.set_active_pane(replacement, window, cx);
             } else {
-                fallback_pane.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
+                // `set_active_pane` without the window title, which belongs to
+                // the project in front. The rest is refreshed now because
+                // switching back will not: the focus event then finds this pane
+                // already active.
+                self.active_pane = replacement.clone();
+                self.last_active_center_pane = Some(replacement.downgrade());
+                self.refresh_active_item_state(true, cx);
             }
+        }
+        // `focus_on` is focused even over an open modal; a fallback pane is not,
+        // so the modal keeps the keyboard.
+        let focus_target = match focus_on {
+            Some(focus_on) => Some(focus_on.clone()),
+            None => replacement.filter(|_| !self.has_active_modal(window, cx)),
+        };
+        if let Some(target) = focus_target {
+            target.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
         }
         if self.last_active_center_pane == Some(pane.downgrade()) {
             self.last_active_center_pane = None;

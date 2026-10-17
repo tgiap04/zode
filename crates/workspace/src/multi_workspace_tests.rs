@@ -3351,3 +3351,167 @@ async fn closing_the_window_mid_upload_leaves_no_copy_behind(cx: &mut TestAppCon
         stored_avatars(&fs)
     );
 }
+
+/// A pane that empties while its project is in the background must not stay
+/// the active pane. Nothing paints a background workspace, so the focus event
+/// that normally moves `active_pane` on never arrives; a stale one sends every
+/// new tab -- the container list, the database view -- into a pane that is no
+/// longer on screen, and the button that opened it seems to do nothing.
+#[gpui::test]
+async fn a_pane_closed_in_the_background_does_not_stay_active(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project_a = Project::test(fs.clone(), [], cx).await;
+    let project_b = Project::test(fs.clone(), [], cx).await;
+    let (multi, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    multi.update(cx, |multi, cx| multi.test_enable_background_retention(cx));
+    let workspace_a = multi.read_with(cx, |multi, _| multi.workspace().clone());
+
+    let (left, right, closing) = workspace_a.update_in(cx, |workspace, window, cx| {
+        let left = workspace.active_pane().clone();
+        let staying = cx.new(|cx| TestItem::new(cx));
+        left.update(cx, |pane, cx| {
+            pane.add_item(Box::new(staying), true, true, None, window, cx)
+        });
+        let right = workspace.split_pane(left.clone(), SplitDirection::Right, window, cx);
+        let closing = cx.new(|cx| TestItem::new(cx));
+        right.update(cx, |pane, cx| {
+            pane.add_item(Box::new(closing.clone()), true, true, None, window, cx)
+        });
+        (left, right, closing)
+    });
+    cx.run_until_parked();
+    assert!(workspace_a.read_with(cx, |workspace, _| workspace.active_pane() == &right));
+
+    multi.update_in(cx, |multi, window, cx| {
+        multi.test_add_workspace(project_b, window, cx);
+    });
+    cx.run_until_parked();
+
+    right.update_in(cx, |pane, window, cx| {
+        pane.remove_item(closing.entity_id(), false, true, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace_a.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.panes().len(), 1, "the emptied pane is gone");
+        assert!(
+            workspace.active_pane() == &left,
+            "the remaining pane takes over while the project is still in the background"
+        );
+    });
+
+    multi.update_in(cx, |multi, window, cx| {
+        multi.activate(workspace_a.clone(), None, window, cx);
+    });
+    cx.run_until_parked();
+    let opened = workspace_a.update_in(cx, |workspace, window, cx| {
+        let opened = cx.new(|cx| TestItem::new(cx));
+        workspace.add_item_to_active_pane(Box::new(opened.clone()), None, true, window, cx);
+        opened
+    });
+    left.read_with(cx, |pane, _| {
+        assert!(
+            pane.items()
+                .any(|item| item.item_id() == opened.entity_id()),
+            "a tab opened after switching back lands in the pane on screen"
+        );
+    });
+}
+
+/// The same close on screen behaves as it always did: the remaining pane is
+/// active and has the focus.
+#[gpui::test]
+async fn a_pane_closed_on_screen_hands_over_to_the_one_left(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi.read_with(cx, |multi, _| multi.workspace().clone());
+
+    let (left, right, closing) = workspace.update_in(cx, |workspace, window, cx| {
+        let left = workspace.active_pane().clone();
+        let staying = cx.new(|cx| TestItem::new(cx));
+        left.update(cx, |pane, cx| {
+            pane.add_item(Box::new(staying), true, true, None, window, cx)
+        });
+        let right = workspace.split_pane(left.clone(), SplitDirection::Right, window, cx);
+        let closing = cx.new(|cx| TestItem::new(cx));
+        right.update(cx, |pane, cx| {
+            pane.add_item(Box::new(closing.clone()), true, true, None, window, cx)
+        });
+        (left, right, closing)
+    });
+    cx.run_until_parked();
+
+    right.update_in(cx, |pane, window, cx| {
+        pane.remove_item(closing.entity_id(), false, true, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(cx, |workspace, _| {
+        assert!(workspace.active_pane() == &left);
+    });
+    cx.update(|window, cx| {
+        assert!(left.read(cx).focus_handle(cx).contains_focused(window, cx));
+    });
+}
+
+/// A pane closing in a background project must not take the keyboard from the
+/// project in front: the window has one focus, and it is that project's.
+#[gpui::test]
+async fn a_pane_closed_in_the_background_leaves_the_front_project_focused(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project_a = Project::test(fs.clone(), [], cx).await;
+    let project_b = Project::test(fs.clone(), [], cx).await;
+    let (multi, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    multi.update(cx, |multi, cx| multi.test_enable_background_retention(cx));
+    let workspace_a = multi.read_with(cx, |multi, _| multi.workspace().clone());
+
+    let (right, closing) = workspace_a.update_in(cx, |workspace, window, cx| {
+        let left = workspace.active_pane().clone();
+        let staying = cx.new(|cx| TestItem::new(cx));
+        left.update(cx, |pane, cx| {
+            pane.add_item(Box::new(staying), true, true, None, window, cx)
+        });
+        let right = workspace.split_pane(left, SplitDirection::Right, window, cx);
+        let closing = cx.new(|cx| TestItem::new(cx));
+        right.update(cx, |pane, cx| {
+            pane.add_item(Box::new(closing.clone()), true, true, None, window, cx)
+        });
+        (right, closing)
+    });
+    cx.run_until_parked();
+
+    let workspace_b = multi.update_in(cx, |multi, window, cx| {
+        multi.test_add_workspace(project_b, window, cx)
+    });
+    let front = workspace_b.update_in(cx, |workspace, window, cx| {
+        let front = workspace.active_pane().clone();
+        let item = cx.new(|cx| TestItem::new(cx));
+        front.update(cx, |pane, cx| {
+            pane.add_item(Box::new(item), true, true, None, window, cx)
+        });
+        front
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(front.read(cx).focus_handle(cx).contains_focused(window, cx));
+    });
+
+    right.update_in(cx, |pane, window, cx| {
+        pane.remove_item(closing.entity_id(), false, true, window, cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(
+            front.read(cx).focus_handle(cx).contains_focused(window, cx),
+            "the project in front keeps the keyboard"
+        );
+    });
+}
