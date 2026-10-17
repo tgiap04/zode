@@ -266,7 +266,7 @@ impl crate::branch_panel::panel::BranchPanel {
             h_flex()
                 .w_full()
                 .px_2()
-                .py_1()
+                .py_1p5()
                 .gap_1()
                 .child(
                     Label::new("No remote")
@@ -274,7 +274,7 @@ impl crate::branch_panel::panel::BranchPanel {
                         .color(Color::Muted),
                 )
                 .child(
-                    Button::new("create-remote-repo", "Create on host…")
+                    Button::new("create-remote-repo", "Create on Host…")
                         .label_size(LabelSize::Small)
                         .on_click(cx.listener(move |panel, _, window, cx| {
                             panel.create_remote_repository(id, window, cx);

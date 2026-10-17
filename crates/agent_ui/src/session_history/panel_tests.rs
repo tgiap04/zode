@@ -175,6 +175,11 @@ async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestA
     let ellipsis = cx
         .debug_bounds("agent-history-menu:2")
         .expect("the session row's ellipsis must be drawn");
+    // The trigger is only painted while the pointer is over its row, so a click
+    // that did not first arrive there would reach nothing -- as it would for a
+    // person. The move is the arrival.
+    cx.simulate_mouse_move(ellipsis.center(), None, gpui::Modifiers::default());
+    cx.run_until_parked();
     cx.simulate_click(ellipsis.center(), gpui::Modifiers::default());
     cx.run_until_parked();
 
@@ -188,6 +193,80 @@ async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestA
         panel.read_with(cx, |panel, _| panel.expanded_rows.is_empty()),
         "and must not fall through to the row, which would expand it instead"
     );
+    // Opening the menu takes the pointer off the row, which hides the trigger
+    // unless the row knows its menu is open. That knowledge is the handle.
+    assert!(
+        panel.update(cx, |panel, _| panel
+            .menu_handle(&Arc::from("one"))
+            .is_deployed()),
+        "the row must know its menu is open, or its trigger vanishes under it"
+    );
+}
+
+/// A row's menu handle lives in the panel and stores the closure that builds
+/// the menu, so anything that closure captures strongly -- including the panel
+/// itself -- is kept alive by the panel for as long as the panel lives.
+///
+/// The menu is opened here as well as drawn: the built `ContextMenu` is a second
+/// owner of the entry handlers, and the handle holds it too. The panel is taken
+/// out of the workspace rather than the window closed, because the dock outlives
+/// its window in this harness and would hold the panel regardless.
+#[gpui::test]
+async fn a_panel_with_an_open_row_menu_is_released_when_removed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let panel: Entity<AgentHistoryPanel> = workspace.update_in(cx, |workspace, window, cx| {
+        cx.new(|cx| AgentHistoryPanel::new(workspace, window, cx))
+    });
+    panel.update(cx, |panel, _| panel.providers.clear());
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+        workspace.toggle_panel_focus::<AgentHistoryPanel>(window, cx);
+    });
+    cx.run_until_parked();
+    panel.update(cx, |panel, cx| {
+        let sessions = vec![session("one", "/root", "Newest here", 300)];
+        panel
+            .store
+            .update(cx, |store, cx| store.set_index_for_test(sessions, cx));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let ellipsis = cx
+        .debug_bounds("agent-history-menu:2")
+        .expect("the session row's ellipsis must be drawn");
+    cx.simulate_mouse_move(ellipsis.center(), None, gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_click(ellipsis.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("MENU_ITEM-Delete").is_some(),
+        "the menu must be open, or this test says nothing about what it holds"
+    );
+
+    let weak_panel = panel.downgrade();
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.remove_panel(&panel, window, cx);
+    });
+    drop(panel);
+    cx.run_until_parked();
+    // One more effect cycle: a dropped entity's resources are kept until the end
+    // of the cycle it was dropped in.
+    cx.update(|_, _| {});
+
+    weak_panel.assert_released();
 }
 
 /// The other half of the scoping claim: with nothing open, nothing is listed.
@@ -543,6 +622,41 @@ async fn deleting_all_takes_this_projects_sessions_and_no_others(cx: &mut TestAp
     );
 }
 
+/// A Claude session only has a sidecar directory when it ran subagents, yet
+/// its deletion always lists one. A path that is already absent counts as
+/// gone, so the session must not stay listed.
+#[gpui::test]
+async fn deleting_all_forgets_a_session_whose_sidecar_directory_never_existed(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "one.jsonl": "" })).await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![session("one", "/root", "First", 300)],
+        vec![(
+            "one",
+            vec![PathBuf::from("/logs/one.jsonl"), PathBuf::from("/logs/one")],
+        )],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert_eq!(trashed_names(&fs), vec!["one.jsonl".to_string()]);
+    assert!(
+        remaining_ids(&panel, &mut cx).is_empty(),
+        "an absent sidecar directory must not keep the row listed"
+    );
+}
+
 /// The second scope test: a filter narrows the list, never the delete.
 #[gpui::test]
 async fn the_search_filter_does_not_narrow_the_delete(cx: &mut TestAppContext) {
@@ -786,7 +900,8 @@ async fn a_session_with_nothing_on_disk_offers_to_drop_the_row(cx: &mut TestAppC
     );
 }
 
-/// The partial-failure rule. `FakeFs::trash` errors on a path it never held, so
+/// The partial-failure rule. `FakeFs::trash` errors on a path whose parent
+/// directory it never held, even when a missing path is otherwise tolerated, so
 /// the second session fails without any injection machinery.
 #[gpui::test]
 async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContext) {
@@ -803,7 +918,7 @@ async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContex
         ],
         vec![
             ("good", vec![PathBuf::from("/logs/good.jsonl")]),
-            ("bad", vec![PathBuf::from("/logs/missing.jsonl")]),
+            ("bad", vec![PathBuf::from("/unmounted/missing.jsonl")]),
         ],
         fs.clone(),
         cx,
@@ -871,6 +986,61 @@ async fn a_single_delete_whose_trash_fails_keeps_the_row(cx: &mut TestAppContext
         remaining_ids(&panel, &mut cx),
         vec!["bad".to_string()],
         "a failed trash must keep the row (H7), matching delete_all's own discipline"
+    );
+}
+
+/// The single delete's happy path with the store idle: the row leaves the
+/// panel with no manual refresh.
+///
+/// The transcript is a real file (see the comment on
+/// `a_single_delete_whose_trash_fails_keeps_the_row`) that is also registered
+/// with `FakeFs`, so the trash call itself succeeds.
+#[gpui::test]
+async fn a_single_delete_that_trashes_cleanly_drops_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let real_log =
+        std::env::temp_dir().join(format!("zode-single-ok-{}.jsonl", std::process::id()));
+    std::fs::write(&real_log, "").expect("writing the real fixture file must succeed");
+    if let Some(parent) = real_log.parent() {
+        fs.insert_tree(parent, json!({})).await;
+    }
+    fs.insert_file(&real_log, Vec::new()).await;
+
+    let target = SessionSummary {
+        log_path: Some(real_log.clone()),
+        log_bytes: 10,
+        ..session("gone", "/root", "Trashes cleanly", 300)
+    };
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![target.clone(), session("kept", "/root", "Still here", 200)],
+        Vec::new(),
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&target, window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    std::fs::remove_file(&real_log).ok();
+
+    assert_eq!(
+        trashed_names(&fs).len(),
+        1,
+        "the transcript must reach the trash"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["kept".to_string()],
+        "a clean single delete must drop the row without a refresh"
     );
 }
 

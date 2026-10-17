@@ -9,7 +9,7 @@
 //! time -- that is what actually stops its `Task`s and `Subscription`s from
 //! running.
 //!
-//! `workspace` cannot read the settings behind three of the fifteen items --
+//! `workspace` cannot read the settings behind three of the sixteen items --
 //! they live in crates that depend on `workspace`, so reading them here would
 //! be a dependency cycle. `StatusBarItemSpec::is_shown`/`set_shown` therefore
 //! take the crate-agnostic `&App`/`&mut SettingsContent` rather than a

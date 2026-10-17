@@ -17,6 +17,8 @@ use util::command::Child;
 pub mod docker;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
+pub mod relay;
+mod relay_stream;
 pub mod ssh;
 pub mod wsl;
 

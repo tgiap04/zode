@@ -164,7 +164,7 @@ jobs:
         if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
             echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
         else
-            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml says ${manifest_version}; the binary reports the tag, so consider bumping the manifest to match"
+            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
         fi
     - name: mkdir -p target/
       run: mkdir -p target/
@@ -188,6 +188,31 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 360
+  bump_manifest_on_develop:
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+        ref: develop
+        token: ${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}
+    - id: sync
+      name: release::bump_manifest_on_develop::sync_manifest_to_tag
+      run: script/sync-zode-manifest-to-release-tag "$GITHUB_REF_NAME"
+    - name: release::bump_manifest_on_develop::commit_and_push
+      if: steps.sync.outputs.changed == 'true'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -m "chore: bump zode to $VERSION" -- crates/zed/Cargo.toml Cargo.lock
+        git push origin HEAD:refs/heads/develop
+      env:
+        VERSION: ${{ steps.sync.outputs.version }}
+    timeout-minutes: 10
   bundle_linux_aarch64:
     runs-on: ubuntu-24.04-arm
     env:

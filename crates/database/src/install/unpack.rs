@@ -53,14 +53,30 @@ pub async fn install_archive(
     ensure_entry_stays_inside_staging(entry)?;
 
     let staging = staging_dir(destination);
+    let installed =
+        unpack_and_publish(archive, entry, &staging, destination, executable_name).await;
+    if installed.is_err() {
+        discard_staging(&staging).await;
+    }
+    installed
+}
+
+async fn unpack_and_publish(
+    archive: &Path,
+    entry: &str,
+    staging: &Path,
+    destination: &Path,
+    executable_name: &str,
+) -> Result<PathBuf> {
     // A staging directory left by a previous attempt that died mid-unpack must
     // not contribute files to this one.
-    let _ = smol::fs::remove_dir_all(&staging).await;
-    smol::fs::create_dir_all(&staging)
+    store::ignore_not_found(smol::fs::remove_dir_all(staging).await)
+        .with_context(|| format!("clearing {}", staging.display()))?;
+    smol::fs::create_dir_all(staging)
         .await
         .with_context(|| format!("creating {}", staging.display()))?;
 
-    unpack(archive, &staging).await?;
+    unpack(archive, staging).await?;
 
     let unpacked = staging.join(entry);
     anyhow::ensure!(
@@ -71,13 +87,14 @@ pub async fn install_archive(
 
     // The rename is what publishes the install, so it is the last thing done
     // and it moves a directory that is already complete.
-    let _ = smol::fs::remove_dir_all(destination).await;
+    store::ignore_not_found(smol::fs::remove_dir_all(destination).await)
+        .with_context(|| format!("replacing the install at {}", destination.display()))?;
     if let Some(parent) = destination.parent() {
         smol::fs::create_dir_all(parent)
             .await
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    smol::fs::rename(&staging, destination)
+    smol::fs::rename(staging, destination)
         .await
         .with_context(|| {
             format!(
@@ -97,12 +114,22 @@ pub async fn install_archive(
     Ok(installed)
 }
 
-/// Beside the destination rather than in the system temp directory, so the
-/// final move is a rename within one filesystem rather than a copy.
-fn staging_dir(destination: &Path) -> PathBuf {
-    let mut staging = destination.as_os_str().to_owned();
-    staging.push(".incoming");
-    PathBuf::from(staging)
+/// Beside the destination, so the final move is a rename within one
+/// filesystem, and never named like a version: see [`store::hidden_sibling`].
+pub(crate) fn staging_dir(destination: &Path) -> PathBuf {
+    store::hidden_sibling(destination, "incoming")
+}
+
+/// Best-effort: the install has already failed, and that failure is what the
+/// caller must see. A directory that will not delete is logged rather than
+/// allowed to replace it, and the next attempt clears it before starting.
+async fn discard_staging(staging: &Path) {
+    if let Err(error) = store::ignore_not_found(smol::fs::remove_dir_all(staging).await) {
+        log::warn!(
+            "could not remove the staging directory {}: {error}",
+            staging.display()
+        );
+    }
 }
 
 async fn unpack(archive: &Path, into: &Path) -> Result<()> {
@@ -237,6 +264,10 @@ mod tests {
                 !destination.exists(),
                 "nothing may be published from a failed unpack"
             );
+            assert!(
+                !staging_dir(&destination).exists(),
+                "the unpacked files must not outlive the refusal"
+            );
         });
     }
 
@@ -253,7 +284,53 @@ mod tests {
                 .await
                 .expect_err("unpacking rubbish must fail");
             assert!(!destination.exists());
+            assert!(!staging_dir(&destination).exists());
         });
+    }
+
+    /// An attempt that died mid-unpack leaves its directory behind. A later
+    /// attempt must start from nothing, or the files the dead one wrote would be
+    /// published beside the executable it was verified against.
+    #[test]
+    fn a_leftover_staging_directory_contributes_nothing_to_the_next_install() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = write(
+                root.path(),
+                "driver.tar.gz",
+                &archive_containing(&[("zode-db-postgres", b"#!/bin/sh\nexit 0\n")]).await,
+            );
+            let destination = root.path().join("postgres").join("0.1.5-rc.1");
+            let staging = staging_dir(&destination);
+            std::fs::create_dir_all(&staging).unwrap();
+            write(&staging, "left-by-a-dead-attempt", b"stale");
+
+            let installed = install_archive(
+                &archive,
+                "zode-db-postgres",
+                &destination,
+                "zode-db-postgres",
+            )
+            .await
+            .unwrap();
+
+            assert!(installed.is_file());
+            assert!(!destination.join("left-by-a-dead-attempt").exists());
+            assert!(!staging.exists());
+        });
+    }
+
+    /// The staging name of a pre-release is a version-shaped string only if it
+    /// is built by appending to the version.
+    #[test]
+    fn staging_sits_beside_the_destination_and_never_reads_as_a_version() {
+        for version in ["0.1.4", "0.1.5-rc.1"] {
+            let destination = Path::new("/store/postgres").join(version);
+            let staging = staging_dir(&destination);
+            assert_eq!(staging.parent(), destination.parent());
+            let name = staging.file_name().and_then(|name| name.to_str()).unwrap();
+            assert!(!store::is_version(name), "{name:?}");
+        }
     }
 
     /// `Path::join` is not containment: joining an absolute path discards

@@ -1,5 +1,5 @@
 use crate::Sidebar;
-use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE};
+use crate::rail::{RAIL_BLOCK_PADDING, RAIL_ICON_GAP, rail_button};
 use gpui::{AnyElement, App, Context, Entity, Window};
 use std::sync::Arc;
 use ui::{Tooltip, prelude::*};
@@ -77,9 +77,7 @@ impl Sidebar {
             };
             let tooltip = if is_showing { "Hide Panel" } else { name };
 
-            let button = IconButton::new(panel.persistent_name(), icon)
-                .icon_size(RAIL_ICON_SIZE)
-                .toggle_state(is_showing);
+            let button = rail_button(panel.persistent_name(), icon).toggle_state(is_showing);
 
             buttons.push(if is_showing {
                 // Takes this panel out of the stack and leaves the rest —
@@ -124,7 +122,7 @@ impl Sidebar {
         Some(
             v_flex()
                 .flex_shrink_0()
-                .py(RAIL_ICON_GAP)
+                .py(RAIL_BLOCK_PADDING)
                 .gap(RAIL_ICON_GAP)
                 .items_center()
                 .border_t_1()

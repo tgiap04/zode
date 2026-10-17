@@ -1630,7 +1630,7 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 
 ## Status Bar
 
-- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere — the search, language-server and diagnostics buttons live under `editor.search.button`, `global_lsp_settings.button` and `diagnostics.button`, and the CPU/RAM badge and the keep-display-awake indicator under the top-level `project_footprint_indicator` and `keep_display_awake`.
+- Description: Control various elements in the status bar. Note that some items in the status bar have their own settings set elsewhere — the search, language-server and diagnostics buttons live under `editor.search.button`, `global_lsp_settings.button` and `diagnostics.button`, the CPU/RAM badge under the top-level `project_footprint_indicator`, and the keep-display-awake indicator under the top-level `keep_display_awake` and `keep_display_awake_always` — it is shown while either is on.
 - Setting: `status_bar`
 - Default:
 
@@ -1648,7 +1648,8 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
     "activity_indicator": true,
     "active_toolchain_button": true,
     "vim_mode_button": true,
-    "image_info_button": true
+    "image_info_button": true,
+    "app_version_button": true
   }
 }
 ```
@@ -1656,11 +1657,19 @@ Positive `integer` value between 1 and 32. Values outside of this range will be 
 Right-clicking an empty part of the status bar opens a menu of these switches, grouped by which
 side of the bar the item sits on. Hiding an item through that menu writes the same setting a hand
 edit would, and does not merely stop drawing it: the item is removed from the bar and its entity
-dropped, so any polling or background work it was doing stops with it.
+dropped, so any polling or background work it was doing stops with it. Keep Display Awake is governed by two settings, and hiding it turns both `keep_display_awake` and `keep_display_awake_always` off, which releases any hold.
 
 `active_encoding_button` takes `always`, `non_utf8` or `never` rather than a boolean; the right-click
 menu treats `never` as off and turns it back on as `non_utf8`, so a value of `always` is not
 preserved across a hide and show.
+
+`app_version_button` shows Zode's version, such as `v0.1.5`, at the right end of the bar. A
+prerelease keeps its suffix (`v0.1.5-beta.1`); build metadata is never shown. Hovering it shows
+`Zode 0.1.5` (the Preview and Nightly channels name themselves, as in `Zode Preview 0.1.5-beta.1`)
+and the short commit when the build knows it, and clicking it opens the About window. Only the dock
+buttons, and the remote-control indicator while remote control is on, sit further right. The
+right-click menu lists it as **App Version**, and the Settings window as **App Version Button**
+under Window & Layout.
 
 There is an experimental setting that completely hides the status bar. This causes major usability problems (you will be unable to use many of Zode's features), but is provided for those who value screen real-estate above all else.
 
@@ -2384,9 +2393,19 @@ Example:
 
 `boolean` values
 
+## Keep Display Awake Always
+
+- Description: Whether to keep the display lit for as long as a Zode window is open, until this is turned off. Independent of `keep_display_awake`, and held on battery too. There is no time limit, and the screen will not lock on idle for as long as it is on. Toggle it from the status bar eye icon's menu (**Always Keep Display Awake**) or with the `keep_awake::ToggleAlwaysOn` action in the command palette, which has no default key binding and, like the icon, exists only where the platform can hold the display. See [Keeping the Display Awake](../keep-display-awake.md) for platform support and trade-offs.
+- Setting: `keep_display_awake_always`
+- Default: `false`
+
+**Options**
+
+`boolean` values
+
 ## Agent Finished Notification
 
-- Description: Whether to post an OS notification when an agent finishes answering or its CLI exits -- posted regardless of window focus. `quiet_period_ms` is how long the agent must stay quiet after its last output before the "finished answering" notification fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
+- Description: Whether to post an OS notification when an agent finishes answering, is waiting for your approval, or its CLI exits -- posted regardless of window focus. For a Claude tab with a tracked session, "finished answering" comes from the end of the turn in its transcript and the approval notification from its permission dialog. For every other agent, `quiet_period_ms` is how long it must stay quiet after its last output before "finished answering" fires; it is a debounce, not a guarantee, since an agent can legitimately pause longer than this while running a tool or waiting on a model. Floored at 2000ms. See [Agent Finished Notifications](../agent-finished-notifications.md) for the trade-off, the platform table, and how to turn it off.
 - Setting: `agent_finished_notification`
 - Default:
 
@@ -2403,6 +2422,26 @@ Example:
 
 - `enabled`: `boolean`
 - `quiet_period_ms`: positive `integer` milliseconds, floored at `2000`
+
+## Remote Control
+
+- Description: Whether another of your devices, signed in to the same account, may watch and type into the agents and terminals running in this Zode. Off means Zode opens no connection for it and watches no terminal. Turning it on also needs you to be signed in, and every device that may connect has to be approved once by comparing a six-digit code. While a device is connected the status bar says so and offers a way to disconnect it, and the status bar is shown for as long as one is connected even if `status_bar.show` hides it; a toast announces each device that takes control (in the window you are looking at, or the most recently used one if Zode is in the background); at most four devices may be connected at once; the actions `remote_control::DisconnectAll`, `remote_control::Disable` and `remote_control::ManageDevices` are in the command palette. While a device is connected, Zode holds the display awake on the same terms as `keep_display_awake`. Everything sent between the devices is end-to-end encrypted; the wire format is described in [Remote control protocol](../remote-control-protocol.md).
+- Setting: `remote_control`
+- Default:
+
+```json [settings]
+{
+  "remote_control": {
+    "enabled": false,
+    "idle_timeout_minutes": 30
+  }
+}
+```
+
+**Options**
+
+- `enabled`: `boolean`
+- `idle_timeout_minutes`: `integer` minutes a connected device may send nothing before it is disconnected; `0` turns the limit off
 
 ## Project Footprint Indicator
 

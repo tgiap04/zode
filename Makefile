@@ -86,17 +86,17 @@ help: ## Show this help
 	@grep -hE '^[a-z][a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## Compile the zode binary and the database drivers (PROFILE=dev, incremental)
+build: ## Compile the zode binary only, no drivers (PROFILE=dev, incremental) — see `drivers`
 	$(CARGO) build -p $(PACKAGE) --bin $(PACKAGE) --profile $(PROFILE)
-	@$(MAKE) drivers PROFILE=$(PROFILE)
 
-# The drivers are sidecar binaries outside `default-members`, so neither
-# `cargo build -p zode` nor `cargo run` produces them — a fresh checkout has
-# none, and zode looks for them beside its own executable. Without this every
-# connection failed with `command not found: zode-db-postgres`, repeated by the
-# reconnect loop, which reads as a broken database panel rather than as a
-# missing build step. `script/bundle-*` already build them; only the dev loop
-# did not.
+# Opt-in, never part of `build`: a driver beside the executable is used before
+# any downloaded one, so building them on every `build` left the download path
+# — and removing a downloaded driver — unreachable from a dev build. Without
+# them a dev build downloads the latest published driver set from ZODE_API_URL,
+# the same set a release build gets.
+#
+# Drivers built by an earlier run stay beside the binary and keep winning until
+# they are deleted, e.g. `rm target/debug/zode-db-*`.
 drivers: ## Compile the database driver sidecars beside the zode binary
 	$(CARGO) build --profile $(PROFILE) \
 		-p zode-db-sqlite -p zode-db-postgres -p zode-db-mysql -p zode-db-mongodb
@@ -118,8 +118,11 @@ run: ## Compile if needed, then launch
 # macOS reads the app icon from the bundle's Info.plist, so `build` and `dev`
 # can never show it -- they produce a bare executable and the Dock falls back to
 # its generic "exec" tile. Only a bundle has an icon at all.
+#
+# `-n`: the bundle never carries drivers, and building and packaging them as
+# release assets is the release job's work, not a local one.
 bundle: ## Build a macOS .app so the Dock icon exists, then open it
-	script/bundle-mac -d -o
+	script/bundle-mac -d -o -n
 
 lint: ## Run the project's clippy gate (never plain `cargo clippy`)
 	./script/clippy

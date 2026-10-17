@@ -9,6 +9,7 @@ use workspace::{
 };
 
 use crate::AgentView;
+use crate::agent_view::pane_state;
 
 /// Type tag for the notification id. Paired with the agent's binary name it gives
 /// one notification per agent, so asking for both in turn produces two toasts
@@ -94,84 +95,86 @@ pub(crate) fn render(
     let docs = missing.docs_url;
     let binary = missing.binary;
 
-    v_flex()
-        .size_full()
-        .items_center()
-        .justify_center()
-        .p_8()
-        .gap_3()
-        .child(Icon::new(IconName::Warning).color(Color::Warning))
-        .child(Headline::new(format!("{display_name} is not installed")).size(HeadlineSize::Small))
-        .child(
-            Label::new(format!(
-                "zode could not find `{binary}` in your shell environment."
-            ))
-            .color(Color::Muted),
-        )
-        .child(
-            h_flex()
-                .mt_2()
-                .max_w_full()
-                .px_3()
-                .py_2()
-                .gap_2()
-                .rounded_md()
-                .bg(colors.editor_subheader_background)
-                .border_1()
-                .border_color(colors.border)
-                .child(
-                    div().overflow_x_hidden().child(
-                        Label::new(install)
-                            .size(LabelSize::Small)
-                            .buffer_font(cx)
-                            .color(Color::Default),
-                    ),
-                )
-                .child(
-                    IconButton::new("copy-install-command", IconName::Copy)
-                        .icon_size(IconSize::Small)
-                        .tooltip(Tooltip::text("Copy"))
-                        .on_click(move |_, _window, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(install.to_string()));
-                        }),
+    pane_state(
+        Icon::new(IconName::Warning)
+            .size(IconSize::Medium)
+            .color(Color::Warning),
+        format!("{display_name} is not installed"),
+        Color::Default,
+    )
+    .child(
+        Label::new(format!(
+            "zode could not find `{binary}` in your shell environment."
+        ))
+        .color(Color::Muted),
+    )
+    .child(
+        h_flex()
+            .max_w_full()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .rounded_md()
+            .bg(colors.editor_subheader_background)
+            .border_1()
+            .border_color(colors.border)
+            .child(
+                div().overflow_x_hidden().child(
+                    Label::new(install)
+                        .size(LabelSize::Small)
+                        .buffer_font(cx)
+                        .color(Color::Default),
                 ),
-        )
-        .child(
-            h_flex()
-                .mt_1()
-                .gap_2()
-                .child(
-                    Button::new("install-now", "Install Now")
-                        .style(ButtonStyle::Filled)
-                        .tooltip(Tooltip::text(
-                            "Opens a terminal with the command typed, ready for you to run",
-                        ))
-                        .on_click({
-                            let view = view.downgrade();
-                            move |_, window, cx| {
-                                view.update(cx, |view, cx| {
-                                    view.open_install_terminal(install, window, cx)
-                                })
-                                .log_err();
-                            }
-                        }),
-                )
-                // The CLI can be installed while this screen is open, so there has
-                // to be a way back that is not "close the tab and click again".
-                .child(Button::new("check-again", "Check Again").on_click({
-                    let view = view.downgrade();
-                    move |_, window, cx| {
-                        view.update(cx, |view, cx| view.restart(window, cx))
+            )
+            .child(
+                IconButton::new("copy-install-command", IconName::Copy)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Copy"))
+                    .on_click(move |_, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(install.to_string()));
+                    }),
+            ),
+    )
+    .child(
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("install-now", "Install Now")
+                    .style(ButtonStyle::Filled)
+                    .tooltip(Tooltip::text(
+                        "Opens a terminal with the command typed, ready for you to run",
+                    ))
+                    .on_click({
+                        let view = view.downgrade();
+                        move |_, window, cx| {
+                            view.update(cx, |view, cx| {
+                                view.open_install_terminal(install, window, cx)
+                            })
                             .log_err();
-                    }
-                }))
-                .child(
-                    Button::new("install-docs", "Docs")
-                        .style(ButtonStyle::Subtle)
-                        .on_click(move |_, _window, cx| cx.open_url(docs)),
-                ),
-        )
-        .into_any_element()
+                        }
+                    }),
+            )
+            // The CLI can be installed while this screen is open, so there has
+            // to be a way back that is not "close the tab and click again".
+            .child(
+                Button::new("check-again", "Check Again")
+                    .style(ButtonStyle::Subtle)
+                    .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
+                    .on_click({
+                        let view = view.downgrade();
+                        move |_, window, cx| {
+                            view.update(cx, |view, cx| view.restart(window, cx))
+                                .log_err();
+                        }
+                    }),
+            )
+            .child(
+                Button::new("install-docs", "Docs")
+                    .style(ButtonStyle::Subtle)
+                    .on_click(move |_, _window, cx| cx.open_url(docs)),
+            ),
+    )
+    .into_any_element()
 }
 
 #[cfg(test)]

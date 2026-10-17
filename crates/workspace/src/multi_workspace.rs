@@ -25,6 +25,7 @@ use util::path_list::PathList;
 
 use crate::Toast;
 use crate::notifications::NotificationId;
+use crate::project_avatar::PROJECT_SQUARE_SIZE;
 
 const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
@@ -250,7 +251,7 @@ impl Render for DraggedProject {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         gpui::div()
-            .size(px(32.))
+            .size(PROJECT_SQUARE_SIZE)
             .rounded_md()
             .border_1()
             .border_color(colors.border_selected)
@@ -260,7 +261,7 @@ impl Render for DraggedProject {
                     self.colour,
                     self.logo.clone(),
                 )
-                .size(px(32.))
+                .size(PROJECT_SQUARE_SIZE)
                 .background(colors.element_background),
             )
     }

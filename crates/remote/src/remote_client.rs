@@ -6,6 +6,7 @@ use crate::{
     proxy::ProxyLaunchError,
     transport::{
         docker::{DockerConnectionOptions, DockerExecConnection},
+        relay::{RelayConnectionOptions, RelayRemoteConnection},
         ssh::SshRemoteConnection,
         wsl::{WslConnectionOptions, WslRemoteConnection},
     },
@@ -922,6 +923,11 @@ impl RemoteClient {
             .map_or(false, |connection| connection.has_wsl_interop())
     }
 
+    pub fn terminals_over_rpc(&self) -> bool {
+        self.remote_connection()
+            .is_some_and(|connection| connection.terminals_over_rpc())
+    }
+
     pub fn build_command(
         &self,
         program: Option<String>,
@@ -1119,6 +1125,22 @@ impl RemoteClient {
         (opts.into(), server_client, connect_guard)
     }
 
+    /// Makes the mock connection behind `opts` carry terminals over the
+    /// connection, as the relay does. Call before connecting.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn route_mock_terminals_over_rpc(
+        opts: &RemoteConnectionOptions,
+        client_cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::transport::mock::MockConnectionRegistry;
+        if let RemoteConnectionOptions::Mock(mock_opts) = opts {
+            client_cx.update(|cx| {
+                cx.default_global::<MockConnectionRegistry>()
+                    .route_terminals_over_rpc(mock_opts)
+            });
+        }
+    }
+
     /// Registers a new mock server for existing connection options.
     ///
     /// Use this to simulate reconnection: after forcing a disconnect, register
@@ -1245,6 +1267,11 @@ impl ConnectionPool {
                                 .await
                                 .map(|connection| Arc::new(connection) as Arc<dyn RemoteConnection>)
                         }
+                        RemoteConnectionOptions::Relay(opts) => {
+                            RelayRemoteConnection::new(opts, delegate, cx)
+                                .await
+                                .map(|connection| Arc::new(connection) as Arc<dyn RemoteConnection>)
+                        }
                         #[cfg(any(test, feature = "test-support"))]
                         RemoteConnectionOptions::Mock(opts) => match cx.update(|cx| {
                             cx.default_global::<crate::transport::mock::MockConnectionRegistry>()
@@ -1292,6 +1319,7 @@ pub enum RemoteConnectionOptions {
     Ssh(SshConnectionOptions),
     Wsl(WslConnectionOptions),
     Docker(DockerConnectionOptions),
+    Relay(RelayConnectionOptions),
     #[cfg(any(test, feature = "test-support"))]
     Mock(crate::transport::mock::MockConnectionOptions),
 }
@@ -1311,6 +1339,7 @@ impl RemoteConnectionOptions {
                     opts.name.clone()
                 }
             }
+            RemoteConnectionOptions::Relay(opts) => opts.host_name.clone(),
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(opts) => format!("mock-{}", opts.id),
         }
@@ -1412,6 +1441,14 @@ pub trait RemoteConnection: Send + Sync {
     fn shell(&self) -> String;
     fn default_system_shell(&self) -> String;
     fn has_wsl_interop(&self) -> bool;
+
+    /// Whether terminals on this connection are processes of the remote
+    /// server, driven with terminal messages, rather than a local command
+    /// that reaches the remote machine (as `ssh` does) and so can be built
+    /// with [`Self::build_command`].
+    fn terminals_over_rpc(&self) -> bool {
+        false
+    }
 
     #[cfg(any(test, feature = "test-support"))]
     fn simulate_disconnect(&self, _: &AsyncApp) {}

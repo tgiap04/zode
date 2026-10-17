@@ -10,6 +10,7 @@ use crate::install::store;
 use async_compression::futures::write::GzipEncoder;
 use futures::AsyncWriteExt as _;
 use sha2::{Digest as _, Sha256};
+use std::path::Path;
 
 /// A gzipped tar holding one executable named after `id`.
 ///
@@ -36,6 +37,18 @@ pub async fn driver_archive(id: &str) -> Vec<u8> {
     encoder.into_inner()
 }
 
+fn this_platform() -> &'static str {
+    current_target().expect("the test suite runs on a platform Zode publishes for")
+}
+
+/// What the release calls the archive: `zode-db-<id>-<target>.tar.gz`, the only
+/// shape the manifest is allowed to name. A name without the target would be
+/// refused, and would also never be what `script/package-database-drivers`
+/// produced.
+pub fn archive_asset_for(id: &str) -> String {
+    format!("zode-db-{id}-{}.tar.gz", this_platform())
+}
+
 /// A manifest naming that archive for this platform.
 ///
 /// `sha256` is taken rather than computed so a test can publish a checksum that
@@ -45,16 +58,30 @@ pub fn manifest_for(id: &str, archive: &[u8], sha256: String, version: &str) -> 
         version: version.to_string(),
         drivers: vec![DriverAsset {
             id: id.to_string(),
-            target: current_target()
-                .expect("the test suite runs on a platform Zode publishes for")
-                .to_string(),
-            asset: format!("zode-db-{id}.tar.gz"),
+            target: this_platform().to_string(),
+            asset: archive_asset_for(id),
             entry: store::executable_name(id),
             sha256,
             size: archive.len() as u64,
         }],
     })
     .expect("a manifest of owned strings always serialises")
+}
+
+/// Every entry under one driver's directory, sorted by name: versions, but also
+/// any staging or archive leftover an install left beside them. Empty when the
+/// driver has no directory at all.
+pub fn directory_entries(root: &Path, id: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join(id))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 pub fn sha256_of(bytes: &[u8]) -> String {

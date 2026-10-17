@@ -1,4 +1,4 @@
-//! The table of the fifteen items `initialize_workspace` puts on the status
+//! The table of the sixteen items `initialize_workspace` puts on the status
 //! bar, moved out of `zed.rs` so each one can carry a [`StatusBarItemSpec`]
 //! and be shown, hidden and rebuilt from settings instead of only ever being
 //! built once at startup.
@@ -31,15 +31,18 @@
 //!   over one indicator's handle -- a rebuilt indicator would otherwise leave
 //!   a captured handle pointing at a dropped entity.
 
+mod app_version_indicator;
+
 use activity_indicator::ActivityIndicator;
 use agent_usage::AgentUsageIndicator;
+use app_version_indicator::AppVersionIndicator;
 use diagnostics::items::DiagnosticIndicator;
 use editor::EditorSettings;
 use encoding_selector::ActiveBufferEncoding;
 use go_to_line::cursor_position::CursorPosition;
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use image_viewer::ImageInfo;
-use keep_awake::{KeepAwake, KeepDisplayAwakeSetting};
+use keep_awake::{KeepAwake, KeepDisplayAwakeAlwaysSetting, KeepDisplayAwakeSetting};
 use language_selector::ActiveBufferLanguage;
 use language_tools::lsp_button::{self, LspButton};
 use line_ending_selector::LineEndingIndicator;
@@ -155,8 +158,20 @@ const KEEP_AWAKE: ItemDescriptor = ItemDescriptor {
     id: "keep_awake",
     label: "Keep Display Awake",
     side: StatusBarSide::Left,
-    is_shown: |cx| KeepDisplayAwakeSetting::get_global(cx).0,
-    set_shown: |content, on| content.keep_display_awake = Some(on),
+    // Shown while either switch is on, and hiding it turns both off: an icon
+    // hidden over a display still being held is the one state nobody can see or
+    // undo from the bar.
+    is_shown: |cx| {
+        KeepDisplayAwakeSetting::get_global(cx).0 || KeepDisplayAwakeAlwaysSetting::get_global(cx).0
+    },
+    set_shown: |content, on| {
+        content.keep_display_awake = Some(on);
+        // Only written when it is on, so hiding the row does not add a key the
+        // user never set to their settings file.
+        if !on && content.keep_display_awake_always == Some(true) {
+            content.keep_display_awake_always = Some(false);
+        }
+    },
 };
 
 const PROJECT_FOOTPRINT: ItemDescriptor = ItemDescriptor {
@@ -261,14 +276,27 @@ const IMAGE_INFO: ItemDescriptor = ItemDescriptor {
     },
 };
 
-/// The fifteen, in the order they render. `keep_awake` is included even
+const APP_VERSION: ItemDescriptor = ItemDescriptor {
+    id: "app_version",
+    label: "App Version",
+    side: StatusBarSide::Right,
+    is_shown: |cx| StatusBarSettings::get_global(cx).app_version_button,
+    set_shown: |content, on| {
+        content
+            .status_bar
+            .get_or_insert_default()
+            .app_version_button = Some(on)
+    },
+};
+
+/// The sixteen, in the order `register` adds them. `keep_awake` is included even
 /// though `register` may skip adding it to a real bar -- the descriptor
 /// itself is platform-independent, only its registration is not.
 ///
 /// Test-only: `register` builds each `StatusBarItemSpec` from its own named
 /// descriptor above, so nothing outside `#[cfg(test)]` needs this list.
 #[cfg(test)]
-const ALL_DESCRIPTORS: [ItemDescriptor; 15] = [
+const ALL_DESCRIPTORS: [ItemDescriptor; 16] = [
     SEARCH_BUTTON,
     LSP_BUTTON,
     DIAGNOSTIC_SUMMARY,
@@ -276,6 +304,7 @@ const ALL_DESCRIPTORS: [ItemDescriptor; 15] = [
     ACTIVITY_INDICATOR,
     AGENT_USAGE,
     KEEP_AWAKE,
+    APP_VERSION,
     PROJECT_FOOTPRINT,
     ACTIVE_BUFFER_ENCODING,
     ACTIVE_BUFFER_LANGUAGE,
@@ -351,6 +380,7 @@ pub(crate) fn register(
     let vim_mode_indicator = cx.new(|cx| ModeIndicator::new(window, cx));
     let cursor_position = cx.new(|_| CursorPosition::new(workspace));
     let image_info = cx.new(|_| ImageInfo::new(workspace));
+    let app_version = cx.new(|cx| AppVersionIndicator::new(cx));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
         let rank = status_bar.add_left_item(search_button, window, cx);
@@ -475,10 +505,23 @@ pub(crate) fn register(
             ));
         }
 
-        // Leftmost of the right-hand group: a running total the eye can rest
-        // on, kept clear of the buffer-specific controls that follow and out
-        // of the left group, which grows and shifts as activity indicators
-        // come and go.
+        // Right items render in reverse of the order they are added, so the
+        // first added sits furthest right. The version goes first: a fact about
+        // the editor rather than any buffer. Only the dock buttons, and the
+        // remote-control indicator while remote control is on, are added
+        // earlier and so sit to its right.
+        let rank = status_bar.add_right_item(app_version, window, cx);
+        status_bar.register_toggleable_item(APP_VERSION.spec(
+            rank,
+            Box::new(|status_bar, rank, window, cx| {
+                let item = cx.new(|cx| AppVersionIndicator::new(cx));
+                status_bar.insert_item_at_rank(StatusBarSide::Right, rank, item, window, cx);
+            }),
+        ));
+
+        // Next to it, the footprint: a running total the eye can rest on, kept
+        // clear of the buffer-specific controls added after it and out of the
+        // left group, which grows and shifts as activity indicators come and go.
         let rank = status_bar.add_right_item(project_footprint, window, cx);
         status_bar.register_toggleable_item(PROJECT_FOOTPRINT.spec(
             rank,
@@ -698,6 +741,7 @@ mod tests {
             ProjectSettings::register(cx);
             StatusBarSettings::register(cx);
             KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
             ProjectFootprintSetting::register(cx);
 
             for item in ALL_DESCRIPTORS {
@@ -720,6 +764,37 @@ mod tests {
         });
     }
 
+    /// The keep-awake row reads two switches, and the round trip above only
+    /// ever moves one of them. With only the always-on switch on, the row must
+    /// show, and hiding it must turn that switch off -- otherwise "hide" would
+    /// leave the row and the hold exactly where they were.
+    #[gpui::test]
+    fn hiding_keep_awake_turns_off_the_always_on_switch_too(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
+
+            cx.update_global::<SettingsStore, ()>(|store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.keep_display_awake = Some(false);
+                    content.keep_display_awake_always = Some(true);
+                });
+            });
+            assert!(
+                (KEEP_AWAKE.is_shown)(cx),
+                "the icon has to show while the always-on switch holds"
+            );
+
+            cx.update_global::<SettingsStore, ()>(|store, cx| {
+                store.update_user_settings(cx, |content| (KEEP_AWAKE.set_shown)(content, false));
+            });
+            assert!(!(KEEP_AWAKE.is_shown)(cx));
+            assert!(!KeepDisplayAwakeAlwaysSetting::get_global(cx).0);
+        });
+    }
+
     #[gpui::test]
     fn is_shown_matches_todays_defaults(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -729,11 +804,12 @@ mod tests {
             ProjectSettings::register(cx);
             StatusBarSettings::register(cx);
             KeepDisplayAwakeSetting::register(cx);
+            KeepDisplayAwakeAlwaysSetting::register(cx);
             ProjectFootprintSetting::register(cx);
 
             for item in ALL_DESCRIPTORS {
                 // `active_file_name` and `line_ending_indicator` default to
-                // `false` in `default.json` today; asserting all fifteen
+                // `false` in `default.json` today; asserting all sixteen
                 // `true` would be wrong and would have shipped broken.
                 let expected = !matches!(item.id, "active_file_name" | "line_ending_indicator");
                 assert_eq!(

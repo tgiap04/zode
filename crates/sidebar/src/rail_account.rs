@@ -1,6 +1,8 @@
 use crate::Sidebar;
-use crate::rail::RAIL_ICON_SIZE;
+use crate::rail::rail_button;
 use gpui::{AnyElement, Context};
+use release_channel::AppVersion;
+use remote_control::RemoteControlSettings;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use zode_account::{Account, AccountStatus};
 
@@ -24,8 +26,7 @@ impl Sidebar {
             AccountStatus::SignedOut | AccountStatus::WaitingForApproval { .. } => {
                 let waiting = matches!(status, AccountStatus::WaitingForApproval { .. });
 
-                IconButton::new("project-rail-account", IconName::Person)
-                    .icon_size(RAIL_ICON_SIZE)
+                rail_button("project-rail-account", IconName::Person)
                     .toggle_state(waiting)
                     .tooltip(move |_window, cx| {
                         Tooltip::with_meta(
@@ -56,8 +57,7 @@ impl Sidebar {
                 // the menu, which is where someone looks for it anyway.
                 PopoverMenu::new("project-rail-account-menu")
                     .trigger(
-                        IconButton::new("project-rail-account", IconName::Person)
-                            .icon_size(RAIL_ICON_SIZE)
+                        rail_button("project-rail-account", IconName::Person)
                             .icon_color(if offline {
                                 Color::Muted
                             } else {
@@ -66,7 +66,8 @@ impl Sidebar {
                             .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx)),
                     )
                     .menu(move |window, cx| {
-                        Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                        Some(ContextMenu::build(window, cx, move |menu, _window, cx| {
+                            let remote_control_on = RemoteControlSettings::is_enabled(cx);
                             menu.action(
                                 "Sync Settings\u{2026}",
                                 Box::new(zed_actions::account::SyncSettings),
@@ -89,12 +90,42 @@ impl Sidebar {
                                 Box::new(zed_actions::env_sync::OpenEnvVault),
                             )
                             .separator()
+                            .toggleable_entry(
+                                "Remote Control",
+                                remote_control_on,
+                                IconPosition::End,
+                                None,
+                                move |window, cx| {
+                                    if remote_control_on {
+                                        window
+                                            .dispatch_action(Box::new(remote_control::Disable), cx)
+                                    } else {
+                                        window.dispatch_action(Box::new(remote_control::Enable), cx)
+                                    }
+                                },
+                            )
+                            .when(remote_control_on, |menu| {
+                                menu.action(
+                                    "Manage Trusted Devices\u{2026}",
+                                    Box::new(remote_control::ManageDevices),
+                                )
+                            })
+                            .action(
+                                "Open a Zode on Your Account\u{2026}",
+                                Box::new(zed_actions::OpenZodeOnAccount),
+                            )
+                            .separator()
                             .action(
                                 "Account on the Web",
                                 Box::new(zed_actions::account::OpenAccountOnWeb),
                             )
                             .separator()
                             .action("Sign Out", Box::new(zed_actions::account::SignOut))
+                            .separator()
+                            .action(
+                                format!("About Zode (v{})", AppVersion::display(cx)),
+                                Box::new(zed_actions::About),
+                            )
                         }))
                     })
                     .into_any_element()

@@ -6,7 +6,7 @@ use agent_sessions::{AgentKind, SessionSummary};
 use collections::HashSet;
 use gpui::{Context, Window};
 use std::path::{Path, PathBuf};
-use ui::{Divider, DividerColor, ScrollAxes, Scrollbars, Tooltip, WithScrollbar as _, prelude::*};
+use ui::{ScrollAxes, Scrollbars, Tab, Tooltip, WithScrollbar as _, prelude::*};
 
 /// One line of the list. Three levels, outermost first.
 #[derive(Clone, Debug, PartialEq)]
@@ -190,7 +190,6 @@ impl Render for AgentHistoryPanel {
             .size_full()
             .bg(background)
             .child(self.render_search(has_project_sessions, cx))
-            .child(Divider::horizontal().color(DividerColor::Border))
             .child(if rows.is_empty() {
                 self.render_empty(&roots, &query, cx).into_any_element()
             } else {
@@ -224,49 +223,53 @@ impl AgentHistoryPanel {
         h_flex()
             .flex_none()
             .w_full()
+            .h(Tab::container_height(cx))
             .px_2()
-            .py_1p5()
-            .gap_1p5()
+            .gap_1()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.panel_background)
             .child(
                 Icon::new(IconName::MagnifyingGlass)
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
             .child(div().flex_1().child(self.filter_editor.clone()))
-            .children(self.loading.then(|| {
-                Label::new("Reading…")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
-            }))
-            .children((!self.loading).then(|| {
-                IconButton::new("agent-history-refresh", IconName::ArrowCircle)
-                    .icon_size(IconSize::Small)
-                    .tooltip(|_window, cx| Tooltip::simple("Refresh", cx))
-                    .on_click(cx.listener(|this, _, _window, cx| this.refresh(cx)))
-            }))
             .child(
-                // Wrapped because `IconButton` carries no `debug_selector` of
-                // its own, and a control that deletes everything should be
-                // reachable from a test.
-                div()
-                    .debug_selector(|| "agent-history-delete-all".into())
+                h_flex()
+                    .gap_0p5()
                     .child(
-                        IconButton::new("agent-history-delete-all", IconName::Trash)
+                        IconButton::new("agent-history-refresh", IconName::RotateCw)
                             .icon_size(IconSize::Small)
-                            // Disabled rather than hidden: a control that
-                            // vanishes sends people hunting for a feature they
-                            // used yesterday.
-                            .disabled(self.loading || self.deleting || !has_project_sessions)
-                            .loading(self.deleting)
-                            .tooltip(|_window, cx| {
-                                Tooltip::simple("Delete all sessions for this project", cx)
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.delete_all(window, cx)),
+                            .loading(self.loading)
+                            .tooltip(|_window, cx| Tooltip::simple("Refresh", cx))
+                            .on_click(cx.listener(|this, _, _window, cx| this.refresh(cx))),
+                    )
+                    .child(
+                        // Wrapped because `IconButton` carries no
+                        // `debug_selector` of its own, and a control that
+                        // deletes everything should be reachable from a test.
+                        div()
+                            .debug_selector(|| "agent-history-delete-all".into())
+                            .child(
+                                IconButton::new("agent-history-delete-all", IconName::Trash)
+                                    .icon_size(IconSize::Small)
+                                    // Disabled rather than hidden: a control
+                                    // that vanishes sends people hunting for a
+                                    // feature they used yesterday.
+                                    .disabled(
+                                        self.loading || self.deleting || !has_project_sessions,
+                                    )
+                                    .loading(self.deleting)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::simple("Delete all sessions for this project", cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.delete_all(window, cx)
+                                    })),
                             ),
                     ),
             )
-            .bg(colors.panel_background)
     }
 
     fn render_empty(
@@ -291,7 +294,8 @@ impl AgentHistoryPanel {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_2()
+            .p_4()
+            .gap_1()
             .child(
                 Icon::new(IconName::Astroid)
                     .size(IconSize::XLarge)

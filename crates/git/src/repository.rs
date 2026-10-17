@@ -975,6 +975,14 @@ pub trait GitRepository: Send + Sync {
     /// Run git diff
     fn diff(&self, diff: DiffType) -> BoxFuture<'_, Result<String>>;
 
+    /// The working tree against `HEAD`, staged changes included, limited to a
+    /// folder and to the paths the request keeps, and never more than the
+    /// request's byte limit. `None` when there is no commit yet.
+    fn diff_head_to_worktree_scoped(
+        &self,
+        request: crate::bounded_diff::ScopedDiff,
+    ) -> BoxFuture<'_, Result<Option<crate::bounded_diff::BoundedDiff>>>;
+
     fn diff_stat(
         &self,
         path_prefixes: &[RepoPath],
@@ -2253,6 +2261,18 @@ impl GitRepository for RealGitRepository {
                     String::from_utf8_lossy(&output.stderr)
                 );
                 Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            })
+            .boxed()
+    }
+
+    fn diff_head_to_worktree_scoped(
+        &self,
+        request: crate::bounded_diff::ScopedDiff,
+    ) -> BoxFuture<'_, Result<Option<crate::bounded_diff::BoundedDiff>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                crate::bounded_diff::diff_head_to_worktree(&git_binary?, request).await
             })
             .boxed()
     }

@@ -1,5 +1,5 @@
-use gpui::{AnyElement, FontWeight, IntoElement, Render, Window, list};
-use ui::{Tooltip, prelude::*};
+use gpui::{AnyElement, IntoElement, Render, Window, list};
+use ui::{Tab, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
 
@@ -78,9 +78,10 @@ impl BranchPanel {
         let reloading = self.reloading;
 
         h_flex()
+            .debug_selector(|| "worktrees-header".into())
             .w_full()
             .flex_none()
-            .h(px(34.))
+            .h(Tab::container_height(cx))
             .px_2()
             .justify_between()
             .border_b_1()
@@ -88,12 +89,11 @@ impl BranchPanel {
             .child(
                 Label::new("Worktrees")
                     .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .weight(FontWeight::SEMIBOLD),
+                    .color(Color::Muted),
             )
             .children(repo_id.map(|id| {
                 h_flex()
-                    .gap_1()
+                    .gap_0p5()
                     .child(
                         IconButton::new("reload-worktrees", IconName::RotateCw)
                             .icon_size(IconSize::Small)
@@ -130,12 +130,16 @@ impl BranchPanel {
     /// broken" -- a blank panel says neither.
     fn render_empty(&self, _cx: &Context<Self>) -> AnyElement {
         v_flex()
+            .debug_selector(|| "worktrees-empty".into())
             .size_full()
-            .p_3()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .gap_1()
             .child(
-                Label::new("No git repository in this project")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
+                div()
+                    .debug_selector(|| "worktrees-empty-message".into())
+                    .child(Label::new("No git repository in this project").color(Color::Muted)),
             )
             .into_any_element()
     }

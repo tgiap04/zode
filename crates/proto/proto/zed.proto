@@ -14,6 +14,7 @@ import "image.proto";
 import "lsp.proto";
 import "notification.proto";
 import "task.proto";
+import "terminal.proto";
 import "toolchain.proto";
 import "worktree.proto";
 
@@ -484,7 +485,14 @@ message Envelope {
     GitRestoreArchiveCheckpoint git_restore_archive_checkpoint = 446;
     GitGetTags git_get_tags = 447;
     GitTagsResponse git_tags_response = 448;
-    GitCheckoutTag git_checkout_tag = 449; // current max
+    GitCheckoutTag git_checkout_tag = 449;
+
+    CreateTerminal create_terminal = 450;
+    TerminalOutput terminal_output = 451;
+    TerminalInput terminal_input = 452;
+    ResizeTerminal resize_terminal = 453;
+    TerminalExited terminal_exited = 454;
+    CloseTerminal close_terminal = 455; // current max
   }
 
   reserved 87 to 88;

@@ -16,25 +16,61 @@ This is on by default:
 }
 ```
 
-## The two triggers
+## The triggers
 
-- **The agent stops answering.** An agent tab has an "is producing a
-  response" edge, and once that edge goes from true to false and stays false
-  for `quiet_period_ms`, a notification fires.
-- **The agent's CLI process exits.** Independent of the first trigger --
-  covers an agent that crashes, is killed, or ends its session outright.
+- **The agent finishes answering.** How this is detected depends on the tab;
+  see below.
+- **The agent is waiting for your approval.** Only for a Claude tab whose
+  session Zode is tracking -- see below.
+- **The agent's CLI process exits.** Independent of the others -- covers an
+  agent that crashes, is killed, or ends its session outright.
 
-Either one can fire on its own; neither depends on the other.
+Each can fire on its own; none depends on another.
 
-## The quiet period, and why notifications can fire early
+## Claude tabs: read from the transcript
+
+For a Claude tab whose session Zode is tracking, "finished answering" comes
+from Claude's own transcript, which records when a turn ends. Zode waits three
+seconds after that line before notifying, so a turn that immediately starts
+again does not notify. A turn you interrupted does not notify at all.
+
+A turn that ended while background agents it started are still pending is held
+back. When their results start a follow-up turn, that turn notifies when it
+ends. If nothing follows, Zode notifies late instead: after about ten minutes
+with no subagent activity, or after about thirty minutes if it cannot see the
+subagents at all.
+
+`quiet_period_ms` does not apply here, and long tool calls or model waits do
+not cause early notifications. The one exception is a Stop hook that runs for
+more than about eight seconds on a Claude version that never writes a
+turn-duration line: Zode may announce the turn before the hook finishes.
+
+If the transcript never appears, there is no "finished answering"
+notification for that tab, but the "session ended" one still fires.
+
+### Waiting for your approval
+
+When Claude's permission dialog is on screen and the terminal has been quiet
+for a few seconds, Zode posts a separate "Waiting for your approval"
+notification. Zode recognises the dialog by reading the terminal, so this can
+fail: a dialog it does not recognise only loses that one notification. Nothing
+else is affected. The notification is not withdrawn when you answer the
+dialog.
+
+## Every other agent: the quiet period
+
+Any other agent, and a Claude tab without a tracked session, uses the
+heuristic described here. An agent tab has an "is producing a response" edge,
+and once that edge goes from true to false and stays false for
+`quiet_period_ms`, a notification fires.
 
 `quiet_period_ms` (default `12000`, floored at `2000`) exists because there is
-no better signal available. These agents run as CLIs inside a pty, not as
-something Zode speaks a structured protocol to -- there is no protocol-level
-"reply finished" event to read. Whether an agent is "still answering" is
-inferred from how often its terminal is being written to, and that same
-signal goes quiet during a long tool call or while the agent is waiting on a
-model response, not only when it is actually done.
+no better signal available for these. These agents run as CLIs inside a pty,
+not as something Zode speaks a structured protocol to -- there is no
+protocol-level "reply finished" event to read. Whether an agent is "still
+answering" is inferred from how often its terminal is being written to, and
+that same signal goes quiet during a long tool call or while the agent is
+waiting on a model response, not only when it is actually done.
 
 **This means a notification can and will fire while the agent is still
 working**, whenever it pauses longer than the configured quiet period -- a

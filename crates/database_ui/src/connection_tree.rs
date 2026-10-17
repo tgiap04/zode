@@ -1,7 +1,11 @@
 use crate::database_panel::{DatabasePanel, NodeState};
 use database::protocol::TableKind;
-use gpui::{Context, Window};
-use ui::{Tooltip, prelude::*};
+use gpui::{ClickEvent, Context, Div, MouseButton, MouseDownEvent, Stateful, Window};
+use ui::{CommonAnimationExt as _, ListItem, ListItemSpacing, Tooltip, prelude::*};
+
+/// One step per level, the same for every row: a connection, a schema and a
+/// table line up with each other only if they agree on it.
+pub(crate) const INDENT_STEP: Pixels = px(16.);
 
 /// One line of the tree, already flattened.
 ///
@@ -119,6 +123,7 @@ impl DatabasePanel {
 
     pub(crate) fn render_row(
         &self,
+        position: usize,
         row: &Row,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -138,16 +143,10 @@ impl DatabasePanel {
                 open,
             } => {
                 let (index, schema, name) = (*index, schema.clone(), name.clone());
-                indented(*depth)
-                    .id(gpui::ElementId::Name(
-                        format!("db-table-{index}-{schema}-{name}").into(),
-                    ))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(cx.theme().colors().element_hover))
-                    .when(*open, |element| {
-                        element.bg(cx.theme().colors().element_selected)
-                    })
-                    .child(
+                let id = gpui::ElementId::Name(format!("db-table-{index}-{schema}-{name}").into());
+                let item = tree_row(id.clone(), *depth)
+                    .toggle_state(*open)
+                    .start_slot(
                         Icon::new(match kind {
                             TableKind::Table => IconName::Table,
                             TableKind::View | TableKind::MaterializedView => IconName::Eye,
@@ -155,7 +154,8 @@ impl DatabasePanel {
                         .size(IconSize::Small)
                         .color(Color::Muted),
                     )
-                    .child(Label::new(name.clone()).size(LabelSize::Small))
+                    .child(row_content().child(Label::new(name.clone()).truncate()));
+                clickable(id, item)
                     // Both at once: clicking a table means "show me this
                     // table", and that is its shape *and* its rows. Splitting
                     // them across two gestures would make the common one two
@@ -172,44 +172,55 @@ impl DatabasePanel {
                 primary_key,
                 nullable,
                 depth,
-            } => indented(*depth)
+            } => tree_row(("database-column", position), *depth)
+                .selectable(false)
                 .child(
-                    Icon::new(if *primary_key {
-                        IconName::Hash
-                    } else {
-                        IconName::Dash
-                    })
-                    .size(IconSize::XSmall)
-                    .color(if *primary_key {
-                        Color::Accent
-                    } else {
-                        Color::Muted
-                    }),
+                    row_content()
+                        .child(Label::new(name.clone()).truncate())
+                        // The primary key is what tells you this is the table you
+                        // meant.
+                        .when(*primary_key, |content| {
+                            content.child(
+                                Icon::new(IconName::Hash)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Accent),
+                            )
+                        })
+                        .child(
+                            Label::new(type_name.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        // Only nullability is marked, and only when it holds: marking
+                        // both would put a badge on every row and say nothing.
+                        .when(*nullable, |content| {
+                            content.child(
+                                Label::new("null")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        }),
                 )
-                .child(Label::new(name.clone()).size(LabelSize::Small))
-                .child(
-                    Label::new(type_name.clone())
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-                // Only nullability is marked, and only when it holds: marking
-                // both would put a badge on every row and say nothing.
-                .when(*nullable, |element| {
-                    element.child(
-                        Label::new("null")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                })
                 .into_any_element(),
-            Row::Note { text, depth } => indented(*depth)
+            Row::Note { text, depth } => tree_row(("database-note", position), *depth)
+                .selectable(false)
                 .child(
-                    Label::new(text.clone())
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
+                    row_content().child(
+                        Label::new(text.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
                 )
                 .into_any_element(),
         }
+    }
+
+    /// What a click anywhere on a connection does, and what its arrow does.
+    fn choose_connection(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_connection(index, window, cx);
+        // Queries go where you last clicked, so the scratch buffer and
+        // the grid follow the tree rather than needing their own picker.
+        self.set_active(index, window, cx);
     }
 
     fn render_connection(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -217,103 +228,114 @@ impl DatabasePanel {
             return div().into_any_element();
         };
 
-        let (icon, colour, tooltip) = match &node.state {
-            NodeState::Idle => (IconName::Database, Color::Muted, None),
-            NodeState::Connecting => (IconName::ArrowCircle, Color::Muted, None),
+        let glyph = |icon: IconName, colour: Color| {
+            Icon::new(icon)
+                .size(IconSize::Small)
+                .color(colour)
+                .into_any_element()
+        };
+        let (leading, tooltip) = match &node.state {
+            NodeState::Idle => (glyph(IconName::Database, Color::Muted), None),
+            // Keyed by the row: the list recycles them, and an animation keyed
+            // by position in the code would restart whenever one scrolls away.
+            NodeState::Connecting => (
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::Small)
+                    .color(Color::Muted)
+                    .with_keyed_rotate_animation(("database-connecting", index), 2)
+                    .into_any_element(),
+                None,
+            ),
             // Names the driver that actually answered, which is the only place
             // anyone can check that `postgres` in settings reached a PostgreSQL
             // driver rather than whatever else claimed the id.
             NodeState::Connected(session) => (
-                IconName::Database,
-                Color::Success,
+                glyph(IconName::Database, Color::Success),
                 Some(SharedString::from(format!(
                     "{} · {}",
                     session.driver_name, node.config.url
                 ))),
             ),
-            NodeState::Failed(error) => (IconName::Warning, Color::Error, Some(error.clone())),
+            NodeState::Failed(error) => {
+                (glyph(IconName::Warning, Color::Error), Some(error.clone()))
+            }
         };
         let expanded = node.expanded && matches!(node.state, NodeState::Connected(_));
+        let connecting = matches!(node.state, NodeState::Connecting);
+        let connected = matches!(node.state, NodeState::Connected(_));
         let name = node.config.name.clone();
         let pinned = self.is_pinned(&name);
 
-        indented(0)
-            .id(("database-connection", index))
-            .cursor_pointer()
-            .hover(|style| style.bg(cx.theme().colors().element_hover))
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
+        // One button, two jobs, and never both at once: what a connection
+        // needs is either to be closed or to be opened again, and the row
+        // already says which of those it is.
+        //
+        // Nothing while connecting -- a stop button that cannot stop
+        // anything would be the third thing this row does not need.
+        let power = (!connecting).then(|| {
+            IconButton::new(
+                ("database-connection-power", index),
+                if connected {
+                    IconName::Power
                 } else {
-                    IconName::ChevronRight
-                })
-                .size(IconSize::XSmall)
-                .color(Color::Muted),
+                    IconName::RotateCw
+                },
             )
-            .child(Icon::new(icon).size(IconSize::Small).color(colour))
-            .child(Label::new(node.config.name.clone()).size(LabelSize::Small))
-            .when_some(tooltip, |element, error: SharedString| {
-                // The driver's own words, in full. "Could not connect" is worth
-                // nothing next to "password authentication failed for user".
-                element.tooltip(move |_window, cx| Tooltip::simple(error.clone(), cx))
-            })
-            // One button, two jobs, and never both at once: what a connection
-            // needs is either to be closed or to be opened again, and the row
-            // already says which of those it is.
-            //
-            // Nothing while connecting -- a stop button that cannot stop
-            // anything would be the third thing this row does not need.
-            .when(!matches!(node.state, NodeState::Connecting), |element| {
-                let connected = matches!(node.state, NodeState::Connected(_));
-                element.child(
-                    IconButton::new(
-                        ("database-connection-power", index),
-                        if connected {
-                            IconName::Power
-                        } else {
-                            IconName::RotateCw
-                        },
-                    )
-                    .icon_size(IconSize::XSmall)
-                    .tooltip(move |_window, cx| {
-                        Tooltip::simple(
-                            if connected {
-                                "Disconnect, stopping the driver"
-                            } else {
-                                "Connect again"
-                            },
-                            cx,
-                        )
-                    })
-                    .on_click(cx.listener(move |this, _event, window, cx| {
-                        if connected {
-                            this.disconnect(index, cx);
-                        } else {
-                            this.reconnect(index, window, cx);
-                        }
-                    })),
-                )
-            })
-            // A pinned connection is marked rather than reordered: a tree that
-            // rearranges itself on a right-click loses the place you were in.
-            .when(pinned, |element| {
-                element.child(
-                    Icon::new(IconName::Pin)
-                        .size(IconSize::XSmall)
-                        .color(Color::Accent),
+            .icon_size(IconSize::Small)
+            .tooltip(move |_window, cx| {
+                Tooltip::simple(
+                    if connected {
+                        "Disconnect, stopping the driver"
+                    } else {
+                        "Connect again"
+                    },
+                    cx,
                 )
             })
             .on_click(cx.listener(move |this, _event, window, cx| {
-                this.toggle_connection(index, window, cx);
-                // Queries go where you last clicked, so the scratch buffer and
-                // the grid follow the tree rather than needing their own picker.
-                this.set_active(index, window, cx);
+                if connected {
+                    this.disconnect(index, cx);
+                } else {
+                    this.reconnect(index, window, cx);
+                }
+            }))
+        });
+
+        let item = tree_row(("database-connection-item", index), 0)
+            .toggle(expanded)
+            .on_toggle(cx.listener(move |this, _event: &ClickEvent, window, cx| {
+                this.choose_connection(index, window, cx);
+            }))
+            .start_slot(leading)
+            .child(
+                row_content()
+                    .child(Label::new(name).truncate())
+                    // A pinned connection is marked rather than reordered: a tree that
+                    // rearranges itself on a right-click loses the place you were in.
+                    .when(pinned, |content| {
+                        content.child(
+                            Icon::new(IconName::Pin)
+                                .size(IconSize::XSmall)
+                                .color(Color::Accent),
+                        )
+                    }),
+            )
+            .end_slot::<IconButton>(power);
+
+        clickable(("database-connection", index), item)
+            // The driver's own words, in full. "Could not connect" is worth
+            // nothing next to "password authentication failed for user".
+            .when_some(tooltip, |element, text: SharedString| {
+                element.tooltip(move |_window, cx| Tooltip::simple(text.clone(), cx))
+            })
+            .on_click(cx.listener(move |this, _event, window, cx| {
+                this.choose_connection(index, window, cx);
             }))
             // `on_mouse_down(Right, ..)` rather than `on_right_click`, which
             // only exists on the button components, not on a plain element.
             .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.deploy_connection_menu(index, event.position, window, cx);
                 }),
             )
@@ -333,21 +355,16 @@ impl DatabasePanel {
         else {
             return div().into_any_element();
         };
+        let key = index * 1024 + schema_index;
 
-        indented(1)
-            .id(("database-schema", index * 1024 + schema_index))
-            .cursor_pointer()
-            .hover(|style| style.bg(cx.theme().colors().element_hover))
-            .child(
-                Icon::new(if schema.expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(IconSize::XSmall)
-                .color(Color::Muted),
-            )
-            .child(Label::new(schema.schema.name.clone()).size(LabelSize::Small))
+        let item = tree_row(("database-schema-item", key), 1)
+            .toggle(schema.expanded)
+            .on_toggle(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                this.toggle_schema(index, schema_index, cx);
+            }))
+            .child(row_content().child(Label::new(schema.schema.name.clone()).truncate()));
+
+        clickable(("database-schema", key), item)
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.toggle_schema(index, schema_index, cx);
             }))
@@ -355,14 +372,31 @@ impl DatabasePanel {
     }
 }
 
-/// One tree line at `depth`. Padding rather than a spacer child, so a row with
-/// no icon still lines up with one that has.
-fn indented(depth: usize) -> Div {
-    h_flex()
-        .w_full()
-        .flex_none()
-        .gap_1()
-        .px_2()
-        .py_0p5()
-        .pl(px(8.0 + depth as f32 * 14.0))
+/// One tree line at `depth`.
+///
+/// One level deeper than the depth says: the arrow hangs in the gutter to the
+/// left of a row, so the shallowest rows need a gutter of their own, and rows
+/// with no arrow still line up with the ones that have one.
+fn tree_row(id: impl Into<ElementId>, depth: usize) -> ListItem {
+    ListItem::new(id)
+        .spacing(ListItemSpacing::Dense)
+        .indent_step_size(INDENT_STEP)
+        .indent_level(depth + 1)
+        .always_show_disclosure_icon(true)
+}
+
+/// What a row says, as tall as a button.
+///
+/// `uniform_list` measures the first row and gives every row that height, so a
+/// row that carries a button and one that carries none have to agree on one.
+fn row_content() -> Div {
+    h_flex().h(ButtonSize::Default.rems()).min_w_0().gap_1()
+}
+
+/// The click target for a line that does something.
+///
+/// `ListItem` indents with a margin on the part that takes the click, so its
+/// own handler leaves the indent dead while the hover highlight spans it.
+fn clickable(id: impl Into<ElementId>, item: ListItem) -> Stateful<Div> {
+    div().id(id).w_full().cursor_pointer().child(item)
 }

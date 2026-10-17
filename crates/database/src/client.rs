@@ -172,13 +172,19 @@ impl DriverClient {
     /// Refused outright on a mismatch rather than worked around: a driver
     /// speaking a different shape will fail later anyway, and it will fail
     /// somewhere far less obvious than here.
+    ///
+    /// The message says what to do about it because a downloaded driver is kept
+    /// across app updates, so this is where a protocol bump shows up for
+    /// someone whose driver predates it.
     pub async fn initialize(&self) -> Result<InitializeResult> {
         let result = self
             .request::<crate::protocol::Initialize>(crate::protocol::NoParams {})
             .await?;
         anyhow::ensure!(
             version_is_compatible(PROTOCOL_VERSION, result.protocol_version),
-            "driver `{}` speaks database protocol version {}, but this build of Zode speaks {}",
+            "driver `{}` speaks database protocol version {}, but this build of Zode speaks {}. \
+             If Zode downloaded this driver, remove it in the connection dialog and download it \
+             again; if that does not help, update Zode.",
             result.driver_name,
             result.protocol_version,
             PROTOCOL_VERSION,

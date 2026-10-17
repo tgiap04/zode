@@ -5,13 +5,16 @@ use ui::{PopoverMenu, Tooltip, prelude::*};
 
 impl Sidebar {
     pub(crate) fn render_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        h_flex()
             .flex_1()
-            .child(self.filter_editor.clone())
+            .min_w_0()
+            .gap_0p5()
+            .child(div().flex_1().min_w_0().child(self.filter_editor.clone()))
             .when(self.has_filter_query(cx), |this| {
                 this.child(
                     IconButton::new("clear-filter", IconName::Close)
                         .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text("Clear Search"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.reset_filter_editor_text(window, cx);
                         })),
@@ -52,10 +55,12 @@ impl Sidebar {
 
     pub(crate) fn render_empty_state(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
+            .debug_selector(|| "project-list-empty".into())
             .size_full()
             .items_center()
             .justify_center()
-            .gap_2()
+            .p_4()
+            .gap_1()
             .child(
                 Icon::new(IconName::FileTree)
                     .size(IconSize::XLarge)
@@ -66,9 +71,12 @@ impl Sidebar {
 
     pub(crate) fn render_no_results(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
+            .debug_selector(|| "project-list-empty".into())
             .size_full()
             .items_center()
             .justify_center()
+            .p_4()
+            .gap_1()
             .child(Label::new("No matching projects").color(Color::Muted))
     }
 }

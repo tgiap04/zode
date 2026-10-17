@@ -19,6 +19,9 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
         container_ui::init(cx);
         container_ui::use_fake_engines_for_test(cx);
         database_ui::init(cx);
+        // The container tab's search field is an editor; the app installs the
+        // factory behind every `InputField` here too.
+        editor::init(cx);
     });
 }
 

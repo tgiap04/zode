@@ -1,0 +1,23 @@
+[package]
+name = "remote_relay_protocol"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/remote_relay_protocol.rs"
+doctest = false
+
+[dependencies]
+base64.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+snow.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true

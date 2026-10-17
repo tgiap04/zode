@@ -6,13 +6,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use credentials_provider::CredentialsProvider;
-use gpui::{AppContext as _, AsyncApp, TestAppContext};
-use http_client::{FakeHttpClient, HttpClient, Response};
+use futures::AsyncReadExt as _;
+use gpui::{AppContext as _, AsyncApp, Entity, TestAppContext};
+use http_client::{AsyncBody, FakeHttpClient, HttpClient, Request, Response};
 use zode_account::{Account, AccountStatus};
 
 /// A keychain that is whatever the test says it is.
@@ -31,13 +32,23 @@ impl StubCredentials {
     }
 
     /// A machine that signed in on an earlier run.
-    fn holding(user_id: &str, payload: serde_json::Value) -> Arc<dyn CredentialsProvider> {
+    ///
+    /// Typed rather than boxed so a test can read back what a later run left
+    /// behind; it still coerces to the trait object wherever one is wanted.
+    fn holding(user_id: &str, payload: serde_json::Value) -> Arc<Self> {
         Arc::new(Self {
             stored: Mutex::new(Some((
                 user_id.to_string(),
                 serde_json::to_vec(&payload).expect("the fixture payload"),
             ))),
         })
+    }
+
+    /// The entry as the keychain holds it right now: its username and payload.
+    fn held(&self) -> Option<(String, serde_json::Value)> {
+        let (username, payload) = self.stored.lock().unwrap().clone()?;
+        let payload = serde_json::from_slice(&payload).expect("the stored payload is JSON");
+        Some((username, payload))
     }
 }
 
@@ -48,7 +59,22 @@ impl StubCredentials {
 /// also read, so a change to it should break a test rather than a user's saved
 /// session.
 fn saved_session(with_user: bool) -> serde_json::Value {
-    let expires_at = std::time::SystemTime::now() + Duration::from_secs(3_600);
+    session_expiring_at(
+        with_user,
+        std::time::SystemTime::now() + Duration::from_secs(3_600),
+    )
+}
+
+/// The same entry once its access token has died, so the next start has to
+/// refresh it before it can do anything.
+fn expired_session(with_user: bool) -> serde_json::Value {
+    session_expiring_at(
+        with_user,
+        std::time::SystemTime::now() - Duration::from_secs(3_600),
+    )
+}
+
+fn session_expiring_at(with_user: bool, expires_at: std::time::SystemTime) -> serde_json::Value {
     let since_epoch = expires_at
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .expect("a clock after 1970");
@@ -430,4 +456,289 @@ async fn an_entry_saved_before_the_user_was_remembered_still_loads(cx: &mut Test
     account.read_with(cx, |account: &Account, _| {
         assert_eq!(*account.status(), AccountStatus::SignedOut);
     });
+}
+
+/// An account service whose refresh token rotates on use, and which treats a
+/// second use of a spent one as theft.
+///
+/// That rule is what makes an unsaved rotation fatal rather than wasteful, so
+/// the fake enforces it instead of answering every refresh with a fresh pair.
+/// Every pair it issues expires at once (`expires_in: 0`), which makes each
+/// later start refresh again and so exercises the stored token every time.
+struct RotatingServer {
+    live_refresh_token: Mutex<String>,
+    rotations: AtomicUsize,
+    reuse_seen: AtomicBool,
+    identity_hangs: AtomicBool,
+    identity_errors: AtomicBool,
+}
+
+impl RotatingServer {
+    fn new(live_refresh_token: &str) -> Arc<Self> {
+        Arc::new(Self {
+            live_refresh_token: Mutex::new(live_refresh_token.to_string()),
+            rotations: AtomicUsize::new(0),
+            reuse_seen: AtomicBool::new(false),
+            identity_hangs: AtomicBool::new(false),
+            identity_errors: AtomicBool::new(false),
+        })
+    }
+
+    fn client(self: &Arc<Self>) -> Arc<dyn HttpClient> {
+        let server = self.clone();
+        FakeHttpClient::create(move |request| {
+            let server = server.clone();
+            async move { server.answer(request).await }
+        })
+    }
+
+    fn reuse_seen(&self) -> bool {
+        self.reuse_seen.load(Ordering::SeqCst)
+    }
+
+    /// Makes `/auth/me` never answer, as a request cut off mid-flight would.
+    fn hang_identity(&self) {
+        self.identity_hangs.store(true, Ordering::SeqCst);
+    }
+
+    /// Makes `/auth/me` answer 503, as a gateway in front of a down service does.
+    fn fail_identity(&self) {
+        self.identity_errors.store(true, Ordering::SeqCst);
+    }
+
+    async fn answer(&self, request: Request<AsyncBody>) -> anyhow::Result<Response<AsyncBody>> {
+        let path = request.uri().path().to_string();
+
+        if path.ends_with("/auth/device/refresh") {
+            let mut raw = String::new();
+            request.into_body().read_to_string(&mut raw).await?;
+            let presented: serde_json::Value = serde_json::from_str(&raw)?;
+            let presented = presented["refresh_token"].as_str().unwrap_or_default();
+
+            let mut live = self.live_refresh_token.lock().unwrap();
+            if presented != *live {
+                self.reuse_seen.store(true, Ordering::SeqCst);
+                return Ok(json_response(
+                    401,
+                    serde_json::json!({
+                        "statusCode": 401,
+                        "message": "Unauthorized",
+                        "error": "Unauthorized",
+                    }),
+                ));
+            }
+
+            let rotation = self.rotations.fetch_add(1, Ordering::SeqCst) + 1;
+            *live = format!("rt-{rotation}");
+            return Ok(json_response(
+                200,
+                serde_json::json!({
+                    "access_token": format!("at-{rotation}"),
+                    "refresh_token": *live,
+                    "expires_in": 0,
+                }),
+            ));
+        }
+
+        if path.ends_with("/auth/me") {
+            if self.identity_hangs.load(Ordering::SeqCst) {
+                // Never resolves in any bounded amount of scheduler time.
+                futures::future::pending::<()>().await;
+                unreachable!()
+            }
+            if self.identity_errors.load(Ordering::SeqCst) {
+                return Ok(json_response(
+                    503,
+                    serde_json::json!({ "error": "unavailable" }),
+                ));
+            }
+            return Ok(json_response(
+                200,
+                serde_json::json!({
+                    "id": "1",
+                    "email": "ada@example.com",
+                    "name": null,
+                    "avatarUrl": null,
+                }),
+            ));
+        }
+
+        Ok(json_response(
+            404,
+            serde_json::json!({ "error": "not_found" }),
+        ))
+    }
+}
+
+fn json_response(status: u16, body: serde_json::Value) -> Response<AsyncBody> {
+    Response::builder()
+        .status(status)
+        .body(body.to_string().into())
+        .expect("a well-formed response")
+}
+
+fn restored_account(
+    cx: &mut TestAppContext,
+    http_client: Arc<dyn HttpClient>,
+    credentials: &Arc<StubCredentials>,
+) -> Entity<Account> {
+    cx.update(|cx| {
+        cx.new(|cx| {
+            let mut account = Account::new(
+                http_client,
+                credentials.clone(),
+                "https://zodekit.site/api".into(),
+            );
+            account.restore(cx).detach();
+            account
+        })
+    })
+}
+
+/// Invariant 7 — a refresh during restore survives a restart.
+///
+/// The refresh token rotates on use, so the pair a restore obtains is the only
+/// live one the moment the server hands it over. If it is not written back, the
+/// keychain holds a spent token, the next start presents it, and the server
+/// reads that as theft and signs the user out everywhere. Two starts in a row
+/// against a server that enforces the rule is the whole scenario.
+#[gpui::test]
+async fn a_refresh_during_restore_survives_a_restart(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("stored-refresh");
+    let credentials = StubCredentials::holding("1", expired_session(true));
+
+    let first = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+
+    first.read_with(cx, |account: &Account, _| {
+        assert!(
+            account.status().is_signed_in(),
+            "the first start refreshes a valid session and stays signed in"
+        );
+    });
+    let (_, saved) = credentials.held().expect("the session is still saved");
+    assert_eq!(
+        saved["refresh_token"], "rt-1",
+        "the rotated refresh token must be on disk before the process can exit"
+    );
+
+    let second = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+
+    assert!(
+        !server.reuse_seen(),
+        "the second start presented a refresh token the server had already spent"
+    );
+    second.read_with(cx, |account: &Account, _| {
+        assert!(
+            account.status().is_signed_in(),
+            "the second start must still be signed in"
+        );
+    });
+    let (_, saved) = credentials.held().expect("the session is still saved");
+    assert_eq!(saved["refresh_token"], "rt-2");
+}
+
+/// Invariant 7, for the entry that does not remember who it belongs to.
+///
+/// The rotation is saved under the id the entry was already filed under, and
+/// once `/auth/me` names the owner the entry is rewritten to remember them.
+#[gpui::test]
+async fn a_refresh_during_restore_of_a_legacy_entry_is_saved_with_its_owner(
+    cx: &mut TestAppContext,
+) {
+    let server = RotatingServer::new("stored-refresh");
+    let credentials = StubCredentials::holding("1", expired_session(false));
+
+    let account = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+
+    account.read_with(cx, |account: &Account, _| {
+        assert!(account.status().is_signed_in());
+    });
+    let (username, saved) = credentials.held().expect("the session is still saved");
+    assert_eq!(username, "1");
+    assert_eq!(saved["refresh_token"], "rt-1");
+    assert_eq!(
+        saved["user"]["id"], "1",
+        "the entry now remembers its owner"
+    );
+}
+
+/// Invariant 7, before the identity call answers.
+///
+/// The identity call is the slow step that follows a rotation, and quitting
+/// during it is the window the write is ordered ahead of. Here that call never
+/// answers, so the rotated pair must already be on disk when the run stops.
+#[gpui::test]
+async fn a_rotation_is_saved_before_the_identity_call_answers(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("stored-refresh");
+    server.hang_identity();
+    let credentials = StubCredentials::holding("1", expired_session(true));
+
+    let _account = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+
+    let (_, saved) = credentials.held().expect("the session is still saved");
+    assert_eq!(
+        saved["refresh_token"], "rt-1",
+        "the rotated refresh token must be on disk while the identity call is pending"
+    );
+}
+
+/// Invariant 7, for an entry that does not remember who it belongs to, when the
+/// identity call cannot name them.
+///
+/// The keychain username is the user id, so the entry can be rewritten under the
+/// id it was already filed under without waiting for `/auth/me`. Skipping that
+/// leaves a spent refresh token on disk, and the next start presenting it is read
+/// as theft and revokes every session of the user. The stored id is deliberately
+/// not the one the server would answer with, so it can only have come from the
+/// keychain.
+async fn legacy_entry_keeps_its_rotation_while_identity_fails(
+    cx: &mut TestAppContext,
+    server: Arc<RotatingServer>,
+) {
+    let credentials = StubCredentials::holding("filed-under-id", expired_session(false));
+
+    let _first = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+
+    let (username, saved) = credentials.held().expect("the session is still saved");
+    assert_eq!(
+        saved["refresh_token"], "rt-1",
+        "the rotated refresh token must be on disk although the owner is still unknown"
+    );
+    assert_eq!(
+        username, "filed-under-id",
+        "the entry stays filed under the id it already had"
+    );
+    assert!(
+        saved["user"].is_null(),
+        "an owner nobody has named must not be invented"
+    );
+
+    let _second = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+
+    assert!(
+        !server.reuse_seen(),
+        "the second start presented a refresh token the server had already spent"
+    );
+    let (_, saved) = credentials.held().expect("the session is still saved");
+    assert_eq!(saved["refresh_token"], "rt-2");
+}
+
+#[gpui::test]
+async fn a_legacy_entry_keeps_its_rotation_while_the_identity_call_hangs(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("stored-refresh");
+    server.hang_identity();
+    legacy_entry_keeps_its_rotation_while_identity_fails(cx, server).await;
+}
+
+#[gpui::test]
+async fn a_legacy_entry_keeps_its_rotation_while_the_identity_call_errors(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("stored-refresh");
+    server.fail_identity();
+    legacy_entry_keeps_its_rotation_while_identity_fails(cx, server).await;
 }

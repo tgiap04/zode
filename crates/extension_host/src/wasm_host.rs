@@ -561,7 +561,8 @@ fn wasm_engine(executor: &BackgroundExecutor) -> wasmtime::Engine {
             // back to the executor at regular intervals.
             config.epoch_interruption(true);
 
-            let engine = wasmtime::Engine::new(&config).unwrap();
+            let engine =
+                util::process::with_sigchld_blocked(|| wasmtime::Engine::new(&config)).unwrap();
 
             // It might be safer to do this on a non-async thread to make sure it makes progress
             // regardless of if extensions are blocking.

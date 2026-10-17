@@ -1,5 +1,5 @@
 use crate::Sidebar;
-use crate::rail::RAIL_ICON_SIZE;
+use crate::rail::rail_button;
 use database_ui::DatabasePanel;
 use gpui::{AnyElement, App, Context, Window};
 use ui::{Tooltip, prelude::*};
@@ -34,8 +34,7 @@ impl Sidebar {
     ) -> AnyElement {
         let is_open = self.database_tab_open(cx);
 
-        IconButton::new("project-rail-database", IconName::DatabaseZap)
-            .icon_size(RAIL_ICON_SIZE)
+        rail_button("project-rail-database", IconName::Database)
             .toggle_state(is_open)
             .tooltip(move |_window, cx| {
                 Tooltip::for_action(

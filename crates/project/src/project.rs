@@ -1396,9 +1396,7 @@ impl Project {
 
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1641,9 +1639,7 @@ impl Project {
                 remote_client: Some(remote.clone()),
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1683,6 +1679,8 @@ impl Project {
             remote_proto.add_entity_request_handler(Self::handle_find_search_candidates_chunk);
 
             remote_proto.add_entity_message_handler(Self::handle_find_search_candidates_cancel);
+            remote_proto.add_entity_request_handler(Self::handle_terminal_output);
+            remote_proto.add_entity_message_handler(Self::handle_terminal_exited);
             BufferStore::init(&remote_proto);
             WorktreeStore::init_remote(&remote_proto);
             LspStore::init(&remote_proto);

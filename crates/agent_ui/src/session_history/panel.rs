@@ -7,7 +7,7 @@ use gpui::{
     WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
-use ui::{IconName, prelude::*};
+use ui::{ContextMenu, IconName, PopoverMenuHandle, prelude::*};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -41,6 +41,9 @@ pub struct AgentHistoryPanel {
     /// is a view over the index, recomputed per render.
     pub(crate) store: Entity<crate::SessionStore>,
     pub(crate) counts: HashMap<Arc<str>, CountState>,
+    /// One per row whose menu has been drawn, so a row can tell that its menu is
+    /// open. Keyed by session id like `counts`, and dropped with them on refresh.
+    menu_handles: HashMap<Arc<str>, PopoverMenuHandle<ContextMenu>>,
     /// The real editor behind the search box. Its text is the filter — read on
     /// render rather than mirrored into a field, so the two cannot disagree.
     pub(crate) filter_editor: Entity<Editor>,
@@ -115,6 +118,7 @@ impl AgentHistoryPanel {
             providers: agent_sessions::default_providers(),
             store,
             counts: HashMap::default(),
+            menu_handles: HashMap::default(),
             collapsed_agents: Default::default(),
             collapsed_groups: Default::default(),
             expanded_rows: Default::default(),
@@ -162,6 +166,7 @@ impl AgentHistoryPanel {
         }
         self.loading = true;
         self.counts.clear();
+        self.menu_handles.clear();
         self.store.update(cx, |store, cx| store.refresh(cx));
     }
 
@@ -209,6 +214,14 @@ impl AgentHistoryPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// The handle behind one row's ellipsis menu, made on first ask.
+    pub(crate) fn menu_handle(&mut self, session_id: &Arc<str>) -> PopoverMenuHandle<ContextMenu> {
+        self.menu_handles
+            .entry(session_id.clone())
+            .or_default()
+            .clone()
     }
 
     pub(crate) fn provider_for(

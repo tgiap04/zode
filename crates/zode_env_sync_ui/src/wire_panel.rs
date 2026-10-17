@@ -1,8 +1,8 @@
-use editor::Editor;
 use gpui::{
     App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window,
 };
 use ui::{Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
+use ui_input::InputField;
 use workspace::ModalView;
 use zode_env_sync::{EntryId, EnvSession, WireBytes};
 
@@ -25,7 +25,7 @@ pub struct WirePanel {
     entry: EntryId,
     focus_handle: FocusHandle,
     /// The name being typed, and whether that row is open.
-    name_input: Entity<Editor>,
+    name_input: Entity<InputField>,
     renaming: bool,
 }
 
@@ -46,11 +46,7 @@ impl WirePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name_input = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("services/api/.env", window, cx);
-            editor
-        });
+        let name_input = cx.new(|cx| InputField::new(window, cx, "services/api/.env"));
 
         Self {
             session,
@@ -76,7 +72,7 @@ impl WirePanel {
     fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.stored_as(cx).to_string();
         self.name_input
-            .update(cx, |editor, cx| editor.set_text(current, window, cx));
+            .update(cx, |field, cx| field.set_text(&current, window, cx));
         self.renaming = true;
         window.focus(&self.name_input.focus_handle(cx), cx);
         cx.notify();
@@ -122,8 +118,9 @@ impl Render for WirePanel {
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
             .occlude()
-            .w(rems(54.))
-            .max_h(rems(44.))
+            .w(rems(60.))
+            .max_h(rems(40.))
+            .debug_selector(|| "env-wire-modal".into())
             // Escape discards. Enter is deliberately not bound to Send: this
             // window exists to be read, and a keystroke that skips the reading
             // would remove the only thing it is for.
@@ -165,21 +162,10 @@ impl Render for WirePanel {
                                     .w_full()
                                     .gap_2()
                                     .items_center()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(colors.border_focused)
-                                            .bg(colors.editor_background)
-                                            .child(self.name_input.clone()),
-                                    )
+                                    .child(div().flex_1().child(self.name_input.clone()))
                                     .child(
                                         Button::new("env-wire-rename-save", "Save")
                                             .style(ButtonStyle::Filled)
-                                            .label_size(LabelSize::XSmall)
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 this.commit_rename(cx)
                                             })),
@@ -233,7 +219,6 @@ impl Render for WirePanel {
                         ModalFooter::new()
                             .start_slot(
                                 Button::new("env-wire-copy", "Copy Ciphertext")
-                                    .label_size(LabelSize::Small)
                                     .start_icon(
                                         Icon::new(IconName::Copy).size(IconSize::Small),
                                     )
@@ -251,7 +236,6 @@ impl Render for WirePanel {
                                     .gap_1()
                                     .child(
                                         Button::new("env-wire-cancel", "Do Not Send")
-                                            .label_size(LabelSize::Small)
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 this.session.update(cx, |session, cx| {
                                                     session.discard_prepared(cx)
@@ -262,7 +246,6 @@ impl Render for WirePanel {
                                     .child(
                                         Button::new("env-wire-send", "Send")
                                             .style(ButtonStyle::Filled)
-                                            .label_size(LabelSize::Small)
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 this.session.update(cx, |session, cx| {
                                                     session.send_prepared(cx)
@@ -287,6 +270,9 @@ mod tests {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+            // The name field is an `InputField`, and the factory behind every
+            // one of them is installed here.
+            editor::init(cx);
         });
     }
 
@@ -351,6 +337,24 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// A window of wide data is the large tier of modal widths.
+    #[gpui::test]
+    fn the_window_is_the_large_width(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(cx);
+        let (_panel, cx) =
+            cx.add_window_view(|window, cx| WirePanel::new(session, wire(), entry(), window, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("env-wire-modal")
+            .expect("the modal must be drawn");
+        let large = cx.update(|window, _| rems(60.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, large);
+    }
+
     #[gpui::test]
     fn the_window_shows_the_value_it_was_given_and_nothing_else(cx: &mut TestAppContext) {
         // The panel must not derive, re-encrypt, or reformat. What it holds is
@@ -386,17 +390,17 @@ mod tests {
         panel.update_in(cx, |panel, window, cx| {
             assert_eq!(panel.stored_as(cx), "services/api/.env");
             panel.start_rename(window, cx);
-            panel.name_input.update(cx, |editor, cx| {
-                editor.set_text("../escape/.env", window, cx)
-            });
+            panel
+                .name_input
+                .update(cx, |field, cx| field.set_text("../escape/.env", window, cx));
             panel.commit_rename(cx);
             assert!(
                 panel.renaming,
                 "a name that leaves the project must leave the row open",
             );
 
-            panel.name_input.update(cx, |editor, cx| {
-                editor.set_text("services/api/.env.production", window, cx)
+            panel.name_input.update(cx, |field, cx| {
+                field.set_text("services/api/.env.production", window, cx)
             });
             panel.commit_rename(cx);
             assert!(!panel.renaming, "a good name closes the row");

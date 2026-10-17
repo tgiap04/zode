@@ -1,7 +1,8 @@
 use crate::database_panel::DatabasePanel;
 use crate::panel_layout::{DraggedSplit, Split};
+use crate::query::QueryState;
 use gpui::{Context, DragMoveEvent, Window, uniform_list};
-use ui::{Tooltip, prelude::*};
+use ui::{Tab, Tooltip, prelude::*};
 use zed_actions::database as actions;
 
 impl Render for DatabasePanel {
@@ -141,23 +142,24 @@ impl DatabasePanel {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_run = self.active.is_some();
+        let running = matches!(self.query, QueryState::Running { .. });
         h_flex()
             .flex_none()
             .w_full()
+            .h(Tab::container_height(cx))
             .px_2()
-            .py_1()
-            .gap_1()
             .justify_between()
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .child(Label::new("Database").size(LabelSize::Small))
             .child(
                 h_flex()
-                    .gap_1()
+                    .gap_0p5()
                     .when(can_run, |element| {
                         element.child(
                             IconButton::new("database-run", IconName::PlayFilled)
                                 .icon_size(IconSize::Small)
+                                .loading(running)
                                 .tooltip(|_window, cx| {
                                     Tooltip::for_action("Run", &actions::RunQuery, cx)
                                 })
@@ -180,7 +182,7 @@ impl DatabasePanel {
                             .icon_size(IconSize::Small)
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action(
-                                    "Open in a floating window",
+                                    "Open in a Floating Window",
                                     &actions::OpenInFloatingWindow,
                                     cx,
                                 )
@@ -193,7 +195,7 @@ impl DatabasePanel {
                         IconButton::new("database-add-connection", IconName::Plus)
                             .icon_size(IconSize::Small)
                             .tooltip(|_window, cx| {
-                                Tooltip::for_action("Add connection", &actions::AddConnection, cx)
+                                Tooltip::for_action("Add Connection", &actions::AddConnection, cx)
                             })
                             // Dispatched, not called: the workspace action is
                             // the one road to this dialog, so both buttons that
@@ -210,6 +212,7 @@ impl DatabasePanel {
             .size_full()
             .items_center()
             .justify_center()
+            .p_4()
             .gap_1()
             .child(
                 Icon::new(IconName::Database)
@@ -218,11 +221,14 @@ impl DatabasePanel {
             )
             .child(Label::new("No database connections").color(Color::Muted))
             .child(
-                Button::new("database-empty-add", "Add a connection")
-                    .style(ButtonStyle::Filled)
-                    .on_click(|_event, window, cx| {
-                        window.dispatch_action(Box::new(actions::AddConnection), cx)
-                    }),
+                div().pt_1().child(
+                    Button::new("database-empty-add", "Add a Connection")
+                        .style(ButtonStyle::Filled)
+                        .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
+                        .on_click(|_event, window, cx| {
+                            window.dispatch_action(Box::new(actions::AddConnection), cx)
+                        }),
+                ),
             )
     }
 
@@ -279,7 +285,8 @@ impl DatabasePanel {
                     cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                         range
                             .filter_map(|index| {
-                                rows.get(index).map(|row| this.render_row(row, window, cx))
+                                rows.get(index)
+                                    .map(|row| this.render_row(index, row, window, cx))
                             })
                             .collect()
                     }),

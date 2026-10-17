@@ -3,7 +3,7 @@ use crate::query::{QueryState, cell_text};
 use database::protocol::Cell;
 use gpui::{Context, Window};
 use std::rc::Rc;
-use ui::{Table, Tooltip, prelude::*};
+use ui::{Tab, Table, Tooltip, prelude::*};
 
 impl DatabasePanel {
     pub(crate) fn render_results(
@@ -13,34 +13,37 @@ impl DatabasePanel {
     ) -> AnyElement {
         match &self.query {
             QueryState::Idle => self.render_nothing_chosen(cx),
-            QueryState::Running { cancelling, .. } => {
-                v_flex()
-                    .size_full()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .child(
-                        Label::new(if *cancelling {
-                            "Cancelling…"
-                        } else {
-                            "Running…"
-                        })
-                        .color(Color::Muted),
-                    )
-                    .when(!*cancelling, |element| {
-                        element.child(Button::new("database-cancel", "Cancel").on_click(
-                            cx.listener(|this, _event, _window, cx| {
-                                this.cancel_query(cx);
-                            }),
-                        ))
+            QueryState::Running { cancelling, .. } => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .gap_1()
+                .child(
+                    Label::new(if *cancelling {
+                        "Cancelling…"
+                    } else {
+                        "Running…"
                     })
-                    .into_any_element()
-            }
+                    .color(Color::Muted),
+                )
+                .when(!*cancelling, |element| {
+                    element.child(div().pt_1().child(
+                        Button::new("database-cancel", "Cancel").on_click(cx.listener(
+                            |this, _event, _window, cx| {
+                                this.cancel_query(cx);
+                            },
+                        )),
+                    ))
+                })
+                .into_any_element(),
             // Read-only is called out by name: a user who typed `delete` needs
             // to be told the column is read-only, not that their SQL is wrong.
             QueryState::Failed(error) => v_flex()
                 .size_full()
-                .p_3()
+                .items_center()
+                .justify_center()
+                .p_4()
                 .gap_1()
                 .child(
                     Label::new(if error.read_only {
@@ -51,9 +54,20 @@ impl DatabasePanel {
                     .color(Color::Error),
                 )
                 .child(
-                    Label::new(error.message.clone())
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
+                    div()
+                        .id("database-query-error")
+                        .debug_selector(|| "database-query-error".into())
+                        // A driver's own words can run to a page. Bounded and
+                        // scrolling, so the title above it stays where it is
+                        // read instead of being centred off the top of the pane.
+                        .min_h_0()
+                        .max_h(rems(10.))
+                        .overflow_y_scroll()
+                        .child(
+                            Label::new(error.message.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
                 )
                 .into_any_element(),
             QueryState::Done(page) if page.result.rows.is_empty() => {
@@ -77,7 +91,11 @@ impl DatabasePanel {
                                     result
                                         .columns
                                         .iter()
-                                        .map(|column| column.name.clone())
+                                        .map(|column| {
+                                            Label::new(column.name.clone())
+                                                .size(LabelSize::Small)
+                                                .truncate()
+                                        })
                                         .collect::<Vec<_>>(),
                                 )
                                 .uniform_list("database-results", row_count, {
@@ -117,6 +135,7 @@ impl DatabasePanel {
             .size_full()
             .items_center()
             .justify_center()
+            .p_4()
             .gap_1()
             .debug_selector(|| "database-no-table-placeholder".into())
             .child(
@@ -144,9 +163,8 @@ impl DatabasePanel {
             h_flex()
                 .flex_none()
                 .w_full()
+                .h(Tab::container_height(cx))
                 .px_2()
-                .py_1()
-                .gap_1()
                 .justify_between()
                 .border_t_1()
                 .border_color(cx.theme().colors().border)
@@ -162,11 +180,11 @@ impl DatabasePanel {
                 )
                 .child(
                     h_flex()
-                        .gap_1()
+                        .gap_0p5()
                         .child(
                             IconButton::new("database-copy-csv", IconName::Copy)
                                 .icon_size(IconSize::Small)
-                                .tooltip(|_window, cx| Tooltip::simple("Copy page as CSV", cx))
+                                .tooltip(|_window, cx| Tooltip::simple("Copy Page as CSV", cx))
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.copy_page_as_csv(cx);
                                 })),
@@ -174,6 +192,13 @@ impl DatabasePanel {
                         .child(
                             IconButton::new("database-previous-page", IconName::ChevronLeft)
                                 .icon_size(IconSize::Small)
+                                .tooltip(|_window, cx| {
+                                    Tooltip::for_action(
+                                        "Previous Page",
+                                        &zed_actions::database::PreviousPage,
+                                        cx,
+                                    )
+                                })
                                 .disabled(!previous)
                                 .on_click(cx.listener(|this, _event, window, cx| {
                                     this.page(false, window, cx);
@@ -182,6 +207,13 @@ impl DatabasePanel {
                         .child(
                             IconButton::new("database-next-page", IconName::ChevronRight)
                                 .icon_size(IconSize::Small)
+                                .tooltip(|_window, cx| {
+                                    Tooltip::for_action(
+                                        "Next Page",
+                                        &zed_actions::database::NextPage,
+                                        cx,
+                                    )
+                                })
                                 .disabled(!next)
                                 .on_click(cx.listener(|this, _event, window, cx| {
                                     this.page(true, window, cx);
@@ -202,10 +234,11 @@ fn render_cell(cell: &Cell) -> AnyElement {
             .size(LabelSize::Small)
             .color(Color::Muted)
             .italic()
+            .truncate()
             .into_any_element(),
         _ => Label::new(text)
             .size(LabelSize::Small)
-            .single_line()
+            .truncate()
             .into_any_element(),
     }
 }

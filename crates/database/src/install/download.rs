@@ -1,4 +1,4 @@
-//! Fetching a driver from the release this build came from.
+//! Fetching the most recently published driver.
 //!
 //! The order matters more than any single step: the bytes are hashed while
 //! they stream, compared against the manifest, and only then unpacked. Nothing
@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result};
 use collections::HashMap;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, channel::mpsc};
-use http_client::HttpClient;
+use http_client::{HttpClient, StatusCode};
 use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
 use std::path::PathBuf;
@@ -18,6 +18,11 @@ use std::sync::Arc;
 use crate::install::endpoint::DriverEndpoint;
 use crate::install::manifest::{DriverManifest, current_target, parse_sha256};
 use crate::install::{store, unpack};
+
+/// The most a manifest may weigh. A real one is a few kilobytes -- a line per
+/// driver per platform -- so this is generous, and exists only so that a server
+/// that answers with something endless cannot fill memory.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// How far along an install is, for a progress bar that means something.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +48,6 @@ pub struct DriverInstaller {
     http: Arc<dyn HttpClient>,
     endpoint: DriverEndpoint,
     root: PathBuf,
-    manifest: Mutex<Option<Arc<DriverManifest>>>,
     in_flight: Mutex<HashMap<String, SharedInstall>>,
     watchers: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<InstallProgress>>>>,
 }
@@ -58,7 +62,6 @@ impl DriverInstaller {
             http,
             endpoint,
             root,
-            manifest: Mutex::default(),
             in_flight: Mutex::default(),
             watchers: Mutex::default(),
         }
@@ -130,23 +133,22 @@ impl DriverInstaller {
         })?;
 
         self.report(id, InstallProgress::FetchingManifest);
-        let manifest = self.manifest().await?;
+        let manifest = self.fetch_manifest().await?;
+        let version = manifest.version.as_str();
         let asset = manifest.find(id, target).with_context(|| {
             let published = manifest.targets_for(id);
             if published.is_empty() {
                 format!(
-                    "version {} publishes no `{id}` driver. In a development build, run \
+                    "version {version} publishes no `{id}` driver. In a development build, run \
                      `script/build-database-drivers` (or `make drivers`) instead, or install \
                      the driver by hand into {}",
-                    self.endpoint.version(),
                     self.root.display()
                 )
             } else {
                 format!(
-                    "version {} has no `{id}` driver for {target} (it publishes: {}). In a \
+                    "version {version} has no `{id}` driver for {target} (it publishes: {}). In a \
                      development build, run `script/build-database-drivers` (or `make drivers`) \
                      instead, or install the driver by hand into {}",
-                    self.endpoint.version(),
                     published.join(", "),
                     self.root.display()
                 )
@@ -154,18 +156,18 @@ impl DriverInstaller {
         })?;
         let expected = parse_sha256(&asset.asset, &asset.sha256)?;
 
-        let directory = store::version_dir_in(&self.root, id, self.endpoint.version());
+        let directory = store::version_dir_in(&self.root, id, version);
         smol::fs::create_dir_all(directory.parent().unwrap_or(&self.root))
             .await
             .with_context(|| format!("creating {}", self.root.display()))?;
 
         // Downloaded beside where it will be unpacked, so nothing crosses a
         // filesystem boundary and the final move stays a rename.
-        let archive = directory.with_extension("download");
+        let archive = store::hidden_sibling(&directory, "download");
         let downloaded = self
             .download_to(
                 id,
-                &self.endpoint.asset_url(&asset.asset),
+                &self.endpoint.asset_url(version, &asset.asset),
                 &archive,
                 asset.size,
             )
@@ -192,10 +194,15 @@ impl DriverInstaller {
 
         // The archive is never wanted again, and a corrupt one left behind is a
         // download that will be skipped next time on the strength of its name.
-        let _ = smol::fs::remove_file(&archive).await;
+        if let Err(error) = store::ignore_not_found(smol::fs::remove_file(&archive).await) {
+            log::warn!(
+                "could not remove the downloaded archive {}: {error}",
+                archive.display()
+            );
+        }
         let installed = result?;
 
-        store::prune_other_versions_in(&self.root, id, self.endpoint.version())?;
+        store::prune_other_versions_in(&self.root, id, version)?;
         Ok(installed)
     }
 
@@ -217,6 +224,13 @@ impl DriverInstaller {
             .get(url, Default::default(), false)
             .await
             .with_context(|| format!("downloading the `{id}` driver from {url}"))?;
+        // A publish deletes the version a manifest names, so an archive the
+        // manifest just promised can be gone by the time it is asked for.
+        anyhow::ensure!(
+            response.status() != StatusCode::NOT_FOUND,
+            "the published `{id}` driver set changed while it was being downloaded (the server \
+             no longer has {url}); try again to install the current one"
+        );
         anyhow::ensure!(
             response.status().is_success(),
             "downloading the `{id}` driver failed with status {}",
@@ -252,17 +266,13 @@ impl DriverInstaller {
         Ok(hex(hasher.finalize().as_slice()))
     }
 
-    /// The driver manifest for this version, fetched once per process.
+    /// The manifest of the most recently published drivers.
     ///
-    /// Cached because it is asked for again on every driver a person installs
-    /// in one sitting, and it cannot change underneath a running app: the
-    /// version it names is the one this build came from.
-    pub async fn manifest(&self) -> Result<Arc<DriverManifest>> {
-        if let Some(manifest) = self.manifest.lock().clone() {
-            return Ok(manifest);
-        }
-
-        let url = self.endpoint.manifest_url();
+    /// Fetched afresh for every install and never kept: a publish deletes the
+    /// version a held manifest names, so one remembered from an earlier install
+    /// would send the next one to an archive that is no longer there.
+    async fn fetch_manifest(&self) -> Result<DriverManifest> {
+        let url = self.endpoint.latest_manifest_url();
         self.endpoint.ensure_trusted(&url)?;
         let mut response = self
             .http
@@ -271,17 +281,27 @@ impl DriverInstaller {
             .with_context(|| format!("fetching the driver manifest from {url}"))?;
         anyhow::ensure!(
             response.status().is_success(),
-            "version {} publishes no driver manifest (fetching it returned {}). \
-             In a development build, run `script/build-database-drivers` instead.",
-            self.endpoint.version(),
+            "no driver manifest is published at {url} (the server answered {}). \
+             In a development build, run `script/build-database-drivers` (or `make drivers`) \
+             instead.",
             response.status()
         );
 
+        // One byte past the limit, so a body of exactly the limit is accepted
+        // and anything longer is told apart from it.
         let mut body = Vec::new();
-        response.body_mut().read_to_end(&mut body).await?;
-        let manifest = Arc::new(DriverManifest::parse(&body)?);
-        *self.manifest.lock() = Some(manifest.clone());
-        Ok(manifest)
+        response
+            .body_mut()
+            .take(MAX_MANIFEST_BYTES + 1)
+            .read_to_end(&mut body)
+            .await
+            .with_context(|| format!("reading the driver manifest from {url}"))?;
+        anyhow::ensure!(
+            body.len() as u64 <= MAX_MANIFEST_BYTES,
+            "the driver manifest at {url} is larger than {MAX_MANIFEST_BYTES} bytes, which no \
+             manifest Zode publishes comes close to; refusing to read it"
+        );
+        DriverManifest::parse(&body)
     }
 
     fn report(&self, id: &str, progress: InstallProgress) {
@@ -304,9 +324,11 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::install::manifest::MANIFEST_ASSET;
-    use crate::install::test_support::{driver_archive, manifest_for, sha256_of};
+    use crate::install::test_support::{
+        archive_asset_for, directory_entries, driver_archive, manifest_for, sha256_of,
+    };
     use futures::StreamExt as _;
-    use http_client::{FakeHttpClient, Response};
+    use http_client::{AsyncBody, FakeHttpClient, Response};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const VERSION: &str = "0.1.1";
@@ -315,23 +337,63 @@ mod tests {
         manifest_for("postgres", archive, sha256, VERSION)
     }
 
-    /// A release serving `manifest` and one archive, counting what was asked
-    /// for so a test can prove a download happened once rather than twice.
+    fn archive_path(version: &str) -> String {
+        format!("/api/drivers/{version}/{}", archive_asset_for("postgres"))
+    }
+
+    /// A server publishing `manifest` under `latest` and one archive under
+    /// [`VERSION`], counting archive fetches so a test can prove a download
+    /// happened once rather than twice.
     fn release_serving(
         manifest: Vec<u8>,
         archive: Vec<u8>,
         requests: Arc<AtomicUsize>,
     ) -> Arc<dyn HttpClient> {
+        release_publishing(
+            vec![manifest],
+            archive,
+            &[VERSION],
+            requests,
+            Arc::default(),
+        )
+    }
+
+    /// The server's real URL contract and nothing looser: the manifest answers
+    /// only at `/drivers/latest/`, an archive only under one of `versions`, and
+    /// every other path is a 404 -- so a client that builds a URL wrongly fails
+    /// a test instead of passing against a fake that matched on a suffix.
+    ///
+    /// Each manifest request is answered with the next of `manifests`, the last
+    /// repeating, and `paths` records every path asked for, in order.
+    fn release_publishing(
+        manifests: Vec<Vec<u8>>,
+        archive: Vec<u8>,
+        versions: &'static [&'static str],
+        archive_requests: Arc<AtomicUsize>,
+        paths: Arc<Mutex<Vec<String>>>,
+    ) -> Arc<dyn HttpClient> {
+        let manifest_path = format!("/api/drivers/latest/{MANIFEST_ASSET}");
+        let archive_paths: Vec<String> = versions
+            .iter()
+            .map(|version| archive_path(version))
+            .collect();
+        let manifests_served = Arc::new(AtomicUsize::new(0));
         FakeHttpClient::create(move |request| {
-            let manifest = manifest.clone();
+            let manifests = manifests.clone();
             let archive = archive.clone();
-            let requests = requests.clone();
+            let archive_requests = archive_requests.clone();
+            let paths = paths.clone();
+            let manifest_path = manifest_path.clone();
+            let archive_paths = archive_paths.clone();
+            let manifests_served = manifests_served.clone();
             async move {
                 let path = request.uri().path().to_string();
-                let body = if path.ends_with(MANIFEST_ASSET) {
-                    manifest
-                } else if path.ends_with("zode-db-postgres.tar.gz") {
-                    requests.fetch_add(1, Ordering::SeqCst);
+                paths.lock().push(path.clone());
+                let body = if path == manifest_path {
+                    let turn = manifests_served.fetch_add(1, Ordering::SeqCst);
+                    manifests[turn.min(manifests.len() - 1)].clone()
+                } else if archive_paths.contains(&path) {
+                    archive_requests.fetch_add(1, Ordering::SeqCst);
                     archive
                 } else {
                     return Ok(Response::builder().status(404).body(Default::default())?);
@@ -344,7 +406,7 @@ mod tests {
     fn installer(http: Arc<dyn HttpClient>, root: &std::path::Path) -> Arc<DriverInstaller> {
         Arc::new(DriverInstaller::with_root(
             http,
-            DriverEndpoint::new("https://api.test.invalid/api", VERSION),
+            DriverEndpoint::new("https://api.test.invalid/api"),
             root.to_path_buf(),
         ))
     }
@@ -363,7 +425,7 @@ mod tests {
             let installed = installer.install("postgres").await.unwrap();
 
             assert_eq!(
-                store::installed_path_in(root.path(), "postgres", VERSION),
+                store::installed_path_in(root.path(), "postgres"),
                 Some(installed)
             );
         });
@@ -390,15 +452,11 @@ mod tests {
                 .expect_err("a driver that does not match its checksum must be refused");
 
             assert!(error.to_string().contains("checksum"), "{error}");
-            assert_eq!(
-                store::installed_path_in(root.path(), "postgres", VERSION),
-                None
-            );
+            assert_eq!(store::installed_path_in(root.path(), "postgres"), None);
             assert!(
-                !store::version_dir_in(root.path(), "postgres", VERSION)
-                    .with_extension("download")
-                    .exists(),
-                "the rejected archive must not be left to be trusted later"
+                directory_entries(root.path(), "postgres").is_empty(),
+                "the rejected archive must not be left to be trusted later: {:?}",
+                directory_entries(root.path(), "postgres")
             );
         });
     }
@@ -475,6 +533,7 @@ mod tests {
 
             let message = error.to_string();
             assert!(message.contains("no driver manifest"), "{message}");
+            assert!(message.contains("/drivers/latest/"), "{message}");
             assert!(message.contains("build-database-drivers"), "{message}");
         });
     }
@@ -500,7 +559,7 @@ mod tests {
             };
             let installer = Arc::new(DriverInstaller::with_root(
                 http,
-                DriverEndpoint::new("not a url", VERSION),
+                DriverEndpoint::new("not a url"),
                 root.path().to_path_buf(),
             ));
 
@@ -534,6 +593,7 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("mongodb"), "{message}");
             assert!(message.contains("publishes no"), "{message}");
+            assert!(message.contains(VERSION), "{message}");
         });
     }
 
@@ -549,6 +609,134 @@ mod tests {
 
             let error = installer.install("postgres").await.unwrap_err();
             assert!(error.to_string().contains("driver manifest"), "{error}");
+        });
+    }
+
+    /// What is installed, and from where, is whatever the manifest under
+    /// `latest` names; nothing about the running app enters into it.
+    #[test]
+    fn the_archive_is_fetched_from_the_version_the_manifest_names() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let manifest = manifest_for("postgres", &archive, sha256_of(&archive), "0.2.0");
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let installer = installer(
+                release_publishing(
+                    vec![manifest],
+                    archive,
+                    &["0.2.0"],
+                    Arc::default(),
+                    paths.clone(),
+                ),
+                root.path(),
+            );
+
+            let installed = installer.install("postgres").await.unwrap();
+
+            assert_eq!(
+                paths.lock().as_slice(),
+                [
+                    format!("/api/drivers/latest/{MANIFEST_ASSET}"),
+                    archive_path("0.2.0"),
+                ]
+            );
+            assert_eq!(
+                installed,
+                store::version_dir_in(root.path(), "postgres", "0.2.0")
+                    .join(store::executable_name("postgres"))
+            );
+        });
+    }
+
+    /// A publish deletes the version a held manifest names, so a manifest kept
+    /// from the last install would point the next one at a 404.
+    #[test]
+    fn each_install_reads_the_manifest_again() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let manifest_at =
+                |version| manifest_for("postgres", &archive, sha256_of(&archive), version);
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let installer = installer(
+                release_publishing(
+                    vec![manifest_at("0.1.0"), manifest_at("0.2.0")],
+                    archive.clone(),
+                    &["0.1.0", "0.2.0"],
+                    Arc::default(),
+                    paths.clone(),
+                ),
+                root.path(),
+            );
+
+            installer.install("postgres").await.unwrap();
+            installer.install("postgres").await.unwrap();
+
+            assert_eq!(
+                paths.lock().as_slice(),
+                [
+                    format!("/api/drivers/latest/{MANIFEST_ASSET}"),
+                    archive_path("0.1.0"),
+                    format!("/api/drivers/latest/{MANIFEST_ASSET}"),
+                    archive_path("0.2.0"),
+                ]
+            );
+            assert_eq!(
+                store::installed_path_in(root.path(), "postgres"),
+                Some(
+                    store::version_dir_in(root.path(), "postgres", "0.2.0")
+                        .join(store::executable_name("postgres"))
+                )
+            );
+            assert_eq!(
+                store::installed_versions_in(root.path(), "postgres"),
+                ["0.2.0"],
+                "the version the new install replaced must be pruned"
+            );
+        });
+    }
+
+    /// The version becomes a URL segment and a directory name. One that is not
+    /// a version must stop the install before either, however it got there.
+    #[test]
+    fn a_manifest_naming_no_usable_version_fetches_no_archive() {
+        smol::block_on(async {
+            let outer = tempfile::tempdir().unwrap();
+            let root = outer.path().join("store");
+            std::fs::create_dir_all(&root).unwrap();
+            let archive = driver_archive("postgres").await;
+            let manifest = manifest_for("postgres", &archive, sha256_of(&archive), "../escape");
+            let archive_requests = Arc::new(AtomicUsize::new(0));
+            let installer = installer(
+                release_publishing(
+                    vec![manifest],
+                    archive,
+                    &["../escape"],
+                    archive_requests.clone(),
+                    Arc::default(),
+                ),
+                &root,
+            );
+
+            let error = installer.install("postgres").await.unwrap_err();
+
+            assert!(error.to_string().contains("../escape"), "{error}");
+            assert_eq!(
+                archive_requests.load(Ordering::SeqCst),
+                0,
+                "nothing may be fetched under a version that is not one"
+            );
+            assert_eq!(
+                std::fs::read_dir(&root).unwrap().count(),
+                0,
+                "nothing may be created in the store"
+            );
+            assert_eq!(
+                std::fs::read_dir(outer.path()).unwrap().count(),
+                1,
+                "nothing may be created beside the store either"
+            );
         });
     }
 
@@ -588,6 +776,463 @@ mod tests {
                 )),
                 "a determinate bar needs a total: {reported:?}"
             );
+        });
+    }
+
+    fn manifest_path() -> String {
+        format!("/api/drivers/latest/{MANIFEST_ASSET}")
+    }
+
+    /// A publish deletes the installed version's archive, and the newer one's
+    /// archive is not served either. The install fails, and what is installed
+    /// stays exactly as it was.
+    #[test]
+    fn a_newer_version_whose_archive_is_withdrawn_leaves_the_installed_driver_in_place() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let installer = installer(
+                release_publishing(
+                    vec![
+                        manifest_for("postgres", &archive, sha256_of(&archive), "0.1.0"),
+                        manifest_for("postgres", &archive, sha256_of(&archive), "0.2.0"),
+                    ],
+                    archive,
+                    &["0.1.0"],
+                    Arc::default(),
+                    paths.clone(),
+                ),
+                root.path(),
+            );
+            let installed = installer.install("postgres").await.unwrap();
+
+            let error = installer.install("postgres").await.unwrap_err();
+
+            let message = error.to_string();
+            assert!(
+                message.contains("changed while it was being downloaded"),
+                "{message}"
+            );
+            assert!(message.contains("try again"), "{message}");
+            assert!(
+                !message.contains("status"),
+                "a withdrawn archive is not a bare status code: {message}"
+            );
+            assert_eq!(
+                store::installed_path_in(root.path(), "postgres"),
+                Some(installed)
+            );
+            assert_eq!(directory_entries(root.path(), "postgres"), ["0.1.0"]);
+            let asked = paths.lock().clone();
+            assert_eq!(
+                asked.last(),
+                Some(&archive_path("0.2.0")),
+                "the newer archive is what was asked for last"
+            );
+        });
+    }
+
+    #[test]
+    fn a_newer_version_failing_its_checksum_leaves_the_installed_driver_in_place() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let installer = installer(
+                release_publishing(
+                    vec![
+                        manifest_for("postgres", &archive, sha256_of(&archive), "0.1.0"),
+                        manifest_for("postgres", &archive, "a".repeat(64), "0.2.0"),
+                    ],
+                    archive,
+                    &["0.1.0", "0.2.0"],
+                    Arc::default(),
+                    Arc::default(),
+                ),
+                root.path(),
+            );
+            let installed = installer.install("postgres").await.unwrap();
+
+            let error = installer
+                .install("postgres")
+                .await
+                .expect_err("an archive that does not match its checksum must be refused");
+
+            assert!(error.to_string().contains("checksum"), "{error}");
+            assert_eq!(
+                store::installed_path_in(root.path(), "postgres"),
+                Some(installed)
+            );
+            assert_eq!(
+                directory_entries(root.path(), "postgres"),
+                ["0.1.0"],
+                "the rejected archive must not be left beside the install"
+            );
+        });
+    }
+
+    /// A manifest naming `../escape` must be refused before any archive is asked
+    /// for, and the install already on disk must not be touched.
+    #[test]
+    fn a_manifest_naming_no_usable_version_leaves_the_installed_driver_and_fetches_no_archive() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let installer = installer(
+                release_publishing(
+                    vec![
+                        manifest_for("postgres", &archive, sha256_of(&archive), "0.1.0"),
+                        manifest_for("postgres", &archive, sha256_of(&archive), "../escape"),
+                    ],
+                    archive,
+                    &["0.1.0", "../escape"],
+                    Arc::default(),
+                    paths.clone(),
+                ),
+                root.path(),
+            );
+            let installed = installer.install("postgres").await.unwrap();
+            let mark = paths.lock().len();
+
+            let error = installer.install("postgres").await.unwrap_err();
+
+            assert!(error.to_string().contains("../escape"), "{error}");
+            assert_eq!(
+                paths.lock()[mark..].to_vec(),
+                [manifest_path()],
+                "nothing may be fetched under a version that is not one"
+            );
+            assert_eq!(
+                store::installed_path_in(root.path(), "postgres"),
+                Some(installed)
+            );
+            assert_eq!(directory_entries(root.path(), "postgres"), ["0.1.0"]);
+        });
+    }
+
+    #[test]
+    fn a_latest_that_is_not_a_manifest_installs_nothing() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let installer = installer(
+                release_publishing(
+                    vec![b"<html>bad gateway</html>".to_vec()],
+                    archive,
+                    &["0.1.0"],
+                    Arc::default(),
+                    paths.clone(),
+                ),
+                root.path(),
+            );
+
+            let error = installer.install("postgres").await.unwrap_err();
+
+            assert!(
+                error.to_string().contains("not the shape Zode expects"),
+                "{error}"
+            );
+            assert!(
+                !root.path().join("postgres").exists(),
+                "nothing may be created for a manifest that was refused"
+            );
+            assert_eq!(paths.lock().as_slice(), [manifest_path()]);
+        });
+    }
+
+    /// Passes its checksum and then fails to unpack. The staging directory the
+    /// unpack had already created must not outlive the failure.
+    #[test]
+    fn an_archive_that_fails_to_unpack_leaves_no_staging_directory_behind() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let installed = installer(
+                release_serving(
+                    manifest_for("postgres", &archive, sha256_of(&archive), VERSION),
+                    archive,
+                    Arc::default(),
+                ),
+                root.path(),
+            )
+            .install("postgres")
+            .await
+            .unwrap();
+
+            let rubbish = b"this is not a gzipped tar archive".to_vec();
+            let failing = installer(
+                release_publishing(
+                    vec![manifest_for(
+                        "postgres",
+                        &rubbish,
+                        sha256_of(&rubbish),
+                        "0.2.0",
+                    )],
+                    rubbish,
+                    &["0.2.0"],
+                    Arc::default(),
+                    Arc::default(),
+                ),
+                root.path(),
+            );
+
+            let error = failing.install("postgres").await.unwrap_err();
+
+            assert!(error.to_string().contains("unpacked"), "{error}");
+            assert_eq!(
+                store::installed_path_in(root.path(), "postgres"),
+                Some(installed)
+            );
+            assert_eq!(
+                directory_entries(root.path(), "postgres"),
+                [VERSION],
+                "a failed unpack must not leave its staging directory behind"
+            );
+        });
+    }
+
+    #[test]
+    fn a_prerelease_version_installs_under_its_full_name_and_leaves_nothing_beside_it() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let installer = installer(
+                release_publishing(
+                    vec![manifest_for(
+                        "postgres",
+                        &archive,
+                        sha256_of(&archive),
+                        "0.1.5-rc.1",
+                    )],
+                    archive,
+                    &["0.1.5-rc.1"],
+                    Arc::default(),
+                    Arc::default(),
+                ),
+                root.path(),
+            );
+
+            let installed = installer.install("postgres").await.unwrap();
+
+            assert_eq!(
+                installed,
+                store::version_dir_in(root.path(), "postgres", "0.1.5-rc.1")
+                    .join(store::executable_name("postgres"))
+            );
+            assert_eq!(directory_entries(root.path(), "postgres"), ["0.1.5-rc.1"]);
+        });
+    }
+
+    #[test]
+    fn installing_the_same_published_version_twice_leaves_one_install_in_place() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let installer = installer(
+                release_publishing(
+                    vec![manifest_for(
+                        "postgres",
+                        &archive,
+                        sha256_of(&archive),
+                        "0.1.0",
+                    )],
+                    archive,
+                    &["0.1.0"],
+                    Arc::default(),
+                    Arc::default(),
+                ),
+                root.path(),
+            );
+
+            installer.install("postgres").await.unwrap();
+            let installed = installer.install("postgres").await.unwrap();
+
+            assert_eq!(
+                installed,
+                store::version_dir_in(root.path(), "postgres", "0.1.0")
+                    .join(store::executable_name("postgres"))
+            );
+            assert_eq!(directory_entries(root.path(), "postgres"), ["0.1.0"]);
+        });
+    }
+
+    /// A status other than 404 means something else went wrong, and saying the
+    /// driver set changed would send the reader after the wrong cause.
+    #[test]
+    fn an_archive_refused_for_another_reason_still_reports_its_status() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let manifest = manifest_json(&archive, sha256_of(&archive));
+            let http = FakeHttpClient::create(move |request| {
+                let manifest = manifest.clone();
+                async move {
+                    if request.uri().path() == manifest_path() {
+                        Ok(Response::builder().status(200).body(manifest.into())?)
+                    } else {
+                        Ok(Response::builder().status(500).body(Default::default())?)
+                    }
+                }
+            });
+
+            let error = installer(http, root.path())
+                .install("postgres")
+                .await
+                .unwrap_err();
+
+            let message = error.to_string();
+            assert!(message.contains("status 500"), "{message}");
+            assert!(!message.contains("changed while"), "{message}");
+            assert!(directory_entries(root.path(), "postgres").is_empty());
+        });
+    }
+
+    /// Far larger than any manifest could be, so a client that reads the body to
+    /// the end rather than stopping at the limit holds all of it in memory.
+    #[test]
+    fn a_manifest_far_larger_than_any_real_one_is_refused() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive_requests = Arc::new(AtomicUsize::new(0));
+            let http = {
+                let archive_requests = archive_requests.clone();
+                FakeHttpClient::create(move |request| {
+                    let archive_requests = archive_requests.clone();
+                    async move {
+                        if request.uri().path() != manifest_path() {
+                            archive_requests.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Ok(Response::builder()
+                            .status(200)
+                            .body(AsyncBody::from_reader(
+                                futures::io::repeat(b' ').take(64 * 1024 * 1024),
+                            ))?)
+                    }
+                })
+            };
+
+            let error = installer(http, root.path())
+                .install("postgres")
+                .await
+                .unwrap_err();
+
+            let message = error.to_string();
+            assert!(message.contains("larger than"), "{message}");
+            assert!(
+                message.contains("1048576"),
+                "the limit is what makes the refusal actionable: {message}"
+            );
+            assert_eq!(archive_requests.load(Ordering::SeqCst), 0);
+            assert!(!root.path().join("postgres").exists());
+        });
+    }
+
+    /// The asset becomes a URL segment, so one that is not an archive name must
+    /// stop the install before any archive is asked for.
+    #[test]
+    fn a_manifest_naming_an_asset_that_is_not_an_archive_fetches_no_archive() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let mut manifest = DriverManifest::parse(&manifest_json(&archive, sha256_of(&archive)))
+                .expect("the fixture manifest is well formed");
+            manifest.drivers[0].asset = "../../etc/passwd".to_string();
+            let archive_requests = Arc::new(AtomicUsize::new(0));
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let installer = installer(
+                release_publishing(
+                    vec![serde_json::to_vec(&manifest).unwrap()],
+                    archive,
+                    &[VERSION],
+                    archive_requests.clone(),
+                    paths.clone(),
+                ),
+                root.path(),
+            );
+
+            let error = installer.install("postgres").await.unwrap_err();
+
+            assert!(error.to_string().contains("../../etc/passwd"), "{error}");
+            assert_eq!(paths.lock().as_slice(), [manifest_path()]);
+            assert_eq!(archive_requests.load(Ordering::SeqCst), 0);
+            assert!(!root.path().join("postgres").exists());
+        });
+    }
+
+    /// Serves `bytes`, and reports what is on disk under `watched` the moment
+    /// the first read is made -- which is while the archive is being written.
+    struct ObservedBody {
+        bytes: futures::io::Cursor<Vec<u8>>,
+        observe: Option<Box<dyn FnOnce() + Send + Sync>>,
+    }
+
+    impl futures::AsyncRead for ObservedBody {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buffer: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if let Some(observe) = self.observe.take() {
+                observe();
+            }
+            std::pin::Pin::new(&mut self.bytes).poll_read(cx, buffer)
+        }
+    }
+
+    /// The temporary archive is named after the version, and a pre-release
+    /// version already ends in dot-separated identifiers: derived by swapping
+    /// the last extension it became `0.1.5-rc.download`, which is itself a
+    /// version.
+    #[test]
+    fn the_archive_in_flight_is_never_named_like_a_version() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = driver_archive("postgres").await;
+            let manifest = manifest_for("postgres", &archive, sha256_of(&archive), "0.1.5-rc.1");
+            let seen = Arc::new(Mutex::new(None));
+            let http = {
+                let root = root.path().to_path_buf();
+                let seen = seen.clone();
+                FakeHttpClient::create(move |request| {
+                    let manifest = manifest.clone();
+                    let archive = archive.clone();
+                    let root = root.clone();
+                    let seen = seen.clone();
+                    async move {
+                        if request.uri().path() == manifest_path() {
+                            return Ok(Response::builder().status(200).body(manifest.into())?);
+                        }
+                        let body = ObservedBody {
+                            bytes: futures::io::Cursor::new(archive),
+                            observe: Some(Box::new(move || {
+                                *seen.lock() = Some((
+                                    directory_entries(&root, "postgres"),
+                                    store::installed_path_in(&root, "postgres"),
+                                ));
+                            })),
+                        };
+                        Ok(Response::builder()
+                            .status(200)
+                            .body(AsyncBody::from_reader(body))?)
+                    }
+                })
+            };
+
+            installer(http, root.path())
+                .install("postgres")
+                .await
+                .unwrap();
+
+            let (entries, resolved) = seen
+                .lock()
+                .take()
+                .expect("the archive body must have been read");
+            assert_eq!(entries, [".0.1.5-rc.1.download"]);
+            assert!(entries.iter().all(|name| !store::is_version(name)));
+            assert_eq!(resolved, None);
+            assert_eq!(directory_entries(root.path(), "postgres"), ["0.1.5-rc.1"]);
         });
     }
 }
