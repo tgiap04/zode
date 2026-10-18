@@ -48,6 +48,15 @@ handshake, because pairing pinned them. A relay that does not hold them cannot
 complete it, and a handshake made for one account and pair of devices does not
 open under another.
 
+**One thing a hostile relay can force.** A device that is told it was revoked
+deletes its pairings and its key, and what tells it is the relay or the account
+service. A hostile one can say so falsely. Zode believes two exact answers only:
+a `403` from the account service whose JSON `error` is `device_revoked`, or the
+relay closing the connection with code 4403 and the reason `device_revoked`.
+Anything else wipes nothing, including a different error text and a 4403 with
+another reason. The cost is a re-pair: the device is left with no trusted
+devices and no key. It gives no one access.
+
 **Tests that hold this.**
 
 | Claim                                                            | Test                                                                                                                                                                                                                                 |
@@ -60,6 +69,7 @@ open under another.
 | The relay forwards bytes untouched and logs sizes, never content | `delivers 1 MiB of random bytes byte for byte, both ways, and logs sizes only` (`web/backend/test/remote-relay.e2e-spec.ts`); `delivers binary frames byte for byte in both directions` (`web/backend/src/remote/relay-hub.spec.ts`) |
 | Pairing messages are forwarded untouched                         | `forwards pairing messages untouched` (`web/backend/test/remote-relay.e2e-spec.ts`)                                                                                                                                                  |
 | One account cannot reach another account's host                  | `never lets one account reach another account's host` (`web/backend/test/remote-relay.e2e-spec.ts`)                                                                                                                                  |
+| Only the exact revoked answer wipes a device                     | `only_the_exact_code_and_reason_say_the_device_was_revoked`, `only_a_body_whose_error_is_device_revoked_means_revoked` (`crates/remote_relay_client`)                                                                                |
 
 ## If something goes wrong
 
@@ -69,6 +79,10 @@ open under another.
 | The relay is man-in-the-middled | The attacker is in the position of the relay, and gets the same nothing. Keys were pinned at pairing; a handshake without them fails.                                                            |
 | A paired device is stolen       | The thief can use it as you. Revoke it ([below](#if-a-device-is-lost)). Until you do, assume a shell on your machine.                                                                            |
 | Your account is compromised     | An attacker can list your devices and open the relay, but cannot control a Zode without pairing, and pairing needs you to confirm on that Zode.                                                  |
+
+A malicious relay or account service can also tell a device that it was
+revoked, which makes the device delete its pairings and key. See
+[above](#what-the-relay-can-and-cannot-do) for the only answers that count.
 
 A controller Zode also checks that the key a host presents matches the key
 your account lists for it, and refuses to pair if it does not.
@@ -91,21 +105,59 @@ attacker who wants to be paired.
   device afterwards does not undo that: the relay could hold that message back,
   so A does not wait for it. If you confirmed on A by mistake, remove the device
   under **Manage Trusted Devices…**.
-- **Lockouts.** A takes one pairing at a time, a request expires after 120
-  seconds, and it takes at most three requests an hour. Three failed attempts
-  lock pairing, and the lock does not expire: you unlock it explicitly under
-  **Manage Trusted Devices…**, with **Unlock Pairing**.
+- **Lockouts.** A takes one pairing at a time and a request expires after 120
+  seconds. It asks you at most three times an hour, and the allowance counts
+  questions that were actually shown to you, not requests. A request abandoned
+  before you were asked neither holds pairing nor spends any of the three. Three
+  failed attempts lock pairing, and the lock does not expire: you unlock it
+  explicitly under **Manage Trusted Devices…**, with **Unlock Pairing**.
+- **Answered requests are capped too.** Abandoning a request costs you nothing,
+  but answering it lets the requester learn the digits before it reveals, so a
+  relay could otherwise try codes without limit by closing every exchange whose
+  digits it did not like. Zode therefore also counts requests it answered,
+  whether or not you were asked afterwards: at most three an hour for one
+  requesting device and twelve an hour for all of them. A relay can invent
+  device ids, so the overall cap is the one that bounds guessing; the
+  per-device cap is for a device that is merely broken. A request over either
+  cap is turned away, and the message says roughly how long to wait.
+- **Turning remote control off and on resets nothing.** The lockout and the
+  hourly counts are kept for the signed-in account while remote control is off;
+  only signing in as a different account starts them fresh.
+- **What counts as a failed attempt.** A reveal that does not match its
+  commitment, and **Reject**. A question that goes away without an answer, such
+  as one another dialog replaces, turns the device away but is not a failed
+  attempt: digits nobody compared did not fail to match.
+- **You are told when a request is turned away.** Zode shows a message when it
+  refuses a request because the hourly allowance is used up, because too many
+  requests were answered this hour (the message says someone may be trying to
+  guess a pairing code), because pairing is locked, or because the list of
+  trusted devices is full (32 devices) or cannot be read. That last check happens before you are shown any digits, so you never
+  compare digits for a device that cannot be saved.
+- **Pairing a device again replaces it.** If the device is already trusted, the
+  prompt says so and says that trusting it replaces what is saved for it. When
+  the key is new, confirming also ends every session that device had under the
+  old key.
+- **Names are cleaned.** A device's name comes from the account service, which
+  every device on your account can write to. Before Zode shows one it removes
+  control characters and the characters that reorder text, and keeps at most 64
+  characters. A name with nothing left becomes a generic one.
 
-| Claim                                                           | Test                                                                                                         |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| A reveal that does not match its commitment is refused          | `a_reveal_that_does_not_match_the_commitment_is_refused` (`crates/remote_relay_protocol`)                    |
-| A swapped requester key fails the commitment                    | `a_swapped_requester_key_fails_the_commitment` (`crates/remote_relay_protocol`)                              |
-| Repeated failures lock pairing until the user resets it         | `repeated_failures_lock_pairing_until_the_user_resets_it` (`crates/remote_relay_protocol`)                   |
-| Three mismatches lock pairing on the host                       | `a_mismatched_commitment_ends_pairing_and_three_of_them_lock_it` (`crates/remote_control`)                   |
-| A lockout does not expire; only unlocking ends it               | `a_lockout_does_not_expire_and_only_unlock_ends_it` (`crates/remote_control`)                                |
-| A lockout survives the connection dropping                      | `a_lockout_survives_the_connection_dropping_and_coming_back` (`crates/remote_control`)                       |
-| Nothing is pinned and no session opens without confirmation     | `nothing_is_pinned_and_no_session_opened_without_confirmation` (`crates/remote_relay_client`)                |
-| A man in the middle that can finish the handshake is not pinned | `a_machine_in_the_middle_that_could_finish_the_handshake_is_still_not_pinned` (`crates/remote_relay_client`) |
+| Claim                                                           | Test                                                                                                                                                                                  |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A reveal that does not match its commitment is refused          | `a_reveal_that_does_not_match_the_commitment_is_refused` (`crates/remote_relay_protocol`)                                                                                             |
+| A swapped requester key fails the commitment                    | `a_swapped_requester_key_fails_the_commitment` (`crates/remote_relay_protocol`)                                                                                                       |
+| Repeated failures lock pairing until the user resets it         | `repeated_failures_lock_pairing_until_the_user_resets_it` (`crates/remote_relay_protocol`)                                                                                            |
+| Three mismatches lock pairing on the host                       | `a_mismatched_commitment_ends_pairing_and_three_of_them_lock_it` (`crates/remote_control`)                                                                                            |
+| A lockout does not expire; only unlocking ends it               | `a_lockout_does_not_expire_and_only_unlock_ends_it` (`crates/remote_control`)                                                                                                         |
+| A lockout survives the connection dropping                      | `a_lockout_survives_the_connection_dropping_and_coming_back` (`crates/remote_control`)                                                                                                |
+| Nothing is pinned and no session opens without confirmation     | `nothing_is_pinned_and_no_session_opened_without_confirmation` (`crates/remote_relay_client`)                                                                                         |
+| A man in the middle that can finish the handshake is not pinned | `a_machine_in_the_middle_that_could_finish_the_handshake_is_still_not_pinned` (`crates/remote_relay_client`)                                                                          |
+| A request abandoned before you were asked costs nothing         | `a_request_abandoned_before_anyone_was_asked_neither_holds_pairing_nor_spends_the_allowance` (`crates/remote_control`)                                                                |
+| A question closed unanswered is not a failed attempt            | `closing_the_question_unanswered_is_not_a_failed_guess` (`crates/remote_control`); `a_question_replaced_by_another_modal_does_not_count_toward_the_lockout` (`crates/remote_control`) |
+| You are told when the allowance is spent                        | `once_the_allowance_is_spent_the_person_is_told_why_nothing_was_asked` (`crates/remote_control`)                                                                                      |
+| A full trust store is reported before you compare digits        | `a_full_trust_store_is_said_before_the_person_compares_digits` (`crates/remote_control`)                                                                                              |
+| Re-pairing with a new key ends the sessions made with the old   | `re_pairing_a_device_with_a_new_key_ends_the_sessions_made_with_the_old_one` (`crates/remote_control`)                                                                                |
+| A device name arrives cleaned and short                         | `names_from_the_directory_arrive_clean_and_short` (`crates/remote_relay_client`)                                                                                                      |
 
 ## A paired device has a shell on A
 
@@ -143,39 +195,65 @@ a toast on this screen names the device and the session.
 
 ### If a device is lost
 
-1. On A, open **Manage Trusted Devices…** (status-bar indicator, or the
-   `remote_control::ManageDevices` action) and choose **Forget** for that
+1. On A, open **Manage Trusted Devices…** (account menu, status-bar indicator,
+   or the `remote_control::ManageDevices` action) and choose **Forget** for that
    device. This ends its session at once; it cannot return without pairing again.
+   It works while remote control is off, so you can forget a device before you
+   turn remote control back on.
 2. For a browser, also sign it out on the web devices page,
    `zodekit.site/account/devices`.
 3. If in doubt, **Disconnect All Devices** or **Turn Off Remote Control**.
 
 Revocation also wipes credentials on the revoked device itself: a device that
-the relay tells has been revoked deletes its key and every pairing. An ordinary
-network failure does not: a dropped connection is retried with backoff, and
-only an explicit revocation deletes anything.
+is told it has been revoked deletes its key and every pairing. Only the two
+exact answers [described above](#what-the-relay-can-and-cannot-do) count. An
+ordinary network failure does not: a dropped connection is retried with
+backoff, and a sign-in that ended for another reason stops remote control until
+you sign in again but deletes nothing.
 
-| Claim                                                            | Test                                                                                                                       |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Forgetting a device ends its session and it cannot come back     | `forgetting_a_device_ends_its_session_and_it_cannot_come_back` (`crates/remote_control`)                                   |
-| A revocation removes the pin and the session                     | `the_relay_announcing_a_revoked_device_removes_its_pin_and_its_session` (`crates/remote_control`)                          |
-| Only explicit revocation wipes pins and key                      | `only_an_explicit_device_revocation_wipes_the_pins_and_key` (`crates/remote_relay_client`)                                 |
-| Revoking during an open project stops the project server         | `revoking_the_device_during_an_open_project_stops_the_project_server` (`crates/remote_control`)                            |
-| The relay closes a revoked device's sockets                      | `closes an editor's live socket when the device is revoked, within a second` (`web/backend/test/remote-relay.e2e-spec.ts`) |
-| Trusting a host to control says nothing about it controlling you | `hosts_pinned_for_control_never_become_devices_allowed_to_control` (`crates/remote_relay_client`)                          |
+**Forget**, a device the relay reports as revoked, and the wipe on a revoked
+device each show a message if the change could not be saved, instead of looking
+done. A forget that was not saved can leave the device trusted again after Zode
+restarts.
+
+Forgetting a host from the controlling Zode ends every live session with that
+host as well.
+
+The device key lives in your keychain once per release channel. Stable keeps
+`zode://remote-device-key/{user_id}`; the other channels use
+`zode://remote-device-key-{channel}/{user_id}`, where `{channel}` is `dev`,
+`nightly` or `preview`. A development build that is revoked therefore never
+deletes the key of the app you installed.
+
+| Claim                                                            | Test                                                                                                                                 |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Forgetting a device ends its session and it cannot come back     | `forgetting_a_device_ends_its_session_and_it_cannot_come_back` (`crates/remote_control`)                                             |
+| A revocation removes the pin and the session                     | `the_relay_announcing_a_revoked_device_removes_its_pin_and_its_session` (`crates/remote_control`)                                    |
+| Only explicit revocation wipes pins and key                      | `only_an_explicit_device_revocation_wipes_the_pins_and_key` (`crates/remote_relay_client`)                                           |
+| Revoking during an open project stops the project server         | `revoking_the_device_during_an_open_project_stops_the_project_server` (`crates/remote_control`)                                      |
+| The relay closes a revoked device's sockets                      | `closes an editor's live socket when the device is revoked, within a second` (`web/backend/test/remote-relay.e2e-spec.ts`)           |
+| Trusting a host to control says nothing about it controlling you | `hosts_pinned_for_control_never_become_devices_allowed_to_control` (`crates/remote_relay_client`)                                    |
+| A sign-in that ended for another reason deletes nothing          | `a_revoked_sign_in_halts_remote_control_but_keeps_the_key_and_the_pins` (`crates/remote_control`)                                    |
+| Devices can be listed and forgotten while remote control is off  | `trusted_devices_are_listed_and_forgotten_while_remote_control_is_off` (`crates/remote_control`)                                     |
+| A forget that cannot be saved says so                            | `a_forget_that_cannot_be_saved_says_so_instead_of_looking_done` (`crates/remote_control`)                                            |
+| Forgetting a host ends the sessions open to it                   | `forgetting_a_host_ends_the_sessions_open_to_it` (`crates/remote_relay_client`)                                                      |
+| Each release channel has its own key entry                       | `no_two_channels_share_a_keychain_entry`, `removing_one_channels_key_leaves_the_other_channels_alone` (`crates/remote_relay_client`) |
 
 ## Off means off
 
 With `remote_control.enabled` false, Zode opens no connection for remote
 control and taps no terminal. Turning it off while sessions are open takes down
-every connection, tap and project server.
+every connection, tap and project server. Quitting Zode does the same: sessions
+end and project servers stop, so neither a project server nor the terminals a
+device started in it outlive Zode. It does not change the `enabled` setting.
 
-| Claim                                                    | Test                                                                                         |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| It ships off, with a 30-minute idle limit                | `remote_control_ships_off_with_a_thirty_minute_idle_limit` (`crates/remote_control`)         |
-| While off, no socket is opened and no terminal is tapped | `while_disabled_no_socket_is_opened_and_no_terminal_is_tapped` (`crates/remote_control`)     |
-| Switching off disconnects at once and stays off          | `turning_it_off_from_the_action_disconnects_at_once_and_stays_off` (`crates/remote_control`) |
-| Turning it off stops the project server                  | `turning_remote_control_off_stops_the_project_server` (`crates/remote_control`)              |
+| Claim                                                    | Test                                                                                                                        |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| It ships off, with a 30-minute idle limit                | `remote_control_ships_off_with_a_thirty_minute_idle_limit` (`crates/remote_control`)                                        |
+| While off, no socket is opened and no terminal is tapped | `while_disabled_no_socket_is_opened_and_no_terminal_is_tapped` (`crates/remote_control`)                                    |
+| Switching off disconnects at once and stays off          | `turning_it_off_from_the_action_disconnects_at_once_and_stays_off` (`crates/remote_control`)                                |
+| Turning it off stops the project server                  | `turning_remote_control_off_stops_the_project_server` (`crates/remote_control`)                                             |
+| Quitting turns it off and stops the project server       | `quitting_zode_turns_remote_control_off`, `quitting_zode_stops_the_project_server_and_its_daemon` (`crates/remote_control`) |
 
 ## Where this is weaker than you might assume
 

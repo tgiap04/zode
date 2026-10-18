@@ -64,6 +64,13 @@ the trash, so deleting one asks opencode itself to remove it (`opencode session
 delete`). **That cannot be undone.** A bulk delete says so explicitly whenever
 the sweep includes an opencode session.
 
+Deleting does not stop an agent that is still running in an open tab. If a tab
+is running the session you are about to delete, the confirmation says so and
+suggests closing the tab first. The agent may keep writing to its transcript
+after it is moved, so the tab can stop reporting finished turns and the session
+can come back in the history list. Zode does not refuse the delete: closing the
+tab is your call.
+
 ## Forked sessions are not tracked
 
 **Continue in New Session…** in the history panel forks a session. The tab
@@ -89,6 +96,19 @@ several CLI processes at startup, each loading its transcript and any MCP server
 it is configured with. The [project footprint
 indicator](./project-footprint-indicator.md) on the status bar is where that shows
 up.
+
+## Where Claude Code's transcripts are read from
+
+Zode reads Claude Code's transcripts from the `projects` folder under
+`CLAUDE_CONFIG_DIR` when that variable is set to an absolute path, and from
+`~/.claude/projects` otherwise. It reads the variable from its own environment.
+An empty value and a relative path are ignored: a relative path is relative to
+the CLI's working directory, which Zode does not have, so Zode reads the default
+folder instead.
+
+Only transcripts named by a session UUID are listed. A `.jsonl` file with any
+other name is skipped, because its name is what gets passed to `--resume`, and
+Claude Code cannot resume a transcript it did not name that way.
 
 ## Where it is stored
 

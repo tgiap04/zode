@@ -49,29 +49,125 @@ downloaded one.
 A release build ships no driver binaries at all — the release bundles used to
 build and include them, but they no longer do. Each driver is fetched the
 first time someone connects to the engine it speaks for, from Zode's own API
-rather than from a GitHub release. The manifest of the latest published driver
-set comes from `{ZODE_API_URL}/drivers/latest/zode-db-drivers-manifest.json`,
-and each archive from `{ZODE_API_URL}/drivers/{version}/{asset}`, where
-`{version}` is the one that manifest names. The archive is verified against the
-manifest and its SHA-256 before anything is unpacked (see
-`crates/database/src/install/`). Development and release builds download the
-same set, whatever version the app itself reports, and the server keeps only
-the set published last — there is no older one to fall back to. When the API
-has no manifest to serve, the download fails with a message that says so and
-points at `script/build-database-drivers` (or `make drivers`), not only the HTTP
-status. A manifest with no build of that driver for your platform names
-installing it by hand (below) as the other way out.
+rather than from a GitHub release. The app asks
+`{ZODE_API_URL}/drivers/latest/zode-db-drivers-manifest.json` only which
+version is current. It then fetches the signed manifest of that version from
+`{ZODE_API_URL}/drivers/{version}/zode-db-manifest-signed.tar.gz`, and each
+archive from `{ZODE_API_URL}/drivers/{version}/{asset}`. The signed manifest has
+an archive-shaped name only because the backend serves nothing else besides the
+manifest's own name; nothing reads it as an archive. Development and release
+builds download the same set, whatever version the app itself reports, and the
+server keeps only the set published last — there is no older one to fall back
+to.
+
+Before it runs anything the app checks, in this order (see
+`crates/database/src/signature.rs` and `crates/database/src/install/`):
+
+1. **The signature.** The signed manifest is one header line,
+   `zode-driver-manifest ed25519 <base64 signature>`, then the manifest exactly
+   as it was signed. The app verifies it against the Ed25519 public key built
+   into it before it believes any row or any checksum, because a checksum that
+   comes from the channel serving the binary proves nothing. A manifest that is
+   unsigned, signed by another key, or for a different version than the one
+   `latest` names is refused.
+2. **That it is not a rollback.** The app refuses a set older than the newest
+   one this machine has installed, which it records in
+   `<data_dir>/database_drivers/.newest-installed-version`. A signature proves
+   who published a set, not when, and every set ever published stays signed.
+   The same version is allowed: that is how a driver you removed comes back. If
+   going back is deliberate, delete that file. Where there is no such record, as on a
+   fresh install, a build refuses any set older than
+   `MINIMUM_DRIVER_SET_VERSION` (`0.1.5-0`, in `crates/database/src/install/store.rs`),
+   which is the lowest prerelease of the first set that was ever signed.
+3. **That the driver speaks our protocol.** Each row carries `protocol`, the
+   database protocol version the driver speaks. A driver this build cannot talk
+   to is refused before it is downloaded: a newer one says to update Zode, an
+   older one says no driver has been published for this version yet. A row with
+   no `protocol` skips this check, and the handshake still has the last word.
+4. **The download itself.** It stops once more arrives than the manifest said,
+   whatever the manifest says (never more than 512 MiB), and it gives up when a
+   connection delivers nothing for 30 seconds. Partial files are removed, also
+   when you walk away from a download.
+5. **The checksum.** The archive's SHA-256 is compared with the signed manifest
+   before anything is unpacked.
+
+When the API has no manifest to serve, or the set it serves is not signed, the
+download fails with a message that says so and points at
+`script/build-database-drivers` (or `make drivers`), not only the HTTP status. A
+manifest with no build of that driver for your platform names installing it by
+hand (below) as the other way out.
+
+Until a signed set has been published, a build that carries this check cannot
+download drivers. Drivers that are already installed keep working, and so do
+older apps, which read the unsigned copy under `latest`.
 
 `ZODE_API_URL` defaults to `https://api.zodekit.site/api`
 (`zode_account::api_url()`); point it at a backend you're running locally to
 test the download path end to end, e.g.
-`ZODE_API_URL=http://localhost:8000/api`. This is a public, unauthenticated
-route — the panel must work for someone who has never signed in.
+`ZODE_API_URL=http://localhost:8000/api`. Every URL the app follows must stay on
+that origin and be HTTPS; plain HTTP is accepted only for the machine's own
+loopback (`localhost`, `127.0.0.0/8` and `[::1]`). A backend you run yourself
+has to publish a manifest signed with the key your build trusts, or the
+download is refused. This is a public, unauthenticated route — the panel must
+work for someone who has never signed in.
 
 `script/bundle-mac` is what builds, signs and packages the drivers as those
 release assets, and CI runs it that way. `-n` skips both the build and the
 packaging; `make bundle` passes it, because a local bundle never carries
 drivers and publishing them is the release job's work.
+
+### Publishing and signing a driver set
+
+The release job publishes with
+`script/publish-drivers-to-web [--force] <directory> <version>`, where the
+directory holds the `zode-db-*.tar.gz` archives and
+`zode-db-drivers-manifest.json`. The script signs first, so a missing or wrong
+key costs nothing. It then uploads the archives, uploads the signed manifest,
+publishes the manifest last, and finally checks that `latest` names the version
+and that the backend serves the signed manifest byte for byte as it was signed.
+Two copies of the manifest go out: the plain one, which is what `latest` serves
+and all an older app reads, and the signed one, which carries each driver's
+`protocol` and is the one the app acts on.
+
+The key comes from the environment, and one of the two is required:
+
+| Variable                       | Holds                                                                                                          |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `ZODE_DRIVER_SIGNING_KEY`      | The base64 of the PKCS#8 private key file, on one line. This is the CI secret.                                 |
+| `ZODE_DRIVER_SIGNING_KEY_FILE` | The path of that PKCS#8 file, for a person publishing from a machine that holds it. It wins when both are set. |
+
+The script refuses a version older than the one that is published now, because
+a publish replaces the previous set for everybody, and a machine that already
+installed the newer set would refuse the older one anyway. Pass `--force` when
+going back is the point.
+
+`cargo xtask driver-manifest` is what the script calls:
+
+- `generate-key --out <file>` writes a new Ed25519 key, refusing to overwrite a
+  file, and prints the public half to embed as `DRIVER_MANIFEST_PUBLIC_KEY` in
+  `crates/database/src/signature.rs`.
+- `sign --manifest <file> --out <file> [--key-file <file>]` writes the signed
+  manifest. It refuses a key whose public half is not the one built into your
+  checkout, since the app would refuse what it signs.
+- `check-key [--key-file <file>]` fails unless the signing key is present and its
+  public half is the one built into your checkout. It signs nothing.
+- `compare-versions <version> <other>` prints `older`, `same` or `newer`, by
+  semver, so `0.1.5-rc.1` is older than `0.1.5`.
+
+In CI the release workflow does not wait until the end to find out the key is
+wrong. An early `check_driver_signing_key` job builds `xtask` and runs
+`xtask driver-manifest check-key` with `ZODE_DRIVER_SIGNING_KEY`, and the job
+that creates the draft release needs it, so a missing or mismatched secret stops
+the run before anything is created or uploaded. The asset upload job builds
+`xtask` in a step of its own that holds no secret, and hands that binary to
+`script/publish-drivers-to-web` as `ZODE_XTASK_BIN`, so the signing key and the
+upload token are never in the environment while the tree compiles. Release assets
+are uploaded with `gh release upload --clobber`, so running the job again after a
+partial failure replaces what is already there.
+
+The app trusts only the key it was built with, so rotating the key takes an app
+release. Keep the private key out of the repository and out of logs. The tooling
+never prints it.
 
 Downloaded drivers land under `<data_dir>/database_drivers/<id>/<version>/`,
 where `<version>` is the one the manifest named — the published driver set's
@@ -82,9 +178,9 @@ version, not the app's. `data_dir` is:
 - **Windows**: `%LOCALAPPDATA%\Zode`
 
 A downloaded driver is kept until you remove it: Zode never checks for a newer
-set, and fetches the manifest only when you ask for a download. If more than one version directory is present (an old one could
-not be deleted while its driver was running), the most recently installed one
-wins. Whether a driver works with the app is decided when you connect, by the
+set, and fetches the manifest only when you ask for a download. If more than
+one version directory is present (an old one could not be deleted while its
+driver was running), the most recently installed one wins. Whether a driver works with the app is decided when you connect, by the
 protocol handshake. A driver that speaks a different protocol than this build is
 refused, and the message says to remove it in the connection dialog and download
 it again, or to update Zode if that does not help.
@@ -94,18 +190,28 @@ still works by placing the binary at
 `<data_dir>/database_drivers/<id>/<version>/zode-db-<id>` (add `.exe` on
 Windows). `<version>` can be any directory name of the form
 `MAJOR.MINOR.PATCH[-pre]`, e.g. `0.0.0`. Zode does not run a driver from a
-directory with any other name, and the next download of that driver deletes
-every directory under `<id>/` except the version it installs. The
-executable name and directory shape are exactly what the download path itself
-produces, so a driver placed there by hand is indistinguishable from one that
-was downloaded, remove button included.
+directory with any other name. The next download of that driver deletes every
+other version directory under `<id>/`, one you placed by hand included, and
+clears away leftovers of an interrupted download once they are an hour old.
 
-That button is a trash icon ("Remove the downloaded driver") on an engine row of
-the database panel's connection dialog. It appears only for a driver Zode
-downloaded, since a driver beside the executable belongs to the checkout or the
-bundle, and one named by `ZODE_DB_<ID>` to whoever named it. It deletes
-`<data_dir>/database_drivers/<id>/`, every version it holds, and the next
-connection to that engine is offered the download again.
+A driver placed by hand is found and used like any other, and it is offered for
+removal too. Every install Zode makes writes a `.zode-installed` marker beside
+the executable, and only a driver with that marker is known to be one Zode
+downloaded, and so one that comes back with a click. A driver with no marker may
+have been placed by hand, or downloaded by an earlier Zode that wrote none; Zode
+cannot tell which.
+
+That button is a trash icon on an engine row of the database panel's connection
+dialog. It appears for a driver in the download store, not for one beside the
+executable, which belongs to the checkout or the bundle, nor for one named by
+`ZODE_DB_<ID>`, which belongs to whoever named it. Choosing it asks first. For a
+driver Zode downloaded the tooltip reads "Remove the downloaded driver" and the
+question is "Remove the downloaded driver?". For one with no marker the tooltip
+reads "Remove the driver", and the question names the folder it would empty,
+`<data_dir>/database_drivers/<id>/`, and says the driver cannot be downloaded
+again if you placed it yourself. Either way **Remove** deletes that folder, every
+version it holds, and the next connection to that engine is offered the download
+again. Connections that are already open keep working until they are closed.
 
 A driver that cannot be found is never started. Connecting to it fails at once
 with ``the `postgres` driver is not installed -- download it from the connection

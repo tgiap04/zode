@@ -45,8 +45,16 @@ not cause early notifications. The one exception is a Stop hook that runs for
 more than about eight seconds on a Claude version that never writes a
 turn-duration line: Zode may announce the turn before the hook finishes.
 
-If the transcript never appears, there is no "finished answering"
-notification for that tab, but the "session ended" one still fires.
+If the transcript never shows a turn mark while the CLI writes output for about
+a minute, Zode stops trusting it for that tab. It may be somewhere Zode does not
+look, or its format may have changed. The tab then falls back to the
+[quiet period](#every-other-agent-the-quiet-period), the same as every other
+agent, and the "finished answering" notification comes from that. The first
+turn mark that does arrive puts the tab back on the transcript. The "session
+ended" notification fires either way.
+
+If you run `/clear`, Claude starts a new transcript. The tab follows it, so
+turns keep being reported.
 
 ### Waiting for your approval
 
@@ -59,8 +67,9 @@ dialog.
 
 ## Every other agent: the quiet period
 
-Any other agent, and a Claude tab without a tracked session, uses the
-heuristic described here. An agent tab has an "is producing a response" edge,
+Any other agent, a Claude tab without a tracked session, and a Claude tab whose
+transcript Zode has stopped trusting (see above) use the heuristic described
+here. An agent tab has an "is producing a response" edge,
 and once that edge goes from true to false and stays false for
 `quiet_period_ms`, a notification fires.
 

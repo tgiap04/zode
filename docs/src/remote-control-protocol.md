@@ -65,6 +65,11 @@ The rules around the role are the relay's contract:
 - A client socket is greeted with `hello` carrying `role` `client`, then a
   `presence` list of the account's hosts that are connected, which does not
   include the client's own device.
+- A Zode checks the `role` in that `hello` against the role it asked for. A
+  `hello.role` that does not match the socket's role stops the client as an
+  incompatible relay, as an unknown `relay_protocol` does. Without the check, a
+  relay that ignored `?role=` could register a client socket as the device's
+  host and take the host slot from the real host.
 - A client opens a session with `open`, naming a host's device id and a `mode`
   of `pair` or `session`. Opening to its own device id is answered with `error`
   `unauthorized`.
@@ -152,8 +157,14 @@ counter value as nonce, giving `ciphertext ‖ 16-byte tag`.
 - A message that fails to authenticate **closes the session for good**. There
   is no skipping a bad message and carrying on.
 - A session ends after 2^32 messages in one direction. The peers run a fresh
-  handshake instead of rekeying. A stream that would not fit in the messages
-  left is refused whole, before any of it is sent, and the session is closed.
+  handshake instead of rekeying. A caller that holds a whole stream before
+  sending it can ask for it to be sealed at once (`encrypt_data_chunks` in
+  `remote_relay_protocol`); a stream that would not fit in the messages left is
+  then refused whole, before any of it is sent, and the session is closed. Zode's
+  relay client and host do not do that. They seal frame by frame as bytes
+  arrive, so running out of messages ends the session partway through a stream,
+  which the peer sees as the session closing and not as a stream that ended
+  cleanly.
 - Noise caps a message at 65535 bytes. Plaintext per message is held to 61440
   bytes (60 KiB), header included.
 
@@ -245,9 +256,25 @@ offsets, which may fall inside a UTF-8 character or an escape sequence, and the
 same goes for live output.
 
 A new snapshot (starting with `ESC c` again) replaces the screen whenever the
-host's size changes, a slow reader fell too far behind, output was lost, or a
-settle snapshot (below) is due; at most one every 250 ms per terminal and
-device. Not carried: underline colour, hyperlinks, the primary screen behind an
+host's size changes, a slow reader fell too far behind, output was lost, the
+program leaves the alternate screen, or a settle snapshot (below) is due; at
+most one every 250 ms per terminal and device. The spacing holds across a
+detach and a re-attach too: a device that attaches again is owed a snapshot no
+sooner than one that stayed.
+
+Two of those need a word:
+
+- **Leaving the alternate screen.** A snapshot taken while a program is on the
+  alternate screen carries that screen and not the primary one behind it, so the
+  device has nothing to return to when the program leaves. The host sends a
+  fresh snapshot then, to each device that was sent such a snapshot.
+- **A slow reader.** When live output overflows a device's queue, the queue is
+  dropped and a fresh snapshot is wanted. A snapshot that is already being sent
+  is delivered whole, and the fresh one follows it: cutting it off would leave a
+  device that cannot keep up with a blank screen for as long as the output
+  lasts.
+
+Not carried: underline colour, hyperlinks, the primary screen behind an
 alternate one, and whether the saved cursor was waiting to wrap. Of the
 character sets, only ASCII and line drawing exist on the host, so only those are
 carried.
@@ -288,14 +315,25 @@ not use this.
   A request missing `stream_id`, `app_version` or `proto_version`, or naming
   stream 0 or a stream from `0x80000000` up, is answered with `error` code
   `malformed` and the `request_id`.
+- **Refused while earlier servers are going.** At most four project servers may
+  be in the middle of being stopped at once. A device that opens a project
+  while four are still on their way out is answered with `error` code
+  `rate_limited` and the `request_id`, with the message "earlier project servers
+  are still being stopped; try again shortly". Nothing is started, and the
+  session carries on.
 - **Answer.** `ide_opened` repeats `request_id` and `stream_id`, and tells the
   controller what it cannot learn from the stream before it has built a
   connection on it: `path_style` (`posix` or `windows`), the host's login
   `shell` and its `default_shell`.
 - **Framing.** On the stream, bytes flow both ways until the stream ends. They
-  are the project server's own framing, which this protocol does not look
-  inside: each message is a 4-byte little-endian length followed by that many
-  bytes. Treat the stream as bytes; a message may be cut across data frames.
+  are the project server's own framing, which this protocol does not interpret:
+  each message is a 4-byte little-endian length followed by that many bytes.
+  Treat the stream as bytes; a message may be cut across data frames. Neither the
+  controller nor the project server reads a message longer than 256 MiB: a
+  length over that ends the stream with an error. The host does read the
+  controller's side far enough to tell a ping from a request, so that the idle
+  limit can count requests and not the heartbeat. It never acts on what it
+  reads, and the bytes go on to the server unchanged.
 - **One per session.** A session has at most one project stream. A second
   `ide_open` while one is open is answered with `error` code `too_large` and the
   `request_id`; the first is untouched. After it ends, another may be opened.
@@ -303,6 +341,18 @@ not use this.
   controller ending it stops the project server and every terminal it opened;
   the host ending it means the server exited. Neither ends the session: the
   mirror keeps working. Ending the session ends the stream the same way.
+- **Stopping the server.** The host asks the server to stop, which makes it
+  close its terminals first, and kills it if it is still there after 5 seconds.
+  Where the system has `SIGTERM` that is the request. On Windows there is no
+  such signal, so the host writes a `server.stop` file in the server's state
+  directory, beside its pid file, and the server, which looks for the file every
+  250 ms, stops and quits when it appears. A session that ends before the server
+  has written its pid file is still stopped: the host waits up to 5 seconds for
+  the file.
+- **Terminals.** A project server holds at most 16 terminals for its controller
+  at once, and a terminal that is still closing counts until its process has
+  been collected. One more is refused with "too many terminals: at most 16 may
+  be open at once".
 - **Versions.** The project server's messages are only compatible between
   identical builds, and nothing is uploaded over the relay in this version. So
   `app_version` must equal the host's and `proto_version` must equal the host's
@@ -341,16 +391,27 @@ program is run to produce a diff.
   between.
 - **Diff.** `diff_request` needs `worktree_id`. The reply carries a `stream_id`;
   the unified diff of the working tree against `HEAD` (staged and unstaged
-  changes, not untracked files) follows on it in the same way. It covers only
-  the files inside that folder, so a folder that is part of a larger repository
-  does not show the rest of it, and leaves out whatever the folder does not
-  show: private files and files the user's `file_scan_exclusions` hide. No
-  external diff program and no textconv program is run. The repository's own
-  git filters (a `clean` filter named in its attributes, say) still apply, as
-  they do to any `git status` or `git diff` Zode runs. A changed path that is
-  not valid UTF-8 is left out. At most 2 MiB is sent, cut at the end of a line; `truncated` says it was cut. A folder that
-  is not in a git repository, or a repository with no commit yet, is answered
-  with `not_found`.
+  changes, plus files git does not track yet) follows on it in the same way.
+  Files git does not track yet and does not ignore are each shown as a new file,
+  up to 100 of them. It covers only the files inside that folder, so a folder
+  that is part of a larger repository does not show the rest of it, and leaves
+  out whatever the folder does not show: private files and files the user's
+  `file_scan_exclusions` hide, new files included. No external diff program and
+  no textconv program is run. The repository's own git filters (a `clean`
+  filter named in its attributes, say) still apply, as they do to any
+  `git status` or `git diff` Zode runs. A changed submodule appears in its short
+  form, the old and new commit, whatever the user's `diff.submodule` says. A
+  changed path that is not valid UTF-8 is left out. At most 2 MiB is sent, cut at the end of a line. `truncated` says
+  the diff is not all of the changes: it was cut, more than 100 new files
+  exist, one could not be read, or 8 seconds into the read there were new files
+  still to start. A folder that is not in a git repository, or
+  a repository with no commit yet, is answered with `not_found`.
+- **Time spent on a diff.** Git is given 20 seconds for one diff. If it takes
+  longer, git is stopped and the request is answered with `internal`, which
+  leaves room before the 30 seconds every request gets. A diff that nobody is
+  waiting for any more, because the request timed out or the session ended, is
+  stopped too, and one still waiting its turn is skipped, so it does not hold up
+  the repository's other git work.
 - **Streams the host opens.** The `stream_id` in a reply is chosen by the host
   and is at least `0x80000000`, so it never meets an id a browser picked for
   its own streams; a browser may not pick one that high for `terminal_attach`
@@ -373,13 +434,18 @@ program is run to produce a diff.
   the answers already waiting plus the largest answer (2 MiB) that each request
   being worked on, this one included, may yet produce still fit in 8 MiB; if
   not, it is answered with `rate_limited`. Those refusals, and the errors for
-  requests that were accepted, are queued behind the answers already waiting,
-  so they arrive in order. An error for a request that was never accepted --
+  requests that were accepted, are queued behind the control messages already
+  waiting, so they arrive in order. Control messages are small and go ahead of
+  file and diff frames: a reply does not wait behind a file, and a file's frames
+  never pass the reply that names their stream. An error for a request that was never accepted --
   `unsupported`, or `malformed` for a missing `worktree_id` -- is sent at once
   and may arrive ahead of answers still waiting; its `request_id` says which
   request it answers. A device whose waiting answers have reached 8 MiB plus
   another 64 KiB is ignoring what it is told, and its session is ended when the
-  next message is queued for it. Ending a session cancels the requests still
+  next answer is queued for it. Only what the device asked for counts toward
+  that. What the host pushes unasked, such as an agent's status or the list of
+  terminals, never ends a session: a newer push replaces an older one about the
+  same thing that is still waiting, and at most 256 pushes wait for a device. Ending a session cancels the requests still
   being worked on. A request that is not finished
   after 30 seconds is answered with `internal` and its place is freed. A
   request missing `worktree_id` where it is needed is `malformed`.
@@ -422,8 +488,9 @@ opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
   `updated_at` descending, then `id` ascending. `limit` defaults to 50 and is
   held to 1 through 200. `before` is `{updated_at, id}`, copied from the `next`
   of an earlier reply, and the page starts after that entry. A request without
-  `before` makes the host read the agents' session stores again first; later
-  pages are read without another scan.
+  `before` makes the host read the agents' session stores again first, unless a
+  read finished less than 5 seconds ago, in which case it answers from that one.
+  Later pages are read without another scan.
 - **Long pages.** A page that does not fit one control message arrives as
   several `sessions_list_reply` messages with the same `request_id`, in order.
   Every one but the last has `more` set, and only the last carries `next`, and
@@ -459,7 +526,11 @@ opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
   it opens a tab on the session in the window whose folder holds the directory,
   and answers `session_resumed` without `open_agent_id`. The tab is added after
   the answer and arrives like any other, as an `agent_update` whose
-  `session_id` is the one asked for.
+  `session_id` is the one asked for. A tab that is still starting its agent does
+  not count as running yet, but it does hold its session: a second
+  `session_resume` for that session opens nothing. Its answer is still a
+  `session_resumed` without `open_agent_id`, and the tab that arrives is the one
+  the first request opened.
 - **Forking.** With `fork` true the host always opens a new tab, and the agent
   branches the conversation: Claude Code is started with
   `--resume <id> --fork-session` and opencode with `-s <id> --fork`. The agent
@@ -474,7 +545,7 @@ opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
   a tab has been answered, the next from that device is answered `rate_limited`
   for 3 seconds, whichever session it names and whatever its `fork`. The tab is
   added after the answer and an agent counts as running only once its process
-  is, so until then nothing else says the session is open. An answer that only
+  is, so until then `open_agent_id` is not set for it. An answer that only
   points at a running tab, and an error, open nothing and start no wait. A
   request not finished after 30 seconds is answered with `internal`.
 - **Notice on the host.** When a session is opened for a device, the host shows
@@ -570,8 +641,8 @@ machine in the middle generates keypairs until its two fake keys produce the
 same six digits on both sides, about a million tries. With the requester
 committing to its nonce first, the acceptor's nonce and key are fixed before
 the requester's is revealed, so the digits are not something the attacker can
-steer after the fact. Each guess then needs the victim's cooperation, and one
-wrong match fails the pairing visibly.
+steer after the fact. Each guess then needs an answered request, which is
+capped (below), and one wrong match fails the pairing visibly.
 
 **Rules the acceptor enforces:**
 
@@ -583,6 +654,15 @@ wrong match fails the pairing visibly.
   that does not match the commitment, or digits the person says do not match. The
   lockout does not time out: only an explicit user action unlocks it, because a
   lockout that expires by itself only slows guessing down.
+- **Answered requests are capped.** The acceptor counts each `pair_request` it
+  answers with `pair_accept`, whether or not the person is asked afterwards:
+  at most 3 an hour for one requesting device id and 12 an hour across all
+  ids. Answering is what lets a requester learn the digits before it reveals,
+  so without the cap a relay could close every exchange whose digits it did not
+  like and try again at no cost to the person. A request over either cap is
+  closed without an answer, and the person is told. A refused request does not
+  count, and the count slides with the hour. Separately, the person is asked at
+  most 3 times an hour; that count includes only questions actually shown.
 - A reveal is one try. Whatever its outcome, the pending exchange ends.
 - A public key that is all zeros, or any other small-order point, is refused in
   `pair_request` and `pair_accept`.

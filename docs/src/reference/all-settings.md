@@ -2441,7 +2441,7 @@ Example:
 **Options**
 
 - `enabled`: `boolean`
-- `idle_timeout_minutes`: `integer` minutes a connected device may send nothing before it is disconnected; `0` turns the limit off
+- `idle_timeout_minutes`: `integer` minutes a connected device may go unused before it is disconnected: typing in a terminal, browsing files, listing or resuming sessions, and requests from a project opened from another Zode count as use, while pings and that project's heartbeat do not; `0` turns the limit off. See [Remote control](../remote-control.md#turn-it-on)
 
 ## Project Footprint Indicator
 
