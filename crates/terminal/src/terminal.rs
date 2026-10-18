@@ -57,7 +57,7 @@ use terminal_hyperlinks::RegexSearches;
 use terminal_settings::{AlternateScroll, CursorShape, TerminalSettings};
 use theme::{ActiveTheme, Theme};
 use urlencoding;
-use util::{paths::PathStyle, truncate_and_trailoff};
+use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -512,6 +512,7 @@ impl TerminalBuilder {
             path_style,
             remote_tap_slot: Arc::default(),
             remote_parser: terminal_type_is_remote.then(RemoteParser::new),
+            remote_sync_expiry: None,
             #[cfg(any(test, feature = "test-support"))]
             input_log: Vec::new(),
         };
@@ -603,8 +604,6 @@ impl TerminalBuilder {
 
             #[cfg(windows)]
             let shell_program = shell_params.as_ref().map(|params| {
-                use util::ResultExt;
-
                 Self::resolve_path(&params.program)
                     .log_err()
                     .unwrap_or(params.program.clone())
@@ -756,6 +755,7 @@ impl TerminalBuilder {
                 path_style,
                 remote_tap_slot,
                 remote_parser: None,
+                remote_sync_expiry: None,
                 #[cfg(any(test, feature = "test-support"))]
                 input_log: Vec::new(),
             };
@@ -957,6 +957,13 @@ enum TerminalType {
 type RemoteParser =
     alacritty_terminal::vte::ansi::Processor<alacritty_terminal::vte::ansi::StdSyncHandler>;
 
+/// The timer that ends a synchronized update of a remote-backed terminal.
+/// Dropping it cancels the wait.
+struct RemoteSyncExpiry {
+    deadline: Instant,
+    _task: Task<()>,
+}
+
 /// What a remote-backed terminal asks of the process it stands in for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteTerminalCommand {
@@ -1049,6 +1056,8 @@ pub struct Terminal {
     /// Keeps an escape sequence or a character that straddles two chunks of
     /// remote output whole. Only a remote-backed terminal has one.
     remote_parser: Option<RemoteParser>,
+    /// Ends a synchronized update the remote program never closed.
+    remote_sync_expiry: Option<RemoteSyncExpiry>,
     /// Where the pty reader thread hands raw output to whoever mirrors this
     /// terminal. Empty until [`Terminal::attach_remote_tap`] fills it.
     remote_tap_slot: Arc<RemoteTapSlot>,
@@ -1220,11 +1229,17 @@ impl Terminal {
                     TerminalType::DisplayOnly => {}
                 }
 
+                let size_before = (term.columns(), term.screen_lines());
                 term.resize(new_bounds);
                 // If there are matches we need to emit a wake up event to
                 // invalidate the matches and recalculate their locations
                 // in the new terminal layout
-                if !self.matches.is_empty() {
+                //
+                // A mirror of this terminal learns of a new size from the same
+                // event, and has no output to learn it from while the program
+                // is idle.
+                let resized = (term.columns(), term.screen_lines()) != size_before;
+                if !self.matches.is_empty() || (resized && self.remote_tap_slot.is_installed()) {
                     cx.emit(Event::Wakeup);
                 }
             }
@@ -1717,11 +1732,52 @@ impl Terminal {
     /// A snapshot that starts with a full reset is fed the same way.
     pub fn feed_remote_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         let parser = self.remote_parser.get_or_insert_with(RemoteParser::new);
-        {
+        let sync_deadline = {
             let mut term = self.term.lock();
             parser.advance(&mut *term, bytes);
-        }
+            parser.sync_timeout().sync_timeout()
+        };
+        self.watch_remote_sync(sync_deadline, cx);
         self.record_pty_output();
+        cx.emit(Event::Wakeup);
+    }
+
+    /// While a synchronized update is open the parser holds every byte back
+    /// until the update is closed. A local terminal's event loop ends it after
+    /// a timeout, so a program that dies inside one cannot freeze the screen;
+    /// a remote-backed terminal has no event loop, and this timer stands in.
+    fn watch_remote_sync(&mut self, deadline: Option<Instant>, cx: &mut Context<Self>) {
+        let Some(deadline) = deadline else {
+            self.remote_sync_expiry = None;
+            return;
+        };
+        if self
+            .remote_sync_expiry
+            .as_ref()
+            .is_some_and(|expiry| expiry.deadline == deadline)
+        {
+            return;
+        }
+        let wait = deadline.saturating_duration_since(Instant::now());
+        self.remote_sync_expiry = Some(RemoteSyncExpiry {
+            deadline,
+            _task: cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |this, cx| this.end_remote_sync(cx))
+                    .log_err();
+            }),
+        });
+    }
+
+    fn end_remote_sync(&mut self, cx: &mut Context<Self>) {
+        self.remote_sync_expiry = None;
+        let Some(parser) = self.remote_parser.as_mut() else {
+            return;
+        };
+        {
+            let mut term = self.term.lock();
+            parser.stop_sync(&mut *term);
+        }
         cx.emit(Event::Wakeup);
     }
 
@@ -1788,6 +1844,14 @@ impl Terminal {
     /// The screen and its scrollback as bytes a fresh emulator can replay,
     /// with the sequence of the last tapped chunk it already contains.
     pub fn remote_snapshot(&self) -> RemoteSnapshot {
+        self.remote_snapshot_with_history(REMOTE_SNAPSHOT_HISTORY_LINES)
+    }
+
+    /// Like [`Self::remote_snapshot`], carrying at most `history_lines` lines
+    /// of scrollback. A snapshot that only has to put the screen right again,
+    /// for a reader that lost output, has no use for the scrollback, which is
+    /// most of its size.
+    pub fn remote_snapshot_with_history(&self, history_lines: usize) -> RemoteSnapshot {
         // The tap runs under this same lock, which is what makes the sequence
         // read below describe exactly the chunks already drawn into the grid.
         let term = self.term.lock();
@@ -1797,7 +1861,8 @@ impl Terminal {
             columns: u16::try_from(term.columns()).unwrap_or(u16::MAX),
             rows: u16::try_from(term.screen_lines()).unwrap_or(u16::MAX),
             sync_pending: term.is_sync_pending(),
-            bytes: render_snapshot(&term, REMOTE_SNAPSHOT_HISTORY_LINES),
+            alternate_screen: term.mode().contains(TermMode::ALT_SCREEN),
+            bytes: render_snapshot(&term, history_lines),
         }
     }
 
@@ -1807,6 +1872,15 @@ impl Terminal {
     /// an update, so a caller must bound how long it waits.
     pub fn remote_sync_pending(&self) -> bool {
         self.term.lock_unfair().is_sync_pending()
+    }
+
+    /// Whether the program is on the alternate screen, which a snapshot sends
+    /// without the primary screen behind it.
+    pub fn remote_in_alternate_screen(&self) -> bool {
+        self.term
+            .lock_unfair()
+            .mode()
+            .contains(TermMode::ALT_SCREEN)
     }
 
     pub fn toggle_vi_mode(&mut self) {
@@ -3675,6 +3749,199 @@ mod tests {
             })
         );
         assert!(!terminal.read_with(window, |terminal, _| terminal.is_pty_backed()));
+    }
+
+    #[gpui::test]
+    async fn test_a_synchronized_update_the_program_never_ends_is_ended_after_a_timeout(
+        cx: &mut TestAppContext,
+    ) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"before\x1b[?2026hheld back", cx);
+        });
+        let screen = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+        assert!(
+            screen.contains("before") && !screen.contains("held back"),
+            "an open update holds output back: {screen:?}"
+        );
+
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let screen = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+        assert!(
+            screen.contains("held back"),
+            "a program that died inside an update must not freeze the screen: {screen:?}"
+        );
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"\r\nprompt$ ", cx);
+        });
+        let screen = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+        assert!(screen.contains("prompt$"), "{screen:?}");
+    }
+
+    #[gpui::test]
+    async fn test_an_update_that_ends_in_time_arms_no_timeout(cx: &mut TestAppContext) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"\x1b[?2026hdrawn\x1b[?2026l", cx);
+        });
+        let screen = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+        assert!(screen.contains("drawn"), "{screen:?}");
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.remote_sync_expiry.is_none()),
+            "nothing is left to expire once the update ended"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_second_update_replaces_the_timeout_of_the_first(cx: &mut TestAppContext) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        let held_back = |cx: &mut TestAppContext| {
+            let screen = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+            !screen.contains("first") && !screen.contains("second")
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"\x1b[?2026hfirst", cx);
+        });
+        let first = terminal.read_with(cx, |terminal, _| {
+            terminal
+                .remote_sync_expiry
+                .as_ref()
+                .map(|expiry| expiry.deadline)
+        });
+        assert!(first.is_some(), "an open update is being timed");
+
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"\x1b[?2026hsecond", cx);
+        });
+        let second = terminal.read_with(cx, |terminal, _| {
+            terminal
+                .remote_sync_expiry
+                .as_ref()
+                .map(|expiry| expiry.deadline)
+        });
+        assert!(second > first, "a new update gets a fresh timeout");
+
+        // Past when the first update would have ended, and before the second
+        // does: only the timer of the second may be running.
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(
+            held_back(cx),
+            "the first timeout must not end an update that was begun again since"
+        );
+
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        let screen = terminal.read_with(cx, |terminal, _| terminal.visible_content());
+        assert!(
+            screen.contains("first") && screen.contains("second"),
+            "the second timeout ends it: {screen:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_snapshot_with_no_history_leaves_out_the_scrollback(cx: &mut TestAppContext) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        terminal.update(cx, |terminal, cx| {
+            for number in 0..40 {
+                terminal.feed_remote_output(format!("line{number:03}\r\n").as_bytes(), cx);
+            }
+        });
+        let text = |snapshot: RemoteSnapshot| String::from_utf8_lossy(&snapshot.bytes).into_owned();
+        let with_history = terminal.read_with(cx, |terminal, _| text(terminal.remote_snapshot()));
+        let screen_only = terminal.read_with(cx, |terminal, _| {
+            text(terminal.remote_snapshot_with_history(0))
+        });
+        assert!(with_history.contains("line001"), "scrollback is carried");
+        assert!(!screen_only.contains("line001"), "{screen_only:?}");
+        assert!(
+            screen_only.contains("line039"),
+            "the screen itself still is: {screen_only:?}"
+        );
+        assert!(screen_only.starts_with("\x1bc"));
+        assert!(screen_only.len() < with_history.len());
+    }
+
+    #[gpui::test]
+    async fn test_a_snapshot_says_whether_it_shows_the_alternate_screen(cx: &mut TestAppContext) {
+        let (terminal, _commands) = remote_backed_terminal(cx);
+        let state = |cx: &mut TestAppContext| {
+            terminal.read_with(cx, |terminal, _| {
+                (
+                    terminal.remote_in_alternate_screen(),
+                    terminal.remote_snapshot().alternate_screen,
+                )
+            })
+        };
+        terminal.update(cx, |terminal, cx| terminal.feed_remote_output(b"shell", cx));
+        assert_eq!(state(cx), (false, false));
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"\x1b[?1049hfull screen", cx)
+        });
+        assert_eq!(state(cx), (true, true));
+        terminal.update(cx, |terminal, cx| {
+            terminal.feed_remote_output(b"\x1b[?1049l", cx)
+        });
+        assert_eq!(state(cx), (false, false));
+    }
+
+    #[gpui::test]
+    async fn test_a_new_size_wakes_a_terminal_whose_output_is_being_mirrored(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_empty_window();
+        let (commands, _commands_rx) = futures::channel::mpsc::unbounded();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_remote_backed(
+                commands,
+                RemoteBackedOptions::default(),
+                CursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .unwrap()
+            .subscribe(cx)
+        });
+        let wakeups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _subscription = window.update(|_, cx| {
+            let wakeups = wakeups.clone();
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                if matches!(event, Event::Wakeup) {
+                    wakeups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        });
+        let resize = |terminal: &Entity<Terminal>, width: f32, cx: &mut gpui::VisualTestContext| {
+            terminal.update_in(cx, |terminal, window, cx| {
+                terminal.set_size(TerminalBounds::new(
+                    px(10.),
+                    px(5.),
+                    bounds(Point::default(), size(px(width), px(200.))),
+                ));
+                terminal.sync(window, cx);
+            });
+        };
+        let wakeups_now = || wakeups.load(std::sync::atomic::Ordering::SeqCst);
+
+        resize(&terminal, 500., window);
+        assert_eq!(wakeups_now(), 0, "nobody is mirroring it, so nobody asks");
+
+        let _tap = terminal.read_with(window, |terminal, _| terminal.remote_tap_slot.install());
+        resize(&terminal, 600., window);
+        assert_eq!(
+            wakeups_now(),
+            1,
+            "a mirror learns of a resize without waiting for output"
+        );
+        resize(&terminal, 600., window);
+        assert_eq!(wakeups_now(), 1, "the same size is not news");
     }
 
     #[gpui::test]

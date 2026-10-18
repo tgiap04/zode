@@ -31,7 +31,7 @@ use alacritty_terminal::{
     Term,
     event::EventListener,
     event_loop::OutputTap,
-    grid::{Charsets, Cursor, Dimensions},
+    grid::{Charsets, Cursor, Dimensions, Grid},
     index::{Column, Line, Point},
     term::{
         TermMode,
@@ -211,6 +211,9 @@ pub struct RemoteSnapshot {
     /// bytes covered by `sequence` are being held back and the screen is behind
     /// them.
     pub sync_pending: bool,
+    /// The program was on the alternate screen, so `bytes` carry that screen
+    /// and not the primary one behind it.
+    pub alternate_screen: bool,
     pub bytes: Vec<u8>,
 }
 
@@ -293,10 +296,7 @@ pub(crate) fn render_snapshot<T: EventListener>(term: &Term<T>, history_limit: u
                 continue;
             }
             pen.move_to(cell, &mut out);
-            push_character(&mut out, cell.c);
-            for zero_width in cell.zerowidth().unwrap_or_default() {
-                push_character(&mut out, *zero_width);
-            }
+            push_cell_text(&mut out, cell);
         }
         if line < last_line && !wrapped {
             pen.reset(&mut out);
@@ -322,27 +322,24 @@ pub(crate) fn render_snapshot<T: EventListener>(term: &Term<T>, history_limit: u
     } else {
         0
     };
+    let pending_wrap = (grid.cursor.input_needs_wrap && mode.contains(TermMode::LINE_WRAP))
+        .then(|| pending_wrap_cell(grid, cursor))
+        .flatten();
     out.extend_from_slice(
         format!(
             "\x1b[{};{}H",
             (cursor.line.0 - top).max(0) + 1,
-            cursor.column.0 + 1
+            pending_wrap.map_or(cursor.column.0, |(column, _)| column) + 1
         )
         .as_bytes(),
     );
-    if grid.cursor.input_needs_wrap && mode.contains(TermMode::LINE_WRAP) {
-        // Positioning the cursor clears "the next character wraps first". The
+    if let Some((_, cell)) = pending_wrap {
+        // Positioning the cursor cleared "the next character wraps first". The
         // last cell is written again, which leaves the cursor in that state.
-        let cell = &grid[cursor.line][cursor.column];
-        if !cell
-            .flags
-            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-        {
-            let mut pen = Pen::default();
-            pen.move_to(cell, &mut out);
-            push_character(&mut out, cell.c);
-            pen.reset(&mut out);
-        }
+        let mut pen = Pen::default();
+        pen.move_to(cell, &mut out);
+        push_cell_text(&mut out, cell);
+        pen.reset(&mut out);
     }
 
     for (flag, code) in PRIVATE_MODES {
@@ -373,6 +370,34 @@ pub(crate) fn render_snapshot<T: EventListener>(term: &Term<T>, history_limit: u
     push_cursor_style(&mut out, term);
     push_private_mode(&mut out, 25, mode.contains(TermMode::SHOW_CURSOR));
     out
+}
+
+/// The cell to write again to leave the cursor waiting to wrap, and the column
+/// the cursor has to be on to write it. When the row ends in a wide character
+/// the cursor is on its spacer half, and what is written is the wide character
+/// itself, from the column before. `None` where nothing can be written to get
+/// there.
+fn pending_wrap_cell(grid: &Grid<Cell>, cursor: Point) -> Option<(usize, &Cell)> {
+    let cell = &grid[cursor.line][cursor.column];
+    if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+        return None;
+    }
+    if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+        return Some((cursor.column.0, cell));
+    }
+    let column = cursor.column.0.checked_sub(1)?;
+    let wide = &grid[cursor.line][Column(column)];
+    wide.flags
+        .contains(Flags::WIDE_CHAR)
+        .then_some((column, wide))
+}
+
+/// A cell's character followed by its combining marks.
+fn push_cell_text(out: &mut Vec<u8>, cell: &Cell) {
+    push_character(out, cell.c);
+    for zero_width in cell.zerowidth().unwrap_or_default() {
+        push_character(out, *zero_width);
+    }
 }
 
 /// The kitty keyboard protocol flags the program asked for, which decide how
@@ -1089,6 +1114,71 @@ mod tests {
     fn a_cursor_that_is_not_waiting_to_wrap_is_left_alone() {
         let mut original = term(10, 3);
         feed(&mut original, b"012345678");
+        let replayed = round_trip(&original);
+        assert!(!replayed.grid().cursor.input_needs_wrap);
+        assert_same_screen(&original, &replayed);
+    }
+
+    #[test]
+    fn a_wide_character_ending_at_the_last_column_still_wraps_after_a_round_trip() {
+        let mut original = term(10, 3);
+        feed(&mut original, "12345678日".as_bytes());
+        assert!(original.grid().cursor.input_needs_wrap);
+        assert!(
+            original.grid()[Line(0)][Column(9)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER),
+            "the cursor is on the spacer half of the wide character"
+        );
+        let mut replayed = round_trip(&original);
+        assert!(
+            replayed.grid().cursor.input_needs_wrap,
+            "the next character must wrap first, as it would have"
+        );
+        assert_same_screen(&original, &replayed);
+
+        continue_both(&mut original, &mut replayed, b"K");
+        assert_same_screen(&original, &replayed);
+        assert_eq!(replayed.grid()[Line(0)][Column(8)].c, '日');
+        assert_eq!(replayed.grid()[Line(1)][Column(0)].c, 'K');
+    }
+
+    #[test]
+    fn a_wide_character_at_the_last_column_keeps_its_combining_marks() {
+        let mut original = term(10, 3);
+        feed(&mut original, "12345678日\u{301}".as_bytes());
+        let replayed = round_trip(&original);
+        assert!(replayed.grid().cursor.input_needs_wrap);
+        assert_eq!(
+            replayed.grid()[Line(0)][Column(8)].zerowidth(),
+            Some(&['\u{301}'][..])
+        );
+        assert_same_screen(&original, &replayed);
+    }
+
+    #[test]
+    fn a_combining_mark_on_the_last_column_survives_the_wrap_pending_rewrite() {
+        let mut original = term(10, 3);
+        feed(&mut original, "123456789e\u{301}".as_bytes());
+        assert!(original.grid().cursor.input_needs_wrap);
+        let mut replayed = round_trip(&original);
+        assert!(replayed.grid().cursor.input_needs_wrap);
+        assert_eq!(
+            replayed.grid()[Line(0)][Column(9)].zerowidth(),
+            Some(&['\u{301}'][..]),
+            "the mark belongs to the last cell and was written before the snapshot"
+        );
+        assert_same_screen(&original, &replayed);
+
+        continue_both(&mut original, &mut replayed, b"K");
+        assert_same_screen(&original, &replayed);
+    }
+
+    #[test]
+    fn a_wide_character_that_does_not_end_the_row_needs_no_special_care() {
+        let mut original = term(10, 3);
+        feed(&mut original, "1234567日".as_bytes());
+        assert!(!original.grid().cursor.input_needs_wrap);
         let replayed = round_trip(&original);
         assert!(!replayed.grid().cursor.input_needs_wrap);
         assert_same_screen(&original, &replayed);
