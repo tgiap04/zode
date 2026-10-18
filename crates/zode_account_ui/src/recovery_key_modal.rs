@@ -7,10 +7,17 @@ use gpui::{
 use ui::{Checkbox, KeyBinding, Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
 use ui_input::{ErasedEditorEvent, InputField};
 use util::ResultExt as _;
-use workspace::ModalView;
+use workspace::{DismissDecision, ModalView};
 use zode_sync::SyncSession;
 
 const COPIED_FEEDBACK: Duration = Duration::from_secs(2);
+
+/// How long the key stays on the clipboard after Copy.
+///
+/// Long enough to switch to a password manager and paste. A clipboard is read
+/// by every other program on the machine and by clipboard history tools, so the
+/// key must not be left there for the rest of the session.
+const CLIPBOARD_LIFETIME: Duration = Duration::from_secs(60);
 
 /// Why the window is open.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,6 +54,10 @@ pub struct RecoveryKeyModal {
     typed_state: TypedState,
     acknowledged: bool,
     copied_reset: Option<Task<()>>,
+    /// Takes the copied key back off the clipboard when its lifetime is up or
+    /// the app quits. Closing the window hands it on rather than cancelling it,
+    /// because the key is usually pasted after the window is gone.
+    clipboard_expiry: Option<Task<()>>,
     error: Option<SharedString>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -62,7 +73,18 @@ enum TypedState {
 }
 
 impl EventEmitter<DismissEvent> for RecoveryKeyModal {}
-impl ModalView for RecoveryKeyModal {}
+impl ModalView for RecoveryKeyModal {
+    /// Every way out of the window ends here: Escape, a click on the backdrop,
+    /// the modal layer closing it. The acknowledgement is asked for in this one
+    /// place, so no route skips it.
+    fn on_before_dismiss(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> DismissDecision {
+        DismissDecision::Dismiss(self.can_close())
+    }
+}
 
 impl Focusable for RecoveryKeyModal {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -103,6 +125,15 @@ impl RecoveryKeyModal {
             cx,
         );
 
+        // The window is released by every way of closing it. The key is still on
+        // the clipboard then, perhaps on its way into a password manager, so the
+        // pending clean-up is let go to run out its own deadline.
+        let released = cx.on_release(|this, _cx| {
+            if let Some(expiry) = this.clipboard_expiry.take() {
+                expiry.detach();
+            }
+        });
+
         let mut this = Self {
             session: session.clone(),
             mode,
@@ -111,9 +142,10 @@ impl RecoveryKeyModal {
             typed_state: TypedState::Empty,
             acknowledged: false,
             copied_reset: None,
+            clipboard_expiry: None,
             error: None,
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![edited],
+            _subscriptions: vec![edited, released],
         };
 
         match mode {
@@ -159,6 +191,9 @@ impl RecoveryKeyModal {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(phrase.to_string()));
+        // Replacing the task cancels the previous one, so copying again restarts
+        // the wait instead of letting the first one clear the new copy.
+        self.clipboard_expiry = Some(take_back_later(phrase, cx));
         self.copied_reset = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPIED_FEEDBACK).await;
             _ = this.update(cx, |this, cx| {
@@ -204,7 +239,11 @@ impl RecoveryKeyModal {
             // the first artifact is re-encrypted, so this string is the only
             // way back to the data.
             RecoveryKeyMode::Create | RecoveryKeyMode::Rotate => {
-                self.acknowledged && self.phrase.is_some()
+                // A key that could not be made is an error on screen and
+                // nothing to save, so leaving loses nothing -- and without this
+                // the window would have no way out at all.
+                let generation_failed = self.phrase.is_none() && self.error.is_some();
+                generation_failed || (self.acknowledged && self.phrase.is_some())
             }
             _ => true,
         }
@@ -217,6 +256,38 @@ impl RecoveryKeyModal {
             RecoveryKeyMode::Enter => "Enter your recovery key",
             RecoveryKeyMode::Rotate => "Your new recovery key",
         }
+    }
+}
+
+/// Takes `key` back off the clipboard once its lifetime is up, or when the app
+/// quits, whichever comes first.
+///
+/// The returned task owns the quit observer, so dropping it ends both. It does
+/// not borrow the window, which lets it outlive the window it was started by.
+fn take_back_later(key: SharedString, cx: &mut Context<RecoveryKeyModal>) -> Task<()> {
+    let quit = App::on_app_quit(cx, {
+        let key = key.clone();
+        move |app| {
+            take_back(&key, app);
+            std::future::ready(())
+        }
+    });
+    cx.spawn(async move |_this, cx| {
+        cx.background_executor().timer(CLIPBOARD_LIFETIME).await;
+        cx.update(|app| take_back(&key, app));
+        drop(quit);
+    })
+}
+
+/// Empties the clipboard, but only while it still holds exactly `key`: whatever
+/// the user copied since is theirs.
+fn take_back(key: &str, cx: &mut App) {
+    let holds_the_key = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .is_some_and(|text| text == key);
+    if holds_the_key {
+        cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
     }
 }
 
@@ -548,6 +619,25 @@ mod tests {
         });
     }
 
+    /// The window exists to protect a key. When there is none, because making it
+    /// failed, there is nothing to protect, and a window that cannot be left is
+    /// worse than one that can.
+    #[gpui::test]
+    fn a_key_that_could_not_be_made_does_not_trap_the_user(cx: &mut TestAppContext) {
+        let (layer, cx) = modal_layer_showing(RecoveryKeyMode::Create, cx);
+        layer
+            .read_with(cx, |layer, _| layer.active_modal::<RecoveryKeyModal>())
+            .expect("the modal is open")
+            .update(cx, |modal, _| {
+                modal.phrase = None;
+                modal.error = Some("the keychain is locked".into());
+            });
+
+        let closed = layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+
+        assert!(closed, "the failure left the window with no way out");
+    }
+
     /// Typed input is classified as the user goes, so a mistyped key is caught
     /// before it is submitted rather than surfacing later as an
     /// indistinguishable decryption failure.
@@ -569,6 +659,290 @@ mod tests {
             matches!(classify(&mistyped), TypedState::Invalid(_)),
             "{:?}",
             classify(&mistyped)
+        );
+    }
+
+    fn modal_layer_showing(
+        mode: RecoveryKeyMode,
+        cx: &mut TestAppContext,
+    ) -> (Entity<workspace::ModalLayer>, &mut gpui::VisualTestContext) {
+        init_test(cx);
+        let session = session(cx);
+        let (layer, cx) = cx.add_window_view(|_, _| workspace::ModalLayer::new());
+        layer.update_in(cx, |layer, window, cx| {
+            layer.toggle_modal(window, cx, |window, cx| {
+                RecoveryKeyModal::new(session, mode, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        (layer, cx)
+    }
+
+    fn acknowledge(layer: &Entity<workspace::ModalLayer>, cx: &mut gpui::VisualTestContext) {
+        let modal = layer
+            .read_with(cx, |layer, _| layer.active_modal::<RecoveryKeyModal>())
+            .expect("the modal is open");
+        modal.update(cx, |modal, _| modal.acknowledged = true);
+    }
+
+    /// Escape was never the only way out. A click on the backdrop reaches the
+    /// modal layer, not the window, so the gate has to be answered where the
+    /// layer asks.
+    #[gpui::test]
+    fn a_click_outside_cannot_dismiss_a_key_that_was_not_acknowledged(cx: &mut TestAppContext) {
+        let (layer, cx) = modal_layer_showing(RecoveryKeyMode::Create, cx);
+
+        let closed = layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+
+        assert!(!closed, "the backdrop closed a key nobody said they saved");
+        assert!(layer.read_with(cx, |layer, _| layer.has_active_modal()));
+    }
+
+    /// A test session holds no key to rotate, so the window is given the new key
+    /// it would have shown.
+    #[gpui::test]
+    fn a_rotated_key_is_held_to_the_same_gate(cx: &mut TestAppContext) {
+        let (layer, cx) = modal_layer_showing(RecoveryKeyMode::Rotate, cx);
+        layer
+            .read_with(cx, |layer, _| layer.active_modal::<RecoveryKeyModal>())
+            .expect("the modal is open")
+            .update(cx, |modal, _| {
+                modal.error = None;
+                modal.phrase = Some("ZODE-NEW-KEY".into());
+            });
+
+        let closed = layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+
+        assert!(!closed, "the backdrop closed a rotated key nobody saved");
+    }
+
+    #[gpui::test]
+    fn an_acknowledged_key_can_be_dismissed_from_outside(cx: &mut TestAppContext) {
+        let (layer, cx) = modal_layer_showing(RecoveryKeyMode::Create, cx);
+        acknowledge(&layer, cx);
+
+        let closed = layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+
+        assert!(closed);
+        assert!(!layer.read_with(cx, |layer, _| layer.has_active_modal()));
+    }
+
+    /// Entering a key and viewing one already held have nothing to lose by
+    /// closing, so the gate must not reach them.
+    #[gpui::test]
+    fn a_window_with_nothing_to_lose_still_closes_from_outside(cx: &mut TestAppContext) {
+        for mode in [RecoveryKeyMode::Enter, RecoveryKeyMode::Reveal] {
+            let (layer, cx) = modal_layer_showing(mode, cx);
+
+            let closed = layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+
+            assert!(closed);
+        }
+    }
+
+    fn clipboard_text(cx: &TestAppContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    fn copy_the_key(modal: &Entity<RecoveryKeyModal>, cx: &mut TestAppContext) -> String {
+        modal.update(cx, |modal, cx| {
+            modal.copy(cx);
+            modal
+                .phrase
+                .clone()
+                .expect("creating must produce a key to copy")
+                .to_string()
+        })
+    }
+
+    #[gpui::test]
+    fn the_copied_key_leaves_the_clipboard_after_a_while(cx: &mut TestAppContext) {
+        let modal = draw(RecoveryKeyMode::Create, cx);
+
+        let phrase = copy_the_key(&modal, cx);
+        assert_eq!(clipboard_text(cx).as_deref(), Some(phrase.as_str()));
+
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME / 2);
+        cx.run_until_parked();
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some(phrase.as_str()),
+            "the key must stay long enough to be pasted"
+        );
+
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME);
+        cx.run_until_parked();
+        assert_eq!(
+            clipboard_text(cx),
+            None,
+            "the key is still on the clipboard"
+        );
+    }
+
+    /// The clipboard is the user's. Something they copied after the key is not
+    /// ours to remove.
+    #[gpui::test]
+    fn something_copied_after_the_key_is_left_alone(cx: &mut TestAppContext) {
+        let modal = draw(RecoveryKeyMode::Create, cx);
+        copy_the_key(&modal, cx);
+
+        cx.write_to_clipboard(ClipboardItem::new_string("a shopping list".into()));
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME * 2);
+        cx.run_until_parked();
+
+        assert_eq!(clipboard_text(cx).as_deref(), Some("a shopping list"));
+    }
+
+    /// Copying again restarts the wait rather than letting the first timer
+    /// clear a key the user has just put back.
+    #[gpui::test]
+    fn copying_again_restarts_the_wait(cx: &mut TestAppContext) {
+        let modal = draw(RecoveryKeyMode::Create, cx);
+        let phrase = copy_the_key(&modal, cx);
+
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME * 3 / 4);
+        cx.run_until_parked();
+        copy_the_key(&modal, cx);
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME / 2);
+        cx.run_until_parked();
+
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some(phrase.as_str()),
+            "the first copy's timer cleared the second copy early"
+        );
+    }
+
+    /// Opens the window, ticks the box, copies the key, and returns the layer
+    /// and the key.
+    fn copy_then_acknowledge(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<workspace::ModalLayer>,
+        &mut gpui::VisualTestContext,
+        String,
+    ) {
+        let (layer, cx) = modal_layer_showing(RecoveryKeyMode::Create, cx);
+        acknowledge(&layer, cx);
+        let phrase = layer
+            .read_with(cx, |layer, _| layer.active_modal::<RecoveryKeyModal>())
+            .expect("the modal is open")
+            .update(cx, |modal, cx| {
+                modal.copy(cx);
+                modal.phrase.clone().expect("a key to copy").to_string()
+            });
+        (layer, cx, phrase)
+    }
+
+    /// Quits through the app rather than the window: shutting down removes the
+    /// window, which the window-scoped `update` cannot survive.
+    fn quit_app(cx: &mut gpui::VisualTestContext) {
+        cx.cx.update(|app| app.shutdown());
+    }
+
+    fn clipboard_of(cx: &gpui::VisualTestContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    /// Copy, tick the box, press Done, paste into the password manager: the last
+    /// step happens after the window is gone, so closing it cannot be what takes
+    /// the key away.
+    #[gpui::test]
+    fn closing_the_window_leaves_the_key_on_the_clipboard_to_be_pasted(cx: &mut TestAppContext) {
+        let (layer, cx, phrase) = copy_then_acknowledge(cx);
+
+        layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME / 2);
+        cx.run_until_parked();
+
+        assert_eq!(
+            clipboard_of(cx),
+            Some(phrase),
+            "the key was taken away before it could be pasted"
+        );
+    }
+
+    /// The deadline belongs to the copy, not to the window: closing it hands the
+    /// rest of the wait to a task of its own.
+    #[gpui::test]
+    fn the_key_leaves_the_clipboard_on_schedule_after_the_window_closed(cx: &mut TestAppContext) {
+        let (layer, cx, _) = copy_then_acknowledge(cx);
+
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME / 2);
+        cx.run_until_parked();
+        layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(CLIPBOARD_LIFETIME / 2 + Duration::from_secs(1));
+        cx.run_until_parked();
+
+        assert_eq!(
+            clipboard_of(cx),
+            None,
+            "the key outlived its lifetime once the window was gone"
+        );
+    }
+
+    /// Quitting must not leave the key behind for the rest of the session of
+    /// whatever else is running.
+    #[gpui::test]
+    fn quitting_takes_the_key_off_the_clipboard(cx: &mut TestAppContext) {
+        let (_layer, cx, phrase) = copy_then_acknowledge(cx);
+        assert_eq!(clipboard_of(cx), Some(phrase));
+
+        quit_app(cx);
+
+        assert_eq!(clipboard_of(cx), None, "the key survived the quit");
+    }
+
+    #[gpui::test]
+    fn quitting_after_the_window_closed_still_takes_the_key_off_the_clipboard(
+        cx: &mut TestAppContext,
+    ) {
+        let (layer, cx, phrase) = copy_then_acknowledge(cx);
+        layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+        cx.run_until_parked();
+        assert_eq!(clipboard_of(cx), Some(phrase));
+
+        quit_app(cx);
+
+        assert_eq!(clipboard_of(cx), None, "the key survived the quit");
+    }
+
+    #[gpui::test]
+    fn closing_the_window_leaves_an_unrelated_clipboard_alone(cx: &mut TestAppContext) {
+        let (layer, cx, _) = copy_then_acknowledge(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("a shopping list".into()));
+
+        layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(CLIPBOARD_LIFETIME * 2);
+        cx.run_until_parked();
+        assert_eq!(clipboard_of(cx).as_deref(), Some("a shopping list"));
+
+        quit_app(cx);
+        assert_eq!(
+            clipboard_of(cx).as_deref(),
+            Some("a shopping list"),
+            "quitting took something that was never the key"
+        );
+    }
+
+    #[gpui::test]
+    fn a_window_that_never_copied_does_not_touch_the_clipboard(cx: &mut TestAppContext) {
+        let (layer, cx) = modal_layer_showing(RecoveryKeyMode::Create, cx);
+        acknowledge(&layer, cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("a shopping list".into()));
+
+        layer.update_in(cx, |layer, window, cx| layer.hide_modal(window, cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("a shopping list")
         );
     }
 }

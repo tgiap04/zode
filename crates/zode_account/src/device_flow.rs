@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::AsyncReadExt as _;
 use gpui::BackgroundExecutor;
-use http_client::{AsyncBody, HttpClient, Request};
+use http_client::{AsyncBody, HttpClient, Request, StatusCode};
 use serde::Deserialize;
 
 use crate::tokens::StoredTokens;
@@ -17,7 +17,7 @@ const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);
 const MAX_INTERVAL: Duration = Duration::from_secs(30);
 
 /// What the user is asked to do, and how long they have to do it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PendingAuthorization {
     /// Opaque; the client polls with this. Never shown to the user.
     pub device_code: String,
@@ -28,6 +28,22 @@ pub struct PendingAuthorization {
     pub verification_uri_complete: String,
     pub expires_in: Duration,
     pub interval: Duration,
+}
+
+impl std::fmt::Debug for PendingAuthorization {
+    /// Everything but the device code, which is a bearer credential: whoever
+    /// holds it can collect the tokens once the user approves. The user code is
+    /// on screen by design and stays.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingAuthorization")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
+    }
 }
 
 /// Why a sign-in stopped.
@@ -148,20 +164,35 @@ pub async fn poll_until_authorized(
 }
 
 /// Exchanges a refresh token for a fresh pair.
+///
+/// `Err(Rejected)` means the server refused this token and nothing else does:
+/// the caller signs the user out and deletes the keychain entry on it, so a
+/// throttled, timed-out or proxied request must come back as `Unreachable`
+/// instead. See [`refusal_of_refresh_token`].
 pub async fn refresh(
     http_client: &Arc<dyn HttpClient>,
     api_url: &str,
     refresh_token: &str,
 ) -> Result<StoredTokens, DeviceFlowError> {
     let request_body = serde_json::json!({ "refresh_token": refresh_token }).to_string();
-    let body = post_json(
+    let answer = exchange(
         http_client,
         &format!("{api_url}/auth/device/refresh"),
         &request_body,
     )
     .await?;
 
-    let parsed: TokenResponse = serde_json::from_str(&body).map_err(|_| {
+    if !answer.status.is_success() {
+        let Some(slug) = refusal_of_refresh_token(answer.status, &answer.body) else {
+            return Err(DeviceFlowError::Unreachable(format!(
+                "the server answered {} to the refresh",
+                answer.status.as_u16()
+            )));
+        };
+        return Err(DeviceFlowError::Rejected(slug));
+    }
+
+    let parsed: TokenResponse = serde_json::from_str(&answer.body).map_err(|_| {
         DeviceFlowError::Unreachable("the refresh response could not be read".into())
     })?;
 
@@ -170,6 +201,25 @@ pub async fn refresh(
         parsed.refresh_token,
         Duration::from_secs(parsed.expires_in),
     ))
+}
+
+/// The error slug when this answer is the server refusing the refresh token.
+///
+/// Two shapes are a refusal. A 401 with the service's JSON error body is what
+/// it sends for a token that is unknown, spent, or revoked (its own body names
+/// no OAuth slug), and a 400 `invalid_grant` is the RFC 6749 section 5.2 form.
+/// Anything else says nothing about the token: 408 and 429 are the network and
+/// the rate limiter, a login page or firewall page is not JSON, and a 400 with
+/// another slug is a malformed request, which deleting a good session cannot
+/// fix. The cost of reading those as a refusal is a user signed out of
+/// something that still works, so the default is to keep the session.
+fn refusal_of_refresh_token(status: StatusCode, body: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<ErrorResponse>(body).ok()?;
+    match status.as_u16() {
+        401 => Some(parsed.error),
+        400 if parsed.error == "invalid_grant" => Some(parsed.error),
+        _ => None,
+    }
 }
 
 /// Tells the server to forget a device session. Best effort by design — the
@@ -271,14 +321,20 @@ async fn poll_once(
     }
 }
 
-/// One POST. `Err(Rejected(code))` carries the server's RFC 8628 error slug
-/// when it sent one, which is what makes the classification above a lookup
-/// rather than a guess at the status code.
-async fn post_json(
+/// What came back from a POST that reached a server, before anyone decides
+/// what the status means.
+struct Answer {
+    status: StatusCode,
+    body: String,
+}
+
+/// One POST. A transport failure is `Unreachable`; any answer at all, whatever
+/// its status, is returned for the caller to classify.
+async fn exchange(
     http_client: &Arc<dyn HttpClient>,
     url: &str,
     body: &str,
-) -> Result<String, DeviceFlowError> {
+) -> Result<Answer, DeviceFlowError> {
     let request = Request::builder()
         .method("POST")
         .uri(url)
@@ -304,6 +360,25 @@ async fn post_json(
             "the response could not be read".into(),
         ));
     }
+
+    Ok(Answer {
+        status,
+        body: response_body,
+    })
+}
+
+/// One POST. `Err(Rejected(code))` carries the server's RFC 8628 error slug
+/// when it sent one, which is what makes the classification above a lookup
+/// rather than a guess at the status code.
+async fn post_json(
+    http_client: &Arc<dyn HttpClient>,
+    url: &str,
+    body: &str,
+) -> Result<String, DeviceFlowError> {
+    let Answer {
+        status,
+        body: response_body,
+    } = exchange(http_client, url, body).await?;
 
     if status.is_success() {
         return Ok(response_body);
@@ -638,6 +713,88 @@ mod tests {
             "the synthetic slug is what sent the last reader the wrong way: {message}"
         );
         cx.background_executor.run_until_parked();
+    }
+
+    /// What the account service really sends when it refuses a refresh token:
+    /// the framework's own body for an `UnauthorizedException`, which carries no
+    /// OAuth slug at all. The device-token route's `invalid_grant` is the other
+    /// shape a refusal can take.
+    #[gpui::test]
+    async fn only_an_explicit_refusal_of_the_token_is_a_rejection(cx: &mut TestAppContext) {
+        for (status, body) in [
+            (
+                401,
+                r#"{"statusCode":401,"message":"Refresh token invalid or reused","error":"Unauthorized"}"#
+                    .to_string(),
+            ),
+            (401, error_body("invalid_grant")),
+            (400, error_body("invalid_grant")),
+        ] {
+            let (client, _) = scripted(vec![(status, body.clone())]);
+
+            let error = refresh(&client, "https://zodekit.site/api", "spent")
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(error, DeviceFlowError::Rejected(_)),
+                "{status} {body} must be a rejection, got {error:?}"
+            );
+        }
+        cx.background_executor.run_until_parked();
+    }
+
+    /// Signing someone out wipes their keychain entry, so a rate limit, a
+    /// timeout, a captive portal, or a firewall page must never be read as the
+    /// server refusing the token.
+    #[gpui::test]
+    async fn an_answer_that_is_not_a_refusal_leaves_the_session_alone(cx: &mut TestAppContext) {
+        let throttled = r#"{"statusCode":429,"message":"ThrottlerException: Too Many Requests"}"#;
+        let bad_request = r#"{"statusCode":400,"message":["refresh_token must be a string"],"error":"Bad Request"}"#;
+        for (status, body) in [
+            (408, String::new()),
+            (429, throttled.to_string()),
+            (429, error_body("rate_limited")),
+            (
+                401,
+                "<html><body>Sign in to the network</body></html>".to_string(),
+            ),
+            (401, String::new()),
+            (403, "<!doctype html><title>Blocked</title>".to_string()),
+            (404, "<!doctype html>".to_string()),
+            (405, "<!doctype html>".to_string()),
+            (400, bad_request.to_string()),
+            (400, error_body("invalid_request")),
+            (502, String::new()),
+        ] {
+            let (client, _) = scripted(vec![(status, body.clone())]);
+
+            let error = refresh(&client, "https://zodekit.site/api", "fine")
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(error, DeviceFlowError::Unreachable(_)),
+                "{status} {body:?} must not be read as a rejection, got {error:?}"
+            );
+        }
+        cx.background_executor.run_until_parked();
+    }
+
+    #[test]
+    fn debug_output_never_prints_the_device_code() {
+        let authorization = PendingAuthorization {
+            device_code: "super-secret-device-code".into(),
+            ..pending(5, 600)
+        };
+
+        let rendered = format!("{authorization:?}");
+
+        assert!(!rendered.contains("super-secret-device-code"), "{rendered}");
+        assert!(
+            rendered.contains("A1B2-C3D4"),
+            "the code on screen is not secret"
+        );
     }
 
     #[gpui::test]

@@ -126,7 +126,16 @@ async fn write_entry(
 /// the session, which the next `read` treats as a stale login — recoverable —
 /// whereas refusing to sign out is not.
 pub async fn delete(credentials: &Arc<dyn CredentialsProvider>, cx: &AsyncApp) {
-    if let Err(error) = credentials.delete_credentials(KEYCHAIN_URL, cx).await {
+    if let Err(error) = try_delete(credentials, cx).await {
         log::warn!("could not delete the account keychain entry: {error}");
     }
+}
+
+/// Removes the session and reports whether the keychain agreed, for a caller
+/// that decides for itself what a failure is worth saying.
+pub async fn try_delete(
+    credentials: &Arc<dyn CredentialsProvider>,
+    cx: &AsyncApp,
+) -> anyhow::Result<()> {
+    credentials.delete_credentials(KEYCHAIN_URL, cx).await
 }

@@ -98,6 +98,42 @@ async fn is_authenticated(cli: HostCli) -> bool {
         .unwrap_or(false)
 }
 
+/// Refuses a name the CLI would read as one of its own options.
+///
+/// `gh repo create -dash` does not name a repository `-dash`: it sets the
+/// description to `ash` and creates the repository under the directory's name.
+/// The same holds for every flag the CLI defines, so the guard is on the
+/// leading dash rather than on a list of flags.
+fn validate_repository_name(name: &str) -> Result<()> {
+    anyhow::ensure!(
+        !name.starts_with('-'),
+        "A repository name cannot start with `-`, because the hosting CLI would read it as an option."
+    );
+    Ok(())
+}
+
+/// The arguments for the provider's repository-create command.
+///
+/// `gh` takes `--` to end option parsing, so its name goes last and every flag
+/// before it. `glab` is driven without it, which leaves
+/// [`validate_repository_name`] as its only protection against a leading dash:
+/// call that first.
+fn create_args(cli: HostCli, name: &str, private: bool) -> Vec<&str> {
+    let visibility = if private { "--private" } else { "--public" };
+    match cli {
+        HostCli::Gh => vec![
+            "repo",
+            "create",
+            "--source=.",
+            "--remote=origin",
+            visibility,
+            "--",
+            name,
+        ],
+        HostCli::Glab => vec!["repo", "create", name, visibility, "--remoteName", "origin"],
+    }
+}
+
 /// Runs the provider's repository-create command in `work_dir`.
 ///
 /// The name is passed as an argument rather than interpolated into a shell
@@ -105,22 +141,9 @@ async fn is_authenticated(cli: HostCli) -> bool {
 /// an explicit working directory is what keeps this from ever creating a
 /// repository for whatever happens to be the editor's cwd.
 async fn create(cli: HostCli, work_dir: &Path, name: &str, private: bool) -> Result<()> {
-    let visibility = if private { "--private" } else { "--public" };
-    let args: Vec<&str> = match cli {
-        HostCli::Gh => vec![
-            "repo",
-            "create",
-            name,
-            "--source=.",
-            "--remote=origin",
-            visibility,
-        ],
-        HostCli::Glab => vec!["repo", "create", name, visibility, "--remoteName", "origin"],
-    };
-
     let output = Command::new(cli.binary())
         .current_dir(work_dir)
-        .args(&args)
+        .args(create_args(cli, name, private))
         .output()
         .await
         .with_context(|| format!("running {}", cli.binary()))?;
@@ -203,6 +226,8 @@ impl crate::branch_panel::panel::BranchPanel {
         cx: &mut Context<Self>,
     ) {
         let task: Task<Result<HostCli>> = cx.background_spawn(async move {
+            validate_repository_name(&name)?;
+
             let mut installed = Vec::new();
             for cli in HostCli::ALL {
                 if is_installed(cli).await {
@@ -320,5 +345,48 @@ mod tests {
         let message = not_signed_in_message(HostCli::Glab);
         assert!(message.contains("glab auth login"));
         assert!(!message.contains("No hosting CLI"));
+    }
+
+    /// A name starting with `-` is the one shape a CLI parses as an option, and
+    /// it is refused with a message that says why rather than handed over.
+    #[test]
+    fn a_name_that_starts_with_a_dash_is_refused() {
+        for name in ["-dash", "--public", "-"] {
+            let error = validate_repository_name(name).unwrap_err().to_string();
+            assert!(
+                error.contains("cannot start with `-`"),
+                "{name:?} gave an unclear message: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_names_pass_the_guard() {
+        for name in ["zode", "my-repo", "my_repo.rs", "a-"] {
+            validate_repository_name(name).unwrap();
+        }
+    }
+
+    /// `gh` stops reading options at `--`, so the name has to be the last
+    /// argument and nothing that is a flag may follow it -- a flag after `--`
+    /// is read as a second positional and the command fails.
+    #[test]
+    fn gh_receives_the_name_after_the_end_of_options_marker() {
+        let args = create_args(HostCli::Gh, "-dash", true);
+        let marker = args
+            .iter()
+            .position(|argument| *argument == "--")
+            .expect("gh must be given `--`");
+
+        assert_eq!(args.last(), Some(&"-dash"));
+        assert_eq!(marker, args.len() - 2, "the name directly follows `--`");
+        assert!(args[..marker].contains(&"--private"));
+        assert!(args[..marker].contains(&"--source=."));
+    }
+
+    #[test]
+    fn the_visibility_flag_follows_the_choice() {
+        assert!(create_args(HostCli::Gh, "zode", false).contains(&"--public"));
+        assert!(create_args(HostCli::Glab, "zode", true).contains(&"--private"));
     }
 }

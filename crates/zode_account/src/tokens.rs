@@ -15,7 +15,7 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 /// in a later process, and a monotonic clock means nothing across a reboot. The
 /// cost is that a user who moves their clock backwards gets one unnecessary
 /// refresh, which is the cheap direction to be wrong in.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredTokens {
     pub access_token: String,
     pub refresh_token: String,
@@ -45,14 +45,24 @@ impl StoredTokens {
 impl std::fmt::Display for StoredTokens {
     /// Prints the shape, never the values.
     ///
-    /// `Debug` is derived because the struct is compared in tests, and a
-    /// derived `Debug` will happily print both tokens. This exists so that any
-    /// log line reaching for a human-readable form gets the redacted one.
+    /// `Debug` is redacted the same way, by hand: a derived one prints both
+    /// tokens, and `{:?}` on a struct that contains this one (an `assert_eq!`
+    /// failure, a `dbg!`) would carry them into a log or a CI transcript.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "StoredTokens {{ access: <redacted>, refresh: <redacted> }}"
         )
+    }
+}
+
+impl std::fmt::Debug for StoredTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredTokens")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
     }
 }
 
@@ -122,6 +132,18 @@ mod tests {
         let rendered = tokens.to_string();
         assert!(!rendered.contains("super-secret-access"));
         assert!(!rendered.contains("super-secret-refresh"));
+    }
+
+    #[test]
+    fn debug_never_prints_a_token() {
+        let tokens = StoredTokens {
+            access_token: "super-secret-access".into(),
+            refresh_token: "super-secret-refresh".into(),
+            expires_at: at(900),
+        };
+        let rendered = format!("{tokens:?}");
+        assert!(!rendered.contains("super-secret-access"), "{rendered}");
+        assert!(!rendered.contains("super-secret-refresh"), "{rendered}");
     }
 
     #[test]
