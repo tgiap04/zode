@@ -2353,7 +2353,8 @@ mod tests {
     #[test]
     fn the_signed_manifest_wins_over_a_latest_that_names_another_asset() {
         smol::block_on(async {
-            let other = "zode-db-postgres-x86_64-unknown-linux-gnu.tar.gz";
+            // Not a real target: a real one would be this runner's own asset on some runner.
+            let other = "zode-db-postgres-no-such-target.tar.gz";
             let (result, _root, paths) = install_where_they_disagree(
                 |latest| latest.drivers[0].asset = other.to_string(),
                 |_| {},
