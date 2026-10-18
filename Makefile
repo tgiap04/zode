@@ -86,7 +86,7 @@ help: ## Show this help
 	@grep -hE '^[a-z][a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-build: ## Compile the zode binary only, no drivers (PROFILE=dev, incremental) — see `drivers`
+build: ## Compile the zode binary only, no drivers (PROFILE=dev, incremental) — `make drivers` after a database protocol change
 	$(CARGO) build -p $(PACKAGE) --bin $(PACKAGE) --profile $(PROFILE)
 
 # Opt-in, never part of `build`: a driver beside the executable is used before
@@ -95,9 +95,15 @@ build: ## Compile the zode binary only, no drivers (PROFILE=dev, incremental) �
 # them a dev build downloads the latest published driver set from ZODE_API_URL,
 # the same set a release build gets.
 #
+# That set speaks the protocol of the release it was published for. A checkout
+# that has changed `PROTOCOL_VERSION` (crates/database/src/protocol.rs) or a
+# driver's behaviour therefore cannot use it: Download Driver refuses it with a
+# protocol message, and a driver already downloaded fails the handshake. Run
+# this target, which is what those messages point at.
+#
 # Drivers built by an earlier run stay beside the binary and keep winning until
 # they are deleted, e.g. `rm target/debug/zode-db-*`.
-drivers: ## Compile the database driver sidecars beside the zode binary
+drivers: ## Compile the database driver sidecars beside the zode binary (after a protocol change)
 	$(CARGO) build --profile $(PROFILE) \
 		-p zode-db-sqlite -p zode-db-postgres -p zode-db-mysql -p zode-db-mongodb
 

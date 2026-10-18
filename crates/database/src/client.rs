@@ -182,15 +182,30 @@ impl DriverClient {
             .await?;
         anyhow::ensure!(
             version_is_compatible(PROTOCOL_VERSION, result.protocol_version),
-            "driver `{}` speaks database protocol version {}, but this build of Zode speaks {}. \
-             If Zode downloaded this driver, remove it in the connection dialog and download it \
-             again; if that does not help, update Zode.",
-            result.driver_name,
-            result.protocol_version,
-            PROTOCOL_VERSION,
+            "{}",
+            protocol_mismatch(&result.driver_name, result.protocol_version)
         );
         Ok(result)
     }
+}
+
+/// What to say when a driver speaks another protocol than this build.
+///
+/// Which way the gap runs decides the advice. Removing and downloading again
+/// only helps when the driver is the stale one; when it is newer than Zode, the
+/// published set is the new one already and downloading it again fetches the
+/// same driver, so the only way out is a newer Zode.
+fn protocol_mismatch(driver_name: &str, theirs: u32) -> String {
+    let advice = if theirs > PROTOCOL_VERSION {
+        "Update Zode to use it."
+    } else {
+        "If Zode downloaded this driver, remove it in the connection dialog and download it \
+         again; if you build Zode from source, run `make drivers`."
+    };
+    format!(
+        "driver `{driver_name}` speaks database protocol version {theirs}, but this build of \
+         Zode speaks {PROTOCOL_VERSION}. {advice}"
+    )
 }
 
 #[cfg(test)]
@@ -209,6 +224,23 @@ mod tests {
                 .with_detail("error connecting to server"),
         );
         assert_eq!(error.to_string(), "error connecting to server");
+    }
+
+    /// A driver newer than the app is not cured by downloading it again: the
+    /// published set is the newer one, so the same driver comes back.
+    #[test]
+    fn a_driver_newer_than_zode_says_to_update_zode() {
+        let message = protocol_mismatch("postgres", PROTOCOL_VERSION + 1);
+        assert!(message.contains("Update Zode"), "{message}");
+        assert!(!message.contains("download it again"), "{message}");
+    }
+
+    #[test]
+    fn a_driver_older_than_zode_says_to_fetch_it_again_or_rebuild_it() {
+        let message = protocol_mismatch("postgres", PROTOCOL_VERSION.saturating_sub(1));
+        assert!(message.contains("download it again"), "{message}");
+        assert!(message.contains("make drivers"), "{message}");
+        assert!(!message.contains("Update Zode"), "{message}");
     }
 
     #[test]

@@ -143,7 +143,32 @@ jobs:
           exit 1
         fi
     timeout-minutes: 360
+  check_driver_signing_key:
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
+    steps:
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+    - name: steps::cache_rust_dependencies_namespace
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+    - name: release::build_xtask
+      run: cargo build --package xtask --locked
+    - name: release::check_driver_signing_key
+      run: target/debug/xtask driver-manifest check-key
+      env:
+        ZODE_DRIVER_SIGNING_KEY: ${{ secrets.ZODE_DRIVER_SIGNING_KEY }}
+    timeout-minutes: 360
   create_draft_release:
+    needs:
+    - check_driver_signing_key
     if: (github.repository_owner == 'tgiap04')
     runs-on: ubuntu-24.04
     permissions:
@@ -189,6 +214,12 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 360
   bump_manifest_on_develop:
+    needs:
+    - create_draft_release
+    - run_tests_linux
+    - clippy_linux
+    - check_scripts
+    - check_driver_signing_key
     if: (github.repository_owner == 'tgiap04')
     runs-on: ubuntu-24.04
     permissions:
@@ -521,6 +552,7 @@ jobs:
     - run_tests_linux
     - clippy_linux
     - check_scripts
+    - check_driver_signing_key
     - bundle_linux_aarch64
     - bundle_linux_x86_64
     - bundle_mac_aarch64
@@ -535,6 +567,16 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: steps::cache_rust_dependencies_namespace
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+    - name: release::build_xtask
+      run: cargo build --package xtask --locked
     - name: release::download_workflow_artifacts
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
       with:
@@ -559,8 +601,8 @@ jobs:
         mv ./artifacts/database-drivers-x86_64-pc-windows-msvc/* driver-artifacts/
     - name: release::build_driver_manifest
       run: script/build-driver-manifest driver-artifacts "${GITHUB_REF_NAME#v}"
-    - name: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
-      run: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
+    - name: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" --clobber release-artifacts/*
+      run: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" --clobber release-artifacts/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: release::publish_drivers_to_web
@@ -568,6 +610,8 @@ jobs:
       env:
         ZODE_DRIVER_UPLOAD_TOKEN: ${{ secrets.ZODE_DRIVER_UPLOAD_TOKEN }}
         ZODE_DRIVER_UPLOAD_URL: ${{ vars.ZODE_DRIVER_UPLOAD_URL }}
+        ZODE_DRIVER_SIGNING_KEY: ${{ secrets.ZODE_DRIVER_SIGNING_KEY }}
+        ZODE_XTASK_BIN: target/debug/xtask
   validate_release_assets:
     needs:
     - upload_release_assets

@@ -206,7 +206,11 @@ impl ConnectionModal {
                             )
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
-                            .tooltip(Tooltip::text("Remove the downloaded driver"))
+                            .tooltip(Tooltip::text(if engine.hand_placed {
+                                "Remove the driver"
+                            } else {
+                                "Remove the downloaded driver"
+                            }))
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
                                     // The row underneath selects on click; this one only

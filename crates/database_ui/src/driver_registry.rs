@@ -39,7 +39,10 @@ const BUILT_IN: &[(&str, &str)] = &[
 ///    back into the bundle restores the old behaviour with no code change.
 /// 2. **The download store**, under `paths::database_drivers_dir()`. This is
 ///    where a driver fetched on demand lands, and where someone with no route to
-///    the API can put one by hand. It holds whichever published version was
+///    the API can put one by hand -- told apart by the marker an install leaves
+///    (`DriverOrigin::Store` against `DriverOrigin::Manual`), because only the
+///    first is known to be one a click fetches back. Both are offered for
+///    removal; the second with a warning. It holds whichever published version was
 ///    installed most recently, and a driver stays until someone removes it:
 ///    there is no update check, and `DriverClient::initialize` is what refuses
 ///    one whose protocol no longer matches.
@@ -68,7 +71,12 @@ fn resolve_driver(id: &str, store_root: &Path) -> DriverState {
     }
 
     if let Some(path) = store::installed_path_in(store_root, id) {
-        return DriverState::installed(path, DriverOrigin::Store);
+        let origin = if store::installed_by_zode(&path) {
+            DriverOrigin::Store
+        } else {
+            DriverOrigin::Manual
+        };
+        return DriverState::installed(path, origin);
     }
 
     // `PATH` is consulted only when someone has said, by setting an
@@ -141,12 +149,23 @@ pub struct CatalogueEntry {
     /// known, and none of them is bundled. False here means it has yet to be
     /// downloaded, which is an offer, not a dead end.
     pub installed: bool,
-    /// Whether that driver is one Zode downloaded, and so one Zode may delete.
+    /// Whether that driver sits in the download store, and so is one Zode may
+    /// offer to delete.
     ///
     /// A driver beside the executable belongs to the bundle or the checkout,
     /// and one named by `ZODE_DB_<ID>` to whoever named it -- neither is Zode's
-    /// to remove.
+    /// to remove. What is in the store is, but see [`Self::hand_placed`] for how
+    /// sure Zode is that a click brings it back.
     pub downloaded: bool,
+    /// Whether that driver in the store carries nothing saying Zode put it
+    /// there.
+    ///
+    /// Either somebody copied it in by hand -- which is what the install error
+    /// tells someone with no route to the API to do -- or an earlier Zode
+    /// downloaded it, before there was anything to leave. Zode cannot tell the
+    /// two apart, so it offers to remove it all the same and says plainly that
+    /// the driver may not come back.
+    pub hand_placed: bool,
 }
 
 /// The engines Zode knows the names of.
@@ -291,9 +310,15 @@ pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
             installed: registry
                 .get(driver)
                 .is_some_and(|driver| driver.is_installed()),
-            downloaded: registry
+            downloaded: registry.get(driver).is_some_and(|driver| {
+                matches!(
+                    driver.origin(),
+                    Some(DriverOrigin::Store | DriverOrigin::Manual)
+                )
+            }),
+            hand_placed: registry
                 .get(driver)
-                .is_some_and(|driver| driver.origin() == Some(DriverOrigin::Store)),
+                .is_some_and(|driver| driver.origin() == Some(DriverOrigin::Manual)),
         })
         .collect();
 
@@ -314,6 +339,7 @@ pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
             group: SharedString::new_static("Other"),
             installed: true,
             downloaded: false,
+            hand_placed: false,
         });
     }
     entries
@@ -365,11 +391,14 @@ pub fn refresh(id: &str, cx: &mut App) -> bool {
 /// The deletion runs off the main thread: a driver is tens of megabytes. A
 /// connection already running the driver keeps its process; the next one to
 /// start is offered the download again.
+///
+/// Does nothing about a download of the same driver that is still running, and
+/// cannot: it is a shared future that other windows are waiting on, and one
+/// caller has no business stopping it for the rest. It is not reachable from
+/// the dialog either, which offers Remove only for a driver that is installed
+/// and Download only for one that is not.
 pub fn remove_download(id: SharedString, cx: &mut App) -> gpui::Task<anyhow::Result<()>> {
     let root = store_root(cx);
-    // A download of the same driver still in flight would unpack into the
-    // directory being deleted, and bring the driver back afterwards.
-    installer(cx).forget(&id);
     let removal = cx.background_spawn({
         let id = id.clone();
         async move { store::remove_in(&root, &id) }
@@ -439,12 +468,17 @@ const TEST_API_BASE: &str = "https://api.test.invalid/api";
 /// user's real data directory; without the http client it would reach for
 /// `TEST_API_BASE` for real; and without setting the root *before* the registry
 /// reads it, the resolver would keep looking somewhere the installer never
-/// wrote.
+/// wrote. The installer trusts the key the test fixtures are signed with, and
+/// no other, and accepts the low versions those fixtures publish.
 #[cfg(test)]
 pub(crate) fn set_installer_for_test(root: PathBuf, cx: &mut App) {
     cx.set_global(GlobalDriverStore(root.clone()));
     let endpoint = DriverEndpoint::new(TEST_API_BASE);
-    let installer = Arc::new(DriverInstaller::with_root(cx.http_client(), endpoint, root));
+    let installer = Arc::new(
+        DriverInstaller::with_root(cx.http_client(), endpoint, root)
+            .trusting(database::signature::testing::public_key())
+            .accepting_versions_from("0.0.0"),
+    );
     cx.set_global(GlobalDriverInstaller(installer));
 }
 
@@ -514,6 +548,7 @@ impl ExtensionDatabaseDriverProxy for ExtensionDrivers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use database::install::test_support::plant_driver;
 
     fn declared(id: &str) -> ExtensionDatabaseDriver {
         ExtensionDatabaseDriver {
@@ -638,17 +673,11 @@ mod tests {
     /// longer anything the running app can name -- so whichever one was
     /// installed is the one a driver resolves to.
     #[gpui::test]
-    fn a_driver_downloaded_under_any_version_is_one_the_registry_finds(
+    fn a_driver_installed_under_any_version_is_one_the_registry_finds(
         cx: &mut gpui::TestAppContext,
     ) {
         let store = tempfile::tempdir().unwrap();
-        let directory = store::version_dir_in(store.path(), "postgres", "0.9.9");
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
-            directory.join(store::executable_name("postgres")),
-            b"not really a driver",
-        )
-        .unwrap();
+        plant_driver(store.path(), "postgres", "0.9.9", true);
 
         cx.update(|cx| {
             set_installer_for_test(store.path().to_path_buf(), cx);
@@ -661,6 +690,66 @@ mod tests {
                 .get("postgres")
                 .and_then(|driver| driver.origin());
             assert_eq!(origin, Some(DriverOrigin::Store));
+        });
+    }
+
+    /// What the install error tells an offline user to do -- and what a driver
+    /// downloaded by an earlier Zode, which left no marker, looks like. It
+    /// resolves and runs like any other, and is offered for removal, flagged as
+    /// one that may not come back.
+    #[gpui::test]
+    fn a_driver_with_no_marker_is_found_and_offered_for_removal_as_hand_placed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = tempfile::tempdir().unwrap();
+        plant_driver(store.path(), "postgres", "0.9.9", false);
+
+        cx.update(|cx| {
+            set_installer_for_test(store.path().to_path_buf(), cx);
+            assert!(refresh("postgres", cx), "it is installed and usable");
+
+            let registry = global(cx);
+            assert_eq!(
+                registry
+                    .read(cx)
+                    .get("postgres")
+                    .and_then(|driver| driver.origin()),
+                Some(DriverOrigin::Manual)
+            );
+            for entry in catalogue(cx)
+                .into_iter()
+                .filter(|entry| entry.driver == "postgres")
+            {
+                assert!(entry.installed, "{entry:?}");
+                assert!(
+                    entry.downloaded,
+                    "{} sits in the store, so it can be removed",
+                    entry.name
+                );
+                assert!(
+                    entry.hand_placed,
+                    "{} carries no marker, so removing it must warn",
+                    entry.name
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn a_driver_zode_installed_is_offered_for_removal(cx: &mut gpui::TestAppContext) {
+        let store = tempfile::tempdir().unwrap();
+        plant_driver(store.path(), "postgres", "0.9.9", true);
+
+        cx.update(|cx| {
+            set_installer_for_test(store.path().to_path_buf(), cx);
+            refresh("postgres", cx);
+
+            assert!(
+                catalogue(cx)
+                    .into_iter()
+                    .filter(|entry| entry.driver == "postgres")
+                    .all(|entry| entry.downloaded && !entry.hand_placed)
+            );
         });
     }
 }

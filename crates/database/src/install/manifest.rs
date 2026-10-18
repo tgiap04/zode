@@ -4,6 +4,10 @@
 //! shipped, with the checksum of each. Reading it is one request against a
 //! fixed URL; discovering the same thing any other way would take a guess at
 //! asset naming.
+//!
+//! The copy under `latest` is only ever read for its version. The rows that are
+//! acted on come from the signed copy (see `crate::signature`), which is the one
+//! carrying `protocol`.
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -38,6 +42,15 @@ pub struct DriverAsset {
     /// Lowercase hex SHA-256 of the asset, as published.
     pub sha256: String,
     pub size: u64,
+    /// The database protocol version the driver speaks.
+    ///
+    /// Read before anything is downloaded, so a driver this build cannot talk
+    /// to is refused up front instead of being fetched, installed, and then
+    /// refused at the handshake. Absent from a manifest that predates it, which
+    /// is allowed and simply skips that check: the handshake still has the last
+    /// word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<u32>,
 }
 
 impl DriverManifest {
@@ -162,6 +175,7 @@ mod tests {
                     entry: "zode-db-postgres".into(),
                     sha256: "a".repeat(64),
                     size: 4_812_345,
+                    protocol: Some(1),
                 },
                 DriverAsset {
                     id: "postgres".into(),
@@ -170,6 +184,7 @@ mod tests {
                     entry: "zode-db-postgres".into(),
                     sha256: "b".repeat(64),
                     size: 4_912_345,
+                    protocol: None,
                 },
             ],
         }
@@ -179,6 +194,18 @@ mod tests {
     fn a_manifest_survives_a_round_trip() {
         let json = serde_json::to_vec(&manifest()).unwrap();
         assert_eq!(DriverManifest::parse(&json).unwrap(), manifest());
+    }
+
+    /// What is published today has no `protocol` on its rows, and it must keep
+    /// parsing: the check it feeds is skipped, not failed.
+    #[test]
+    fn a_row_with_no_protocol_still_parses() {
+        let json = br#"{"version":"0.1.1","drivers":[{"id":"postgres",
+            "target":"aarch64-apple-darwin",
+            "asset":"zode-db-postgres-aarch64-apple-darwin.tar.gz",
+            "entry":"zode-db-postgres","sha256":"aa","size":3}]}"#;
+        let parsed = DriverManifest::parse(json).unwrap();
+        assert_eq!(parsed.drivers[0].protocol, None);
     }
 
     /// The same driver on the wrong platform is a miss, not a fallback. A

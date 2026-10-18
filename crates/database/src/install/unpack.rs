@@ -8,12 +8,13 @@
 use anyhow::{Context as _, Result};
 use async_compression::futures::bufread::GzipDecoder;
 use async_tar::Archive;
+use futures::AsyncWriteExt as _;
 use futures::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use crate::install::store;
 
-/// Refuses an `entry` that would name something outside the staging directory.
+/// Refuses an `entry` that is not exactly the driver's own executable name.
 ///
 /// `entry` arrives from the manifest, and `Path::join` is not a containment
 /// operation: an absolute value discards the directory it is joined to
@@ -21,42 +22,39 @@ use crate::install::store;
 /// `store::make_executable`, which would then chmod a file of the manifest's
 /// choosing.
 ///
-/// The manifest is served over the same origin the driver itself comes from,
-/// so nothing here defends against a host that is already trusted to hand over
-/// an executable. It is checked because the URL that manifest is fetched from
-/// became configurable -- and because a value that names a path should be
-/// proven to name one inside the directory it is about to be joined to,
-/// whoever supplied it.
-fn ensure_entry_stays_inside_staging(entry: &str) -> Result<()> {
-    use std::path::Component;
-
-    let path = Path::new(entry);
+/// Equality with the name the driver is installed under settles that and one
+/// more thing. The resolver looks for that name directly inside the version
+/// directory, so an entry anywhere else -- `nested/zode-db-x` -- would unpack
+/// fine and then leave an install the resolver cannot see. It has to be caught
+/// here, before the install it would replace is deleted.
+fn ensure_entry_is_the_executable(entry: &str, executable_name: &str) -> Result<()> {
     anyhow::ensure!(
-        path.components()
-            .all(|component| matches!(component, Component::Normal(_))),
-        "the driver manifest names {entry:?} inside the archive, which is not a \
-         path within it; refusing to unpack"
+        entry == executable_name,
+        "the driver manifest names {entry:?} as the executable inside the archive, but a driver \
+         is installed as {executable_name:?}; refusing to unpack"
     );
     Ok(())
 }
 
-/// Unpacks `archive` and moves the driver's executable into place.
+/// Unpacks `archive` into `staging` and moves the driver's executable into place.
 ///
 /// `entry` is the executable's path inside the archive; `destination` is the
-/// version directory it belongs in. Returns the installed executable.
+/// version directory it belongs in. `staging` is scratch space of the caller's
+/// choosing, beside `destination` so the final move stays a rename, and named
+/// per install so two installs never share one. Returns the installed
+/// executable.
 pub async fn install_archive(
     archive: &Path,
     entry: &str,
+    staging: &Path,
     destination: &Path,
     executable_name: &str,
 ) -> Result<PathBuf> {
-    ensure_entry_stays_inside_staging(entry)?;
+    ensure_entry_is_the_executable(entry, executable_name)?;
 
-    let staging = staging_dir(destination);
-    let installed =
-        unpack_and_publish(archive, entry, &staging, destination, executable_name).await;
+    let installed = unpack_and_publish(archive, entry, staging, destination, executable_name).await;
     if installed.is_err() {
-        discard_staging(&staging).await;
+        discard_staging(staging).await;
     }
     installed
 }
@@ -78,12 +76,22 @@ async fn unpack_and_publish(
 
     unpack(archive, staging).await?;
 
+    // `symlink_metadata`, not `is_file`: an archive can hold a link by this
+    // name, and every call that follows -- the permission change in particular
+    // -- would act on whatever it points at.
     let unpacked = staging.join(entry);
-    anyhow::ensure!(
-        unpacked.is_file(),
-        "the downloaded archive does not contain {entry}"
-    );
+    match smol::fs::symlink_metadata(&unpacked).await {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => anyhow::bail!("{entry} in the downloaded archive is not a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("the downloaded archive does not contain {entry}")
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", unpacked.display()));
+        }
+    }
     store::make_executable(&unpacked)?;
+    mark_installed(staging).await?;
 
     // The rename is what publishes the install, so it is the last thing done
     // and it moves a directory that is already complete.
@@ -94,30 +102,50 @@ async fn unpack_and_publish(
             .await
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    smol::fs::rename(staging, destination)
-        .await
-        .with_context(|| {
-            format!(
-                "moving the unpacked driver from {} to {}",
-                staging.display(),
-                destination.display()
-            )
-        })?;
-
     let installed = destination.join(executable_name);
-    anyhow::ensure!(
-        installed.is_file(),
-        "{entry} did not land at {}",
-        installed.display()
-    );
+    if let Err(error) = smol::fs::rename(staging, destination).await {
+        // Another install of this very version -- verified against the same
+        // signed manifest, so the same bytes -- can publish between the removal
+        // above and this move, and a rename onto a directory that is not empty
+        // fails. What is there is then what was asked for, so it is accepted
+        // rather than reported as a failure of an install that has in effect
+        // succeeded. Anything else is still an error.
+        let published_by_another_install = smol::unblock({
+            let installed = installed.clone();
+            move || installed.is_file() && store::installed_by_zode(&installed)
+        })
+        .await;
+        if !published_by_another_install {
+            return Err(error).with_context(|| {
+                format!(
+                    "moving the unpacked driver from {} to {}",
+                    staging.display(),
+                    destination.display()
+                )
+            });
+        }
+    }
+
     clear_quarantine(&installed).await;
     Ok(installed)
 }
 
-/// Beside the destination, so the final move is a rename within one
-/// filesystem, and never named like a version: see [`store::hidden_sibling`].
-pub(crate) fn staging_dir(destination: &Path) -> PathBuf {
-    store::hidden_sibling(destination, "incoming")
+/// Writes [`store::INSTALL_MARKER`], which says Zode put this driver here.
+///
+/// `create_new` so an archive that already holds something by that name -- a
+/// link to a file elsewhere, say -- fails the install instead of being written
+/// through.
+async fn mark_installed(directory: &Path) -> Result<()> {
+    let path = directory.join(store::INSTALL_MARKER);
+    let mut marker = smol::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+        .with_context(|| format!("marking {} as installed by Zode", directory.display()))?;
+    marker.write_all(b"installed by Zode\n").await?;
+    marker.flush().await?;
+    Ok(())
 }
 
 /// Best-effort: the install has already failed, and that failure is what the
@@ -179,7 +207,6 @@ async fn clear_quarantine(path: &Path) {
 mod tests {
     use super::*;
     use async_compression::futures::write::GzipEncoder;
-    use futures::AsyncWriteExt as _;
 
     /// Built with the same crates that read it, rather than pulling a second
     /// tar and gzip implementation into the workspace for a test.
@@ -206,6 +233,26 @@ mod tests {
         path
     }
 
+    fn staging_for(destination: &Path) -> PathBuf {
+        store::hidden_sibling(destination, "incoming")
+    }
+
+    async fn install(
+        archive: &Path,
+        entry: &str,
+        destination: &Path,
+        executable_name: &str,
+    ) -> Result<PathBuf> {
+        install_archive(
+            archive,
+            entry,
+            &staging_for(destination),
+            destination,
+            executable_name,
+        )
+        .await
+    }
+
     #[test]
     fn an_archive_lands_as_an_executable_at_its_version() {
         smol::block_on(async {
@@ -217,7 +264,7 @@ mod tests {
             );
             let destination = root.path().join("postgres").join("0.1.1");
 
-            let installed = install_archive(
+            let installed = install(
                 &archive,
                 "zode-db-postgres",
                 &destination,
@@ -237,6 +284,63 @@ mod tests {
         });
     }
 
+    /// What lets Remove tell a driver Zode installed from one somebody copied
+    /// into the store: the install writes the marker, and nothing else does.
+    #[test]
+    fn an_install_is_marked_as_zodes_own() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = write(
+                root.path(),
+                "driver.tar.gz",
+                &archive_containing(&[("zode-db-postgres", b"#!/bin/sh\nexit 0\n")]).await,
+            );
+            let destination = root.path().join("postgres").join("0.1.1");
+
+            let installed = install(
+                &archive,
+                "zode-db-postgres",
+                &destination,
+                "zode-db-postgres",
+            )
+            .await
+            .unwrap();
+
+            assert!(store::installed_by_zode(&installed));
+        });
+    }
+
+    /// An archive carrying the marker's name is not trusted to have meant it,
+    /// least of all as a link that the write would otherwise follow.
+    #[test]
+    fn an_archive_that_brings_its_own_marker_is_refused() {
+        smol::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let archive = write(
+                root.path(),
+                "driver.tar.gz",
+                &archive_containing(&[
+                    ("zode-db-postgres", b"#!/bin/sh\nexit 0\n"),
+                    (store::INSTALL_MARKER, b"forged"),
+                ])
+                .await,
+            );
+            let destination = root.path().join("postgres").join("0.1.1");
+
+            install(
+                &archive,
+                "zode-db-postgres",
+                &destination,
+                "zode-db-postgres",
+            )
+            .await
+            .expect_err("an archive may not write the marker itself");
+
+            assert!(!destination.exists());
+            assert!(!staging_for(&destination).exists());
+        });
+    }
+
     /// An archive that unpacked but held nothing runnable must not leave a
     /// version directory behind: the resolver would call that installed.
     #[test]
@@ -250,7 +354,7 @@ mod tests {
             );
             let destination = root.path().join("postgres").join("0.1.1");
 
-            let error = install_archive(
+            let error = install(
                 &archive,
                 "zode-db-postgres",
                 &destination,
@@ -265,7 +369,7 @@ mod tests {
                 "nothing may be published from a failed unpack"
             );
             assert!(
-                !staging_dir(&destination).exists(),
+                !staging_for(&destination).exists(),
                 "the unpacked files must not outlive the refusal"
             );
         });
@@ -280,11 +384,11 @@ mod tests {
             let archive = write(root.path(), "driver.tar.gz", b"not gzip");
             let destination = root.path().join("mysql").join("0.1.1");
 
-            install_archive(&archive, "zode-db-mysql", &destination, "zode-db-mysql")
+            install(&archive, "zode-db-mysql", &destination, "zode-db-mysql")
                 .await
                 .expect_err("unpacking rubbish must fail");
             assert!(!destination.exists());
-            assert!(!staging_dir(&destination).exists());
+            assert!(!staging_for(&destination).exists());
         });
     }
 
@@ -301,11 +405,11 @@ mod tests {
                 &archive_containing(&[("zode-db-postgres", b"#!/bin/sh\nexit 0\n")]).await,
             );
             let destination = root.path().join("postgres").join("0.1.5-rc.1");
-            let staging = staging_dir(&destination);
+            let staging = staging_for(&destination);
             std::fs::create_dir_all(&staging).unwrap();
             write(&staging, "left-by-a-dead-attempt", b"stale");
 
-            let installed = install_archive(
+            let installed = install(
                 &archive,
                 "zode-db-postgres",
                 &destination,
@@ -320,61 +424,112 @@ mod tests {
         });
     }
 
-    /// The staging name of a pre-release is a version-shaped string only if it
-    /// is built by appending to the version.
-    #[test]
-    fn staging_sits_beside_the_destination_and_never_reads_as_a_version() {
-        for version in ["0.1.4", "0.1.5-rc.1"] {
-            let destination = Path::new("/store/postgres").join(version);
-            let staging = staging_dir(&destination);
-            assert_eq!(staging.parent(), destination.parent());
-            let name = staging.file_name().and_then(|name| name.to_str()).unwrap();
-            assert!(!store::is_version(name), "{name:?}");
-        }
-    }
-
     /// `Path::join` is not containment: joining an absolute path discards
     /// what it was joined to, and `..` walks out. Either would carry the
-    /// manifest's choice of path into `store::make_executable`.
+    /// manifest's choice of path into `store::make_executable`. Anywhere but
+    /// directly in the version directory is also somewhere the resolver does not
+    /// look.
     #[test]
-    fn an_entry_naming_somewhere_outside_the_archive_is_refused() {
+    fn an_entry_that_is_not_the_executable_itself_is_refused() {
         for entry in [
             "/etc/passwd",
             "../../../../etc/passwd",
             "..",
             "nested/../../escape",
+            "nested/zode-db-mysql",
+            "./zode-db-mysql",
+            "zode-db-postgres",
+            "",
         ] {
             assert!(
-                ensure_entry_stays_inside_staging(entry).is_err(),
+                ensure_entry_is_the_executable(entry, "zode-db-mysql").is_err(),
                 "{entry:?} must be refused"
             );
         }
-    }
-
-    #[test]
-    fn an_ordinary_entry_is_accepted() {
-        for entry in ["zode-db-mysql", "zode-db-mysql.exe", "nested/zode-db-mysql"] {
-            ensure_entry_stays_inside_staging(entry)
-                .unwrap_or_else(|error| panic!("{entry:?} must be accepted: {error}"));
-        }
+        ensure_entry_is_the_executable("zode-db-mysql", "zode-db-mysql").unwrap();
     }
 
     /// The check has to run before anything touches the filesystem -- a
     /// refusal that happens after the archive is already unpacked has
-    /// already done the work it was meant to prevent.
+    /// already done the work it was meant to prevent. In particular it must
+    /// precede the removal of an install already in place.
     #[test]
-    fn a_traversing_entry_is_refused_before_anything_is_unpacked() {
+    fn a_misplaced_entry_is_refused_before_anything_is_touched() {
         smol::block_on(async {
             let root = tempfile::tempdir().unwrap();
-            let archive = write(root.path(), "driver.tar.gz", b"not gzip");
+            let archive = write(
+                root.path(),
+                "driver.tar.gz",
+                &archive_containing(&[("nested/zode-db-mysql", b"#!/bin/sh\nexit 0\n")]).await,
+            );
             let destination = root.path().join("mysql").join("0.1.1");
+            std::fs::create_dir_all(&destination).unwrap();
+            let existing = write(&destination, "zode-db-mysql", b"the install already here");
 
-            let error = install_archive(&archive, "../escape", &destination, "zode-db-mysql")
-                .await
-                .expect_err("a traversing entry must be refused");
+            let error = install(
+                &archive,
+                "nested/zode-db-mysql",
+                &destination,
+                "zode-db-mysql",
+            )
+            .await
+            .expect_err("an entry in a subdirectory must be refused");
 
             assert!(error.to_string().contains("refusing to unpack"), "{error}");
-            assert!(!staging_dir(&destination).exists());
+            assert_eq!(
+                std::fs::read(&existing).unwrap(),
+                b"the install already here",
+                "the install in place must survive a refusal"
+            );
+            assert!(!staging_for(&destination).exists());
+        });
+    }
+
+    /// An archive can hold a link by the executable's name. Every call after the
+    /// unpack follows links, so one pointing out of the staging directory would
+    /// have its target's permissions changed.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_place_of_the_executable_is_refused_and_its_target_left_alone() {
+        smol::block_on(async {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let root = tempfile::tempdir().unwrap();
+            let target = write(root.path(), "somebody-elses-file", b"private");
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            let mut builder = async_tar::Builder::new(GzipEncoder::new(Vec::new()));
+            let mut header = async_tar::Header::new_gnu();
+            header.set_entry_type(async_tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_link_name(&target).unwrap();
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "zode-db-postgres", futures::io::empty())
+                .await
+                .unwrap();
+            let mut encoder = builder.into_inner().await.unwrap();
+            encoder.close().await.unwrap();
+            let archive = write(root.path(), "driver.tar.gz", &encoder.into_inner());
+            let destination = root.path().join("postgres").join("0.1.1");
+
+            let error = install(
+                &archive,
+                "zode-db-postgres",
+                &destination,
+                "zode-db-postgres",
+            )
+            .await
+            .expect_err("a link is not an executable");
+
+            assert!(error.to_string().contains("not a regular file"), "{error}");
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "what the link points at must not be made executable"
+            );
+            assert!(!destination.exists());
         });
     }
 }

@@ -8,7 +8,7 @@
 //! only place that is checked is the handshake, not anywhere in this path.
 
 use anyhow::{Context as _, Result};
-use url::Url;
+use url::{Host, Url};
 
 use crate::install::manifest::MANIFEST_ASSET;
 
@@ -18,12 +18,6 @@ use crate::install::manifest::MANIFEST_ASSET;
 /// No published version can be called this: the server requires a version to
 /// start with a digit.
 const LATEST: &str = "latest";
-
-/// Hosts that are the machine's own loopback, for which plain HTTP is allowed.
-///
-/// A developer pointing `ZODE_API_URL` at `http://localhost:8000/api` must
-/// still be able to install a driver; nothing else gets that exemption.
-const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
 
 /// `{base}/drivers/{version}/{asset}`, plus `{base}/drivers/latest/` for the
 /// manifest alone -- the one contract this crate shares with the server and
@@ -78,7 +72,7 @@ impl DriverEndpoint {
         );
 
         let same_origin = target.scheme() == base.scheme()
-            && target.host_str() == base.host_str()
+            && target.host() == base.host()
             && target.port_or_known_default() == base.port_or_known_default();
         anyhow::ensure!(
             same_origin,
@@ -87,16 +81,28 @@ impl DriverEndpoint {
             origin_of(&base),
         );
 
-        let loopback = target
-            .host_str()
-            .map(|host| LOOPBACK_HOSTS.contains(&host))
-            .unwrap_or(false);
         anyhow::ensure!(
-            target.scheme() == "https" || loopback,
+            target.scheme() == "https" || is_loopback(&target),
             "driver asset url is not https: {url:?}"
         );
 
         Ok(())
+    }
+}
+
+/// Whether the url names the machine's own loopback, for which plain HTTP is
+/// allowed.
+///
+/// A developer pointing `ZODE_API_URL` at `http://localhost:8000/api` must still
+/// be able to install a driver; nothing else gets that exemption. Judged on the
+/// parsed host rather than on its text: `host_str` writes an IPv6 address inside
+/// brackets, so `[::1]` would never equal a bare `::1` in a list of names.
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain == "localhost",
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -209,6 +215,45 @@ mod tests {
         endpoint
             .ensure_trusted("http://localhost:8000/api/drivers/0.1.1/asset.tar.gz")
             .unwrap();
+    }
+
+    /// `Url::host_str` spells an IPv6 host with its brackets, so comparing it
+    /// against a list of bare addresses never matched `[::1]`.
+    #[test]
+    fn plain_http_on_every_spelling_of_loopback_is_allowed() {
+        for base in [
+            "http://localhost:8000/api",
+            "http://LOCALHOST:8000/api",
+            "http://127.0.0.1:8000/api",
+            "http://127.0.0.2:8000/api",
+            "http://[::1]:8000/api",
+        ] {
+            let endpoint = DriverEndpoint::new(base);
+            let url = format!("{base}/drivers/0.1.1/asset.tar.gz");
+            endpoint
+                .ensure_trusted(&url)
+                .unwrap_or_else(|error| panic!("{base} must be allowed: {error}"));
+        }
+    }
+
+    /// Only the machine's own loopback gets the exemption. These all look
+    /// local to a person and none of them is.
+    #[test]
+    fn plain_http_on_anything_but_loopback_is_refused() {
+        for base in [
+            "http://[::2]:8000/api",
+            "http://[fe80::1]:8000/api",
+            "http://192.168.1.10:8000/api",
+            "http://localhost.example:8000/api",
+            "http://0.0.0.0:8000/api",
+        ] {
+            let endpoint = DriverEndpoint::new(base);
+            let url = format!("{base}/drivers/0.1.1/asset.tar.gz");
+            assert!(
+                endpoint.ensure_trusted(&url).is_err(),
+                "{base} must be refused"
+            );
+        }
     }
 
     #[test]

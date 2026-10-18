@@ -1016,6 +1016,7 @@ async fn the_dialog_keeps_its_actions_in_a_footer_on_every_step(cx: &mut TestApp
                 group: "Relational".into(),
                 installed: false,
                 downloaded: false,
+                hand_placed: false,
             },
             message: "No such driver".into(),
         };

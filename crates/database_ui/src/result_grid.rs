@@ -227,8 +227,12 @@ impl DatabasePanel {
 /// A null is drawn differently from every other value, because it is the one
 /// value that is not text -- and a grid that renders it like the empty string
 /// is lying about the data.
+///
+/// Every cell is one line. The rows of a `uniform_list` all take the height of
+/// the first, so a text value holding a newline would make every row as tall as
+/// the first row's longest cell and clip the rest.
 fn render_cell(cell: &Cell) -> AnyElement {
-    let text = cell_text(cell);
+    let text = one_line(&cell_text(cell));
     match cell {
         Cell::Null => Label::new(text)
             .size(LabelSize::Small)
@@ -243,6 +247,15 @@ fn render_cell(cell: &Cell) -> AnyElement {
     }
 }
 
+/// The text with each line break written as `⏎`, which is what
+/// `Label::single_line` does and what `truncate` alone does not.
+fn one_line(text: &str) -> SharedString {
+    if !text.contains(['\n', '\r']) {
+        return SharedString::from(text.to_string());
+    }
+    SharedString::from(text.replace("\r\n", "⏎").replace(['\n', '\r'], "⏎"))
+}
+
 fn note(text: &'static str, colour: Color, _cx: &mut Context<DatabasePanel>) -> AnyElement {
     v_flex()
         .size_full()
@@ -250,4 +263,25 @@ fn note(text: &'static str, colour: Color, _cx: &mut Context<DatabasePanel>) -> 
         .justify_center()
         .child(Label::new(text).size(LabelSize::Small).color(colour))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cell_holding_line_breaks_is_drawn_on_one_line() {
+        assert_eq!(one_line("first\nsecond"), "first⏎second");
+        assert_eq!(one_line("first\r\nsecond"), "first⏎second");
+        assert_eq!(one_line("first\rsecond"), "first⏎second");
+        assert_eq!(one_line("a\n\nb"), "a⏎⏎b");
+        assert_eq!(one_line("\n"), "⏎");
+    }
+
+    #[test]
+    fn a_cell_without_line_breaks_is_left_as_it_is() {
+        assert_eq!(one_line("plain text"), "plain text");
+        assert_eq!(one_line(""), "");
+        assert_eq!(one_line("tab\tseparated"), "tab\tseparated");
+    }
 }

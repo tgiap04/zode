@@ -45,6 +45,9 @@ secret!(R2_ACCOUNT_ID);
 secret!(R2_ACCESS_KEY_ID);
 secret!(R2_SECRET_ACCESS_KEY);
 secret!(ZODE_DRIVER_UPLOAD_TOKEN);
+// The base64 of the PKCS#8 private key that signs the driver manifest. Its public half
+// is `DRIVER_MANIFEST_PUBLIC_KEY` in `crates/database/src/signature.rs`.
+secret!(ZODE_DRIVER_SIGNING_KEY);
 
 // todo(ci) make these secrets too...
 var!(AZURE_SIGNING_ACCOUNT_NAME);

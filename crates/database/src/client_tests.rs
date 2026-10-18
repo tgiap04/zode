@@ -166,9 +166,11 @@ async fn a_driver_on_the_wrong_version_is_refused_with_both_numbers(cx: &mut Tes
             && message.contains(&crate::PROTOCOL_VERSION.wrapping_add(1).to_string()),
         "the message must name both versions, or nobody can tell which end to fix: {message}"
     );
+    // The fake speaks a newer protocol than this build, and downloading a
+    // driver again fetches the same newer one: only updating Zode helps.
     assert!(
-        message.contains("download it again"),
-        "a driver kept across app updates must be told how to be replaced: {message}"
+        message.contains("Update Zode") && !message.contains("download it again"),
+        "a driver newer than the app must send the person to update the app: {message}"
     );
 }
 
