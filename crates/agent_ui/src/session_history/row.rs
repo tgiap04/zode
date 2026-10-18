@@ -1,7 +1,4 @@
-use crate::session_history::{
-    actions::cwd_exists,
-    panel::{AgentHistoryPanel, CountState},
-};
+use crate::session_history::panel::{AgentHistoryPanel, CountState};
 use agent_sessions::{AgentKind, Fork, SessionSummary};
 use gpui::{Anchor, Context, FontWeight, Window};
 use std::path::{Path, PathBuf};
@@ -116,7 +113,7 @@ pub(crate) fn render_session(
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
     let expanded = panel.expanded_rows.contains(&session.id);
-    let alive = cwd_exists(session);
+    let alive = panel.cwd_alive(&session.cwd);
     let can_fork = panel.can_fork(session);
     let roots = panel.project_roots(cx);
     let menu_handle = panel.menu_handle(&session.id);

@@ -286,6 +286,29 @@ impl TurnTracker {
         self.phase == Phase::Running && !self.open_calls.is_empty()
     }
 
+    /// Whether a tool call in the current turn has no result yet. Wider than
+    /// [`Self::tool_pending`], which also needs the turn to be running: this is
+    /// what says the transcript still has a result to come, and so a subagent a
+    /// call spawned may not have written its sidecar yet.
+    pub fn call_open(&self) -> bool {
+        !self.open_calls.is_empty()
+    }
+
+    /// Whether the agent is between turns: the last one is over, or none has
+    /// begun. The only time the user can type at its prompt -- so the only time
+    /// the conversation can be cleared, and a transcript can have been left.
+    /// A turn closed with background work still running counts: the prompt is
+    /// back whatever that work is doing.
+    pub fn is_closed(&self) -> bool {
+        matches!(self.phase, Phase::Idle | Phase::Ended | Phase::Held)
+    }
+
+    /// Whether the turn closed with background work still running, which is the
+    /// one state [`TurnPass::background_quiet_for`] is read in.
+    pub fn is_held(&self) -> bool {
+        self.phase == Phase::Held
+    }
+
     pub fn awaiting_approval(&self) -> bool {
         self.awaiting_approval
     }
@@ -353,14 +376,20 @@ pub fn approval_next(asking: bool, tool_pending: bool, quiet: bool, dialog_visib
     tool_pending && dialog_visible && (asking || quiet)
 }
 
-/// Notices a tab whose transcript never produces a turn mark.
+/// Notices a tab whose transcript has stopped producing turn marks while the
+/// CLI keeps writing.
 ///
-/// The turn marks come from a format this editor does not own. If it changes,
-/// the failure is silent: no turn ever starts or ends, and nothing is
-/// announced. This is the one place that failure can say so.
+/// The turn marks come from a format this editor does not own, in a file the
+/// CLI can stop writing to without a word. If the format changes, or the
+/// transcript lands somewhere this editor does not look, no turn ever starts or
+/// ends and nothing is announced. And if the CLI moves to a new transcript --
+/// which is what clearing a conversation does -- the marks stop in the middle of
+/// a tab's life. Both look the same from here: output, and no marks.
 #[derive(Default)]
 pub struct SilenceWatch {
     saw_marks: bool,
+    /// How long the CLI has been writing since the last mark, or since the
+    /// start while none has come.
     writing_for: std::time::Duration,
     warned: bool,
 }
@@ -369,24 +398,49 @@ pub struct SilenceWatch {
 /// say so.
 const SILENT_WRITING_BEFORE_WARNING: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How much terminal activity after the last mark is long enough to go and look
+/// for the transcript having moved. Far shorter than the limit above, because
+/// being wrong costs one look at a directory where being late costs whatever
+/// the new transcript recorded in the meantime.
+const MARKS_STOPPED_AFTER_WRITING: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl SilenceWatch {
     pub fn saw_marks(&mut self) {
         self.saw_marks = true;
+        self.writing_for = std::time::Duration::ZERO;
     }
 
     /// Accounts for `elapsed` of observation, `cli_writing` saying whether the
-    /// agent's output was flowing during it. True exactly once, when the
-    /// total passes the limit.
+    /// agent's output was flowing during it. True exactly once, when a tab that
+    /// has never produced a mark passes the limit.
     ///
     /// Counts only time the CLI was writing: an agent left idle at its prompt
     /// has nothing to put in a transcript, and that is not a fault.
     pub fn observe(&mut self, cli_writing: bool, elapsed: std::time::Duration) -> bool {
-        if self.saw_marks || self.warned || !cli_writing {
+        if !cli_writing {
             return false;
         }
         self.writing_for += elapsed;
+        if self.saw_marks || self.warned {
+            return false;
+        }
         self.warned = self.writing_for >= SILENT_WRITING_BEFORE_WARNING;
         self.warned
+    }
+
+    /// Whether the transcript has never produced a mark although the CLI has
+    /// written for a minute -- so nothing it says about turns can be trusted to
+    /// arrive. Lifts as soon as a mark does.
+    pub fn never_marked(&self) -> bool {
+        self.warned && !self.saw_marks
+    }
+
+    /// Whether marks came and then stopped while the CLI kept writing. Not proof
+    /// of anything: a long build writes for minutes into a transcript that says
+    /// nothing until it is done. It is the cue to check whether the CLI has
+    /// moved to another transcript.
+    pub fn marks_stopped(&self) -> bool {
+        self.saw_marks && self.writing_for >= MARKS_STOPPED_AFTER_WRITING
     }
 }
 
@@ -950,6 +1004,132 @@ mod tests {
         let mut watch = SilenceWatch::default();
         watch.saw_marks();
         assert!(!watch.observe(true, std::time::Duration::from_secs(3600)));
+        assert!(!watch.never_marked());
+    }
+
+    #[test]
+    fn a_tab_that_never_marked_is_named_so_until_a_mark_arrives() {
+        let second = std::time::Duration::from_secs(1);
+        let mut watch = SilenceWatch::default();
+        for _ in 0..59 {
+            watch.observe(true, second);
+        }
+        assert!(!watch.never_marked(), "a minute has not passed");
+        assert!(watch.observe(true, second));
+        assert!(watch.never_marked());
+
+        watch.saw_marks();
+        assert!(
+            !watch.never_marked(),
+            "a transcript that turns out to work is trusted again"
+        );
+    }
+
+    #[test]
+    fn marks_that_stop_while_the_cli_writes_are_noticed_after_ten_seconds() {
+        let second = std::time::Duration::from_secs(1);
+        let mut watch = SilenceWatch::default();
+        assert!(
+            !watch.marks_stopped(),
+            "a tab that has had no marks yet has not stopped getting them"
+        );
+        watch.saw_marks();
+        for _ in 0..9 {
+            watch.observe(true, second);
+        }
+        assert!(!watch.marks_stopped());
+        watch.observe(false, second);
+        assert!(
+            !watch.marks_stopped(),
+            "an idle prompt writes nothing and is not a stall"
+        );
+        watch.observe(true, second);
+        assert!(watch.marks_stopped());
+        assert!(
+            !watch.never_marked(),
+            "it did mark once, so this is not a transcript that never worked"
+        );
+    }
+
+    #[test]
+    fn a_mark_ends_a_stall() {
+        let mut watch = SilenceWatch::default();
+        watch.saw_marks();
+        watch.observe(true, std::time::Duration::from_secs(30));
+        assert!(watch.marks_stopped());
+        watch.saw_marks();
+        assert!(!watch.marks_stopped());
+    }
+
+    #[test]
+    fn a_turn_is_closed_between_turns_and_open_while_one_runs() {
+        let mut tracker = TurnTracker::default();
+        assert!(tracker.is_closed(), "nothing has begun");
+
+        pass(&mut tracker, &[TurnMark::Prompt], &[], true, None);
+        assert!(!tracker.is_closed(), "running");
+
+        // The first turn of a transcript ends on its reply, before anything has
+        // shown that a closing line exists.
+        pass(
+            &mut tracker,
+            &[TurnMark::EndTurn { message_id: None }, duration(false)],
+            &[],
+            true,
+            None,
+        );
+        assert!(tracker.is_closed(), "ended");
+
+        pass(
+            &mut tracker,
+            &[
+                TurnMark::Prompt,
+                TurnMark::EndTurn {
+                    message_id: Some("m2".into()),
+                },
+            ],
+            &[],
+            true,
+            None,
+        );
+        assert!(
+            !tracker.is_closed(),
+            "the reply is written but the turn is still waiting for its closing line"
+        );
+
+        pass(&mut tracker, &[duration(true)], &[], true, None);
+        assert!(tracker.is_closed(), "held: the prompt is back");
+    }
+
+    #[test]
+    fn the_tracker_says_when_a_call_is_open_and_when_a_turn_is_held() {
+        let mut tracker = TurnTracker::default();
+        assert!(!tracker.call_open() && !tracker.is_held());
+
+        pass(
+            &mut tracker,
+            &[TurnMark::Prompt, call("toolu_1")],
+            &[],
+            true,
+            None,
+        );
+        assert!(tracker.call_open());
+        pass(&mut tracker, &[], &done(&["toolu_1"]), true, None);
+        assert!(!tracker.call_open(), "its result closed it");
+
+        pass(
+            &mut tracker,
+            &[TurnMark::EndTurn { message_id: None }, duration(true)],
+            &[],
+            true,
+            None,
+        );
+        assert!(
+            tracker.is_held(),
+            "the turn closed with background work running"
+        );
+        pass(&mut tracker, &[TurnMark::Prompt], &[], true, None);
+        assert!(!tracker.is_held());
     }
 
     fn screen(lines: &[&str]) -> Vec<String> {

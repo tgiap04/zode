@@ -84,7 +84,7 @@ impl Speaker {
 /// Everything here is cheap to obtain — a bounded read of the log's head and
 /// tail, or one sqlite row. The expensive numbers live in [`SessionCounts`],
 /// fetched separately and only for rows that are actually on screen.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSummary {
     /// The id the agent's own `resume` takes.
     pub id: Arc<str>,
@@ -210,6 +210,14 @@ pub struct TranscriptProgress {
     /// pass read a different file from its start. Whatever the caller derived
     /// from the earlier file no longer describes anything.
     pub restarted: bool,
+    /// A fingerprint of the transcript's first line, once that line is whole.
+    ///
+    /// A transcript only ever grows, so its first line never changes: a value
+    /// that differs from the last pass's means a different file stands at the
+    /// path, even one at least as long as the cursor, which `restarted` cannot
+    /// see. `None` while the first line is still being written, or for a store
+    /// that has no such line.
+    pub identity: Option<u64>,
 }
 
 /// The numbers that cost a full scan of the transcript.

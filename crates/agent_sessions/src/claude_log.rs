@@ -9,8 +9,12 @@
 //! parse decisions testable without a filesystem, and keeps them in one place.
 
 use crate::{Speaker, SubagentEvent, TurnMark};
-use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use serde::{
+    Deserialize, Deserializer,
+    de::{SeqAccess, Visitor},
+};
+use serde_json::{Value, value::RawValue};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 /// What the tail of a transcript can tell us. The tail, not the head, because
 /// `ai-title` is appended repeatedly as the title is refined and the last one
@@ -111,6 +115,160 @@ pub(crate) struct ChunkScan {
     pub subagent_events: Vec<SubagentEvent>,
 }
 
+impl ChunkScan {
+    /// Appends what a later stretch found, keeping file order.
+    pub(crate) fn extend(&mut self, later: ChunkScan) {
+        self.tool_use_ids.extend(later.tool_use_ids);
+        self.turn_marks.extend(later.turn_marks);
+        self.subagent_events.extend(later.subagent_events);
+    }
+}
+
+/// A field read on its own terms: a value of the wrong type is `None` instead
+/// of a line that fails to parse.
+///
+/// The transcript format belongs to another program, and the reading above it
+/// degrades one field at a time. Declaring only the fields a scan needs keeps
+/// the rest -- a base64 image, a file a tool returned -- from being allocated
+/// at all, and this keeps a field the CLI reshapes from costing the line.
+struct Lenient<T>(Option<T>);
+
+impl<T> Default for Lenient<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Lenient<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: &RawValue = Deserialize::deserialize(deserializer)?;
+        Ok(Self(serde_json::from_str(raw.get()).ok()))
+    }
+}
+
+/// [`Lenient`] for a field that is a JSON object: one written as a list is
+/// `None` as well.
+///
+/// A derived struct reads its fields from a JSON array too, in declaration
+/// order, so `["x"]` would otherwise come out as a struct whose first field is
+/// `"x"`. The transcript never writes an object that way, and the reading this
+/// replaced found nothing in a list.
+struct Object<T>(Option<T>);
+
+impl<T> Default for Object<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Object<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: &RawValue = Deserialize::deserialize(deserializer)?;
+        Ok(Self(parse_object(raw.get())))
+    }
+}
+
+/// `text` as a `T`, when it is a JSON object that reads as one.
+fn parse_object<'a, T: Deserialize<'a>>(text: &'a str) -> Option<T> {
+    if !text.trim_start().starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(text).ok()
+}
+
+/// `message.content`: a bare string, or a list of blocks.
+enum Content {
+    Text(String),
+    Blocks(Vec<Object<Block>>),
+}
+
+impl<'de> Deserialize<'de> for Content {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ContentVisitor;
+
+        impl<'de> Visitor<'de> for ContentVisitor {
+            type Value = Content;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string or a list of blocks")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Content, E> {
+                Ok(Content::Text(text.to_owned()))
+            }
+
+            fn visit_string<E: serde::de::Error>(self, text: String) -> Result<Content, E> {
+                Ok(Content::Text(text))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Content, A::Error> {
+                let mut blocks = Vec::new();
+                while let Some(block) = seq.next_element::<Object<Block>>()? {
+                    blocks.push(block);
+                }
+                Ok(Content::Blocks(blocks))
+            }
+        }
+
+        deserializer.deserialize_any(ContentVisitor)
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct Block {
+    #[serde(rename = "type", default)]
+    kind: Lenient<String>,
+    #[serde(default)]
+    tool_use_id: Lenient<String>,
+    #[serde(default)]
+    id: Lenient<String>,
+    #[serde(default)]
+    text: Lenient<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct Message {
+    #[serde(default)]
+    content: Lenient<Content>,
+    #[serde(default)]
+    stop_reason: Lenient<String>,
+    #[serde(default)]
+    id: Lenient<String>,
+    #[serde(default)]
+    model: Lenient<String>,
+}
+
+/// The fields of a transcript line a scan reads, and nothing else.
+#[derive(Deserialize)]
+struct Line<'a> {
+    #[serde(rename = "type", default)]
+    kind: Lenient<String>,
+    #[serde(default)]
+    message: Object<Message>,
+    #[serde(rename = "isSidechain", default)]
+    is_sidechain: Lenient<bool>,
+    #[serde(rename = "isMeta", default)]
+    is_meta: Lenient<bool>,
+    #[serde(rename = "isCompactSummary", default)]
+    is_compact_summary: Lenient<bool>,
+    #[serde(rename = "isApiErrorMessage", default)]
+    is_api_error_message: Lenient<bool>,
+    #[serde(default)]
+    subtype: Lenient<String>,
+    #[serde(rename = "pendingBackgroundAgentCount", default)]
+    pending_background_agents: Lenient<u64>,
+    #[serde(default)]
+    operation: Lenient<String>,
+    /// A queued operation carries its text here, outside `message`.
+    #[serde(rename = "content", default)]
+    queued: Lenient<String>,
+    /// Kept as raw text: it is a string, an object or a list depending on the
+    /// tool, can be as large as a file, and only a tool-result line ever needs
+    /// to look inside it.
+    #[serde(rename = "toolUseResult", borrow, default)]
+    tool_use_result: Option<&'a RawValue>,
+}
+
 /// The tool calls this stretch of transcript reports a result for, and the
 /// landmarks of the main conversation chain, in the order the file wrote them.
 ///
@@ -127,7 +285,7 @@ pub(crate) struct ChunkScan {
 /// The turn marks come from the same lines in the same pass, so the file is
 /// read once and one cursor serves both. The substring guard is only a cheap
 /// pre-filter -- most lines here are assistant messages that can run to hundreds
-/// of kilobytes, and parsing all of them costs the budget -- and the parsed value
+/// of kilobytes, and parsing all of them costs the budget -- and the parsed line
 /// decides what a line is. A thinking block and a text block are separate lines
 /// that each carry `end_turn`, so one turn can yield several `EndTurn` marks.
 ///
@@ -147,55 +305,50 @@ pub(crate) fn scan_chunk(chunk: &str) -> ChunkScan {
         if !is_scan_candidate(line) {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+        let Some(parsed) = parse_object::<Line>(line.trim()) else {
             log::warn!(
-                "a transcript line that may end a tool call or a turn is not valid \
-                 JSON; whatever it ends will read as still running"
+                "a transcript line that may end a tool call or a turn is not a JSON \
+                 object that can be read; whatever it ends will read as still running"
             );
             continue;
         };
-        let message = value.get("message");
-        let content = message.and_then(|message| message.get("content"));
-        let is_sidechain = value
-            .get("isSidechain")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let kind = value.get("type").and_then(Value::as_str);
+        let message = parsed.message.0;
+        let content = message
+            .as_ref()
+            .and_then(|message| message.content.0.as_ref());
+        let is_sidechain = parsed.is_sidechain.0.unwrap_or(false);
+        let kind = parsed.kind.0.as_deref();
 
         // Not every line mentioning the word carries a result block -- a user
         // message can say "tool_result" in prose -- so an absent one is normal
         // and silent. It is a *result block this code cannot read* that is
         // worth saying something about, and that is the case below.
         let mut has_result_block = false;
-        if let Some(blocks) = content.and_then(Value::as_array) {
-            for block in blocks {
-                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                    continue;
-                }
-                has_result_block = true;
-                match block.get("tool_use_id").and_then(Value::as_str) {
-                    Some(id) => scan.tool_use_ids.push(id.to_owned()),
-                    None => log::warn!(
-                        "a tool result carries no readable `tool_use_id`; the \
-                         subagent it ends will read as still running"
-                    ),
-                }
+        for block in blocks_of(content) {
+            if block.kind.0.as_deref() != Some("tool_result") {
+                continue;
+            }
+            has_result_block = true;
+            match block.tool_use_id.0.as_deref() {
+                Some(id) => scan.tool_use_ids.push(id.to_owned()),
+                None => log::warn!(
+                    "a tool result carries no readable `tool_use_id`; the \
+                     subagent it ends will read as still running"
+                ),
             }
         }
         // Before the sidechain skip, like the tool_use_ids above: a subagent
         // resuming a sibling is still a run that started, and the tracker looks
         // for it by sidecar id whichever chain reported it.
-        if has_result_block
-            && let Some(task_id) = value
-                .get("toolUseResult")
-                .and_then(|result| result.get("resumedAgentId"))
-                .and_then(Value::as_str)
+        if has_result_block && let Some(task_id) = parsed.tool_use_result.and_then(resumed_agent_id)
         {
             scan.subagent_events
-                .push(SubagentEvent::Resumed(sidecar_id(task_id)));
+                .push(SubagentEvent::Resumed(sidecar_id(&task_id)));
         }
         if kind == Some("queue-operation") {
-            for task_id in notified_task_ids(&value) {
+            for task_id in
+                notified_task_ids(parsed.operation.0.as_deref(), parsed.queued.0.as_deref())
+            {
                 scan.subagent_events
                     .push(SubagentEvent::Stopped(sidecar_id(task_id)));
             }
@@ -212,13 +365,10 @@ pub(crate) fn scan_chunk(chunk: &str) -> ChunkScan {
                 // so it is not the end of anything. A synthetic API-error line
                 // is different: it is how a failed request ends the turn.
                 let is_synthetic = message
-                    .and_then(|message| message.get("model"))
-                    .and_then(Value::as_str)
+                    .as_ref()
+                    .and_then(|message| message.model.0.as_deref())
                     == Some("<synthetic>");
-                let is_api_error = value
-                    .get("isApiErrorMessage")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let is_api_error = parsed.is_api_error_message.0.unwrap_or(false);
                 if is_synthetic && !is_api_error {
                     continue;
                 }
@@ -227,42 +377,45 @@ pub(crate) fn scan_chunk(chunk: &str) -> ChunkScan {
                 // and `stop_sequence` leave the agent waiting just as
                 // `end_turn` does. `null` is a partial write, not a stop.
                 match message
-                    .and_then(|message| message.get("stop_reason"))
-                    .and_then(Value::as_str)
+                    .as_ref()
+                    .and_then(|message| message.stop_reason.0.as_deref())
                 {
                     Some("tool_use") => {
                         scan.turn_marks.push(TurnMark::Working);
-                        let blocks = content.and_then(Value::as_array).into_iter().flatten();
-                        for block in blocks {
-                            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                        for block in blocks_of(content) {
+                            if block.kind.0.as_deref() != Some("tool_use") {
                                 continue;
                             }
-                            if let Some(id) = block.get("id").and_then(Value::as_str) {
+                            if let Some(id) = block.id.0.as_deref() {
                                 scan.turn_marks.push(TurnMark::ToolCall(Arc::from(id)));
                             }
                         }
                     }
                     Some(_) => scan.turn_marks.push(TurnMark::EndTurn {
                         message_id: message
-                            .and_then(|message| message.get("id"))
-                            .and_then(Value::as_str)
+                            .as_ref()
+                            .and_then(|message| message.id.0.as_deref())
                             .map(Arc::from),
                     }),
                     None => {}
                 }
             }
             Some("system") => {
-                if value.get("subtype").and_then(Value::as_str) == Some("turn_duration") {
+                if parsed.subtype.0.as_deref() == Some("turn_duration") {
                     scan.turn_marks.push(TurnMark::TurnDuration {
-                        background_pending: value
-                            .get("pendingBackgroundAgentCount")
-                            .and_then(Value::as_u64)
+                        background_pending: parsed
+                            .pending_background_agents
+                            .0
                             .is_some_and(|count| count > 0),
                     });
                 }
             }
             Some("user") => {
-                if let Some(mark) = user_mark(&value, content, has_result_block) {
+                let flagged = |flag: &Lenient<bool>| flag.0.unwrap_or(false);
+                // A compaction summary is the CLI restating history, not the
+                // user asking.
+                let is_meta = flagged(&parsed.is_meta) || flagged(&parsed.is_compact_summary);
+                if let Some(mark) = user_mark(is_meta, content, has_result_block) {
                     scan.turn_marks.push(mark);
                 }
             }
@@ -270,6 +423,27 @@ pub(crate) fn scan_chunk(chunk: &str) -> ChunkScan {
         }
     }
     scan
+}
+
+/// The blocks of a list-shaped `content`, skipping any that could not be read.
+fn blocks_of(content: Option<&Content>) -> impl Iterator<Item = &Block> {
+    match content {
+        Some(Content::Blocks(blocks)) => blocks.as_slice(),
+        Some(Content::Text(_)) | None => &[],
+    }
+    .iter()
+    .filter_map(|block| block.0.as_ref())
+}
+
+/// The task a result says it resumed, when `toolUseResult` is an object that
+/// names one. Any other shape of that field is simply not a resume.
+fn resumed_agent_id(result: &RawValue) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Resumed {
+        #[serde(rename = "resumedAgentId", default)]
+        task_id: Lenient<String>,
+    }
+    parse_object::<Resumed>(result.get())?.task_id.0
 }
 
 /// The sidecar file stem Claude Code gives a subagent: `agent-` and its task id.
@@ -281,11 +455,11 @@ fn sidecar_id(task_id: &str) -> Arc<str> {
 /// since a single enqueue may batch several. Only an `enqueue` counts: the same
 /// text reappears on `remove`, in attachments and in prose, and counting those
 /// would end a resumed run the moment it restarted.
-fn notified_task_ids(value: &Value) -> Vec<&str> {
-    if value.get("operation").and_then(Value::as_str) != Some("enqueue") {
+fn notified_task_ids<'a>(operation: Option<&str>, content: Option<&'a str>) -> Vec<&'a str> {
+    if operation != Some("enqueue") {
         return Vec::new();
     }
-    let Some(content) = value.get("content").and_then(Value::as_str) else {
+    let Some(content) = content else {
         return Vec::new();
     };
     if !content.trim_start().starts_with("<task-notification>") {
@@ -321,17 +495,67 @@ fn is_scan_candidate(line: &str) -> bool {
     .any(|needle| line.contains(needle))
 }
 
+/// How many lines at the top of a transcript are searched for the command that
+/// opened it. The command is among the first few, ahead of nothing but the
+/// mode lines, an attachment and the caveat.
+const CLEAR_SEARCH_LINES: usize = 16;
+
+/// The names a command that clears the conversation is recorded under.
+const CLEAR_COMMANDS: [&str; 3] = ["/clear", "/reset", "/new"];
+
+/// Whether the top of a transcript records the conversation having been
+/// cleared: a *user* line whose text starts with the command's own tag.
+///
+/// A substring search would take any session that read this source, a fixture,
+/// or a prompt quoting the command for a continuation. What the CLI writes is a
+/// user line that begins with the tag, within the first few lines of the file,
+/// and nothing else qualifies. `head` may end in a partial line, which is
+/// simply not read.
+pub(crate) fn opens_with_clear(head: &str) -> bool {
+    head.lines().take(CLEAR_SEARCH_LINES).any(records_a_clear)
+}
+
+fn records_a_clear(line: &str) -> bool {
+    if !line.contains("<command-name>") {
+        return false;
+    }
+    let Some(parsed) = parse_object::<Line>(line.trim()) else {
+        return false;
+    };
+    if parsed.kind.0.as_deref() != Some("user") {
+        return false;
+    }
+    let content = parsed
+        .message
+        .0
+        .as_ref()
+        .and_then(|message| message.content.0.as_ref());
+    let texts: Vec<&str> = match content {
+        Some(Content::Text(text)) => vec![text.as_str()],
+        Some(Content::Blocks(_)) => blocks_of(content)
+            .filter(|block| block.kind.0.as_deref() == Some("text"))
+            .filter_map(|block| block.text.0.as_deref())
+            .collect(),
+        None => return false,
+    };
+    texts.iter().any(|text| {
+        let text = text.trim_start();
+        (text.starts_with("<command-name>") || text.starts_with("<command-message>"))
+            && between(text, "<command-name>", "</command-name>")
+                .map(str::trim)
+                .is_some_and(|name| CLEAR_COMMANDS.contains(&name))
+    })
+}
+
 /// An interrupt outranks a prompt: the CLI writes it as a user line, and it is
 /// the user stopping the turn rather than starting one.
-fn user_mark(value: &Value, content: Option<&Value>, has_result_block: bool) -> Option<TurnMark> {
+fn user_mark(is_meta: bool, content: Option<&Content>, has_result_block: bool) -> Option<TurnMark> {
     let texts: Vec<&str> = match content? {
-        Value::String(text) => vec![text.as_str()],
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|block| block.get("text").and_then(Value::as_str))
+        Content::Text(text) => vec![text.as_str()],
+        Content::Blocks(_) => blocks_of(content)
+            .filter(|block| block.kind.0.as_deref() == Some("text"))
+            .filter_map(|block| block.text.0.as_deref())
             .collect(),
-        _ => return None,
     };
     // At the start, not anywhere: the user quoting the marker in a prompt is
     // still a prompt.
@@ -341,9 +565,6 @@ fn user_mark(value: &Value, content: Option<&Value>, has_result_block: bool) -> 
     {
         return Some(TurnMark::Interrupt);
     }
-    let flagged = |key: &str| value.get(key).and_then(Value::as_bool).unwrap_or(false);
-    // A compaction summary is the CLI restating history, not the user asking.
-    let is_meta = flagged("isMeta") || flagged("isCompactSummary");
     // Slash-command bookkeeping is written under the user's name but is not
     // the user starting a turn; the work the command causes announces itself.
     let spoken = texts.iter().any(|text| !is_bookkeeping(text));
@@ -935,6 +1156,172 @@ not json at all
             END_TURN,
         ]);
         assert_eq!(marks(&chunk), vec![end_turn(None)]);
+    }
+
+    /// The format belongs to another program, and the scan reads it a field at a
+    /// time: a field of the wrong type costs the field, and never the line or
+    /// the readable lines around it.
+    #[test]
+    fn a_field_of_an_unexpected_type_costs_the_field_and_not_the_line() {
+        let chunk = lines(&[
+            r#"{"type":"assistant","message":{"role":"assistant","stop_reason":5,"id":7,"content":"x"}}"#,
+            r#"{"type":"user","isSidechain":null,"toolUseResult":"Error: boom","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Error"}]}}"#,
+            r#"{"type":"user","toolUseResult":[1,2,3],"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":42}}"#,
+            r#"{"type":"user","message":"hello"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[7,"text",{"type":"text","text":"a real prompt"}]}}"#,
+            END_TURN,
+        ]);
+
+        let scan = scan_chunk(&chunk);
+
+        assert_eq!(scan.tool_use_ids, vec!["toolu_a", "toolu_b"]);
+        assert_eq!(
+            scan.turn_marks,
+            vec![TurnMark::Prompt, end_turn(None)],
+            "a result is not a prompt, content of no known shape says nothing, a block \
+             that is not an object is skipped, and the real prompt and reply still count"
+        );
+        assert!(scan.subagent_events.is_empty());
+    }
+
+    /// What dominates a transcript's size, and what the scan never reads: an
+    /// image is a base64 string of several megabytes inside the line that
+    /// carries the prompt.
+    #[test]
+    fn a_line_carrying_a_huge_image_is_still_read_for_its_prompt() {
+        let image = "A".repeat(3 * 1024 * 1024);
+        let line = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{image}"}}}},{{"type":"text","text":"what is this"}}]}}}}"#
+        );
+        assert_eq!(marks(&line), vec![TurnMark::Prompt]);
+    }
+
+    /// A tool result can carry a file as large as it likes under `toolUseResult`,
+    /// and only a `resumedAgentId` in it means anything.
+    #[test]
+    fn a_resume_is_read_out_of_an_object_that_also_carries_a_large_file() {
+        let file = "x".repeat(1024 * 1024);
+        let line = format!(
+            r#"{{"type":"user","toolUseResult":{{"file":"{file}","resumedAgentId":"abc"}},"message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_r"}}]}}}}"#
+        );
+        let scan = scan_chunk(&line);
+        assert_eq!(scan.tool_use_ids, vec!["toolu_r"]);
+        assert_eq!(scan.subagent_events, vec![resumed("abc")]);
+    }
+
+    /// A derived struct will also take its fields from a JSON array, in order.
+    /// The transcript never writes one that way, and the reading above it used
+    /// to find nothing in an array, so an array stays nothing.
+    #[test]
+    fn a_list_where_an_object_belongs_is_not_read_as_one() {
+        let chunk = lines(&[
+            r#"{"type":"user","toolUseResult":["x"],"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[["tool_use","toolu_x"]]}}"#,
+            r#"{"type":"user","message":["user","a prompt"]}"#,
+            r#"["{\"type\":\"user\"}"]"#,
+        ]);
+
+        let scan = scan_chunk(&chunk);
+
+        assert_eq!(scan.tool_use_ids, vec!["toolu_a"]);
+        assert!(
+            scan.subagent_events.is_empty(),
+            "`[\"x\"]` is not a resume of agent-x: {:?}",
+            scan.subagent_events
+        );
+        assert_eq!(
+            scan.turn_marks,
+            vec![TurnMark::Working],
+            "a block that is a list names no tool call, and a message that is a list says nothing"
+        );
+    }
+
+    const CLEAR_COMMAND: &str = "<command-name>/clear</command-name>\\n            <command-message>clear</command-message>\\n            <command-args></command-args>";
+
+    fn user_line(content: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{content}"}},"cwd":"/w/one"}}"#
+        )
+    }
+
+    /// What a `/clear` leaves at the top of the file the CLI starts for it,
+    /// read off real transcripts.
+    #[test]
+    fn a_transcript_that_opens_with_a_clear_command_is_recognised() {
+        let head = lines(&[
+            r#"{"type":"mode","mode":"default","sessionId":"x"}"#,
+            r#"{"type":"file-history-snapshot","snapshot":{}}"#,
+            &user_line(
+                "<local-command-caveat>Caveat: generated while running local commands</local-command-caveat>",
+            ),
+            &user_line(CLEAR_COMMAND),
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}"#,
+        ]);
+        assert!(opens_with_clear(&head));
+    }
+
+    #[test]
+    fn the_other_names_for_it_and_the_text_block_form_count_too() {
+        for name in ["/reset", "/new"] {
+            let head = user_line(&format!(
+                "<command-name>{name}</command-name>\\n<command-message>x</command-message>"
+            ));
+            assert!(opens_with_clear(&head), "{name}");
+        }
+        let message_first = user_line(
+            "<command-message>clear</command-message>\\n<command-name>/clear</command-name>",
+        );
+        assert!(opens_with_clear(&message_first));
+        let blocks = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<command-name>/clear</command-name>"}]}}"#;
+        assert!(opens_with_clear(blocks));
+    }
+
+    /// The tag is only a clear when a user line *starts* with it. A session
+    /// that reads this very file, a fixture, or a prompt that quotes the
+    /// command all contain the same text without being what it names.
+    #[test]
+    fn text_that_merely_contains_the_command_does_not_qualify() {
+        let quoted = "<command-name>/clear</command-name>";
+        for head in [
+            // A tool result that read a file containing it.
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_a","content":"const CLEAR: &str = \"{quoted}\";"}}]}}}}"#
+            ),
+            // The assistant saying it.
+            format!(
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"it records {quoted}"}}]}}}}"#
+            ),
+            // A prompt that quotes it part-way through.
+            user_line(&format!("why does the transcript hold {quoted} first?")),
+            // Recorded, but not as something the user ran.
+            format!(r#"{{"type":"system","subtype":"local_command","content":"{quoted}"}}"#),
+            // Another command entirely.
+            user_line(
+                "<command-name>/model</command-name>\\n<command-message>model</command-message>",
+            ),
+        ] {
+            assert!(!opens_with_clear(&head), "{head}");
+        }
+    }
+
+    #[test]
+    fn only_the_top_of_the_file_is_searched() {
+        let mut lines_before = vec![r#"{"type":"mode","mode":"default"}"#.to_string(); 16];
+        lines_before.push(user_line(CLEAR_COMMAND));
+        assert!(
+            !opens_with_clear(&lines_before.join("\n")),
+            "a clear deep in a conversation did not open it"
+        );
+    }
+
+    #[test]
+    fn a_head_cut_off_mid_line_still_reads_the_whole_lines_above_the_cut() {
+        let head = format!(
+            "{}\n{{\"type\":\"user\",\"message\":{{\"role\":\"us",
+            user_line(CLEAR_COMMAND)
+        );
+        assert!(opens_with_clear(&head));
     }
 
     #[test]

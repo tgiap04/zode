@@ -3,7 +3,11 @@ use crate::{
     TranscriptProgress,
 };
 use anyhow::Result;
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 /// Whether `id` is safe to use as a single path component.
 ///
@@ -124,7 +128,32 @@ pub trait SessionProvider: Send + Sync {
             subagent_events: Vec::new(),
             scanned_to: from,
             restarted: false,
+            identity: None,
         })
+    }
+
+    /// The session this one handed over to, if the agent's CLI has moved on to
+    /// another transcript since `since` while a tab was still running it.
+    ///
+    /// What clearing a conversation does: the CLI opens a new transcript beside
+    /// the old one and never writes to the old one again, so a reader that
+    /// stays with the id it started on goes quiet without anything having
+    /// failed. `since` is when the tab began, because a transcript last written
+    /// before then cannot belong to a process that started after it. `claimed`
+    /// is every session another tab is already following; none of those is this
+    /// one's successor.
+    ///
+    /// `Ok(None)` for every store that cannot say, and for one that has nothing
+    /// to report. The caller asks only when the current transcript has stopped
+    /// growing while the CLI keeps writing, so a store may do real directory
+    /// reads here.
+    fn successor(
+        &self,
+        _session: &SessionSummary,
+        _since: SystemTime,
+        _claimed: &[Arc<str>],
+    ) -> Result<Option<SessionSummary>> {
+        Ok(None)
     }
 
     /// How long it has been since the most recent write by any of this

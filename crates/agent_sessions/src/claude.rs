@@ -6,10 +6,13 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use std::{
+    collections::HashMap,
+    ffi::{OsStr, OsString},
     fs::File,
-    io::{Read as _, Seek as _, SeekFrom},
+    hash::{DefaultHasher, Hash as _, Hasher as _},
+    io::{ErrorKind, Read, Seek as _, SeekFrom},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
 
@@ -23,6 +26,26 @@ const TAIL_STEPS: &[u64] = &[256 * 1024, 1024 * 1024];
 /// command carries that command's expanded body before the user gets a word in,
 /// and one such body measured 122 KB.
 const HEAD_STEPS: &[u64] = &[16 * 1024, 256 * 1024];
+/// The most of a transcript read into memory at once while following it.
+///
+/// A first pass over a long conversation has the whole history to get through
+/// and a restored window does it for every tab at once, so reading it in one
+/// piece costs the file's size, per tab, plus every copy made on the way to
+/// parsing it. A piece is cut at the last newline, so it holds the window plus
+/// whatever line straddles its end -- one base64 image line is several megabytes.
+const TRANSCRIPT_WINDOW: usize = 4 * 1024 * 1024;
+/// How much of the beginning of a transcript fingerprints it. Its first line is
+/// a few dozen bytes; the bound only matters for a file whose first line is
+/// still being written or is absurdly long.
+const IDENTITY_BYTES: u64 = 4096;
+/// How much of the beginning of a candidate successor is searched for the
+/// `/clear` that opens it. The command is among the first few lines, and a
+/// transcript that opens on a long slash-command body is read at most this far.
+const CLEAR_SEARCH_BYTES: u64 = 32 * 1024;
+/// How many transcripts' heads are remembered at once. A project holds a few
+/// hundred at most; past this the whole cache is dropped and refilled, which
+/// costs one more read of each head that is still asked about.
+const HEAD_CACHE_ENTRIES: usize = 256;
 
 /// Claude Code's transcripts: `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`,
 /// with a sidecar directory of the same stem holding `subagents/` and
@@ -33,17 +56,36 @@ const HEAD_STEPS: &[u64] = &[16 * 1024, 256 * 1024];
 /// out of the file's own lines instead.
 pub struct ClaudeProvider {
     projects_dir: PathBuf,
+    /// What the head of each candidate successor said, so a tab that asks again
+    /// every few seconds does not read the same heads again.
+    heads: Mutex<HeadCache>,
 }
 
 impl ClaudeProvider {
     pub fn new(projects_dir: PathBuf) -> Self {
-        Self { projects_dir }
+        Self {
+            projects_dir,
+            heads: Mutex::new(HeadCache::default()),
+        }
+    }
+
+    /// How many heads have been read from disk, for a test of the cache.
+    #[cfg(test)]
+    fn head_reads(&self) -> usize {
+        self.heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reads
     }
 
     /// `~/.claude/projects` — Claude Code's own directory, not this editor's
-    /// config dir.
+    /// config dir — or `projects` under `CLAUDE_CONFIG_DIR` when that is set,
+    /// which is where the CLI writes for anyone who has moved its config.
     pub fn default_root() -> PathBuf {
-        util::paths::home_dir().join(".claude").join("projects")
+        projects_dir_for(
+            std::env::var_os("CLAUDE_CONFIG_DIR"),
+            util::paths::home_dir().as_path(),
+        )
     }
 
     fn summary_for(&self, log_path: &Path, untitled: Untitled) -> Result<Option<SessionSummary>> {
@@ -166,6 +208,15 @@ impl SessionProvider for ClaudeProvider {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                     continue;
                 }
+                // The stem goes into `--resume` as an argument. A transcript
+                // Claude did not name with a UUID is not one it can resume.
+                if !path
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(is_uuid)
+                {
+                    continue;
+                }
                 match self.summary_for(&path, Untitled::Drop) {
                     Ok(Some(summary)) => sessions.push(summary),
                     Ok(None) => {}
@@ -188,7 +239,7 @@ impl SessionProvider for ClaudeProvider {
     /// not go through `list`, which reads the head and tail of all 45 transcripts
     /// to build summaries this caller would throw away.
     fn find(&self, id: &str) -> Result<Option<SessionSummary>> {
-        if !is_safe_component(id) || !self.availability().is_ready() {
+        if !is_safe_component(id) || !is_uuid(id) || !self.availability().is_ready() {
             return Ok(None);
         }
         let file_name = format!("{id}.jsonl");
@@ -259,14 +310,28 @@ impl SessionProvider for ClaudeProvider {
     ) -> Result<TranscriptProgress> {
         let Some(log_path) = session.log_path.as_ref() else {
             return Ok(TranscriptProgress {
-                tool_use_ids: Vec::new(),
-                turn_marks: Vec::new(),
-                subagent_events: Vec::new(),
                 scanned_to: from,
-                restarted: false,
+                ..TranscriptProgress::default()
             });
         };
         read_transcript_progress(log_path, from)
+    }
+
+    fn successor(
+        &self,
+        session: &SessionSummary,
+        since: SystemTime,
+        claimed: &[Arc<str>],
+    ) -> Result<Option<SessionSummary>> {
+        let Some(current) = session.log_path.as_deref() else {
+            return Ok(None);
+        };
+        let Some(path) =
+            newest_cleared_transcript(&self.heads, current, &session.id, since, claimed)?
+        else {
+            return Ok(None);
+        };
+        self.summary_for(&path, Untitled::KeepAsId)
     }
 
     fn background_quiet_for(&self, session: &SessionSummary) -> Result<Option<Duration>> {
@@ -393,6 +458,23 @@ mod tests {
     use super::*;
     use crate::Speaker;
 
+    // Claude names a transcript by a UUID, and `list` and `find` hold nothing
+    // else to that shape, so every fixture is named by one.
+    const ONE: &str = "00000000-0000-4000-8000-000000000001";
+    const TWO: &str = "00000000-0000-4000-8000-000000000002";
+    const THREE: &str = "00000000-0000-4000-8000-000000000003";
+    const FOUR: &str = "00000000-0000-4000-8000-000000000004";
+    const WANTED: &str = "00000000-0000-4000-8000-0000000000aa";
+    const ABSENT: &str = "00000000-0000-4000-8000-0000000000ab";
+    const PRESENT: &str = "00000000-0000-4000-8000-0000000000ac";
+    const HOUSEKEEPING: &str = "00000000-0000-4000-8000-0000000000ad";
+    const EMPTY: &str = "00000000-0000-4000-8000-0000000000ae";
+    const ZERO: &str = "00000000-0000-4000-8000-0000000000af";
+    const COMMANDED: &str = "00000000-0000-4000-8000-0000000000b0";
+    const RENAMED: &str = "00000000-0000-4000-8000-0000000000b1";
+    const DEEP: &str = "00000000-0000-4000-8000-0000000000b2";
+    const BURIED: &str = "00000000-0000-4000-8000-0000000000b3";
+
     /// One transcript, written the way Claude writes them: opening `mode` lines,
     /// a repeated `ai-title`, and a sidecar directory of subagent metadata.
     fn session(dir: &Path, id: &str, lines: &[&str], subagents: usize) {
@@ -421,7 +503,7 @@ mod tests {
         let dir = root.path().join("-w-one");
         session(
             &dir,
-            "s1",
+            ONE,
             &[
                 r#"{"type":"mode","mode":"default"}"#,
                 r#"{"type":"user","message":{"role":"user","content":"do the thing"},"cwd":"/w/one","gitBranch":"main"}"#,
@@ -437,7 +519,7 @@ mod tests {
         let sessions = provider.list().unwrap();
         assert_eq!(sessions.len(), 1);
         let found = &sessions[0];
-        assert_eq!(&*found.id, "s1");
+        assert_eq!(&*found.id, ONE);
         assert_eq!(found.title, "Doing the thing", "the last ai-title wins");
         assert_eq!(found.preview, "done");
         assert_eq!(found.preview_speaker, Some(Speaker::Agent));
@@ -459,14 +541,14 @@ mod tests {
         let dir = root.path().join("-w-one");
         session(
             &dir,
-            "empty",
+            EMPTY,
             &[
                 r#"{"type":"mode","mode":"default"}"#,
                 r#"{"type":"permission-mode","mode":"default"}"#,
             ],
             0,
         );
-        std::fs::write(dir.join("zero.jsonl"), "").unwrap();
+        std::fs::write(dir.join(format!("{ZERO}.jsonl")), "").unwrap();
 
         let provider = ClaudeProvider::new(root.path().to_path_buf());
         assert!(provider.list().unwrap().is_empty());
@@ -477,7 +559,7 @@ mod tests {
         let root = projects_dir();
         session(
             &root.path().join("-w-one"),
-            "s2",
+            TWO,
             &[
                 r#"{"type":"user","message":{"role":"user","content":"just this once"},"cwd":"/w/one"}"#,
                 r#"{"type":"assistant","message":{"role":"assistant","content":"sure"},"cwd":"/w/one"}"#,
@@ -494,7 +576,7 @@ mod tests {
         let root = projects_dir();
         session(
             &root.path().join("-w-one"),
-            "housekeeping",
+            HOUSEKEEPING,
             &[
                 r#"{"type":"mode","mode":"default"}"#,
                 r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
@@ -515,7 +597,7 @@ mod tests {
         let root = projects_dir();
         session(
             &root.path().join("-w-one"),
-            "commanded",
+            COMMANDED,
             &[
                 r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
                 r#"{"type":"user","message":{"role":"user","content":"<command-message>debug-code</command-message> <command-name>/debug-code</command-name> <command-args>the titles are wrong</command-args>"},"cwd":"/w/one"}"#,
@@ -533,7 +615,7 @@ mod tests {
         let root = projects_dir();
         session(
             &root.path().join("-w-one"),
-            "renamed",
+            RENAMED,
             &[
                 r#"{"type":"user","message":{"role":"user","content":"do the thing"},"cwd":"/w/one"}"#,
                 r#"{"type":"ai-title","aiTitle":"Doing the thing"}"#,
@@ -561,7 +643,7 @@ mod tests {
         );
         session(
             &root.path().join("-w-one"),
-            "deep",
+            DEEP,
             &[
                 &padded,
                 r#"{"type":"user","message":{"role":"user","content":"here is the real question"},"cwd":"/w/one"}"#,
@@ -582,7 +664,7 @@ mod tests {
         let root = projects_dir();
         session(
             &root.path().join("-w-one"),
-            "housekeeping",
+            HOUSEKEEPING,
             &[
                 r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."},"cwd":"/w/one"}"#,
                 r#"{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name> <command-args></command-args>"},"cwd":"/w/one"}"#,
@@ -592,11 +674,11 @@ mod tests {
         let provider = ClaudeProvider::new(root.path().to_path_buf());
         assert!(provider.list().unwrap().is_empty());
         let found = provider
-            .find("housekeeping")
+            .find(HOUSEKEEPING)
             .unwrap()
             .expect("the transcript is on disk, so the id still names a session");
         assert_eq!(
-            found.title, "housekeeping",
+            found.title, HOUSEKEEPING,
             "listed under its id, for want of anything better"
         );
     }
@@ -613,7 +695,7 @@ mod tests {
         );
         session(
             &root.path().join("-w-one"),
-            "buried",
+            BURIED,
             &[
                 &padded,
                 r#"{"type":"user","message":{"role":"user","content":"here is the real question"},"cwd":"/w/one"}"#,
@@ -626,7 +708,7 @@ mod tests {
             "300 KB of scaffolding before the first word is past every step the head grows to"
         );
         assert!(
-            provider.find("buried").unwrap().is_some(),
+            provider.find(BURIED).unwrap().is_some(),
             "the transcript exists, and saying otherwise invites a second session on top of it"
         );
     }
@@ -637,7 +719,7 @@ mod tests {
         let dir = root.path().join("-w-one");
         session(
             &dir,
-            "wanted",
+            WANTED,
             &[
                 r#"{"type":"user","message":{"role":"user","content":"hello"},"cwd":"/w/one"}"#,
                 r#"{"type":"ai-title","aiTitle":"Found me"}"#,
@@ -646,8 +728,8 @@ mod tests {
         );
 
         let provider = ClaudeProvider::new(root.path().to_path_buf());
-        let found = provider.find("wanted").unwrap().expect("held");
-        assert_eq!(&*found.id, "wanted");
+        let found = provider.find(WANTED).unwrap().expect("held");
+        assert_eq!(&*found.id, WANTED);
         assert_eq!(found.title, "Found me");
         assert_eq!(
             found.cwd,
@@ -662,14 +744,14 @@ mod tests {
         let dir = root.path().join("-w-one");
         session(
             &dir,
-            "present",
+            PRESENT,
             &[r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#],
             0,
         );
 
         let provider = ClaudeProvider::new(root.path().to_path_buf());
         assert!(
-            provider.find("absent").unwrap().is_none(),
+            provider.find(ABSENT).unwrap().is_none(),
             "an id nobody wrote is Ok(None), not an error"
         );
     }
@@ -712,7 +794,7 @@ mod tests {
         for i in 0..20 {
             session(
                 &dir,
-                &format!("decoy-{i}"),
+                &format!("00000000-0000-4000-8000-{i:012}"),
                 &[
                     r#"{"type":"user","message":{"role":"user","content":"noise"},"cwd":"/w/one"}"#,
                     r#"{"type":"ai-title","aiTitle":"Noise"}"#,
@@ -725,14 +807,14 @@ mod tests {
         std::fs::create_dir_all(root.path().join("-w-two")).unwrap();
         session(
             &root.path().join("-w-two"),
-            "wanted",
+            WANTED,
             &[r#"{"type":"user","message":{"role":"user","content":"real"},"cwd":"/w/two"}"#],
             0,
         );
 
         let provider = ClaudeProvider::new(root.path().to_path_buf());
-        let found = provider.find("wanted").unwrap().expect("held");
-        assert_eq!(&*found.id, "wanted");
+        let found = provider.find(WANTED).unwrap().expect("held");
+        assert_eq!(&*found.id, WANTED);
         assert_eq!(
             found.cwd,
             PathBuf::from("/w/two"),
@@ -774,7 +856,7 @@ mod tests {
         let root = projects_dir();
         session(
             &root.path().join("-w-one"),
-            "s3",
+            THREE,
             &[r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#],
             0,
         );
@@ -783,7 +865,7 @@ mod tests {
 
         let resume = provider.resume_command(session, Fork::Continue).unwrap();
         assert_eq!(resume.program, "claude");
-        assert_eq!(resume.args, vec!["--resume".to_string(), "s3".to_string()]);
+        assert_eq!(resume.args, vec!["--resume".to_string(), THREE.to_string()]);
         assert_eq!(resume.cwd, PathBuf::from("/w/one"));
 
         let fork = provider.resume_command(session, Fork::New).unwrap();
@@ -791,7 +873,7 @@ mod tests {
             fork.args,
             vec![
                 "--resume".to_string(),
-                "s3".to_string(),
+                THREE.to_string(),
                 "--fork-session".to_string()
             ]
         );
@@ -803,7 +885,7 @@ mod tests {
         let dir = root.path().join("-w-one");
         session(
             &dir,
-            "s4",
+            FOUR,
             &[r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#],
             2,
         );
@@ -811,7 +893,7 @@ mod tests {
         let session = &provider.list().unwrap()[0];
         assert_eq!(
             provider.paths_to_trash(session),
-            vec![dir.join("s4"), dir.join("s4.jsonl")]
+            vec![dir.join(FOUR), dir.join(format!("{FOUR}.jsonl"))]
         );
     }
 
@@ -1033,6 +1115,531 @@ mod tests {
         assert!(pass.restarted, "the caller must be told to start over");
         assert!(!read_transcript_progress(&log, 0).unwrap().restarted);
     }
+
+    fn result_line(id: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}"}}]}}}}"#
+        )
+    }
+
+    /// A transcript the first pass has to read whole, cut into windows far
+    /// smaller than it, must hand over only complete lines and never a piece
+    /// bigger than a window plus the line that straddles it. That bound is the
+    /// whole difference from reading the file into one buffer.
+    #[test]
+    fn a_long_transcript_is_read_in_bounded_windows() {
+        let mut text = String::new();
+        for n in 0..200 {
+            text.push_str(&result_line(&format!("toolu_{n}")));
+            text.push('\n');
+        }
+        let longest = result_line("toolu_199").len() + 1;
+        let window = 1000;
+
+        let mut pieces: Vec<String> = Vec::new();
+        let consumed = read_complete_lines(text.as_bytes(), window, |piece| {
+            pieces.push(piece.to_owned())
+        })
+        .unwrap();
+
+        assert_eq!(consumed as usize, text.len());
+        assert!(pieces.len() > 10, "it must really have been cut up");
+        for piece in &pieces {
+            assert!(piece.len() <= window + longest, "{} bytes", piece.len());
+            assert!(piece.ends_with('\n'), "a piece ends on a line boundary");
+        }
+        assert_eq!(pieces.concat(), text, "nothing lost, nothing read twice");
+    }
+
+    #[test]
+    fn a_line_longer_than_a_window_is_still_handed_over_whole() {
+        let long = result_line(&"x".repeat(5000));
+        let text = format!("{}\n{}\n", result_line("toolu_a"), long);
+        let mut pieces: Vec<String> = Vec::new();
+        read_complete_lines(text.as_bytes(), 100, |piece| pieces.push(piece.to_owned())).unwrap();
+        assert_eq!(pieces.concat(), text);
+        assert!(
+            pieces.iter().any(|piece| piece.contains(&long)),
+            "a line is never split across two pieces"
+        );
+    }
+
+    #[test]
+    fn a_trailing_partial_line_is_not_consumed() {
+        let text = format!("{}\n{}", result_line("toolu_a"), result_line("toolu_b"));
+        let mut seen = String::new();
+        let consumed =
+            read_complete_lines(text.as_bytes(), 64, |piece| seen.push_str(piece)).unwrap();
+        assert_eq!(consumed as usize, result_line("toolu_a").len() + 1);
+        assert_eq!(seen, format!("{}\n", result_line("toolu_a")));
+    }
+
+    /// Windowing is a way of reading, not of deciding: a window of a few bytes
+    /// must find exactly what one read of the whole file finds, and stop at
+    /// the same offset.
+    #[test]
+    fn a_small_window_finds_what_a_single_read_finds() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let mut text = String::new();
+        for n in 0..30 {
+            text.push_str(r#"{"type":"user","message":{"role":"user","content":"go"}}"#);
+            text.push('\n');
+            text.push_str(&format!(
+                r#"{{"type":"assistant","message":{{"id":"m{n}","role":"assistant","stop_reason":"tool_use","content":[{{"type":"tool_use","id":"toolu_{n}"}}]}}}}"#
+            ));
+            text.push('\n');
+            text.push_str(&result_line(&format!("toolu_{n}")));
+            text.push('\n');
+        }
+        text.push_str(&result_line("toolu_partial"));
+        std::fs::write(&log, &text).unwrap();
+
+        let whole = read_transcript_progress_in(&log, 0, usize::MAX / 2).unwrap();
+        let windowed = read_transcript_progress_in(&log, 0, 37).unwrap();
+        assert_eq!(windowed, whole);
+        assert_eq!(whole.tool_use_ids.len(), 30);
+        assert!(
+            whole.scanned_to < text.len() as u64,
+            "the partial line waits"
+        );
+    }
+
+    /// The tab's transcript can be moved out from under it. Reading nothing
+    /// is the honest answer, and an error here is logged on every pass.
+    #[test]
+    fn a_transcript_deleted_under_a_tab_reads_as_nothing_new() {
+        let root = tempfile::tempdir().unwrap();
+        let pass = read_transcript_progress(&root.path().join("gone.jsonl"), 500).unwrap();
+        assert_eq!(pass.scanned_to, 500, "the cursor stays where it was");
+        assert!(!pass.restarted);
+        assert!(pass.turn_marks.is_empty() && pass.tool_use_ids.is_empty());
+    }
+
+    /// A different file at the same path can be exactly as long as the cursor
+    /// or longer, which `from > length` cannot see. Its first line can, and a
+    /// first line is the one thing a growing transcript never changes.
+    #[test]
+    fn a_transcripts_identity_is_its_first_line_once_that_line_is_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let first = r#"{"type":"mode","mode":"default","sessionId":"aaaa"}"#;
+
+        std::fs::write(&log, &first[..20]).unwrap();
+        assert_eq!(
+            read_transcript_progress(&log, 0).unwrap().identity,
+            None,
+            "a first line still being written is not an identity yet"
+        );
+
+        std::fs::write(&log, format!("{first}\n")).unwrap();
+        let identity = read_transcript_progress(&log, 0).unwrap().identity;
+        assert!(identity.is_some());
+
+        std::fs::write(&log, format!("{first}\n{}\n", result_line("toolu_a"))).unwrap();
+        assert_eq!(
+            read_transcript_progress(&log, 0).unwrap().identity,
+            identity,
+            "appending never changes it"
+        );
+
+        let other = r#"{"type":"mode","mode":"default","sessionId":"bbbb"}"#;
+        std::fs::write(&log, format!("{other}\n{}\n", result_line("toolu_a"))).unwrap();
+        assert_ne!(
+            read_transcript_progress(&log, 0).unwrap().identity,
+            identity,
+            "another conversation at the same path reads differently"
+        );
+    }
+
+    #[test]
+    fn a_first_line_longer_than_the_fingerprint_still_has_a_stable_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let first = format!(r#"{{"type":"mode","pad":"{}"}}"#, "x".repeat(8000));
+        std::fs::write(&log, &first).unwrap();
+        let before = read_transcript_progress(&log, 0).unwrap().identity;
+        assert!(before.is_some());
+        std::fs::write(&log, format!("{first}\n{}\n", result_line("toolu_a"))).unwrap();
+        assert_eq!(read_transcript_progress(&log, 0).unwrap().identity, before);
+    }
+
+    // --- the shape of an id ---
+
+    #[test]
+    fn a_transcript_whose_name_is_not_a_uuid_is_never_listed() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#;
+        session(&dir, "--dangerously-skip-permissions", &[prompt], 0);
+        session(&dir, "agent-a0118bd7", &[prompt], 0);
+        session(&dir, ONE, &[prompt], 0);
+
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        let listed: Vec<String> = provider
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|found| found.id.to_string())
+            .collect();
+        assert_eq!(
+            listed,
+            vec![ONE.to_string()],
+            "a stem reaches `--resume` as an argument, so only a UUID may"
+        );
+    }
+
+    #[test]
+    fn an_id_that_is_not_a_uuid_is_never_found_even_when_its_file_exists() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#;
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+        for hostile in [
+            "--dangerously-skip-permissions",
+            "-x",
+            "not-a-uuid",
+            "00000000-0000-4000-8000-00000000000g",
+            "{00000000-0000-4000-8000-000000000001}",
+            "urn:uuid:00000000-0000-4000-8000-000000000001",
+            "00000000000040008000000000000001",
+            "00000000-0000-4000-8000-00000000000",
+            "00000000-0000-4000-8000-0000000000001",
+        ] {
+            session(&dir, hostile, &[prompt], 0);
+            assert!(
+                provider.find(hostile).unwrap().is_none(),
+                "{hostile:?} must not be looked up"
+            );
+        }
+        session(&dir, ONE, &[prompt], 0);
+        assert!(provider.find(ONE).unwrap().is_some());
+        assert!(
+            provider
+                .find("00000000-0000-4000-8000-0000000000AB")
+                .unwrap()
+                .is_none(),
+            "an upper-case UUID is still a UUID, and this one is simply absent"
+        );
+    }
+
+    // --- where Claude keeps its transcripts ---
+
+    #[test]
+    fn the_projects_directory_follows_claude_config_dir() {
+        let home = Path::new("/home/me");
+        let configured = std::env::temp_dir().join("claude-work");
+        assert_eq!(
+            projects_dir_for(Some(configured.clone().into_os_string()), home),
+            configured.join("projects"),
+            "a user who moves Claude's config moves its transcripts with it"
+        );
+        let default = home.join(".claude").join("projects");
+        assert_eq!(projects_dir_for(None, home), default);
+        assert_eq!(
+            projects_dir_for(Some(std::ffi::OsString::new()), home),
+            default,
+            "an empty variable is an unset one"
+        );
+        assert_eq!(
+            projects_dir_for(Some("relative/claude".into()), home),
+            default,
+            "a relative path means a directory this process cannot know"
+        );
+    }
+
+    // --- a conversation that moved to another transcript ---
+
+    const CLEARED: &str = "00000000-0000-4000-8000-0000000000c1";
+    const OTHER_CLEARED: &str = "00000000-0000-4000-8000-0000000000c2";
+    const SIBLING: &str = "00000000-0000-4000-8000-0000000000c3";
+
+    const PROMPT_LINE: &str =
+        r#"{"type":"user","message":{"role":"user","content":"hi"},"cwd":"/w/one"}"#;
+
+    /// How Claude opens the transcript a `/clear` starts, read off real ones:
+    /// the command is recorded in the first few lines of the new file.
+    const CLEAR_LINES: [&str; 3] = [
+        r#"{"type":"mode","mode":"default","sessionId":"x"}"#,
+        r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"},"cwd":"/w/one"}"#,
+        r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout></local-command-stdout>"},"cwd":"/w/one"}"#,
+    ];
+
+    fn touch(path: &Path, at: SystemTime) {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    fn an_hour_ago() -> SystemTime {
+        SystemTime::now() - Duration::from_secs(3600)
+    }
+
+    /// The tab's own transcript as it stands when the conversation is cleared: last
+    /// written a while ago, which is the point -- whatever the CLI writes next is
+    /// newer than it. Set outright, not left to the clock: two files written
+    /// back to back can share a timestamp on a coarse file system.
+    fn written_a_while_ago(dir: &Path, id: &str) {
+        touch(
+            &dir.join(format!("{id}.jsonl")),
+            SystemTime::now() - Duration::from_secs(120),
+        );
+    }
+
+    fn successor_of(
+        provider: &ClaudeProvider,
+        id: &str,
+        since: SystemTime,
+        claimed: &[Arc<str>],
+    ) -> Option<String> {
+        let current = provider
+            .find(id)
+            .unwrap()
+            .expect("the tab's own transcript");
+        provider
+            .successor(&current, since, claimed)
+            .unwrap()
+            .map(|found| found.id.to_string())
+    }
+
+    #[test]
+    fn a_transcript_that_opens_on_a_clear_after_the_tab_began_is_its_successor() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &[PROMPT_LINE], 0);
+        session(&dir, CLEARED, &CLEAR_LINES, 0);
+        written_a_while_ago(&dir, ONE);
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(
+            successor_of(&provider, ONE, an_hour_ago(), &[]),
+            Some(CLEARED.to_string())
+        );
+    }
+
+    #[test]
+    fn a_transcript_written_before_the_tab_began_is_not() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &[PROMPT_LINE], 0);
+        session(&dir, CLEARED, &CLEAR_LINES, 0);
+        touch(&dir.join(format!("{CLEARED}.jsonl")), an_hour_ago());
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(
+            successor_of(
+                &provider,
+                ONE,
+                SystemTime::now() - Duration::from_secs(60),
+                &[]
+            ),
+            None,
+            "an old descendant of a session resumed just now is not what that CLI is writing"
+        );
+    }
+
+    #[test]
+    fn a_new_conversation_that_did_not_start_with_a_clear_is_not() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &[PROMPT_LINE], 0);
+        session(&dir, SIBLING, &[PROMPT_LINE], 0);
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(
+            successor_of(&provider, ONE, an_hour_ago(), &[]),
+            None,
+            "another tab opened in the same project is not this one's continuation"
+        );
+    }
+
+    #[test]
+    fn a_session_another_tab_follows_is_not() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &[PROMPT_LINE], 0);
+        session(&dir, CLEARED, &CLEAR_LINES, 0);
+        written_a_while_ago(&dir, ONE);
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(
+            successor_of(&provider, ONE, an_hour_ago(), &[Arc::from(CLEARED)]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_newest_of_several_cleared_transcripts_is_chosen_and_never_the_current_one() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &CLEAR_LINES, 0);
+        session(&dir, CLEARED, &CLEAR_LINES, 0);
+        session(&dir, OTHER_CLEARED, &CLEAR_LINES, 0);
+        let now = SystemTime::now();
+        touch(
+            &dir.join(format!("{ONE}.jsonl")),
+            now - Duration::from_secs(60),
+        );
+        touch(
+            &dir.join(format!("{CLEARED}.jsonl")),
+            now - Duration::from_secs(20),
+        );
+        touch(
+            &dir.join(format!("{OTHER_CLEARED}.jsonl")),
+            now - Duration::from_secs(10),
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(
+            successor_of(&provider, ONE, an_hour_ago(), &[]),
+            Some(OTHER_CLEARED.to_string()),
+            "cleared twice before anyone looked: the conversation on screen is the later one"
+        );
+    }
+
+    /// After two clears the tab is on the third transcript, and the second is
+    /// also a transcript that opened on a clear after the tab began. It is also
+    /// older than what the tab is writing now, which is what rules it out: a
+    /// successor is written *after* the transcript it succeeds.
+    #[test]
+    fn a_cleared_transcript_older_than_the_current_ones_last_write_is_not_a_successor() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, CLEARED, &CLEAR_LINES, 0);
+        session(&dir, ONE, &CLEAR_LINES, 0);
+        let now = SystemTime::now();
+        touch(
+            &dir.join(format!("{CLEARED}.jsonl")),
+            now - Duration::from_secs(30),
+        );
+        touch(
+            &dir.join(format!("{ONE}.jsonl")),
+            now - Duration::from_secs(5),
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(
+            successor_of(&provider, ONE, an_hour_ago(), &[]),
+            None,
+            "going back to the conversation the tab already left is not following it"
+        );
+    }
+
+    /// The literal is in the first line of a file that is not a continuation: a
+    /// session that read a file containing the tag. A search for the substring
+    /// would adopt it.
+    #[test]
+    fn a_transcript_that_merely_contains_the_command_is_not_a_successor() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &[PROMPT_LINE], 0);
+        session(
+            &dir,
+            SIBLING,
+            &[
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"const CLEAR: &str = \"<command-name>/clear</command-name>\";"}]}}"#,
+            ],
+            0,
+        );
+        written_a_while_ago(&dir, ONE);
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(successor_of(&provider, ONE, an_hour_ago(), &[]), None);
+    }
+
+    /// A stalled tab asks every few seconds, and each ask would read the head of
+    /// every candidate. A head only changes when its file does.
+    #[test]
+    fn a_head_is_read_once_until_the_file_changes() {
+        let root = projects_dir();
+        let dir = root.path().join("-w-one");
+        session(&dir, ONE, &[PROMPT_LINE], 0);
+        session(&dir, CLEARED, &CLEAR_LINES, 0);
+        session(&dir, SIBLING, &[PROMPT_LINE], 0);
+        written_a_while_ago(&dir, ONE);
+        // Ordered outright: a candidate older than the best so far is not read
+        // at all, so the count below would otherwise depend on the order the
+        // directory lists them in.
+        let now = SystemTime::now();
+        touch(
+            &dir.join(format!("{CLEARED}.jsonl")),
+            now - Duration::from_secs(30),
+        );
+        touch(
+            &dir.join(format!("{SIBLING}.jsonl")),
+            now - Duration::from_secs(10),
+        );
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        for _ in 0..4 {
+            assert_eq!(
+                successor_of(&provider, ONE, an_hour_ago(), &[]),
+                Some(CLEARED.to_string())
+            );
+        }
+        assert_eq!(
+            provider.head_reads(),
+            2,
+            "one read for each of the two candidates, however often it is asked"
+        );
+
+        // The sibling grows: its head is read again, and the others' are not.
+        std::fs::write(
+            dir.join(format!("{SIBLING}.jsonl")),
+            format!("{PROMPT_LINE}\n{PROMPT_LINE}\n"),
+        )
+        .unwrap();
+        successor_of(&provider, ONE, an_hour_ago(), &[]);
+        assert_eq!(provider.head_reads(), 3);
+    }
+
+    #[test]
+    fn the_head_cache_is_bounded() {
+        let mut cache = HeadCache::default();
+        let directory = tempfile::tempdir().unwrap();
+        for n in 0..(HEAD_CACHE_ENTRIES * 2 + 3) {
+            let path = directory.path().join(format!("{n}.jsonl"));
+            std::fs::write(&path, PROMPT_LINE).unwrap();
+            cache.opens_on_a_clear(&path, PROMPT_LINE.len() as u64, SystemTime::UNIX_EPOCH);
+        }
+        assert!(cache.entries.len() <= HEAD_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn only_the_tabs_own_project_directory_is_searched() {
+        let root = projects_dir();
+        session(&root.path().join("-w-one"), ONE, &[PROMPT_LINE], 0);
+        std::fs::create_dir_all(root.path().join("-w-two")).unwrap();
+        session(&root.path().join("-w-two"), CLEARED, &CLEAR_LINES, 0);
+        let provider = ClaudeProvider::new(root.path().to_path_buf());
+
+        assert_eq!(successor_of(&provider, ONE, an_hour_ago(), &[]), None);
+    }
+
+    #[test]
+    fn a_session_with_no_transcript_has_no_successor() {
+        let provider = ClaudeProvider::new(PathBuf::from("/nowhere/at/all"));
+        let session = SessionSummary {
+            id: Arc::from(ONE),
+            agent: AgentKind::Claude,
+            title: String::new(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::new(),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: None,
+            log_bytes: 0,
+        };
+        assert_eq!(
+            provider.successor(&session, an_hour_ago(), &[]).unwrap(),
+            None
+        );
+    }
 }
 
 /// Every subagent the sidecar directory names, newest first.
@@ -1103,38 +1710,256 @@ fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
 /// partial line as read would lose whatever result it turns out to carry once
 /// the rest of it lands.
 fn read_transcript_progress(path: &Path, from: u64) -> Result<TranscriptProgress> {
-    let mut file = File::open(path)?;
+    read_transcript_progress_in(path, from, TRANSCRIPT_WINDOW)
+}
+
+/// [`read_transcript_progress`] with the window it reads in chosen by the
+/// caller, so a test can cut a small file into many.
+fn read_transcript_progress_in(
+    path: &Path,
+    from: u64,
+    window: usize,
+) -> Result<TranscriptProgress> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        // A transcript moved or deleted under a running tab has nothing new in
+        // it. It is not a failure, and reporting one makes the tab say so on
+        // every pass until the file comes back.
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(TranscriptProgress {
+                scanned_to: from,
+                ..TranscriptProgress::default()
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let length = file.metadata()?.len();
     // A transcript only ever grows. Shorter than where the last pass stopped
     // means a different file stands at this path now, so resuming would read
     // into the middle of someone else's line. Start again instead.
     let restarted = from > length;
     let from = if restarted { 0 } else { from };
+    let identity = head_identity(&mut file, length)?;
     file.seek(SeekFrom::Start(from))?;
 
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    let Some(last_newline) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok(TranscriptProgress {
-            tool_use_ids: Vec::new(),
-            turn_marks: Vec::new(),
-            subagent_events: Vec::new(),
-            scanned_to: from,
-            restarted,
-        });
-    };
-    // Lossy on the complete portion only, and the offset computed from the raw
-    // bytes: a replacement character is a different length from what it stands
-    // in for, so counting the converted string would drift the resume point.
-    let complete = String::from_utf8_lossy(&bytes[..=last_newline]);
-    let scan = claude_log::scan_chunk(&complete);
+    // Bounded by the length measured above, so a transcript that is being
+    // written faster than it is read still ends this pass.
+    let mut scan = claude_log::ChunkScan::default();
+    let read = read_complete_lines(file.take(length - from), window, |lines| {
+        scan.extend(claude_log::scan_chunk(lines));
+    })?;
     Ok(TranscriptProgress {
         tool_use_ids: scan.tool_use_ids.into_iter().map(Arc::from).collect(),
         turn_marks: scan.turn_marks,
         subagent_events: scan.subagent_events,
-        scanned_to: from + last_newline as u64 + 1,
+        scanned_to: from + read,
         restarted,
+        identity,
     })
+}
+
+/// Reads `reader` to its end and hands the complete lines in it to `visit`, a
+/// window at a time. Returns how many bytes those lines took up; a trailing
+/// line with no newline yet is not among them.
+///
+/// Each piece is cut at the last newline in what has been read, so a piece is
+/// never more than a window beyond whatever partial line the one before it left,
+/// and never ends inside a line. A line longer than a window is the one case a
+/// piece grows past it: the buffer keeps filling until the line ends.
+fn read_complete_lines<R: Read>(
+    mut reader: R,
+    window: usize,
+    mut visit: impl FnMut(&str),
+) -> std::io::Result<u64> {
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut consumed = 0u64;
+    loop {
+        let read = reader
+            .by_ref()
+            .take(window as u64)
+            .read_to_end(&mut buffer)?;
+        if read == 0 {
+            return Ok(consumed);
+        }
+        let Some(last_newline) = buffer.iter().rposition(|byte| *byte == b'\n') else {
+            continue;
+        };
+        // Lossy on the complete portion only, and the offset computed from the
+        // raw bytes: a replacement character is a different length from what
+        // it stands in for, so counting the converted string would drift the
+        // resume point.
+        visit(&String::from_utf8_lossy(&buffer[..=last_newline]));
+        consumed += last_newline as u64 + 1;
+        buffer.drain(..=last_newline);
+    }
+}
+
+/// A fingerprint of the first line of a transcript of `length` bytes, once that
+/// line is whole.
+///
+/// What tells one file from another standing at the same path. The first line
+/// of a growing transcript never changes, so a different fingerprint is a
+/// different file whatever the two lengths are. A first line longer than the
+/// bytes read is fingerprinted by those bytes, which are as fixed as the line
+/// is once the file is that long.
+fn head_identity(file: &mut File, length: u64) -> std::io::Result<Option<u64>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut head = Vec::new();
+    file.by_ref()
+        .take(length.min(IDENTITY_BYTES))
+        .read_to_end(&mut head)?;
+    let first_line = match head.iter().position(|byte| *byte == b'\n') {
+        Some(end) => &head[..end],
+        None if head.len() as u64 >= IDENTITY_BYTES => &head[..],
+        None => return Ok(None),
+    };
+    let mut hasher = DefaultHasher::new();
+    first_line.hash(&mut hasher);
+    Ok(Some(hasher.finish()))
+}
+
+/// Whether `text` has the shape of a session id Claude names a transcript by: a
+/// UUID in its hyphenated form, nothing around it.
+///
+/// Strict on purpose, where `uuid::Uuid::parse_str` also takes braces, a `urn:`
+/// prefix and the form with no hyphens. The id is handed to the CLI as an
+/// argument, so this is also what keeps a file named like a flag from being
+/// read as one.
+fn is_uuid(text: &str) -> bool {
+    text.len() == 36
+        && text.bytes().enumerate().all(|(position, byte)| {
+            if matches!(position, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// Where Claude keeps its transcripts, given the environment's
+/// `CLAUDE_CONFIG_DIR` and the home directory.
+///
+/// An unset or empty variable is the default. A relative one is too: it would
+/// name a directory relative to the CLI's working directory, which this process
+/// does not have, and guessing one is worse than reading the default.
+fn projects_dir_for(config_dir: Option<OsString>, home: &Path) -> PathBuf {
+    match config_dir.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir.join("projects"),
+        _ => home.join(".claude").join("projects"),
+    }
+}
+
+/// The newest transcript beside `current` that opens on a cleared conversation,
+/// was written after the tab began, and was written after `current` was.
+///
+/// Opening on the `/clear` is what makes a transcript a continuation and not
+/// merely a neighbour: another tab opened in the same project writes a new file
+/// beside this one too, and the project directory is all the two have in
+/// common. The command is recorded in the first lines of the file the CLI
+/// starts, which was read off real transcripts rather than assumed.
+///
+/// A successor is written after what it succeeds, so a transcript no newer than
+/// `current`'s last write is one the tab has already left -- the first after two
+/// clears, say -- and going back to it would be following nothing. `claimed`
+/// holds the rest of the sessions that are not this tab's to take.
+fn newest_cleared_transcript(
+    heads: &Mutex<HeadCache>,
+    current: &Path,
+    current_id: &str,
+    since: SystemTime,
+    claimed: &[Arc<str>],
+) -> Result<Option<PathBuf>> {
+    let Some(directory) = current.parent() else {
+        return Ok(None);
+    };
+    // A transcript deleted under the tab leaves only the time the tab began to
+    // measure from.
+    let current_modified = std::fs::metadata(current)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(directory)?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if stem == current_id || !is_uuid(stem) || claimed.iter().any(|id| &**id == stem) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        // Cheapest tests first: the head of a file is only consulted for a
+        // candidate that could be chosen.
+        if modified < since
+            || current_modified.is_some_and(|written| modified <= written)
+            || newest.as_ref().is_some_and(|(best, _)| *best >= modified)
+        {
+            continue;
+        }
+        let opens_on_a_clear = heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .opens_on_a_clear(&path, metadata.len(), modified);
+        if opens_on_a_clear {
+            newest = Some((modified, path));
+        }
+    }
+    Ok(newest.map(|(_, path)| path))
+}
+
+/// What the head of each transcript said about whether it opens on a clear,
+/// keyed by the file's length and modification time: a head only changes when
+/// its file does.
+#[derive(Default)]
+struct HeadCache {
+    entries: HashMap<PathBuf, (u64, SystemTime, bool)>,
+    /// Heads read from disk, as opposed to answered from `entries`.
+    reads: usize,
+}
+
+impl HeadCache {
+    fn opens_on_a_clear(&mut self, path: &Path, len: u64, modified: SystemTime) -> bool {
+        if let Some((cached_len, cached_modified, answer)) = self.entries.get(path)
+            && *cached_len == len
+            && *cached_modified == modified
+        {
+            return *answer;
+        }
+        self.reads += 1;
+        // A head that could not be read is not remembered: the next ask tries
+        // again, where an answer from a file that read fine holds until it grows.
+        let Some(answer) = read_opens_on_a_clear(path) else {
+            return false;
+        };
+        if self.entries.len() >= HEAD_CACHE_ENTRIES {
+            self.entries.clear();
+        }
+        self.entries
+            .insert(path.to_path_buf(), (len, modified, answer));
+        answer
+    }
+}
+
+/// Whether the beginning of the transcript at `path` records a conversation
+/// being cleared; `None` when it could not be read.
+fn read_opens_on_a_clear(path: &Path) -> Option<bool> {
+    let mut head = Vec::new();
+    let read =
+        File::open(path).and_then(|file| file.take(CLEAR_SEARCH_BYTES).read_to_end(&mut head));
+    if let Err(error) = read {
+        log::debug!("reading the head of {}: {error}", path.display());
+        return None;
+    }
+    Some(claude_log::opens_with_clear(&String::from_utf8_lossy(
+        &head,
+    )))
 }
 
 /// How long before `now` the newest `agent-*.jsonl` in `dir` was written.

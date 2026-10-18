@@ -27,8 +27,12 @@
 //! agent is still working**, whenever it pauses longer than the configured
 //! period. The setting exists so a user who is bitten by this can raise it. A
 //! transcript-backed tab does not read `is_answering` at all, so it has no
-//! such false positives; if its transcript never appears it simply gets no
-//! "finished" notification, and the exit one still fires.
+//! such false positives. If its transcript never produces a turn mark while
+//! the CLI writes output for a minute -- it is somewhere this editor does not
+//! look, or its format changed -- the tab stops reporting turns
+//! (`AgentView::reports_turns` turns false) and takes the heuristic's
+//! notification instead, the one every tab had before transcripts were read;
+//! the first mark that does arrive puts it back.
 //!
 //! No focus check anywhere, by explicit user decision: a notification fires
 //! even while a zode window is frontmost. `agent_notify_tests` carries a

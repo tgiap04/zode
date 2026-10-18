@@ -384,3 +384,125 @@ async fn an_exit_clears_the_approval_latch(cx: &mut TestAppContext) {
         ]
     );
 }
+
+/// A tracked tab whose transcript never marks -- Claude's config moved to a
+/// directory this editor does not read, say -- used to get no "finished"
+/// notification at all, because it was treated as reporting turns for good.
+#[gpui::test]
+async fn a_tab_whose_transcript_never_marks_falls_back_to_the_heuristic(cx: &mut TestAppContext) {
+    let (workspace, id, cx) = open_tab(cx).await;
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<agent_ui::AgentView>(cx).next()
+        })
+        .expect("the tab must exist");
+    let notifier = notifier(cx);
+    let falling_edge = |cx: &mut gpui::VisualTestContext| {
+        view.update(cx, |_, cx| cx.emit(agent_ui::AgentViewEvent::Activity));
+        cx.executor().advance_clock(HEURISTIC_PERIOD);
+        cx.run_until_parked();
+    };
+
+    falling_edge(cx);
+    assert!(
+        cx.posted_notifications().is_empty(),
+        "while its transcript is trusted the pty edges are left alone"
+    );
+
+    view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+    view.read_with(cx, |view, _| assert!(!view.reports_turns()));
+    falling_edge(cx);
+
+    assert_eq!(
+        bodies(cx),
+        ["Finished answering"],
+        "a transcript that cannot be read is no reason for no notification"
+    );
+    assert!(notifier.read_with(cx, |n, _| n.watched.contains_key(&id)));
+}
+
+/// The way back: marks arriving late prove the transcript works, and the tab
+/// goes back to being judged by it.
+#[gpui::test]
+async fn a_tab_whose_marks_arrive_late_goes_back_to_its_transcript(cx: &mut TestAppContext) {
+    let (workspace, _id, cx) = open_tab(cx).await;
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<agent_ui::AgentView>(cx).next()
+        })
+        .expect("the tab must exist");
+    let _notifier = notifier(cx);
+
+    view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+    view.update(cx, |view, cx| view.simulate_turn_marks(cx));
+    view.read_with(cx, |view, _| assert!(view.reports_turns()));
+
+    view.update(cx, |_, cx| cx.emit(agent_ui::AgentViewEvent::Activity));
+    cx.executor().advance_clock(HEURISTIC_PERIOD);
+    cx.run_until_parked();
+    assert!(cx.posted_notifications().is_empty());
+}
+
+/// The heuristic announces a turn while the transcript is out of reach, and
+/// the transcript, once it surfaces, holds that same turn. Believed as news it
+/// is announced a second time: its `Started` clears the latch the first
+/// announcement set, and its `Ended` fires.
+#[gpui::test]
+async fn a_turn_the_heuristic_announced_is_not_announced_again_when_the_transcript_surfaces(
+    cx: &mut TestAppContext,
+) {
+    use agent_sessions::TurnMark;
+    let (workspace, _id, cx) = open_tab(cx).await;
+    let view = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.items_of_type::<agent_ui::AgentView>(cx).next()
+        })
+        .expect("the tab must exist");
+    let _notifier = notifier(cx);
+    let a_turn = |reply: &str| {
+        vec![
+            TurnMark::Prompt,
+            TurnMark::EndTurn {
+                message_id: Some(reply.into()),
+            },
+            TurnMark::TurnDuration {
+                background_pending: false,
+            },
+        ]
+    };
+
+    // The transcript is not where this editor looks, so nothing has been read
+    // from it when the tab gives up on it.
+    view.update(cx, |view, cx| {
+        view.simulate_transcript_pass(Vec::new(), 0, cx)
+    });
+    view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+    view.update(cx, |_, cx| cx.emit(agent_ui::AgentViewEvent::Activity));
+    cx.executor().advance_clock(HEURISTIC_PERIOD);
+    cx.run_until_parked();
+    assert_eq!(
+        bodies(cx),
+        ["Finished answering"],
+        "announced by the heuristic"
+    );
+
+    // Found more than a quiet period later, holding the turn already announced.
+    view.update(cx, |view, cx| {
+        view.simulate_transcript_pass(a_turn("m1"), 100, cx)
+    });
+    cx.executor().advance_clock(CONFIRMATION * 4);
+    cx.run_until_parked();
+    assert_eq!(
+        bodies(cx),
+        ["Finished answering"],
+        "the same turn is not announced twice"
+    );
+
+    // What the transcript writes after that is news again.
+    view.update(cx, |view, cx| {
+        view.simulate_transcript_pass(a_turn("m2"), 200, cx)
+    });
+    cx.executor().advance_clock(CONFIRMATION);
+    cx.run_until_parked();
+    assert_eq!(bodies(cx), ["Finished answering", "Finished answering"]);
+}
