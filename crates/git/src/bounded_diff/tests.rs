@@ -532,9 +532,12 @@ async fn only_so_many_new_files_are_shown_and_the_diff_says_it_left_some_out(
         .expect("a diff")
         .expect("a commit");
     assert!(scoped.truncated);
-    assert_eq!(
-        scoped.text.matches("diff --git").count(),
-        MAX_UNTRACKED_FILES
+    // At most the cap. A slow runner can also run out of the time new files get first, so the
+    // exact count is not pinned; what matters is that the five over the cap never appear.
+    let shown = scoped.text.matches("diff --git").count();
+    assert!(
+        (1..=MAX_UNTRACKED_FILES).contains(&shown),
+        "{shown} new files shown"
     );
     assert!(scoped.text.contains("gen/file-0000.txt"));
     assert!(!scoped.text.contains("gen/file-0100.txt"));

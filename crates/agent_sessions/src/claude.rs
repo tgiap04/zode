@@ -1306,6 +1306,10 @@ mod tests {
             "00000000-0000-4000-8000-00000000000",
             "00000000-0000-4000-8000-0000000000001",
         ] {
+            // Windows refuses `:` in a file name, so that one cannot even be planted there.
+            if cfg!(windows) && hostile.contains(':') {
+                continue;
+            }
             session(&dir, hostile, &[prompt], 0);
             assert!(
                 provider.find(hostile).unwrap().is_none(),
