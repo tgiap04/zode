@@ -570,6 +570,74 @@ async fn ending_a_session_drops_the_work_it_was_waiting_on(cx: &mut TestAppConte
     );
 }
 
+/// The repository runs its git jobs one at a time, and what hangs in one holds
+/// up every other, however long ago the request behind it stopped waiting.
+#[gpui::test]
+async fn diffs_nobody_waits_for_any_more_do_not_hold_up_the_other_jobs_of_the_repository(
+    cx: &mut TestAppContext,
+) {
+    let (_rig, browser, mut connected) = greeted(cx).await;
+    let (project, worktree_id) = project_whose_diffs_hang(cx).await;
+    connected.controls(&browser);
+    ask_for_diffs(&browser, &mut connected, &worktree_id, 1..=4, cx);
+
+    let repository = project.read_with(cx, |project, cx| {
+        project
+            .repositories(cx)
+            .values()
+            .next()
+            .cloned()
+            .expect("a repository")
+    });
+    let mut afterwards = repository.update(cx, |repository, _| {
+        repository.send_job(None, |_, _| async { 7 })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        afterwards.try_recv().expect("still queued"),
+        None,
+        "the hanging diff holds the queue while it is wanted"
+    );
+
+    cx.executor()
+        .advance_clock(file_browse::REQUEST_DEADLINE + Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(
+        afterwards.try_recv().expect("the queue ran on"),
+        Some(7),
+        "every diff was let go with its request"
+    );
+}
+
+#[gpui::test]
+async fn a_diff_still_waiting_in_the_queue_when_its_session_ends_is_never_started(
+    cx: &mut TestAppContext,
+) {
+    let (rig, browser, mut connected) = greeted(cx).await;
+    let (project, worktree_id) = project_whose_diffs_hang(cx).await;
+    connected.controls(&browser);
+    ask_for_diffs(&browser, &mut connected, &worktree_id, 1..=4, cx);
+    let repository = project.read_with(cx, |project, cx| {
+        project
+            .repositories(cx)
+            .values()
+            .next()
+            .cloned()
+            .expect("a repository")
+    });
+    let mut afterwards = repository.update(cx, |repository, _| {
+        repository.send_job(None, |_, _| async { 9 })
+    });
+
+    rig.host.update(cx, |host, cx| host.disconnect_all(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        afterwards.try_recv().expect("the queue ran on"),
+        Some(9),
+        "ending the session freed the queue at once"
+    );
+}
+
 async fn session_with_queue_filled_to(
     queued: usize,
     cx: &mut TestAppContext,

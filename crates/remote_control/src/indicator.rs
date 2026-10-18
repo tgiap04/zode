@@ -237,20 +237,29 @@ impl RemoteControlIndicator {
             return;
         }
         let session_id = pending.session_id;
-        if !self
-            .host
-            .update(cx, |host, _| host.claim_pairing_presentation(session_id))
-        {
+        if self.host.read(cx).pairing_is_presented(session_id) {
             return;
         }
         let host = self.host.clone();
-        self.workspace
+        let on_screen = self
+            .workspace
             .update(cx, |workspace, cx| {
                 workspace.toggle_modal(window, cx, move |window, cx| {
                     PairingModal::new(host, pending, window, cx)
                 });
+                // A modal that cannot be dismissed keeps its place, and the
+                // question is then not on screen: it is asked for again the
+                // next time this looks, rather than being counted as shown.
+                workspace
+                    .active_modal::<PairingModal>(cx)
+                    .is_some_and(|modal| modal.read(cx).session_id() == session_id)
             })
-            .log_err();
+            .log_err()
+            .unwrap_or(false);
+        if on_screen {
+            self.host
+                .update(cx, |host, _| host.claim_pairing_presentation(session_id));
+        }
     }
 
     /// The question cannot be put on screen because no window is in front, and

@@ -14,6 +14,9 @@ pub struct PairingModal {
     host: Entity<RemoteHost>,
     session_id: u32,
     device_name: String,
+    /// What the device is already trusted as, when trusting it again would
+    /// replace what is saved for it.
+    replaces: Option<String>,
     code: String,
     answered: bool,
     focus_handle: FocusHandle,
@@ -50,13 +53,16 @@ impl PairingModal {
                 cx.emit(DismissEvent);
             }
         });
-        // A question dismissed without being answered is answered no.
+        // A question closed without being answered turns the device away. The
+        // digits were not compared, so it is not a mismatch: closing this
+        // because another window or modal took its place must not push the
+        // person toward the lockout.
         let release = cx.on_release({
             let host = host.clone();
             move |this, cx| {
                 if !this.answered {
                     host.update(cx, |host, cx| {
-                        host.reject_pairing_if_pending(session_id, cx)
+                        host.dismiss_pairing_if_pending(session_id, cx)
                     });
                 }
             }
@@ -65,12 +71,17 @@ impl PairingModal {
             host,
             session_id,
             device_name: decision.peer_name,
+            replaces: decision.replaces,
             code: decision.code,
             answered: false,
             focus_handle: cx.focus_handle(),
             _observation: observation,
             _release: release,
         }
+    }
+
+    pub(crate) fn session_id(&self) -> u32 {
+        self.session_id
     }
 
     fn answer(&mut self, trust: bool, cx: &mut Context<Self>) {
@@ -111,6 +122,17 @@ impl Render for PairingModal {
                     )
                     .section(
                         Section::new()
+                            .when_some(self.replaces.clone(), |section, existing| {
+                                section.child(
+                                    Label::new(format!(
+                                        "{existing} is already trusted. Trusting this request \
+                                         replaces what is saved for it and ends any connection \
+                                         made with the old key."
+                                    ))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Warning),
+                                )
+                            })
                             .child(
                                 Label::new(
                                     "Look at the other device. If it shows the same six digits, \

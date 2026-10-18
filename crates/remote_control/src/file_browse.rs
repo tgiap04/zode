@@ -10,11 +10,24 @@
 //! the `private_files` setting names, a symlink of any kind, and anything that
 //! is not an ordinary file on disk.
 
-use std::{future::Future, io::Read as _, path::PathBuf, pin::pin, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::BinaryHeap,
+    future::Future,
+    io::Read as _,
+    path::{Path, PathBuf},
+    pin::pin,
+    sync::Arc,
+    time::Duration,
+};
 
+use anyhow::bail;
 use fs::Fs;
-use futures::future::{Either, select};
-use git::bounded_diff::{PathFilter, ScopedDiff};
+use futures::{
+    channel::oneshot,
+    future::{Either, select},
+};
+use git::bounded_diff::{BoundedDiff, PathFilter, ScopedDiff};
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Task, WeakEntity};
 use project::{
     Project,
@@ -23,7 +36,7 @@ use project::{
 use remote_relay_protocol::{Control, FileEntry, FileKind, MAX_INNER_PAYLOAD_LEN, error_code};
 use settings::WorktreeId;
 use util::{ResultExt as _, rel_path::RelPath};
-use worktree::{Entry, Snapshot, Worktree};
+use worktree::{Entry, Snapshot, Worktree, WorktreeSettings};
 
 /// The most entries a listing carries; a longer directory is cut and says so.
 pub const MAX_LIST_ENTRIES: usize = 2000;
@@ -34,6 +47,9 @@ pub const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 /// How long a request may take before it is answered with an error, whatever
 /// the disk is doing.
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+/// How long git may spend on one diff once it has started, which leaves the
+/// request room to say what went wrong before its own deadline.
+pub const DIFF_DEADLINE: Duration = Duration::from_secs(20);
 
 /// The most a whole listing may weigh once serialized, so that however the
 /// names are escaped it stays inside what the host reserves for one answer.
@@ -244,13 +260,17 @@ impl FileBrowser {
         path: String,
         cx: &App,
     ) -> Task<Result<Vec<u8>, BrowseError>> {
-        let (fs, snapshot) = match self.worktree(worktree_id, cx) {
+        let (fs, snapshot, settings) = match self.worktree(worktree_id, cx) {
             Ok((project, worktree)) => {
-                (project.read(cx).fs().clone(), worktree.read(cx).snapshot())
+                let worktree = worktree.read(cx);
+                let Some(settings) = worktree.as_local().map(|local| local.settings()) else {
+                    return Task::ready(Err(BrowseError::not_found()));
+                };
+                (project.read(cx).fs().clone(), worktree.snapshot(), settings)
             }
             Err(error) => return Task::ready(Err(error)),
         };
-        cx.background_spawn(async move { read_text(fs, &snapshot, &path).await })
+        cx.background_spawn(async move { read_text(fs, &snapshot, &settings, &path).await })
     }
 
     fn diff(&self, worktree_id: &str, cx: &mut App) -> Task<Result<(Vec<u8>, bool), BrowseError>> {
@@ -259,6 +279,7 @@ impl FileBrowser {
             Err(error) => return Task::ready(Err(error)),
         };
         let worktree_path = worktree.read(cx).abs_path();
+        let is_single_file = worktree.read(cx).is_single_file();
         let Some(settings) = worktree.read(cx).as_local().map(|local| local.settings()) else {
             return Task::ready(Err(BrowseError::not_found()));
         };
@@ -297,7 +318,11 @@ impl FileBrowser {
             let scope = scope.clone();
             move |path| {
                 path.strip_prefix(&scope).is_ok_and(|inside| {
-                    !settings.is_path_private(inside) && !settings.is_path_excluded(inside)
+                    if is_single_file && inside.is_empty() {
+                        !single_file_is_hidden(&settings, &worktree_path)
+                    } else {
+                        !settings.is_path_private(inside) && !settings.is_path_excluded(inside)
+                    }
                 })
             }
         });
@@ -305,23 +330,23 @@ impl FileBrowser {
             scope,
             keep,
             max_bytes: MAX_DIFF_BYTES,
+            deadline: DIFF_DEADLINE,
+            executor: cx.background_executor().clone(),
         };
+        let (stop_wanting, still_wanted) = oneshot::channel();
         // `HEAD` as the base makes this the working tree against the last
         // commit, staged and unstaged changes together; the plain worktree
         // diff would leave out whatever is already staged.
         let diff = repository.update(cx, |repository, _| {
-            repository.send_job(None, move |state, _| async move {
-                match state {
-                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.diff_head_to_worktree_scoped(request).await
-                    }
-                    RepositoryState::Remote(_) => {
-                        Err(anyhow::anyhow!("the repository is not on this machine"))
-                    }
-                }
+            repository.send_job(None, move |state, _| {
+                diff_while_wanted(state, request, still_wanted)
             })
         });
         cx.background_spawn(async move {
+            // Dropped with this task, which is what a request that timed out or
+            // whose session ended does to it, and which tells the job above
+            // that nobody wants its answer any more.
+            let _stop_wanting = stop_wanting;
             match diff.await {
                 Ok(Ok(Some(diff))) => Ok((diff.text.into_bytes(), diff.truncated)),
                 Ok(Ok(None)) => Err(BrowseError::new(
@@ -338,6 +363,28 @@ impl FileBrowser {
     }
 }
 
+/// The diff the repository's job queue was asked for, unless `wanted` ends
+/// first. The queue runs one job at a time and does not know that the request
+/// behind a job is gone, so a job that went on would hold up every other git
+/// job of the repository for an answer nobody reads: one still waiting its turn
+/// is skipped, and one that is running is dropped, which stops its git.
+async fn diff_while_wanted(
+    state: RepositoryState,
+    request: ScopedDiff,
+    mut wanted: oneshot::Receiver<()>,
+) -> anyhow::Result<Option<BoundedDiff>> {
+    if wanted.try_recv().is_err() {
+        bail!("the request was dropped before its turn");
+    }
+    let RepositoryState::Local(LocalRepositoryState { backend, .. }) = state else {
+        bail!("the repository is not on this machine");
+    };
+    match select(backend.diff_head_to_worktree_scoped(request), wanted).await {
+        Either::Left((diff, _)) => diff,
+        Either::Right(_) => bail!("the request was dropped while its diff was being made"),
+    }
+}
+
 /// A client's path as a path inside the snapshot, or `None` for an absolute
 /// path or one that would have to be rewritten to be a plain relative path: a
 /// `..`, a `.` or an empty component anywhere but the very start or end. A
@@ -347,18 +394,91 @@ fn snapshot_path(path: &str) -> Option<&RelPath> {
     RelPath::unix(path).ok()
 }
 
+/// Whether `entry` is acceptable in itself: inside the folder, not private,
+/// and not a symlink.
+fn is_reachable_itself(entry: &Entry) -> bool {
+    !entry.is_external && !entry.is_private && entry.canonical_path.is_none()
+}
+
 /// Whether a device may see `entry` at all. A symlink is never followed, and
 /// neither is anything below one: the target is not in the snapshot under the
 /// name the device used, so what it is cannot be told from here.
 fn is_reachable(snapshot: &Snapshot, entry: &Entry) -> bool {
-    !entry.is_external
-        && !entry.is_private
-        && !entry
+    is_reachable_itself(entry)
+        && entry
             .path
             .ancestors()
+            .skip(1)
             .filter(|ancestor| !ancestor.is_empty())
             .filter_map(|ancestor| snapshot.entry_for_path(ancestor))
-            .any(|ancestor| ancestor.canonical_path.is_some())
+            .all(|ancestor| ancestor.canonical_path.is_none())
+}
+
+/// Whether the folder's settings hide the one file a folder of a single file
+/// is. The settings name paths inside a folder and this one has none, so the
+/// file is asked about by its name, as it was when the folder was opened. A
+/// name that cannot be judged is hidden.
+fn single_file_is_hidden(settings: &WorktreeSettings, absolute: &Path) -> bool {
+    let Some(name) = absolute
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| RelPath::unix(name).ok())
+    else {
+        return true;
+    };
+    settings.is_path_private(name) || settings.is_path_excluded(name)
+}
+
+struct Ranked<Key, Item> {
+    key: Key,
+    item: Item,
+}
+
+impl<Key: Ord, Item> Ord for Ranked<Key, Item> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+impl<Key: Ord, Item> PartialOrd for Ranked<Key, Item> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<Key: Ord, Item> PartialEq for Ranked<Key, Item> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl<Key: Ord, Item> Eq for Ranked<Key, Item> {}
+
+/// The `count` first of `items` by `key`, in order, and how many items there
+/// were. Holds the keys of `count` items at a time, however many there are.
+pub(crate) fn first_by_key<Item, Key: Ord>(
+    items: impl Iterator<Item = Item>,
+    count: usize,
+    key: impl Fn(&Item) -> Key,
+) -> (Vec<Item>, usize) {
+    let mut first = BinaryHeap::with_capacity(count.saturating_add(1));
+    let mut total = 0;
+    for item in items {
+        total += 1;
+        first.push(Ranked {
+            key: key(&item),
+            item,
+        });
+        if first.len() > count {
+            first.pop();
+        }
+    }
+    let ordered = first
+        .into_sorted_vec()
+        .into_iter()
+        .map(|ranked| ranked.item)
+        .collect();
+    (ordered, total)
 }
 
 fn list_children(snapshot: &Snapshot, path: &str) -> Result<Listing, BrowseError> {
@@ -367,18 +487,21 @@ fn list_children(snapshot: &Snapshot, path: &str) -> Result<Listing, BrowseError
         .entry_for_path(parent)
         .filter(|entry| entry.is_dir() && is_reachable(snapshot, entry))
         .ok_or_else(BrowseError::not_found)?;
-    let mut children: Vec<&Entry> = snapshot
-        .child_entries(&directory.path)
-        .filter(|entry| is_reachable(snapshot, entry))
-        .collect();
-    children.sort_by_cached_key(|entry| {
-        let name = entry.path.file_name().unwrap_or_default();
-        (!entry.is_dir(), name.to_lowercase(), name.to_string())
-    });
-    let truncated = children.len() > MAX_LIST_ENTRIES;
+    // The directory is reachable, and so is everything above it: only a child
+    // itself can be what makes it unreachable.
+    let (children, total) = first_by_key(
+        snapshot
+            .child_entries(&directory.path)
+            .filter(|entry| is_reachable_itself(entry)),
+        MAX_LIST_ENTRIES,
+        |entry| {
+            let name = entry.path.file_name().unwrap_or_default();
+            (!entry.is_dir(), name.to_lowercase(), name.to_string())
+        },
+    );
+    let truncated = total > MAX_LIST_ENTRIES;
     let entries = children
         .into_iter()
-        .take(MAX_LIST_ENTRIES)
         .map(|entry| FileEntry {
             name: entry.path.file_name().unwrap_or_default().to_string(),
             kind: if entry.is_dir() {
@@ -396,6 +519,7 @@ fn list_children(snapshot: &Snapshot, path: &str) -> Result<Listing, BrowseError
 async fn read_text(
     fs: Arc<dyn Fs>,
     snapshot: &Snapshot,
+    settings: &WorktreeSettings,
     path: &str,
 ) -> Result<Vec<u8>, BrowseError> {
     let relative = snapshot_path(path).ok_or_else(BrowseError::not_found)?;
@@ -403,6 +527,11 @@ async fn read_text(
         .entry_for_path(relative)
         .filter(|entry| entry.is_file() && !entry.is_fifo && is_reachable(snapshot, entry))
         .ok_or_else(BrowseError::not_found)?;
+    // The flag on the entry of a single file is not to be trusted: a rescan
+    // judges it by an empty path, which no setting names.
+    if entry.path.is_empty() && single_file_is_hidden(settings, snapshot.abs_path()) {
+        return Err(BrowseError::not_found());
+    }
     let too_large = || {
         BrowseError::new(
             error_code::TOO_LARGE,

@@ -19,8 +19,8 @@ use remote_relay_client::{
     test_support::{FakeClient, FakeRelay, InMemoryKeychain, StaticCredentials},
 };
 use remote_relay_protocol::{
-    Control, DeviceKeypair, Handshake, HandshakeParameters, InnerKind, KEY_LEN, PairingMessage,
-    PairingRequester, build_prologue, random_nonce,
+    AgentStatus, AgentSummary, Control, DeviceKeypair, Handshake, HandshakeParameters, InnerKind,
+    KEY_LEN, MAX_INNER_PAYLOAD_LEN, PairingMessage, PairingRequester, build_prologue, random_nonce,
 };
 use settings::{Settings as _, SettingsStore};
 #[cfg(unix)]
@@ -36,7 +36,7 @@ use zode_account::{Account, AccountStatus, AccountUser};
 
 use crate::{
     AgentMirror, FileBrowser, HostEnvironment, HostState, RemoteHost, TerminalMirror,
-    session_router::UNSUPPORTED,
+    remote_host::TrustedDevices, session_router::UNSUPPORTED,
 };
 
 const USER_ID: &str = "user-1";
@@ -45,6 +45,7 @@ const HOST_DEVICE: &str = "host-device";
 struct Rig {
     relay: FakeRelay,
     host: Entity<RemoteHost>,
+    account: Entity<Account>,
     #[cfg_attr(
         not(unix),
         allow(dead_code, reason = "only the shell-driven tests read it")
@@ -103,6 +104,34 @@ async fn rig_with_files(
     status: AccountStatus,
     with_files: bool,
 ) -> Rig {
+    build_rig(cx, enabled, status, with_files, false).await
+}
+
+/// A rig whose host is set up the way `init` sets up the app's: switched off
+/// when Zode quits, and given to every window.
+async fn installed_rig(cx: &mut TestAppContext) -> Rig {
+    build_rig(
+        cx,
+        true,
+        AccountStatus::SignedIn(AccountUser {
+            id: USER_ID.into(),
+            email: "ada@example.com".into(),
+            name: None,
+            avatar_url: None,
+        }),
+        false,
+        true,
+    )
+    .await
+}
+
+async fn build_rig(
+    cx: &mut TestAppContext,
+    enabled: bool,
+    status: AccountStatus,
+    with_files: bool,
+    installed: bool,
+) -> Rig {
     cx.executor().allow_parking();
     cx.update(|cx| {
         let store = SettingsStore::test(cx);
@@ -147,6 +176,7 @@ async fn rig_with_files(
     });
 
     let account = cx.update(|cx| cx.new(|_| Account::for_test(status)));
+    let account_handle = account.clone();
     let environment = HostEnvironment {
         credentials: Arc::new(StaticCredentials::new(USER_ID, HOST_DEVICE, "access-token")),
         keychain: keychain.clone(),
@@ -160,23 +190,39 @@ async fn rig_with_files(
     let host = {
         let relay = relay.clone();
         let terminals = terminals.clone();
-        cx.new(move |cx| {
-            RemoteHost::new(
-                account,
-                environment,
-                relay.transport(),
-                agents,
-                terminals,
-                files,
-                "9.9.9".to_string(),
-                cx,
-            )
-        })
+        if installed {
+            cx.update(|cx| {
+                crate::install(
+                    account,
+                    environment,
+                    relay.transport(),
+                    agents,
+                    terminals,
+                    files,
+                    "9.9.9".to_string(),
+                    cx,
+                )
+            })
+        } else {
+            cx.new(move |cx| {
+                RemoteHost::new(
+                    account,
+                    environment,
+                    relay.transport(),
+                    agents,
+                    terminals,
+                    files,
+                    "9.9.9".to_string(),
+                    cx,
+                )
+            })
+        }
     };
     cx.run_until_parked();
     Rig {
         relay,
         host,
+        account: account_handle,
         terminals,
         keychain,
         host_public_key,
@@ -1044,17 +1090,22 @@ async fn no_more_than_four_devices_are_in_control_at_once(cx: &mut TestAppContex
     }
     assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 4);
 
-    let (fifth, _handshake) = begin_handshake(&rig, &browser);
+    // A fifth is answered like any other and, once it has proven it holds the
+    // keys, told in words why there is no place for it.
+    let mut fifth = open_session(&rig, &browser, cx);
+    assert!(!browser.client.was_told_closed(fifth.session_id));
+    fifth.send(&browser, &hello(1));
     cx.run_until_parked();
+    let told = fifth.controls(&browser);
     assert!(
-        browser
-            .client
-            .take_binary()
-            .iter()
-            .all(|(session_id, _)| *session_id != fifth),
-        "no reply to a fifth device"
+        matches!(
+            told.as_slice(),
+            [Control::Error { code, message, .. }]
+                if code == "too_large" && message.contains("already has 4 devices connected")
+        ),
+        "{told:?}"
     );
-    assert!(browser.client.was_told_closed(fifth));
+    assert!(browser.client.was_told_closed(fifth.session_id));
     assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 4);
 }
 
@@ -1136,6 +1187,7 @@ async fn only_as_many_peers_as_there_are_places_can_prove_themselves(cx: &mut Te
 #[gpui::test]
 async fn a_mismatched_commitment_ends_pairing_and_three_of_them_lock_it(cx: &mut TestAppContext) {
     let rig = rig(cx, true).await;
+    let (events, _subscription) = record_host_events(&rig, cx);
     let browser = Browser::new(&rig, "browser-1");
     for attempt in 0..3 {
         let session_id = browser.client.open(HOST_DEVICE, OpenMode::Pair);
@@ -1187,6 +1239,13 @@ async fn a_mismatched_commitment_ends_pairing_and_three_of_them_lock_it(cx: &mut
         "a locked host answers nobody"
     );
     assert!(browser.client.was_told_closed(session_id));
+    let told = problems(&events);
+    assert_eq!(
+        told.len(),
+        1,
+        "the person hears of the lockout once, not once per request: {told:?}"
+    );
+    assert!(told[0].0.contains("locked"), "{told:?}");
 
     rig.host.update(cx, |host, cx| host.unlock_pairing(cx));
     assert!(!rig.host.read_with(cx, |host, _| host.pairing_locked_out()));
@@ -1720,6 +1779,70 @@ async fn a_lockout_survives_the_connection_dropping_and_coming_back(cx: &mut Tes
 }
 
 #[gpui::test]
+async fn a_lockout_survives_turning_remote_control_off_and_on(cx: &mut TestAppContext) {
+    let rig = rig(cx, true).await;
+    let browser = Browser::new(&rig, "browser-1");
+    for _ in 0..3 {
+        let session_id = send_pairing_request(&browser, cx);
+        browser.client.send_text(
+            &encode_pairing(
+                session_id,
+                &PairingMessage::PairReveal { nonce: [0xee; 32] },
+            )
+            .expect("encodes"),
+        );
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(121));
+        cx.run_until_parked();
+    }
+    assert!(rig.host.read_with(cx, |host, _| host.pairing_locked_out()));
+
+    set_remote_control(cx, false, None);
+    cx.run_until_parked();
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+
+    assert!(rig.host.read_with(cx, |host, _| host.has_relay_client()));
+    assert!(
+        rig.host.read_with(cx, |host, _| host.pairing_locked_out()),
+        "turning remote control off and on must not be a way to clear a lockout"
+    );
+    rig.host.update(cx, |host, cx| host.unlock_pairing(cx));
+    assert!(!rig.host.read_with(cx, |host, _| host.pairing_locked_out()));
+}
+
+#[gpui::test]
+async fn a_spent_answer_allowance_survives_turning_remote_control_off_and_on(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx, true).await;
+    let (events, _subscription) = record_host_events(&rig, cx);
+    let browser = Browser::new(&rig, "browser-1");
+    for _ in 0..3 {
+        let session_id = send_pairing_request(&browser, cx);
+        assert_eq!(browser.client.take_pairing().len(), 1);
+        browser.client.close(session_id);
+        cx.run_until_parked();
+    }
+
+    set_remote_control(cx, false, None);
+    cx.run_until_parked();
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+    assert!(rig.host.read_with(cx, |host, _| host.has_relay_client()));
+
+    let session_id = send_pairing_request(&browser, cx);
+    assert!(
+        browser.client.take_pairing().is_empty(),
+        "the allowance was spent before the restart"
+    );
+    assert!(browser.client.was_told_closed(session_id));
+    let told = problems(&events);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].0.contains("about 60 minutes"), "{told:?}");
+}
+
+#[gpui::test]
 async fn turning_it_off_from_the_action_disconnects_at_once_and_stays_off(cx: &mut TestAppContext) {
     let (rig, browser, connected) = paired_and_connected(cx).await;
     cx.update(|cx| {
@@ -1770,7 +1893,7 @@ mod with_a_window {
         indicator::RemoteControlIndicator, pairing_modal::PairingModal,
         trusted_devices_modal::TrustedDevicesModal,
     };
-    use gpui::{Modifiers, VisualTestContext};
+    use gpui::{Modifiers, ParentElement as _, VisualTestContext};
     use remote_relay_client::{OpenMode, encode_pairing};
     use workspace::Workspace;
 
@@ -2003,6 +2126,7 @@ mod with_a_window {
             })
             .expect("room for another device");
         }
+        store.flush().await;
         cx.update(|cx| {
             <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
             RemoteHost::set_global(rig.host.clone(), cx);
@@ -2348,6 +2472,189 @@ mod with_a_window {
             ]
         );
     }
+
+    /// A modal that stays up until it is allowed to close, as a dialog that
+    /// declines to be dismissed does.
+    struct StubbornModal {
+        focus_handle: gpui::FocusHandle,
+        may_close: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl gpui::EventEmitter<gpui::DismissEvent> for StubbornModal {}
+
+    impl gpui::Focusable for StubbornModal {
+        fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl workspace::ModalView for StubbornModal {
+        fn on_before_dismiss(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> workspace::DismissDecision {
+            workspace::DismissDecision::Dismiss(self.may_close.get())
+        }
+    }
+
+    impl gpui::Render for StubbornModal {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div().child("busy")
+        }
+    }
+
+    #[gpui::test]
+    async fn the_trusted_devices_stay_listed_when_the_host_starts_fails_or_is_stopped_under_them(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, false).await;
+        pin_in_storage(&[pinned("phone", 1)], cx).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        let host = rig.host.clone();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_modal(window, cx, move |window, cx| {
+                TrustedDevicesModal::new(host, window, cx)
+            });
+        });
+        let listed = |cx: &mut VisualTestContext| {
+            rig.host
+                .read_with(cx, |host, cx| match host.trusted_devices_listing(cx) {
+                    TrustedDevices::Listed { devices, .. } => Some(
+                        devices
+                            .into_iter()
+                            .map(|device| device.device_id)
+                            .collect::<Vec<_>>(),
+                    ),
+                    TrustedDevices::SignedOut | TrustedDevices::Loading => None,
+                })
+        };
+        cx.run_until_parked();
+        assert_eq!(listed(cx), Some(vec!["phone".to_string()]));
+
+        // It tries to start and cannot read its key.
+        rig.keychain.fail_reads();
+        set_remote_control_in_window(true, cx);
+        assert!(matches!(
+            rig.host.read_with(cx, |host, _| host.state().clone()),
+            HostState::Failed(_)
+        ));
+        assert_eq!(
+            listed(cx),
+            Some(vec!["phone".to_string()]),
+            "a start that failed does not take the list with it"
+        );
+
+        // It is started and stopped again before it got anywhere.
+        rig.keychain.recover();
+        set_remote_control_in_window(false, cx);
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.remote_control.get_or_insert_default().enabled = Some(true);
+                });
+            });
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.remote_control.get_or_insert_default().enabled = Some(false);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            listed(cx),
+            Some(vec!["phone".to_string()]),
+            "and the modal asks for the list again rather than staying on Loading"
+        );
+    }
+
+    fn set_remote_control_in_window(enabled: bool, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.remote_control.get_or_insert_default().enabled = Some(enabled);
+                });
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_question_that_could_not_be_put_on_screen_is_asked_again_once_it_can(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        let may_close = std::rc::Rc::new(std::cell::Cell::new(false));
+        workspace.update_in(cx, |workspace, window, cx| {
+            let may_close = may_close.clone();
+            workspace.toggle_modal(window, cx, move |_, cx| StubbornModal {
+                focus_handle: cx.focus_handle(),
+                may_close,
+            });
+        });
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+        assert!(
+            !pairing_modal_is_open(&workspace, cx),
+            "the modal that would not close kept its place"
+        );
+        assert!(
+            !rig.host
+                .read_with(cx, |host, _| host.pairing_is_presented(session_id)),
+            "a question that is not on screen is not counted as shown"
+        );
+
+        may_close.set(true);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.hide_modal(window, cx);
+        });
+        rig.host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(pairing_modal_is_open(&workspace, cx));
+        assert!(
+            rig.host
+                .read_with(cx, |host, _| host.pairing_is_presented(session_id))
+        );
+    }
+
+    #[gpui::test]
+    async fn a_question_replaced_by_another_modal_does_not_count_toward_the_lockout(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        let browser = Browser::new(&rig, "browser-1");
+        for _ in 0..3 {
+            let session_id = ask_the_question(&rig, &browser, cx);
+            assert!(pairing_modal_is_open(&workspace, cx));
+
+            let host = rig.host.clone();
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    TrustedDevicesModal::new(host, window, cx)
+                });
+            });
+            cx.run_until_parked();
+            assert!(!pairing_modal_is_open(&workspace, cx));
+            assert!(
+                rig.host
+                    .read_with(cx, |host, _| host.pending_pairing().is_none())
+            );
+            assert!(browser.client.was_told_closed(session_id));
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.hide_modal(window, cx);
+            });
+        }
+        assert!(
+            !rig.host.read_with(cx, |host, _| host.pairing_locked_out()),
+            "being covered by another modal is not a mismatch"
+        );
+    }
 }
 
 #[gpui::test]
@@ -2369,6 +2676,878 @@ async fn a_host_turned_off_by_hand_stays_off_while_the_setting_still_reads_on(
         rig.host.read_with(cx, |host, _| host.has_relay_client()),
         "seeing the setting off and then on again is how it comes back"
     );
+}
+
+/// Sends a pairing request on a new session and returns the session.
+fn send_pairing_request(browser: &Browser, cx: &mut TestAppContext) -> u32 {
+    let session_id = browser.client.open(HOST_DEVICE, OpenMode::Pair);
+    let (_requester, request) = PairingRequester::start(
+        *browser.keypair.public_key(),
+        random_nonce().expect("randomness"),
+    );
+    browser
+        .client
+        .send_text(&encode_pairing(session_id, &request).expect("encodes"));
+    cx.run_until_parked();
+    session_id
+}
+
+fn pinned(device_id: &str, key_byte: u8) -> PinnedDevice {
+    PinnedDevice {
+        device_id: device_id.to_string(),
+        public_key: [key_byte; KEY_LEN],
+        name: format!("Browser {device_id}"),
+        paired_at: 1_700_000_000,
+    }
+}
+
+/// The ids Manage Trusted Devices would list, or `None` while it has nothing
+/// to list yet.
+fn listed_device_ids(rig: &Rig, cx: &mut TestAppContext) -> Option<Vec<String>> {
+    rig.host
+        .read_with(cx, |host, cx| match host.trusted_devices_listing(cx) {
+            TrustedDevices::Listed { devices, .. } => {
+                Some(devices.into_iter().map(|device| device.device_id).collect())
+            }
+            TrustedDevices::SignedOut | TrustedDevices::Loading => None,
+        })
+}
+
+async fn pin_in_storage(devices: &[PinnedDevice], cx: &mut TestAppContext) {
+    let mut store = cx
+        .update(|cx| TrustStore::load(USER_ID.to_string(), cx))
+        .await;
+    for device in devices {
+        cx.update(|cx| store.pin(device.clone(), cx))
+            .expect("room for another device");
+    }
+    store.flush().await;
+}
+
+#[gpui::test]
+async fn re_pairing_a_device_with_a_new_key_ends_the_sessions_made_with_the_old_one(
+    cx: &mut TestAppContext,
+) {
+    let (rig, browser, mut connected) = paired_and_connected(cx).await;
+    connected.controls(&browser);
+    let old_session = connected.session_id;
+    assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 1);
+
+    // The same device id and a key nobody has trusted yet: what re-pairing a
+    // browser whose key may have been taken looks like.
+    let rekeyed = Browser {
+        id: browser.id,
+        keypair: DeviceKeypair::generate().expect("a key"),
+        client: browser.client,
+    };
+    let session_id = begin_pairing_until_asked(&rig, &rekeyed, cx);
+    let pending = rig
+        .host
+        .read_with(cx, |host, _| host.pending_pairing().cloned())
+        .expect("the person is asked");
+    assert_eq!(
+        pending.replaces.as_deref(),
+        Some("Ada's browser"),
+        "the question says it replaces a device that is already trusted"
+    );
+    assert_eq!(
+        rig.host.read_with(cx, |host, _| host.sessions().len()),
+        1,
+        "nothing changes until the person says yes"
+    );
+
+    rig.host
+        .update(cx, |host, cx| host.decide_pairing(session_id, true, cx));
+    cx.run_until_parked();
+    assert!(
+        rig.host.read_with(cx, |host, _| host.sessions().is_empty()),
+        "a session built from the old key must not outlive it"
+    );
+    assert!(rekeyed.client.was_told_closed(old_session));
+    let trusted = rig.host.read_with(cx, |host, _| host.trusted_devices());
+    assert_eq!(trusted.len(), 1);
+    assert_eq!(trusted[0].public_key, *rekeyed.keypair.public_key());
+}
+
+#[gpui::test]
+async fn re_pairing_with_the_same_key_leaves_the_session_alone(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = paired_and_connected(cx).await;
+    connected.controls(&browser);
+    let session_id = begin_pairing_until_asked(&rig, &browser, cx);
+    let pending = rig
+        .host
+        .read_with(cx, |host, _| host.pending_pairing().cloned())
+        .expect("the person is asked");
+    assert_eq!(
+        pending.replaces, None,
+        "the key that is saved is the key that asks: nothing is replaced"
+    );
+    rig.host
+        .update(cx, |host, cx| host.decide_pairing(session_id, true, cx));
+    cx.run_until_parked();
+
+    assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 1);
+    connected.send(&browser, &Control::Ping);
+    cx.run_until_parked();
+    assert_eq!(connected.controls(&browser), vec![Control::Pong]);
+}
+
+#[gpui::test]
+async fn a_device_that_is_not_trusted_yet_is_not_said_to_replace_anything(cx: &mut TestAppContext) {
+    let rig = rig(cx, true).await;
+    let browser = Browser::new(&rig, "browser-1");
+    begin_pairing_until_asked(&rig, &browser, cx);
+    let pending = rig
+        .host
+        .read_with(cx, |host, _| host.pending_pairing().cloned())
+        .expect("the person is asked");
+    assert_eq!(pending.replaces, None);
+}
+
+#[gpui::test]
+async fn a_request_abandoned_before_anyone_was_asked_neither_holds_pairing_nor_spends_a_question(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx, true).await;
+    let browser = Browser::new(&rig, "browser-1");
+    for attempt in 0..3 {
+        let session_id = send_pairing_request(&browser, cx);
+        assert_eq!(
+            browser.client.take_pairing().len(),
+            1,
+            "request {attempt} is answered at once: the ones before it left"
+        );
+        browser.client.close(session_id);
+        cx.run_until_parked();
+    }
+    // Another device is not held up by them, and the hour's three questions
+    // are all still there to be asked.
+    let other = Browser::new(&rig, "browser-2");
+    for _ in 0..3 {
+        pair(&rig, &other, cx);
+    }
+}
+
+#[gpui::test]
+async fn a_requester_that_leaves_when_it_does_not_like_the_digits_is_cut_off_after_three_tries(
+    cx: &mut TestAppContext,
+) {
+    // The requester learns the host's nonce from the accept, can work out the
+    // digits before it reveals, and closes if they are not what it wants: nobody
+    // is asked and nothing counts against it, so only the number of answers it
+    // gets bounds how often it may try.
+    let rig = rig(cx, true).await;
+    let (events, _subscription) = record_host_events(&rig, cx);
+    let browser = Browser::new(&rig, "browser-1");
+    for attempt in 0..3 {
+        let session_id = send_pairing_request(&browser, cx);
+        assert_eq!(
+            browser.client.take_pairing().len(),
+            1,
+            "attempt {attempt} is answered"
+        );
+        browser.client.close(session_id);
+        cx.run_until_parked();
+    }
+    assert!(problems(&events).is_empty());
+
+    for attempt in 3..8 {
+        let session_id = send_pairing_request(&browser, cx);
+        assert!(
+            browser.client.take_pairing().is_empty(),
+            "attempt {attempt} is not answered"
+        );
+        assert!(browser.client.was_told_closed(session_id));
+    }
+    assert!(
+        rig.host
+            .read_with(cx, |host, _| host.pending_pairing().is_none()),
+        "nobody was ever asked"
+    );
+    let told = problems(&events);
+    assert_eq!(told.len(), 1, "said once: {told:?}");
+    assert!(told[0].0.contains("too many times"), "{told:?}");
+}
+
+#[gpui::test]
+async fn a_relay_inventing_device_ids_is_cut_off_after_twelve_answers_an_hour(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx, true).await;
+    let mut answered = 0;
+    for index in 0..16 {
+        let invented = Browser::new(&rig, &format!("invented-{index}"));
+        let session_id = send_pairing_request(&invented, cx);
+        if !invented.client.take_pairing().is_empty() {
+            answered += 1;
+            invented.client.close(session_id);
+            cx.run_until_parked();
+        }
+    }
+    assert_eq!(answered, 12, "however many names it makes up");
+
+    cx.executor()
+        .advance_clock(Duration::from_secs(60 * 60 + 1));
+    cx.run_until_parked();
+    let again = Browser::new(&rig, "invented-again");
+    send_pairing_request(&again, cx);
+    assert_eq!(
+        again.client.take_pairing().len(),
+        1,
+        "the hour passes and it may try again"
+    );
+}
+
+#[gpui::test]
+async fn once_the_allowance_is_spent_the_person_is_told_why_nothing_was_asked(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx, true).await;
+    let (events, _subscription) = record_host_events(&rig, cx);
+    let browser = Browser::new(&rig, "browser-1");
+    for _ in 0..3 {
+        pair(&rig, &browser, cx);
+    }
+    assert!(problems(&events).is_empty());
+
+    for _ in 0..2 {
+        let session_id = send_pairing_request(&browser, cx);
+        assert!(browser.client.take_pairing().is_empty());
+        assert!(browser.client.was_told_closed(session_id));
+    }
+    let told = problems(&events);
+    assert_eq!(
+        told.len(),
+        1,
+        "said once, however often it is asked: {told:?}"
+    );
+    assert!(told[0].0.contains("3 times this hour"), "{told:?}");
+}
+
+#[gpui::test]
+async fn a_full_trust_store_is_said_before_the_person_compares_digits(cx: &mut TestAppContext) {
+    let rig = rig(cx, false).await;
+    let devices: Vec<PinnedDevice> = (0..remote_relay_client::MAX_PINNED_DEVICES as u8)
+        .map(|index| pinned(&format!("full-{index}"), index))
+        .collect();
+    pin_in_storage(&devices, cx).await;
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+    let (events, _subscription) = record_host_events(&rig, cx);
+
+    let browser = Browser::new(&rig, "browser-1");
+    let session_id = send_pairing_request(&browser, cx);
+    assert!(
+        browser.client.take_pairing().is_empty(),
+        "no ceremony is run for a pin that cannot be written"
+    );
+    assert!(browser.client.was_told_closed(session_id));
+    let told = problems(&events);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].0.contains("too many devices"), "{told:?}");
+}
+
+#[gpui::test]
+async fn closing_the_question_unanswered_never_counts_toward_the_lockout(cx: &mut TestAppContext) {
+    let rig = rig(cx, true).await;
+    let browser = Browser::new(&rig, "browser-1");
+    for _ in 0..3 {
+        let session_id = begin_pairing_until_asked(&rig, &browser, cx);
+        rig.host.update(cx, |host, cx| {
+            host.dismiss_pairing_if_pending(session_id, cx)
+        });
+        cx.run_until_parked();
+        assert!(browser.client.was_told_closed(session_id));
+        assert!(
+            rig.host
+                .read_with(cx, |host, _| host.pending_pairing().is_none())
+        );
+    }
+    assert!(
+        !rig.host.read_with(cx, |host, _| host.pairing_locked_out()),
+        "digits that were never compared did not fail to match"
+    );
+    assert!(
+        rig.host
+            .read_with(cx, |host, _| host.trusted_devices().is_empty())
+    );
+}
+
+#[gpui::test]
+async fn a_trust_click_after_the_deadline_says_the_request_expired(cx: &mut TestAppContext) {
+    let rig = rig(cx, true).await;
+    let (events, _subscription) = record_host_events(&rig, cx);
+    let browser = Browser::new(&rig, "browser-1");
+    // Housekeeping looks every five seconds, from when the host started. The
+    // question is asked off that rhythm, so there is a moment after its
+    // deadline that housekeeping has not yet seen.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    let session_id = begin_pairing_until_asked(&rig, &browser, cx);
+
+    // Past the deadline and before housekeeping has looked: the question is
+    // still on screen, which is when the click comes.
+    cx.executor().advance_clock(Duration::from_secs(121));
+    assert!(
+        rig.host
+            .read_with(cx, |host, _| host.pending_pairing().is_some())
+    );
+    rig.host
+        .update(cx, |host, cx| host.decide_pairing(session_id, true, cx));
+    cx.run_until_parked();
+
+    assert!(
+        rig.host
+            .read_with(cx, |host, _| host.trusted_devices().is_empty())
+    );
+    let told = problems(&events);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].0.contains("ran out of time"), "{told:?}");
+}
+
+#[gpui::test]
+async fn trusted_devices_are_listed_and_forgotten_while_remote_control_is_off(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx, false).await;
+    pin_in_storage(&[pinned("lost-laptop", 1), pinned("phone", 2)], cx).await;
+    assert_eq!(
+        listed_device_ids(&rig, cx),
+        None,
+        "nothing is known until the saved devices have been read"
+    );
+
+    rig.host
+        .update(cx, |host, cx| host.load_trusted_devices(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        listed_device_ids(&rig, cx),
+        Some(vec!["lost-laptop".to_string(), "phone".to_string()])
+    );
+
+    rig.host
+        .update(cx, |host, cx| host.forget_device("lost-laptop", cx));
+    cx.run_until_parked();
+    assert_eq!(listed_device_ids(&rig, cx), Some(vec!["phone".to_string()]));
+    let reloaded = cx
+        .update(|cx| TrustStore::load(USER_ID.to_string(), cx))
+        .await;
+    assert_eq!(
+        reloaded
+            .devices()
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["phone"],
+        "forgetting while off is saved"
+    );
+
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+    assert!(rig.host.read_with(cx, |host, _| host.has_relay_client()));
+    assert_eq!(
+        rig.host
+            .read_with(cx, |host, _| host.trusted_devices().len()),
+        1,
+        "the forgotten device is still forgotten when the host starts"
+    );
+}
+
+#[gpui::test]
+async fn a_forget_that_cannot_be_saved_says_so_instead_of_looking_done(cx: &mut TestAppContext) {
+    let rig = rig(cx, false).await;
+    let kvp = cx.update(|cx| db::kvp::KeyValueStore::global(cx));
+    kvp.write_kvp(format!("remote_control_trust:{USER_ID}"), "not json".into())
+        .await
+        .expect("saved");
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+    let (events, _subscription) = record_host_events(&rig, cx);
+
+    rig.host
+        .update(cx, |host, cx| host.forget_device("browser-1", cx));
+    cx.run_until_parked();
+
+    let told = problems(&events);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].0.contains("could not be read"), "{told:?}");
+}
+
+#[gpui::test]
+async fn trusted_devices_are_still_listed_when_the_host_has_halted(cx: &mut TestAppContext) {
+    let (rig, _browser, _connected) = paired_and_connected(cx).await;
+    rig.relay
+        .drop_host_connection(Some(4403), "session_revoked");
+    cx.run_until_parked();
+    assert_eq!(
+        rig.host.read_with(cx, |host, _| host.state().clone()),
+        HostState::Halted(StopReason::SessionEnded)
+    );
+
+    assert_eq!(
+        listed_device_ids(&rig, cx),
+        Some(vec!["browser-1".to_string()])
+    );
+    rig.host
+        .update(cx, |host, cx| host.forget_device("browser-1", cx));
+    cx.run_until_parked();
+    let reloaded = cx
+        .update(|cx| TrustStore::load(USER_ID.to_string(), cx))
+        .await;
+    assert!(reloaded.devices().is_empty(), "the forget was saved");
+}
+
+#[gpui::test]
+async fn without_an_account_there_are_no_trusted_devices_to_show(cx: &mut TestAppContext) {
+    let rig = rig_with_status(cx, true, AccountStatus::SignedOut).await;
+    rig.host
+        .update(cx, |host, cx| host.load_trusted_devices(cx));
+    cx.run_until_parked();
+    assert!(rig.host.read_with(cx, |host, cx| matches!(
+        host.trusted_devices_listing(cx),
+        TrustedDevices::SignedOut
+    )));
+}
+
+#[gpui::test]
+async fn turning_remote_control_on_works_after_the_write_that_turned_it_off_failed(
+    cx: &mut TestAppContext,
+) {
+    let (rig, _browser, _connected) = paired_and_connected(cx).await;
+    cx.update(|cx| {
+        <dyn fs::Fs>::set_global(fs::FakeFs::new(cx.background_executor().clone()), cx);
+        RemoteHost::set_global(rig.host.clone(), cx);
+    });
+    // Turned off, but the setting still reads on: the write did not go through.
+    rig.host.update(cx, |host, cx| host.turn_off(cx));
+    cx.run_until_parked();
+    assert!(!rig.host.read_with(cx, |host, _| host.has_relay_client()));
+
+    cx.update(|cx| crate::enable_remote_control(cx));
+    cx.run_until_parked();
+    assert!(
+        rig.host.read_with(cx, |host, _| host.has_relay_client()),
+        "asking for it again must bring it back"
+    );
+    assert!(rig.relay.is_host_connected());
+}
+
+#[gpui::test]
+async fn quitting_zode_turns_remote_control_off(cx: &mut TestAppContext) {
+    let rig = installed_rig(cx).await;
+    let browser = Browser::new(&rig, "browser-1");
+    pair(&rig, &browser, cx);
+    let mut connected = open_session(&rig, &browser, cx);
+    connected.send(&browser, &hello(1));
+    cx.run_until_parked();
+    assert!(rig.host.read_with(cx, |host, _| host.has_relay_client()));
+
+    cx.update(|cx| cx.shutdown());
+
+    assert!(
+        !rig.host.read_with(cx, |host, _| host.has_relay_client()),
+        "the relay client goes before the process does"
+    );
+    assert!(rig.host.read_with(cx, |host, _| host.sessions().is_empty()));
+    cx.run_until_parked();
+    assert!(browser.client.was_told_closed(connected.session_id));
+}
+
+#[gpui::test]
+async fn frames_that_change_nothing_do_not_redraw_what_watches_the_host(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = paired_and_connected(cx).await;
+    connected.controls(&browser);
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _observation = cx.update(|cx| {
+        let notified = notified.clone();
+        cx.observe(&rig.host, move |_, _| notified.set(notified.get() + 1))
+    });
+
+    for _ in 0..20 {
+        connected.send(&browser, &Control::Ping);
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        connected.controls(&browser).len(),
+        20,
+        "every ping is answered"
+    );
+    assert_eq!(
+        notified.get(),
+        0,
+        "twenty pings changed nothing the status bar shows"
+    );
+
+    browser.client.close(connected.session_id);
+    cx.run_until_parked();
+    assert!(
+        notified.get() > 0,
+        "a device leaving is something the status bar shows"
+    );
+}
+
+/// A greeted browser, with `files` offered, the way the running app is.
+async fn connected_with_files(cx: &mut TestAppContext) -> (Rig, Browser, Connected) {
+    let rig = rig_with_files(
+        cx,
+        true,
+        AccountStatus::SignedIn(AccountUser {
+            id: USER_ID.into(),
+            email: "ada@example.com".into(),
+            name: None,
+            avatar_url: None,
+        }),
+        true,
+    )
+    .await;
+    let browser = Browser::new(&rig, "browser-1");
+    pair(&rig, &browser, cx);
+    let mut connected = open_session(&rig, &browser, cx);
+    connected.send(&browser, &hello(1));
+    cx.run_until_parked();
+    (rig, browser, connected)
+}
+
+#[gpui::test]
+async fn browsing_files_keeps_a_session_from_going_idle(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = connected_with_files(cx).await;
+    set_remote_control(cx, true, Some(1));
+    cx.run_until_parked();
+    for request_id in 0..8 {
+        cx.executor().advance_clock(Duration::from_secs(20));
+        connected.send(
+            &browser,
+            &Control::FilesList {
+                request_id,
+                worktree_id: None,
+                path: String::new(),
+            },
+        );
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        rig.host.read_with(cx, |host, _| host.sessions().len()),
+        1,
+        "asking to see files is use, as the setting says"
+    );
+
+    cx.executor().advance_clock(Duration::from_secs(61));
+    cx.run_until_parked();
+    assert!(
+        rig.host.read_with(cx, |host, _| host.sessions().is_empty()),
+        "and a minute without asking is a minute of silence"
+    );
+}
+
+#[cfg(unix)]
+#[gpui::test]
+async fn control_messages_sent_while_the_relay_is_full_wait_instead_of_ending_sessions(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx, false).await;
+    rig.relay.set_outbound_capacity(6);
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+    let browser = Browser::new(&rig, "browser-1");
+    pair(&rig, &browser, cx);
+    let mut connected = open_session(&rig, &browser, cx);
+    connected.send(&browser, &hello(1));
+    cx.run_until_parked();
+    let flooding = shell_terminal(
+        "read line; head -c 3000000 /dev/zero | tr '\\000' 'x'; printf '\\nFLOODEND\\n'; sleep 30",
+        cx,
+    )
+    .await;
+    cx.run_until_parked();
+    let terminal_id = connected
+        .controls(&browser)
+        .into_iter()
+        .rev()
+        .find_map(|control| match control {
+            Control::TerminalList { terminals } => terminals.first().map(|t| t.id.clone()),
+            _ => None,
+        })
+        .expect("the terminal is listed");
+    connected.send(
+        &browser,
+        &Control::TerminalAttach {
+            terminal_id,
+            stream_id: 7,
+        },
+    );
+    cx.run_until_parked();
+    connected.receive(&browser);
+
+    rig.relay.pause_delivery();
+    connected.send_data(&browser, 7, b"go\r");
+    for _ in 0..500 {
+        if flooding
+            .update(cx, |terminal, _| terminal.get_content())
+            .contains("FLOODEND")
+        {
+            break;
+        }
+        cx.background_executor
+            .timer(Duration::from_millis(10))
+            .await;
+        cx.run_until_parked();
+    }
+
+    // The relay's queue is now full of output, and the device pings and the
+    // host announces a new terminal to every device.
+    assert!(
+        !rig.host.read_with(cx, |host, cx| host.relay_has_room(cx)),
+        "the connection to the relay is full when the ping arrives"
+    );
+    connected.send(&browser, &Control::Ping);
+    let _another = shell_terminal("sleep 30", cx).await;
+    cx.run_until_parked();
+    assert_eq!(
+        rig.host.read_with(cx, |host, _| host.sessions().len()),
+        1,
+        "a full relay connection is not a reason to end a session over a reply"
+    );
+
+    rig.relay.resume_delivery();
+    let mut received = Vec::new();
+    for _ in 0..500 {
+        cx.background_executor
+            .timer(Duration::from_millis(10))
+            .await;
+        cx.run_until_parked();
+        received.extend(connected.receive(&browser));
+        let flood: Vec<u8> = received
+            .iter()
+            .filter(|(kind, stream, _)| *kind == InnerKind::Data && *stream == 7)
+            .flat_map(|(_, _, payload)| payload.clone())
+            .collect();
+        if String::from_utf8_lossy(&flood).contains("FLOODEND") {
+            break;
+        }
+    }
+    let controls: Vec<Control> = received
+        .into_iter()
+        .filter(|(kind, _, _)| *kind == InnerKind::Control)
+        .map(|(_, _, payload)| {
+            read_control(&remote_relay_protocol::InnerFrame {
+                kind: InnerKind::Control,
+                stream_id: 0,
+                payload,
+            })
+            .expect("the host speaks the protocol")
+        })
+        .collect();
+    assert!(
+        controls.contains(&Control::Pong),
+        "the reply went out once there was room: {controls:?}"
+    );
+    assert!(
+        controls.iter().any(|control| matches!(
+            control,
+            Control::TerminalList { terminals } if terminals.len() == 2
+        )),
+        "and so did the announcement: {controls:?}"
+    );
+    assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 1);
+}
+
+/// A host whose connection to the relay holds a handful of frames, with a device
+/// that has said hello.
+async fn connected_over_a_narrow_relay(cx: &mut TestAppContext) -> (Rig, Browser, Connected) {
+    let rig = rig(cx, false).await;
+    rig.relay.set_outbound_capacity(6);
+    set_remote_control(cx, true, None);
+    cx.run_until_parked();
+    let browser = Browser::new(&rig, "browser-1");
+    pair(&rig, &browser, cx);
+    let mut connected = open_session(&rig, &browser, cx);
+    connected.send(&browser, &hello(1));
+    cx.run_until_parked();
+    connected.controls(&browser);
+    (rig, browser, connected)
+}
+
+/// Lets the relay go again and gathers everything the host sends until `done`.
+async fn collect_until(
+    browser: &Browser,
+    connected: &mut Connected,
+    cx: &mut TestAppContext,
+    mut done: impl FnMut(&[(InnerKind, u32, Vec<u8>)]) -> bool,
+) -> Vec<(InnerKind, u32, Vec<u8>)> {
+    let mut received = Vec::new();
+    for _ in 0..1000 {
+        cx.background_executor
+            .timer(Duration::from_millis(10))
+            .await;
+        cx.run_until_parked();
+        received.extend(connected.receive(browser));
+        if done(&received) {
+            break;
+        }
+    }
+    received
+}
+
+fn controls_of(received: &[(InnerKind, u32, Vec<u8>)]) -> Vec<Control> {
+    received
+        .iter()
+        .filter(|(kind, _, _)| *kind == InnerKind::Control)
+        .map(|(_, _, payload)| {
+            read_control(&remote_relay_protocol::InnerFrame {
+                kind: InnerKind::Control,
+                stream_id: 0,
+                payload: payload.clone(),
+            })
+            .expect("the host speaks the protocol")
+        })
+        .collect()
+}
+
+fn data_frames(received: &[(InnerKind, u32, Vec<u8>)]) -> usize {
+    received
+        .iter()
+        .filter(|(kind, _, payload)| *kind == InnerKind::Data && !payload.is_empty())
+        .count()
+}
+
+#[gpui::test]
+async fn a_reply_does_not_wait_behind_a_file_the_device_is_slow_to_take(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = connected_over_a_narrow_relay(cx).await;
+    let session_id = connected.session_id;
+    let total: usize = 1_000_000;
+    let frames = total.div_ceil(MAX_INNER_PAYLOAD_LEN);
+
+    rig.relay.pause_delivery();
+    rig.host
+        .update(cx, |host, _| host.queue_waiting_bytes(session_id, total));
+    rig.host.update(cx, |host, cx| host.flush_all(cx));
+    assert!(!rig.host.read_with(cx, |host, cx| host.relay_has_room(cx)));
+    connected.send(&browser, &Control::Ping);
+    cx.run_until_parked();
+
+    rig.relay.resume_delivery();
+    let received = collect_until(&browser, &mut connected, cx, |received| {
+        data_frames(received) == frames && controls_of(received).contains(&Control::Pong)
+    })
+    .await;
+    assert_eq!(data_frames(&received), frames, "all of the file arrives");
+    let pong_at = received
+        .iter()
+        .position(|(kind, _, _)| *kind == InnerKind::Control)
+        .expect("the reply arrives");
+    let frames_before = received[..pong_at]
+        .iter()
+        .filter(|(kind, _, _)| *kind == InnerKind::Data)
+        .count();
+    assert!(
+        frames_before < frames / 2,
+        "the reply went out after the {frames_before} frames already on their way, \
+         not after all {frames}"
+    );
+    assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 1);
+}
+
+#[gpui::test]
+async fn what_the_host_pushes_to_a_device_slow_to_read_is_replaced_and_never_ends_it(
+    cx: &mut TestAppContext,
+) {
+    let (rig, browser, mut connected) = connected_over_a_narrow_relay(cx).await;
+    let session_id = connected.session_id;
+    // More waiting for the device than it is allowed to ask for.
+    let total: usize = 8 * 1024 * 1024 + 100 * 1024;
+    let frames = total.div_ceil(MAX_INNER_PAYLOAD_LEN);
+
+    rig.relay.pause_delivery();
+    rig.host
+        .update(cx, |host, _| host.queue_waiting_bytes(session_id, total));
+    rig.host.update(cx, |host, cx| host.flush_all(cx));
+    assert!(!rig.host.read_with(cx, |host, cx| host.relay_has_room(cx)));
+
+    let agent = |status| Control::AgentUpdate {
+        agent: AgentSummary {
+            id: "agent-1".to_string(),
+            name: "Claude Code".to_string(),
+            status,
+            title: None,
+            session_id: None,
+            agent: None,
+        },
+    };
+    for round in 0..200 {
+        let status = if round % 2 == 0 {
+            AgentStatus::Working
+        } else {
+            AgentStatus::Idle
+        };
+        rig.host
+            .update(cx, |host, cx| host.push_to_all(&agent(status), cx));
+    }
+    rig.host.update(cx, |host, cx| {
+        host.push_to_all(&agent(AgentStatus::Finished), cx)
+    });
+    assert_eq!(
+        rig.host.read_with(cx, |host, _| host.sessions().len()),
+        1,
+        "the device asked for none of it, so it is not ended for it"
+    );
+
+    rig.relay.resume_delivery();
+    let received = collect_until(&browser, &mut connected, cx, |received| {
+        data_frames(received) == frames
+    })
+    .await;
+    let updates: Vec<Control> = controls_of(&received)
+        .into_iter()
+        .filter(|control| matches!(control, Control::AgentUpdate { .. }))
+        .collect();
+    assert_eq!(
+        updates,
+        vec![agent(AgentStatus::Finished)],
+        "told the latest, once"
+    );
+    assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 1);
+}
+
+#[gpui::test]
+async fn a_device_that_asks_for_more_than_it_reads_is_still_ended(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = connected_over_a_narrow_relay(cx).await;
+    let session_id = connected.session_id;
+    rig.relay.pause_delivery();
+    rig.host.update(cx, |host, _| {
+        host.queue_waiting_bytes(session_id, 8 * 1024 * 1024 + 64 * 1024)
+    });
+
+    connected.send(&browser, &Control::Ping);
+    cx.run_until_parked();
+    assert!(
+        rig.host.read_with(cx, |host, _| host.sessions().is_empty()),
+        "what it asked for, and did not read, is its doing"
+    );
+}
+
+#[gpui::test]
+async fn signing_out_is_told_to_whatever_shows_the_trusted_devices(cx: &mut TestAppContext) {
+    let rig = rig(cx, false).await;
+    pin_in_storage(&[pinned("phone", 1)], cx).await;
+    rig.host
+        .update(cx, |host, cx| host.load_trusted_devices(cx));
+    cx.run_until_parked();
+    assert_eq!(listed_device_ids(&rig, cx), Some(vec!["phone".to_string()]));
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _observation = cx.update(|cx| {
+        let notified = notified.clone();
+        cx.observe(&rig.host, move |_, _| notified.set(notified.get() + 1))
+    });
+
+    rig.account
+        .update(cx, |account, cx| account.sign_out(cx).detach());
+    cx.run_until_parked();
+
+    assert!(notified.get() > 0);
+    assert!(rig.host.read_with(cx, |host, cx| matches!(
+        host.trusted_devices_listing(cx),
+        TrustedDevices::SignedOut
+    )));
 }
 
 #[cfg(unix)]
@@ -2518,6 +3697,14 @@ mod project_server {
     /// A paired, greeted browser, with the stand-in as the project server.
     async fn session(ending: &str, cx: &mut TestAppContext) -> (Rig, Browser, Connected, Fixture) {
         let rig = rig(cx, true).await;
+        session_on(rig, ending, cx).await
+    }
+
+    async fn session_on(
+        rig: Rig,
+        ending: &str,
+        cx: &mut TestAppContext,
+    ) -> (Rig, Browser, Connected, Fixture) {
         let fixture = Fixture::new(ending, cx);
         let browser = Browser::new(&rig, "browser-1");
         pair(&rig, &browser, cx);
@@ -2824,6 +4011,139 @@ mod project_server {
         );
     }
 
+    fn framed(envelope: &rpc::proto::Envelope) -> Vec<u8> {
+        use rpc::proto::Message as _;
+        let mut bytes = u32::try_from(envelope.encoded_len())
+            .expect("a short message")
+            .to_le_bytes()
+            .to_vec();
+        envelope.encode(&mut bytes).expect("encodes");
+        bytes
+    }
+
+    /// What the controlling Zode's project client sends every few seconds.
+    fn heartbeat(id: u32) -> Vec<u8> {
+        framed(&rpc::proto::Envelope {
+            id,
+            payload: Some(rpc::proto::envelope::Payload::Ping(rpc::proto::Ping {})),
+            ..Default::default()
+        })
+    }
+
+    /// Anything else a project client says.
+    fn project_request(id: u32) -> Vec<u8> {
+        framed(&rpc::proto::Envelope {
+            id,
+            responding_to: Some(1),
+            payload: Some(rpc::proto::envelope::Payload::Ack(rpc::proto::Ack {})),
+            ..Default::default()
+        })
+    }
+
+    #[gpui::test]
+    async fn the_project_clients_heartbeat_does_not_keep_a_session_from_going_idle(
+        cx: &mut TestAppContext,
+    ) {
+        let (rig, browser, mut connected, _fixture) = session("exec cat", cx).await;
+        connected.controls(&browser);
+        open(&browser, &mut connected, 3, 5, cx);
+        set_remote_control(cx, true, Some(1));
+        cx.run_until_parked();
+        for id in 1..=30 {
+            cx.executor().advance_clock(Duration::from_secs(5));
+            connected.send_data(&browser, 5, &heartbeat(id));
+            cx.run_until_parked();
+        }
+        assert!(
+            rig.host.read_with(cx, |host, _| host.sessions().is_empty()),
+            "two and a half minutes of pings and nothing else is silence"
+        );
+        assert!(browser.client.was_told_closed(connected.session_id));
+    }
+
+    #[gpui::test]
+    async fn requests_on_the_project_stream_keep_a_session_from_going_idle(
+        cx: &mut TestAppContext,
+    ) {
+        let (rig, browser, mut connected, _fixture) = session("exec cat", cx).await;
+        connected.controls(&browser);
+        open(&browser, &mut connected, 3, 5, cx);
+        set_remote_control(cx, true, Some(1));
+        cx.run_until_parked();
+        for id in 1..=8 {
+            cx.executor().advance_clock(Duration::from_secs(20));
+            let mut bytes = heartbeat(id * 2);
+            bytes.extend(project_request(id * 2 + 1));
+            connected.send_data(&browser, 5, &bytes);
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            rig.host.read_with(cx, |host, _| host.sessions().len()),
+            1,
+            "somebody is working in the project"
+        );
+    }
+
+    #[gpui::test]
+    async fn quitting_zode_stops_the_project_server_and_its_daemon(cx: &mut TestAppContext) {
+        let rig = installed_rig(cx).await;
+        let (_rig, browser, mut connected, fixture) = session_on(rig, "exec cat", cx).await;
+        connected.controls(&browser);
+        open(&browser, &mut connected, 3, 5, cx);
+        assert!(echoed(&browser, &mut connected, 5, b"up\n", cx).await);
+        let identifier = fixture.identifier();
+        let proxy = fixture.proxy_pid(&identifier);
+        let daemon = fixture.daemon_pid(&identifier);
+        assert!(is_running(&proxy) && is_running(&daemon));
+
+        cx.update(|cx| cx.shutdown());
+        assert!(
+            wait_for(cx, || !is_running(&proxy) && !is_running(&daemon)).await,
+            "nothing a device started may outlive Zode"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_end_of_a_project_stream_is_not_lost_when_the_relay_is_full(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, false).await;
+        rig.relay.set_outbound_capacity(6);
+        set_remote_control(cx, true, None);
+        cx.run_until_parked();
+        let (rig, browser, mut connected, _fixture) = session_on(rig, "exec cat", cx).await;
+        connected.controls(&browser);
+        open(&browser, &mut connected, 3, 5, cx);
+        assert!(echoed(&browser, &mut connected, 5, b"up\n", cx).await);
+
+        rig.relay.pause_delivery();
+        rig.host.update(cx, |host, _| {
+            host.queue_waiting_bytes(connected.session_id, 1_000_000)
+        });
+        rig.host.update(cx, |host, cx| host.flush_all(cx));
+        assert!(!rig.host.read_with(cx, |host, cx| host.relay_has_room(cx)));
+        // The device is done with the project server.
+        connected.send_data(&browser, 5, &[]);
+        cx.run_until_parked();
+
+        rig.relay.resume_delivery();
+        let received = collect_until(&browser, &mut connected, cx, |received| {
+            received.iter().any(|(kind, stream, payload)| {
+                *kind == InnerKind::Data && *stream == 5 && payload.is_empty()
+            })
+        })
+        .await;
+        assert!(
+            received
+                .iter()
+                .any(|(kind, stream, payload)| *kind == InnerKind::Data
+                    && *stream == 5
+                    && payload.is_empty()),
+            "the stream's end was sent once there was room"
+        );
+        assert_eq!(rig.host.read_with(cx, |host, _| host.sessions().len()), 1);
+    }
+
     #[gpui::test]
     async fn two_sessions_get_two_project_servers_with_their_own_identifiers(
         cx: &mut TestAppContext,
@@ -3097,7 +4417,9 @@ mod project_server {
             assert_eq!(echoed_back.map(|reply| reply.id), Some(41));
             assert!(fixture.started());
 
-            // A second proxy on the same connection cannot reuse the stream.
+            // A reconnect cannot reuse the stream, and a new one would know
+            // nothing of what the client holds: the client is told the project
+            // server is gone, which is how it reports that to the person.
             let (second_tx, _second_rx) = mpsc::unbounded();
             let (_unused_tx, unused_rx) = mpsc::unbounded();
             let (second_activity, _a) = mpsc::channel(1);
@@ -3110,7 +4432,10 @@ mod project_server {
                 Arc::new(MockDelegate),
                 &mut cx.to_async(),
             );
-            assert!(second.await.is_err());
+            assert_eq!(
+                second.await.expect("a reconnect is answered, not failed"),
+                remote::proxy::ProxyLaunchError::ServerNotRunning.to_exit_code()
+            );
             drop(io);
         }
 
@@ -3139,7 +4464,7 @@ mod project_server {
             let (incoming_tx, mut incoming_rx) = mpsc::unbounded();
             let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
             let (activity_tx, _activity_rx) = mpsc::channel(1);
-            let _io = connection.start_proxy(
+            let io = connection.start_proxy(
                 "unused".into(),
                 false,
                 incoming_tx,
@@ -3159,6 +4484,10 @@ mod project_server {
             let daemon = fixture.daemon_pid(&identifier);
             assert!(is_running(&proxy) && is_running(&daemon));
 
+            // A window that gives a connection up has let go of its own proxy
+            // by then; a connection another window still uses is not killed.
+            drop(io);
+            cx.run_until_parked();
             connection.kill().await.expect("killed");
             assert!(connection.has_been_killed());
             assert!(

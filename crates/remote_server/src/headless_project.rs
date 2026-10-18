@@ -1326,8 +1326,13 @@ impl HeadlessProject {
     }
 
     #[cfg(all(test, unix))]
-    pub(crate) fn open_terminal_count(&self) -> usize {
-        self.terminals.len()
+    pub(crate) fn live_terminal_count(&self) -> usize {
+        self.terminals.live_len()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn running_terminal_count(&self) -> usize {
+        self.terminals.running_len()
     }
 
     async fn handle_create_terminal(

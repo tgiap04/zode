@@ -6,7 +6,16 @@
 //! snapshot's sequence number says exactly which queued bytes it already
 //! contains. Nothing is ever cut to fit: a queue that outgrows its limit is
 //! thrown away whole and replaced by a fresh snapshot, which is also how a
-//! resize and a tap that had to drop a chunk are answered.
+//! resize, a tap that had to drop a chunk, and a program leaving the alternate
+//! screen are answered. A snapshot that is still being sent when the live
+//! output behind it overflows is sent whole, and the fresh one follows it:
+//! cutting it off would leave a device that cannot keep up with a blank screen
+//! for as long as the output lasts. Such a repair carries the screen only, not
+//! the scrollback that makes up most of a snapshot, and the time between
+//! repairs grows while the device keeps falling behind.
+//!
+//! A new size is announced once it has stopped changing, so dragging a pane
+//! edge costs one announcement and one snapshot instead of one per step.
 //!
 //! A snapshot can be ahead of the screen: the tap sees bytes before the emulator
 //! has drawn them, so one taken while output was flowing, or inside a
@@ -27,7 +36,7 @@ use std::{
 
 use gpui::{App, Context, Entity, EntityId, EventEmitter, Subscription, Task, WeakEntity};
 use remote_relay_protocol::{MAX_INNER_PAYLOAD_LEN, TerminalSummary};
-use terminal::{RemoteOutputChunk, RemoteTap, Terminal};
+use terminal::{REMOTE_SNAPSHOT_HISTORY_LINES, RemoteOutputChunk, RemoteTap, Terminal};
 use util::ResultExt as _;
 
 use crate::agent_mirror::terminal_id;
@@ -40,6 +49,23 @@ pub const SESSION_QUEUE_LIMIT: usize = 1024 * 1024;
 /// flood of output keeps overflowing the queue, and without this every
 /// overflow would render the whole screen again under the emulator lock.
 pub(crate) const MIN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(250);
+
+/// The longest the time between two repair snapshots of one session grows to
+/// while it keeps falling behind. A repair is wanted when output was lost, which
+/// a flood on a slow link does again and again, and each one costs the link a
+/// whole screen.
+pub(crate) const MAX_REPAIR_SPACING: Duration = Duration::from_secs(2);
+
+/// How long a session has to go without losing output, counted from its last
+/// repair, before the time between repairs starts over at
+/// [`MIN_SNAPSHOT_INTERVAL`]. Longer than [`MAX_REPAIR_SPACING`], or a flood that
+/// goes on would look like a link that had recovered.
+pub(crate) const REPAIR_BACKOFF_RESET: Duration = Duration::from_secs(4);
+
+/// How long a terminal's size has to stay as it is before devices are told.
+/// Dragging a pane edge changes it at every step, and each announcement throws
+/// away what is being sent and has the screen sent again.
+pub(crate) const RESIZE_SETTLE: Duration = Duration::from_millis(120);
 
 /// How long the output has to stay quiet before a snapshot that may have been
 /// taken ahead of the screen is sent once more. The tap sees bytes before the
@@ -65,6 +91,18 @@ pub(crate) const SETTLE_SYNC_RECHECKS: u32 = 20;
 /// foreground for long.
 const DRAIN_BATCH: usize = 256;
 
+/// How much of the terminal a snapshot carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub(crate) enum SnapshotKind {
+    /// The screen only, for a device that lost output. Its scrollback is not
+    /// worth what it costs to send again at the rate losses come.
+    Repair,
+    /// The screen and the scrollback behind it, as a device that has just
+    /// attached or been given a new size needs it.
+    #[default]
+    Full,
+}
+
 /// What waits to be sent to one session for one terminal.
 #[derive(Default)]
 pub(crate) struct OutputQueue {
@@ -74,6 +112,14 @@ pub(crate) struct OutputQueue {
     chunks: VecDeque<(u64, Vec<u8>)>,
     chunk_bytes: usize,
     needs_snapshot: bool,
+    /// Live output was dropped while the frames of a snapshot were still
+    /// being sent, so a fresh snapshot is wanted as soon as they are out.
+    snapshot_after_current: bool,
+    /// What the snapshot that is wanted has to carry.
+    wanted_kind: SnapshotKind,
+    /// Output was lost since this was last asked, which is what the time
+    /// between repairs backs off on.
+    loss_pending: bool,
     /// The sequence of the newest snapshot installed. Output at or below it is
     /// drawn in that snapshot, wherever it turns up.
     snapshot_sequence: u64,
@@ -91,32 +137,95 @@ impl OutputQueue {
         self.needs_snapshot
     }
 
-    pub(crate) fn has_output(&self) -> bool {
-        self.needs_snapshot || !self.snapshot.is_empty() || !self.chunks.is_empty()
+    /// Whether a snapshot is to be taken, now or once the one being sent is
+    /// out.
+    pub(crate) fn wants_snapshot(&self) -> bool {
+        self.needs_snapshot || self.snapshot_after_current
+    }
+
+    /// What the snapshot that is wanted has to carry.
+    pub(crate) fn wanted_kind(&self) -> SnapshotKind {
+        self.wanted_kind
+    }
+
+    /// Whether output was lost since this was last asked. Losses that come
+    /// while a snapshot is already wanted are the same loss, and are not
+    /// counted again.
+    pub(crate) fn take_loss(&mut self) -> bool {
+        std::mem::take(&mut self.loss_pending)
+    }
+
+    /// Whether [`Self::pop`] has something to give.
+    pub(crate) fn is_sendable(&self) -> bool {
+        !self.needs_snapshot && (!self.snapshot.is_empty() || !self.chunks.is_empty())
+    }
+
+    /// Whether live output with `sequence` would be queued. A queue that waits
+    /// for a snapshot drops it, because the snapshot will be taken later than
+    /// the output was, and so is the output the snapshot already drew.
+    pub(crate) fn accepts(&self, sequence: u64) -> bool {
+        !self.wants_snapshot() && sequence > self.snapshot_sequence
     }
 
     /// Queues live output. Past the limit the queue is dropped and a snapshot
-    /// requested instead; a queue that is already waiting for one drops the
-    /// bytes, because the snapshot will be taken later than they were.
+    /// requested instead.
     pub(crate) fn push(&mut self, sequence: u64, bytes: Vec<u8>) {
         // The snapshot is taken lazily and counts reads the foreground has not
         // been handed yet, so those arrive after it and are already drawn.
-        if self.needs_snapshot || sequence <= self.snapshot_sequence {
+        if !self.accepts(sequence) {
             return;
         }
         if self.chunk_bytes + bytes.len() > SESSION_QUEUE_LIMIT {
-            self.invalidate();
+            self.invalidate_after_loss();
             return;
         }
         self.chunk_bytes += bytes.len();
         self.chunks.push_back((sequence, bytes));
     }
 
-    /// Throws away everything queued and asks for a fresh snapshot.
+    /// Throws away the live output queued and asks for a fresh snapshot. The
+    /// frames of a snapshot that are still to be sent stay: the device has
+    /// started on that screen, and a half of it is worse than all of it. The
+    /// fresh snapshot is taken once they are out.
     pub(crate) fn invalidate(&mut self) {
+        self.want_snapshot(SnapshotKind::Full);
+    }
+
+    /// [`Self::invalidate`] for output that was lost, which only the screen
+    /// has to be put right after.
+    pub(crate) fn invalidate_after_loss(&mut self) {
+        if !self.wants_snapshot() {
+            self.loss_pending = true;
+        }
+        self.want_snapshot(SnapshotKind::Repair);
+    }
+
+    fn want_snapshot(&mut self, kind: SnapshotKind) {
+        self.chunks.clear();
+        self.chunk_bytes = 0;
+        // A snapshot that was already wanted for another reason keeps what
+        // that needed.
+        self.wanted_kind = if self.wants_snapshot() {
+            self.wanted_kind.max(kind)
+        } else {
+            kind
+        };
+        if self.snapshot.is_empty() {
+            self.needs_snapshot = true;
+        } else {
+            self.snapshot_after_current = true;
+        }
+    }
+
+    /// Throws away everything queued, a snapshot being sent included, and
+    /// asks for a fresh one. For when what is queued describes a screen that
+    /// no longer exists, as after a resize.
+    pub(crate) fn restart(&mut self) {
         self.snapshot.clear();
         self.chunks.clear();
         self.chunk_bytes = 0;
+        self.snapshot_after_current = false;
+        self.wanted_kind = SnapshotKind::Full;
         self.needs_snapshot = true;
     }
 
@@ -124,6 +233,8 @@ impl OutputQueue {
     /// output up to that sequence is already drawn in it.
     pub(crate) fn install_snapshot(&mut self, sequence: u64, bytes: &[u8]) {
         self.needs_snapshot = false;
+        self.snapshot_after_current = false;
+        self.wanted_kind = SnapshotKind::Full;
         self.snapshot_sequence = sequence;
         self.snapshot = bytes
             .chunks(MAX_INNER_PAYLOAD_LEN)
@@ -146,6 +257,10 @@ impl OutputQueue {
             return None;
         }
         if let Some(frame) = self.snapshot.pop_front() {
+            if self.snapshot.is_empty() && self.snapshot_after_current {
+                self.snapshot_after_current = false;
+                self.needs_snapshot = true;
+            }
             return Some(frame);
         }
         let (sequence, mut frame) = self.chunks.pop_front()?;
@@ -232,10 +347,18 @@ struct Attachment {
     stream_id: u32,
     queue: OutputQueue,
     last_snapshot: Option<Instant>,
+    /// The least time between two repair snapshots at the moment, which grows
+    /// while the session keeps losing output.
+    repair_spacing: Duration,
+    last_repair: Option<Instant>,
     /// Set when the snapshot just taken may have been ahead of the screen.
     settle: Option<Settle>,
     /// The next snapshot is the repeat for a settle, and does not earn another.
     next_snapshot_is_settle: bool,
+    /// The snapshot last sent showed the alternate screen, which it carries
+    /// without the primary screen behind it, so the device has none to go back
+    /// to when the program leaves.
+    primary_screen_missing: bool,
     /// Wakes the session at a later time: to retry a snapshot that was too
     /// soon, or to take the settle. One at a time, whichever is wanted first.
     wake: Option<ScheduledWake>,
@@ -247,18 +370,44 @@ impl Attachment {
             stream_id,
             queue: OutputQueue::awaiting_snapshot(),
             last_snapshot: None,
+            repair_spacing: MIN_SNAPSHOT_INTERVAL,
+            last_repair: None,
             settle: None,
             next_snapshot_is_settle: false,
+            primary_screen_missing: false,
             wake: None,
         }
     }
 
     /// How much longer a snapshot has to wait to keep clear of the last one.
     fn snapshot_wait(&self, now: Instant) -> Option<Duration> {
+        let spacing = match self.queue.wanted_kind() {
+            SnapshotKind::Repair => self.repair_spacing,
+            SnapshotKind::Full => MIN_SNAPSHOT_INTERVAL,
+        };
         let elapsed = now.saturating_duration_since(self.last_snapshot?);
-        MIN_SNAPSHOT_INTERVAL
-            .checked_sub(elapsed)
-            .filter(|wait| !wait.is_zero())
+        spacing.checked_sub(elapsed).filter(|wait| !wait.is_zero())
+    }
+
+    /// Output was lost. A loss soon after the last repair means the session is
+    /// still not keeping up, so the next repair waits twice as long, up to
+    /// [`MAX_REPAIR_SPACING`]; after a good while without one it starts over.
+    fn note_loss(&mut self, now: Instant) {
+        let still_behind = self
+            .last_repair
+            .is_some_and(|at| now.saturating_duration_since(at) < REPAIR_BACKOFF_RESET);
+        self.repair_spacing = if still_behind {
+            (self.repair_spacing * 2).min(MAX_REPAIR_SPACING)
+        } else {
+            MIN_SNAPSHOT_INTERVAL
+        };
+    }
+
+    /// Whether asking for output now would yield some: frames are queued, or a
+    /// snapshot is wanted and may be taken.
+    fn has_output_now(&self, now: Instant) -> bool {
+        self.queue.is_sendable()
+            || (self.queue.needs_snapshot() && self.snapshot_wait(now).is_none())
     }
 
     /// When this session next needs waking: to retry a snapshot that was held
@@ -275,12 +424,24 @@ impl Attachment {
     }
 }
 
+struct PendingResize {
+    dimensions: (u16, u16),
+    _task: Task<()>,
+}
+
 struct Mirrored {
     terminal: WeakEntity<Terminal>,
     id: String,
     attachments: HashMap<u32, Attachment>,
     last_dimensions: (u16, u16),
     last_sequence: u64,
+    /// When sessions that detached last had a snapshot, for as long as that
+    /// still holds them back: a device that attaches again is owed no sooner a
+    /// snapshot than one that stayed.
+    recent_snapshots: HashMap<u32, Instant>,
+    /// A size devices have not been told of, and the wait for it to stop
+    /// changing.
+    pending_resize: Option<PendingResize>,
     /// Drains the tap. Exists only while something is attached.
     tap_task: Option<Task<()>>,
     /// Present only while mirroring is on.
@@ -292,8 +453,9 @@ struct Mirrored {
 pub enum TerminalMirrorEvent {
     /// A terminal appeared, went away or changed its title.
     ListChanged,
-    /// A session has output waiting; ask for it with
-    /// [`TerminalMirror::pop_output`].
+    /// A session has output it can be given now; ask for it with
+    /// [`TerminalMirror::pop_output`]. Not sent for one that is waiting out the
+    /// time between two snapshots, which is announced when that is over.
     OutputReady { session_id: u32 },
     /// The terminal's size changed. Sessions attached to it are being resent a
     /// snapshot at the new size.
@@ -330,13 +492,15 @@ impl EventEmitter<TerminalMirrorEvent> for TerminalMirror {}
 
 impl TerminalMirror {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let this = cx.entity();
+        // Weak, because the subscription lives in the mirror and a strong
+        // handle here would keep the mirror alive for good.
+        let this = cx.weak_entity();
         let observe_new = cx.observe_new::<Terminal>(move |terminal, _window, cx| {
             if !terminal.is_pty_backed() {
                 return;
             }
             let entity = cx.entity();
-            this.update(cx, |this, cx| this.track(entity, cx));
+            this.update(cx, |this, cx| this.track(entity, cx)).log_err();
         });
         Self {
             terminals: HashMap::default(),
@@ -362,6 +526,8 @@ impl TerminalMirror {
                 attachments: HashMap::default(),
                 last_dimensions: (0, 0),
                 last_sequence: 0,
+                recent_snapshots: HashMap::default(),
+                pending_resize: None,
                 tap_task: None,
                 following: Vec::new(),
                 _release: release,
@@ -431,6 +597,8 @@ impl TerminalMirror {
             mirrored.attachments.clear();
             mirrored.tap_task = None;
             mirrored.last_sequence = 0;
+            mirrored.recent_snapshots.clear();
+            mirrored.pending_resize = None;
             if let Some(terminal) = mirrored.terminal.upgrade() {
                 terminal.update(cx, |terminal, _| terminal.detach_remote_tap());
             }
@@ -451,17 +619,23 @@ impl TerminalMirror {
         mirrored.following = vec![cx.subscribe(
             terminal,
             move |this, _terminal, event: &terminal::Event, cx| match event {
-                terminal::Event::Wakeup => this.check_size(id, cx),
-                terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged => {
-                    cx.emit(TerminalMirrorEvent::ListChanged);
-                }
+                terminal::Event::Wakeup => this.on_wakeup(id, cx),
+                // The breadcrumb is the title a program set with an escape
+                // sequence, which no summary shows, so announcing it would
+                // send every device the same list again.
+                terminal::Event::TitleChanged => cx.emit(TerminalMirrorEvent::ListChanged),
                 _ => {}
             },
         )];
     }
 
+    fn on_wakeup(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        self.check_size(id, cx);
+        self.check_alternate_screen(id, cx);
+    }
+
     fn check_size(&mut self, id: EntityId, cx: &mut Context<Self>) {
-        let Some(mirrored) = self.terminals.get_mut(&id) else {
+        let Some(mirrored) = self.terminals.get(&id) else {
             return;
         };
         if mirrored.attachments.is_empty() {
@@ -470,14 +644,73 @@ impl TerminalMirror {
         let Some(terminal) = mirrored.terminal.upgrade() else {
             return;
         };
-        let (columns, rows) = terminal.read(cx).remote_dimensions();
-        if (columns, rows) == mirrored.last_dimensions {
+        let dimensions = terminal.read(cx).remote_dimensions();
+        self.note_size(id, dimensions, cx);
+    }
+
+    /// The terminal has `dimensions` now. If devices have not been told of
+    /// that size they are, once it has stopped changing for [`RESIZE_SETTLE`].
+    /// Hearing of the same size again does not restart the wait, or a terminal
+    /// that keeps printing would never get its resize announced.
+    fn note_size(&mut self, id: EntityId, dimensions: (u16, u16), cx: &mut Context<Self>) {
+        let Some(mirrored) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        if dimensions == mirrored.last_dimensions {
+            // Back at the size devices know, so there is nothing to tell.
+            mirrored.pending_resize = None;
             return;
         }
+        if mirrored
+            .pending_resize
+            .as_ref()
+            .is_some_and(|pending| pending.dimensions == dimensions)
+        {
+            return;
+        }
+        mirrored.pending_resize = Some(PendingResize {
+            dimensions,
+            _task: cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RESIZE_SETTLE).await;
+                this.update(cx, |this, cx| this.settle_size(id, cx))
+                    .log_err();
+            }),
+        });
+    }
+
+    fn settle_size(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        let Some(mirrored) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        mirrored.pending_resize = None;
+        let Some(terminal) = mirrored.terminal.upgrade() else {
+            return;
+        };
+        let dimensions = terminal.read(cx).remote_dimensions();
+        if mirrored.attachments.is_empty() {
+            mirrored.last_dimensions = dimensions;
+        } else if dimensions != mirrored.last_dimensions {
+            self.announce_resize(id, dimensions, cx);
+        }
+    }
+
+    /// Tells every session attached to a terminal that it has a new size, and
+    /// has each of them resent the screen at it.
+    fn announce_resize(
+        &mut self,
+        id: EntityId,
+        (columns, rows): (u16, u16),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mirrored) = self.terminals.get_mut(&id) else {
+            return;
+        };
         mirrored.last_dimensions = (columns, rows);
-        let sessions: Vec<u32> = mirrored.attachments.keys().copied().collect();
+        mirrored.pending_resize = None;
+        let mut sessions: Vec<u32> = mirrored.attachments.keys().copied().collect();
+        sessions.sort_unstable();
         for attachment in mirrored.attachments.values_mut() {
-            attachment.queue.invalidate();
+            attachment.queue.restart();
         }
         let terminal_id = mirrored.id.clone();
         // The host's size wins: the client is told, and resent a snapshot at
@@ -488,7 +721,65 @@ impl TerminalMirror {
             rows,
             sessions: sessions.clone(),
         });
+        self.announce(id, &sessions, cx);
+    }
+
+    /// A snapshot of the alternate screen carries no primary screen, so a
+    /// device that was sent one has nothing to return to when the program
+    /// leaves it. Sessions in that state are sent a fresh snapshot then.
+    fn check_alternate_screen(&mut self, id: EntityId, cx: &mut Context<Self>) {
+        let Some(mirrored) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        if !mirrored
+            .attachments
+            .values()
+            .any(|attachment| attachment.primary_screen_missing)
+        {
+            return;
+        }
+        let Some(terminal) = mirrored.terminal.upgrade() else {
+            return;
+        };
+        if terminal.read(cx).remote_in_alternate_screen() {
+            return;
+        }
+        let mut sessions = Vec::new();
+        for (session_id, attachment) in &mut mirrored.attachments {
+            if attachment.primary_screen_missing {
+                attachment.queue.invalidate();
+                sessions.push(*session_id);
+            }
+        }
+        self.announce(id, &sessions, cx);
+    }
+
+    /// Tells the host about every one of `sessions` that has something to
+    /// send now, and sets a wake for the rest to say so when they do. A session
+    /// that is only waiting out the time between snapshots is not announced:
+    /// asking would get nothing.
+    fn announce(&mut self, id: EntityId, sessions: &[u32], cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let Some(mirrored) = self.terminals.get(&id) else {
+            return;
+        };
+        let mut ready = Vec::new();
+        let mut wakes = Vec::new();
         for session_id in sessions {
+            let Some(attachment) = mirrored.attachments.get(session_id) else {
+                continue;
+            };
+            if attachment.has_output_now(now) {
+                ready.push(*session_id);
+            }
+            if let Some(at) = attachment.next_wake(now) {
+                wakes.push((*session_id, at));
+            }
+        }
+        for (session_id, at) in wakes {
+            self.schedule_wake(id, session_id, at, cx);
+        }
+        for session_id in ready {
             cx.emit(TerminalMirrorEvent::OutputReady { session_id });
         }
     }
@@ -522,6 +813,14 @@ impl TerminalMirror {
             .collect();
         listed.sort_by_key(|(id, _)| id.as_u64());
         listed.into_iter().map(|(_, summary)| summary).collect()
+    }
+
+    /// The size of one terminal in columns and rows, without describing the
+    /// others. `None` when there is no such terminal or it is gone.
+    pub fn dimensions_of(&self, terminal_id: &str, cx: &App) -> Option<(u16, u16)> {
+        let id = self.find(terminal_id)?;
+        let terminal = self.terminals.get(&id)?.terminal.upgrade()?;
+        Some(terminal.read(cx).remote_dimensions())
     }
 
     /// Attaches `session_id` to a terminal, tapping it if nobody was attached
@@ -558,11 +857,21 @@ impl TerminalMirror {
         let Some(mirrored) = self.terminals.get_mut(&id) else {
             return Err(AttachError::NotFound);
         };
-        mirrored.last_dimensions = dimensions;
-        mirrored
+        // With nobody attached there is nobody who has not heard of this size.
+        // Otherwise a size sessions have not been told of stays what they are
+        // measured against, and is announced in due course to them all.
+        if mirrored.attachments.is_empty() {
+            mirrored.last_dimensions = dimensions;
+        }
+        let mut attachment = Attachment::new(stream_id);
+        attachment.last_snapshot = mirrored
             .attachments
-            .insert(session_id, Attachment::new(stream_id));
-        cx.emit(TerminalMirrorEvent::OutputReady { session_id });
+            .get(&session_id)
+            .and_then(|replaced| replaced.last_snapshot)
+            .or_else(|| mirrored.recent_snapshots.remove(&session_id));
+        mirrored.attachments.insert(session_id, attachment);
+        self.note_size(id, dimensions, cx);
+        self.announce(id, &[session_id], cx);
         Ok(dimensions)
     }
 
@@ -609,27 +918,41 @@ impl TerminalMirror {
         }
         let lost = dropped || gap;
         let now = cx.background_executor().now();
+        let mut queues = Vec::with_capacity(mirrored.attachments.len());
         for attachment in mirrored.attachments.values_mut() {
             if let Some(settle) = attachment.settle.as_mut() {
                 settle.on_output(now);
             }
             if lost {
-                attachment.queue.invalidate();
-                continue;
-            }
-            for chunk in &chunks {
-                attachment.queue.push(chunk.sequence, chunk.bytes.clone());
+                attachment.queue.invalidate_after_loss();
+            } else {
+                queues.push(&mut attachment.queue);
             }
         }
-        let ready: Vec<u32> = mirrored
-            .attachments
-            .iter()
-            .filter(|(_, attachment)| attachment.queue.has_output())
-            .map(|(session_id, _)| *session_id)
-            .collect();
-        for session_id in ready {
-            cx.emit(TerminalMirrorEvent::OutputReady { session_id });
+        // The last queue is handed the bytes themselves and the others a copy,
+        // and only a queue that would keep them is given any: one waiting for
+        // its snapshot drops them, so copying for it is wasted.
+        if let Some((last, others)) = queues.split_last_mut() {
+            for chunk in chunks {
+                for queue in others.iter_mut() {
+                    if queue.accepts(chunk.sequence) {
+                        queue.push(chunk.sequence, chunk.bytes.clone());
+                    }
+                }
+                if last.accepts(chunk.sequence) {
+                    last.push(chunk.sequence, chunk.bytes);
+                }
+            }
         }
+        // An overflow shows up inside the queues above, a loss in the tap here;
+        // either way the session is one that is not keeping up.
+        for attachment in mirrored.attachments.values_mut() {
+            if attachment.queue.take_loss() {
+                attachment.note_loss(now);
+            }
+        }
+        let sessions: Vec<u32> = mirrored.attachments.keys().copied().collect();
+        self.announce(id, &sessions, cx);
     }
 
     pub fn detach(&mut self, session_id: u32, terminal_id: &str, cx: &mut Context<Self>) {
@@ -656,13 +979,21 @@ impl TerminalMirror {
         let Some(mirrored) = self.terminals.get_mut(&id) else {
             return;
         };
-        mirrored.attachments.remove(&session_id);
+        if let Some(detached) = mirrored.attachments.remove(&session_id) {
+            let now = cx.background_executor().now();
+            let recent = |at: Instant| now.saturating_duration_since(at) < MIN_SNAPSHOT_INTERVAL;
+            mirrored.recent_snapshots.retain(|_, at| recent(*at));
+            if let Some(at) = detached.last_snapshot.filter(|at| recent(*at)) {
+                mirrored.recent_snapshots.insert(session_id, at);
+            }
+        }
         if !mirrored.attachments.is_empty() {
             return;
         }
         // Nobody left: the terminal goes back to costing nothing.
         mirrored.tap_task = None;
         mirrored.last_sequence = 0;
+        mirrored.pending_resize = None;
         if let Some(terminal) = mirrored.terminal.upgrade() {
             terminal.update(cx, |terminal, _| terminal.detach_remote_tap());
         }
@@ -723,36 +1054,15 @@ impl TerminalMirror {
         }
         for id in candidates {
             let now = cx.background_executor().now();
-            let Some(mirrored) = self.terminals.get_mut(&id) else {
+            self.take_snapshot_if_due(id, session_id, now, cx);
+            let Some(attachment) = self
+                .terminals
+                .get_mut(&id)
+                .and_then(|mirrored| mirrored.attachments.get_mut(&session_id))
+            else {
                 continue;
             };
-            let last_sequence = mirrored.last_sequence;
-            let terminal = mirrored.terminal.upgrade();
-            let Some(attachment) = mirrored.attachments.get_mut(&session_id) else {
-                continue;
-            };
-            if attachment.queue.needs_snapshot()
-                && attachment.snapshot_wait(now).is_none()
-                && let Some(terminal) = terminal
-            {
-                let snapshot = terminal.read(cx).remote_snapshot();
-                attachment
-                    .queue
-                    .install_snapshot(snapshot.sequence, &snapshot.bytes);
-                attachment.last_snapshot = Some(now);
-                // Output the foreground has not been handed yet means the child
-                // was writing as the screen was read, and an open synchronized
-                // update means the screen is behind what the tap has seen.
-                let may_be_ahead = snapshot.sequence > last_sequence || snapshot.sync_pending;
-                attachment.settle = (may_be_ahead && !attachment.next_snapshot_is_settle)
-                    .then(|| Settle::armed(now));
-                attachment.next_snapshot_is_settle = false;
-            }
-            let popped = if attachment.queue.needs_snapshot() {
-                None
-            } else {
-                attachment.queue.pop()
-            };
+            let popped = attachment.queue.pop();
             let stream_id = attachment.stream_id;
             let next_wake = attachment.next_wake(now);
             if let Some(at) = next_wake {
@@ -764,6 +1074,71 @@ impl TerminalMirror {
             }
         }
         None
+    }
+
+    /// Takes the snapshot `session_id` is waiting for, unless it is too soon
+    /// after the last one or the terminal is gone.
+    fn take_snapshot_if_due(
+        &mut self,
+        id: EntityId,
+        session_id: u32,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mirrored) = self.terminals.get(&id) else {
+            return;
+        };
+        let Some(attachment) = mirrored.attachments.get(&session_id) else {
+            return;
+        };
+        if !attachment.queue.needs_snapshot() || attachment.snapshot_wait(now).is_some() {
+            return;
+        }
+        let Some(terminal) = mirrored.terminal.upgrade() else {
+            return;
+        };
+        let (last_dimensions, last_sequence) = (mirrored.last_dimensions, mirrored.last_sequence);
+        let kind = attachment.queue.wanted_kind();
+        let history_lines = match kind {
+            SnapshotKind::Full => REMOTE_SNAPSHOT_HISTORY_LINES,
+            SnapshotKind::Repair => 0,
+        };
+        let snapshot = terminal
+            .read(cx)
+            .remote_snapshot_with_history(history_lines);
+        let dimensions = (snapshot.columns, snapshot.rows);
+        if dimensions != last_dimensions {
+            // The terminal was resized and nobody has been told yet, so every
+            // session still believes in the old size, and this one must hear
+            // of the new one before it is shown a screen drawn at it. The
+            // snapshot is not kept, and does not count against the time
+            // between snapshots: it is taken again once the news is out, which
+            // is when the size has stopped changing.
+            self.note_size(id, dimensions, cx);
+            return;
+        }
+        let Some(attachment) = self
+            .terminals
+            .get_mut(&id)
+            .and_then(|mirrored| mirrored.attachments.get_mut(&session_id))
+        else {
+            return;
+        };
+        attachment
+            .queue
+            .install_snapshot(snapshot.sequence, &snapshot.bytes);
+        attachment.last_snapshot = Some(now);
+        if kind == SnapshotKind::Repair {
+            attachment.last_repair = Some(now);
+        }
+        attachment.primary_screen_missing = snapshot.alternate_screen;
+        // Output the foreground has not been handed yet means the child
+        // was writing as the screen was read, and an open synchronized
+        // update means the screen is behind what the tap has seen.
+        let may_be_ahead = snapshot.sequence > last_sequence || snapshot.sync_pending;
+        attachment.settle =
+            (may_be_ahead && !attachment.next_snapshot_is_settle).then(|| Settle::armed(now));
+        attachment.next_snapshot_is_settle = false;
     }
 
     /// Wakes the session at `at`, unless it is already set to wake no later.
@@ -809,8 +1184,6 @@ impl TerminalMirror {
             return;
         };
         attachment.wake = None;
-        // A snapshot that was held back is asked for again whatever woke us.
-        let mut announce = attachment.queue.needs_snapshot();
         if let Some(settle) = attachment.settle.as_mut()
             && settle.ready(now, || {
                 terminal.is_some_and(|terminal| terminal.read(cx).remote_sync_pending())
@@ -819,19 +1192,12 @@ impl TerminalMirror {
             attachment.settle = None;
             // A snapshot that is already wanted is a fresh one and decides for
             // itself whether it needs a repeat.
-            if !attachment.queue.needs_snapshot() {
+            if !attachment.queue.wants_snapshot() {
                 attachment.queue.invalidate();
                 attachment.next_snapshot_is_settle = true;
             }
-            announce = true;
         }
-        let next_wake = attachment.next_wake(now);
-        if let Some(at) = next_wake {
-            self.schedule_wake(id, session_id, at, cx);
-        }
-        if announce {
-            cx.emit(TerminalMirrorEvent::OutputReady { session_id });
-        }
+        self.announce(id, &[session_id], cx);
     }
 
     /// Whether any terminal still has a tap. For tests and for the host's own
@@ -857,11 +1223,13 @@ mod tests {
     #[test]
     fn a_new_queue_gives_nothing_until_it_has_a_snapshot() {
         let mut queue = OutputQueue::awaiting_snapshot();
-        assert!(queue.has_output());
+        assert!(queue.wants_snapshot());
+        assert!(!queue.is_sendable(), "there is nothing to pop yet");
         assert_eq!(queue.pop(), None);
         queue.install_snapshot(0, b"screen");
+        assert!(queue.is_sendable());
         assert_eq!(drain(&mut queue), vec![b"screen".to_vec()]);
-        assert!(!queue.has_output());
+        assert!(!queue.is_sendable());
     }
 
     #[test]
@@ -979,13 +1347,96 @@ mod tests {
     }
 
     #[test]
-    fn invalidating_drops_a_snapshot_still_being_sent() {
+    fn a_snapshot_still_being_sent_goes_out_whole_and_the_fresh_one_follows_it() {
+        let mut queue = OutputQueue::default();
+        let snapshot: Vec<u8> = (0..MAX_INNER_PAYLOAD_LEN * 3)
+            .map(|index| (index % 13) as u8)
+            .collect();
+        queue.install_snapshot(4, &snapshot);
+        let mut sent = queue.pop().expect("the first frame");
+        queue.push(5, b"behind the snapshot".to_vec());
+
+        queue.invalidate();
+        assert!(queue.wants_snapshot());
+        assert!(
+            !queue.needs_snapshot(),
+            "the frames still to be sent are not thrown away"
+        );
+        assert!(queue.is_sendable());
+
+        while let Some(frame) = queue.pop() {
+            sent.extend_from_slice(&frame);
+            if queue.needs_snapshot() {
+                break;
+            }
+        }
+        assert_eq!(sent, snapshot, "no frame of the snapshot is lost");
+        assert!(
+            queue.needs_snapshot(),
+            "once the snapshot is out, the fresh one is wanted"
+        );
+        assert!(!queue.is_sendable());
+        assert_eq!(queue.pop(), None);
+        assert_eq!(
+            queue.chunk_bytes, 0,
+            "the live output behind it was dropped"
+        );
+    }
+
+    #[test]
+    fn live_output_is_dropped_while_a_fresh_snapshot_waits_behind_the_current_one() {
+        let mut queue = OutputQueue::default();
+        queue.install_snapshot(0, &vec![1u8; MAX_INNER_PAYLOAD_LEN * 2]);
+        queue.invalidate();
+        assert!(!queue.accepts(1));
+        queue.push(1, b"too early to be of use".to_vec());
+        assert_eq!(queue.chunk_bytes, 0);
+
+        queue.install_snapshot(9, b"fresh");
+        assert!(!queue.wants_snapshot());
+        assert!(queue.accepts(10));
+        assert!(!queue.accepts(9), "the snapshot already drew it");
+    }
+
+    #[test]
+    fn an_overflow_behind_a_snapshot_does_not_cut_it_off() {
+        let mut queue = OutputQueue::default();
+        queue.install_snapshot(0, &vec![1u8; MAX_INNER_PAYLOAD_LEN * 2]);
+        let chunk = vec![b'x'; SESSION_QUEUE_LIMIT / 2];
+        queue.push(1, chunk.clone());
+        queue.push(2, chunk);
+        queue.push(3, b"one byte too many".to_vec());
+        assert!(!queue.needs_snapshot());
+        assert!(queue.wants_snapshot());
+        assert_eq!(
+            queue.pop().map(|frame| frame.len()),
+            Some(MAX_INNER_PAYLOAD_LEN)
+        );
+        assert_eq!(
+            queue.pop().map(|frame| frame.len()),
+            Some(MAX_INNER_PAYLOAD_LEN)
+        );
+        assert!(queue.needs_snapshot());
+    }
+
+    #[test]
+    fn restarting_drops_a_snapshot_still_being_sent() {
         let mut queue = OutputQueue::default();
         queue.install_snapshot(0, &vec![1u8; MAX_INNER_PAYLOAD_LEN * 3]);
         assert!(queue.pop().is_some());
-        queue.invalidate();
+        queue.restart();
         assert_eq!(queue.pop(), None);
         assert!(queue.needs_snapshot());
+        assert!(!queue.is_sendable());
+    }
+
+    #[test]
+    fn a_queue_only_accepts_what_is_newer_than_its_snapshot_and_not_while_one_is_wanted() {
+        let mut queue = OutputQueue::awaiting_snapshot();
+        assert!(!queue.accepts(1), "the snapshot will be taken later");
+        queue.install_snapshot(5, b"screen");
+        assert!(!queue.accepts(5));
+        assert!(queue.accepts(6));
     }
 
     #[test]
@@ -996,7 +1447,7 @@ mod tests {
         }
         drain(&mut queue);
         assert_eq!(queue.chunk_bytes, 0);
-        assert!(!queue.has_output());
+        assert!(!queue.is_sendable());
     }
 
     const MILLISECOND: Duration = Duration::from_millis(1);
@@ -1175,6 +1626,67 @@ mod tests {
                 frames.push(bytes);
             }
             frames
+        }
+
+        fn announced(recorded: &Recorded, session_id: u32) -> usize {
+            recorded
+                .events
+                .borrow()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        TerminalMirrorEvent::OutputReady { session_id: announced }
+                            if *announced == session_id
+                    )
+                })
+                .count()
+        }
+
+        /// Asks for a fresh snapshot for the session, as an overflow does.
+        fn invalidate_session(
+            mirror: &Entity<TerminalMirror>,
+            session_id: u32,
+            cx: &mut TestAppContext,
+        ) {
+            mirror.update(cx, |mirror, _| {
+                for mirrored in mirror.terminals.values_mut() {
+                    if let Some(attachment) = mirrored.attachments.get_mut(&session_id) {
+                        attachment.queue.invalidate();
+                    }
+                }
+            });
+        }
+
+        /// Makes the mirror deaf to what the terminal does, so a test can
+        /// change the terminal without the mirror hearing of it.
+        fn stop_following(mirror: &Entity<TerminalMirror>, cx: &mut TestAppContext) {
+            mirror.update(cx, |mirror, _| {
+                for mirrored in mirror.terminals.values_mut() {
+                    mirrored.following.clear();
+                }
+            });
+        }
+
+        /// Gives the terminal a new size of `width` pixels across and 20 rows,
+        /// as its view would when it is laid out.
+        fn resize_terminal(terminal: &Entity<Terminal>, width: f32, cx: &mut TestAppContext) {
+            let window = cx.add_empty_window();
+            terminal.update_in(window, |terminal, window, cx| {
+                let bounds = terminal::TerminalBounds::new(
+                    gpui::px(10.),
+                    gpui::px(5.),
+                    gpui::Bounds {
+                        origin: gpui::Point::default(),
+                        size: gpui::Size {
+                            width: gpui::px(width),
+                            height: gpui::px(200.),
+                        },
+                    },
+                );
+                terminal.set_size(bounds);
+                terminal.sync(window, cx);
+            });
         }
 
         #[gpui::test]
@@ -1699,6 +2211,538 @@ mod tests {
         }
 
         #[gpui::test]
+        async fn output_is_announced_when_there_is_something_to_send_and_not_while_a_snapshot_is_held_back(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            assert_eq!(
+                announced(&recorded, 1),
+                1,
+                "the first snapshot can be taken at once"
+            );
+            assert!(!pop_all(&mirror, 1, cx).is_empty());
+            recorded.events.borrow_mut().clear();
+
+            let entity_id = terminal.entity_id();
+            push_output(&mirror, entity_id, cx);
+            assert_eq!(announced(&recorded, 1), 1, "output is waiting behind it");
+            pop_all(&mirror, 1, cx);
+            recorded.events.borrow_mut().clear();
+
+            // An overflow right after: the fresh snapshot may not be taken for
+            // a while, and until then there is nothing to ask for.
+            invalidate_session(&mirror, 1, cx);
+            for _ in 0..3 {
+                push_output(&mirror, entity_id, cx);
+            }
+            assert_eq!(
+                announced(&recorded, 1),
+                0,
+                "the host would be asked for a screen that cannot be taken yet"
+            );
+            assert!(pop_all(&mirror, 1, cx).is_empty());
+
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
+            cx.run_until_parked();
+            assert_eq!(
+                announced(&recorded, 1),
+                1,
+                "announced once, when the snapshot can be taken"
+            );
+            assert!(pop_all(&mirror, 1, cx)[0].starts_with(b"\x1bc"));
+        }
+
+        /// A screen with more scrollback than fits in one frame, so its
+        /// snapshot is several.
+        const LONG_SCROLLBACK_SCRIPT: &str = "i=0; while [ $i -lt 1100 ]; do printf '%079d\\n' $i; i=$((i+1)); done; \
+             printf 'LASTLINE\\n'; sleep 30";
+
+        #[gpui::test]
+        async fn a_snapshot_still_being_sent_survives_an_overflow_and_a_fresh_one_follows(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal(LONG_SCROLLBACK_SCRIPT, cx).await;
+            wait_for(&terminal, "LASTLINE", cx).await;
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+
+            let (_, first) = mirror
+                .update(cx, |mirror, cx| mirror.pop_output(1, cx))
+                .expect("the first frame of the snapshot");
+            assert!(first.starts_with(b"\x1bc"));
+
+            // The tap loses output while the device is still taking the
+            // snapshot, which is what a flood does to a slow link.
+            let entity_id = terminal.entity_id();
+            mirror.update(cx, |mirror, cx| {
+                let sequence = mirror
+                    .terminals
+                    .get(&entity_id)
+                    .map_or(0, |mirrored| mirrored.last_sequence)
+                    + 1;
+                let chunk = RemoteOutputChunk {
+                    sequence,
+                    bytes: b"flood".to_vec(),
+                };
+                mirror.on_chunks(entity_id, vec![chunk], true, cx);
+            });
+
+            let rest = pop_all(&mirror, 1, cx);
+            assert!(!rest.is_empty(), "the rest of the snapshot is still sent");
+            let mut sent = first;
+            sent.extend(rest.concat());
+            let expected = terminal.read_with(cx, |terminal, _| terminal.remote_snapshot().bytes);
+            assert!(
+                expected.len() > MAX_INNER_PAYLOAD_LEN,
+                "the screen has to need several frames for this to mean anything"
+            );
+            assert!(
+                sent == expected,
+                "the device got the whole screen, not the first part of it"
+            );
+
+            // The fresh snapshot is held back like any other, then arrives.
+            assert!(pop_all(&mirror, 1, cx).is_empty());
+            recorded.events.borrow_mut().clear();
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
+            cx.run_until_parked();
+            assert_eq!(announced(&recorded, 1), 1);
+            assert!(pop_all(&mirror, 1, cx)[0].starts_with(b"\x1bc"));
+        }
+
+        #[gpui::test]
+        async fn a_second_device_attaching_does_not_hide_a_resize_from_the_first(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            pop_all(&mirror, 1, cx);
+
+            // The pane is resized and the mirror has not heard of it yet.
+            stop_following(&mirror, cx);
+            resize_terminal(&terminal, 500., cx);
+            recorded.events.borrow_mut().clear();
+
+            let (columns, rows) = mirror
+                .update(cx, |mirror, cx| mirror.attach(2, &id, 6, cx))
+                .expect("a second device attaches");
+            assert_eq!(
+                (columns, rows),
+                (100, 20),
+                "the new device is told the size"
+            );
+            assert!(
+                !recorded
+                    .events
+                    .borrow()
+                    .iter()
+                    .any(|event| matches!(event, TerminalMirrorEvent::Resized { .. })),
+                "the news waits for the size to settle"
+            );
+            cx.executor().advance_clock(RESIZE_SETTLE);
+            cx.run_until_parked();
+            let events = recorded.events.borrow().clone();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    TerminalMirrorEvent::Resized { columns: 100, rows: 20, sessions, .. }
+                        if sessions == &vec![1, 2]
+                )),
+                "the first device is told along with the second: {events:?}"
+            );
+
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
+            cx.run_until_parked();
+            assert!(pop_all(&mirror, 1, cx)[0].starts_with(b"\x1bc"));
+        }
+
+        #[gpui::test]
+        async fn a_terminal_resized_before_anyone_heard_of_it_announces_it_before_the_screen(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            stop_following(&mirror, cx);
+            resize_terminal(&terminal, 600., cx);
+            recorded.events.borrow_mut().clear();
+
+            assert_eq!(
+                mirror.update(cx, |mirror, cx| mirror.pop_output(1, cx)),
+                None,
+                "a screen drawn at a size the device was not told of is not sent first"
+            );
+            cx.executor().advance_clock(RESIZE_SETTLE);
+            cx.run_until_parked();
+            let events = recorded.events.borrow().clone();
+            let resized = events.iter().position(|event| {
+                matches!(
+                    event,
+                    TerminalMirrorEvent::Resized { columns: 120, rows: 20, sessions, .. }
+                        if sessions == &vec![1]
+                )
+            });
+            let ready = events.iter().position(|event| {
+                matches!(event, TerminalMirrorEvent::OutputReady { session_id: 1 })
+            });
+            assert!(
+                matches!((resized, ready), (Some(resized), Some(ready)) if resized < ready),
+                "the news comes first, then the invitation to ask again: {events:?}"
+            );
+
+            let frames = pop_all(&mirror, 1, cx);
+            assert!(
+                frames[0].starts_with(b"\x1bc"),
+                "the screen follows at the new size, without waiting out the interval"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_title_a_program_sets_does_not_list_the_terminals_again(cx: &mut TestAppContext) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            recorded.events.borrow_mut().clear();
+
+            terminal.update(cx, |_, cx| cx.emit(terminal::Event::BreadcrumbsChanged));
+            assert!(
+                recorded.events.borrow().is_empty(),
+                "no summary shows the breadcrumb, so there is nothing new to list"
+            );
+            terminal.update(cx, |_, cx| cx.emit(terminal::Event::TitleChanged));
+            assert_eq!(
+                *recorded.events.borrow(),
+                vec![TerminalMirrorEvent::ListChanged],
+                "a title that did change is listed"
+            );
+        }
+
+        #[gpui::test]
+        async fn attaching_again_does_not_reset_the_time_between_snapshots(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let _terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+
+            // On the same stream, then after leaving: neither earns a
+            // snapshot sooner than staying would have.
+            for leave_first in [false, true] {
+                if leave_first {
+                    mirror.update(cx, |mirror, cx| mirror.detach(1, &id, cx));
+                }
+                recorded.events.borrow_mut().clear();
+                mirror
+                    .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                    .expect("attaches again");
+                assert!(
+                    pop_all(&mirror, 1, cx).is_empty(),
+                    "a device cannot force a snapshot per request (leave first: {leave_first})"
+                );
+                assert_eq!(announced(&recorded, 1), 0);
+                cx.executor()
+                    .advance_clock(MIN_SNAPSHOT_INTERVAL - Duration::from_millis(10));
+                cx.run_until_parked();
+                assert!(pop_all(&mirror, 1, cx).is_empty());
+
+                cx.executor().advance_clock(Duration::from_millis(20));
+                cx.run_until_parked();
+                assert_eq!(announced(&recorded, 1), 1);
+                assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+            }
+
+            // A device that was gone for longer than that is owed one at once.
+            mirror.update(cx, |mirror, cx| mirror.detach(1, &id, cx));
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
+            cx.run_until_parked();
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches after a while");
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+            assert!(
+                mirror.read_with(cx, |mirror, _| mirror
+                    .terminals
+                    .values()
+                    .all(|mirrored| mirrored.recent_snapshots.is_empty())),
+                "what is remembered of a device that left does not pile up"
+            );
+        }
+
+        fn lose_output(
+            mirror: &Entity<TerminalMirror>,
+            entity_id: EntityId,
+            cx: &mut TestAppContext,
+        ) {
+            mirror.update(cx, |mirror, cx| {
+                let sequence = mirror
+                    .terminals
+                    .get(&entity_id)
+                    .map_or(0, |mirrored| mirrored.last_sequence)
+                    + 1;
+                let chunk = RemoteOutputChunk {
+                    sequence,
+                    bytes: b"lost".to_vec(),
+                };
+                mirror.on_chunks(entity_id, vec![chunk], true, cx);
+            });
+        }
+
+        fn repair_spacing(mirror: &Entity<TerminalMirror>, cx: &mut TestAppContext) -> Duration {
+            mirror.read_with(cx, |mirror, _| {
+                mirror
+                    .terminals
+                    .values()
+                    .flat_map(|mirrored| mirrored.attachments.values())
+                    .map(|attachment| attachment.repair_spacing)
+                    .next()
+                    .unwrap_or_default()
+            })
+        }
+
+        #[gpui::test]
+        async fn repairs_back_off_while_the_device_keeps_falling_behind_and_carry_no_scrollback(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, _recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal(LONG_SCROLLBACK_SCRIPT, cx).await;
+            wait_for(&terminal, "LASTLINE", cx).await;
+            let id = only_terminal_id(&mirror, cx);
+            let entity_id = terminal.entity_id();
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            let full: usize = pop_all(&mirror, 1, cx).iter().map(Vec::len).sum();
+
+            let tick = Duration::from_millis(10);
+            for spacing in [
+                MIN_SNAPSHOT_INTERVAL,
+                MIN_SNAPSHOT_INTERVAL * 2,
+                MIN_SNAPSHOT_INTERVAL * 4,
+                MAX_REPAIR_SPACING,
+                MAX_REPAIR_SPACING,
+            ] {
+                lose_output(&mirror, entity_id, cx);
+                assert_eq!(repair_spacing(&mirror, cx), spacing);
+                cx.executor().advance_clock(spacing - tick);
+                cx.run_until_parked();
+                assert!(
+                    pop_all(&mirror, 1, cx).is_empty(),
+                    "a repair waits {spacing:?} after the last snapshot"
+                );
+                cx.executor().advance_clock(tick * 2);
+                cx.run_until_parked();
+                let frames = pop_all(&mirror, 1, cx);
+                assert_eq!(full_redraws(&frames), 1, "{spacing:?}");
+                let repair: usize = frames.iter().map(Vec::len).sum();
+                assert!(
+                    repair * 10 < full,
+                    "a repair is the screen alone: {repair} bytes against {full}"
+                );
+            }
+
+            cx.executor().advance_clock(REPAIR_BACKOFF_RESET + tick);
+            cx.run_until_parked();
+            lose_output(&mirror, entity_id, cx);
+            assert_eq!(
+                repair_spacing(&mirror, cx),
+                MIN_SNAPSHOT_INTERVAL,
+                "a link that kept up for a while starts over"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_burst_of_resizes_is_announced_once_with_one_snapshot(cx: &mut TestAppContext) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+            pop_all(&mirror, 1, cx);
+            recorded.events.borrow_mut().clear();
+
+            let step = RESIZE_SETTLE / 4;
+            for width in [400., 450., 500., 550., 600.] {
+                resize_terminal(&terminal, width, cx);
+                cx.executor().advance_clock(step);
+                cx.run_until_parked();
+            }
+            assert!(
+                recorded.events.borrow().is_empty(),
+                "nothing is announced while the size is still changing"
+            );
+            assert!(pop_all(&mirror, 1, cx).is_empty());
+
+            cx.executor()
+                .advance_clock(RESIZE_SETTLE + MIN_SNAPSHOT_INTERVAL);
+            cx.run_until_parked();
+            let resized: Vec<_> = recorded
+                .events
+                .borrow()
+                .iter()
+                .filter_map(|event| match event {
+                    TerminalMirrorEvent::Resized { columns, .. } => Some(*columns),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(resized, vec![120]);
+            assert_eq!(full_redraws(&pop_all(&mirror, 1, cx)), 1);
+        }
+
+        #[gpui::test]
+        async fn what_is_remembered_of_devices_that_left_is_pruned_as_it_goes_stale(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, _recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let _terminal = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = only_terminal_id(&mirror, cx);
+            let remembered = |mirror: &Entity<TerminalMirror>, cx: &mut TestAppContext| {
+                mirror.read_with(cx, |mirror, _| {
+                    let mut sessions: Vec<u32> = mirror
+                        .terminals
+                        .values()
+                        .flat_map(|mirrored| mirrored.recent_snapshots.keys().copied())
+                        .collect();
+                    sessions.sort_unstable();
+                    sessions
+                })
+            };
+
+            for session_id in [1, 2] {
+                mirror
+                    .update(cx, |mirror, cx| mirror.attach(session_id, &id, 5, cx))
+                    .expect("attaches");
+                pop_all(&mirror, session_id, cx);
+                mirror.update(cx, |mirror, cx| mirror.detach(session_id, &id, cx));
+            }
+            assert_eq!(remembered(&mirror, cx), vec![1, 2]);
+
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
+            cx.run_until_parked();
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(3, &id, 5, cx))
+                .expect("attaches");
+            pop_all(&mirror, 3, cx);
+            mirror.update(cx, |mirror, cx| mirror.detach(3, &id, cx));
+            assert_eq!(
+                remembered(&mirror, cx),
+                vec![3],
+                "the ones that are past the interval are forgotten"
+            );
+        }
+
+        #[gpui::test]
+        async fn dropping_the_mirror_releases_it(cx: &mut TestAppContext) {
+            let (mirror, recorded) = mirror(cx);
+            let weak = mirror.downgrade();
+            drop(recorded);
+            drop(mirror);
+            cx.update(|_| {});
+            assert!(
+                weak.upgrade().is_none(),
+                "something inside the mirror still holds it up"
+            );
+        }
+
+        #[gpui::test]
+        async fn leaving_the_alternate_screen_sends_the_primary_screen_again(
+            cx: &mut TestAppContext,
+        ) {
+            let (mirror, recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal(
+                "printf 'PRIMARYTEXT\\n\\033[?1049hALTERNATETEXT'; read line; \
+                 printf '\\033[?1049lBACKTEXT\\n'; sleep 30",
+                cx,
+            )
+            .await;
+            wait_for(&terminal, "ALTERNATETEXT", cx).await;
+            assert!(terminal.read_with(cx, |terminal, _| terminal.remote_in_alternate_screen()));
+            let id = only_terminal_id(&mirror, cx);
+            mirror
+                .update(cx, |mirror, cx| mirror.attach(1, &id, 5, cx))
+                .expect("attaches");
+
+            let first = String::from_utf8_lossy(&pop_all(&mirror, 1, cx).concat()).into_owned();
+            assert!(first.starts_with("\x1bc\x1b[?1049h"), "{first:?}");
+            assert!(first.contains("ALTERNATETEXT"));
+            assert!(
+                !first.contains("PRIMARYTEXT"),
+                "the snapshot of the alternate screen has no primary screen: {first:?}"
+            );
+
+            assert!(mirror.update(cx, |mirror, cx| mirror.input(1, &id, b"go\r".to_vec(), cx)));
+            wait_for(&terminal, "BACKTEXT", cx).await;
+            cx.run_until_parked();
+            assert!(!terminal.read_with(cx, |terminal, _| terminal.remote_in_alternate_screen()));
+            recorded.events.borrow_mut().clear();
+            cx.executor()
+                .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
+            cx.run_until_parked();
+
+            let frames = pop_all(&mirror, 1, cx);
+            let after = String::from_utf8_lossy(&frames.concat()).into_owned();
+            assert!(
+                after.starts_with("\x1bc"),
+                "a device left on a blank primary screen is redrawn: {after:?}"
+            );
+            assert!(
+                after.contains("PRIMARYTEXT") && after.contains("BACKTEXT"),
+                "{after:?}"
+            );
+            assert!(
+                !after.contains("?1049h"),
+                "it is the primary screen: {after:?}"
+            );
+
+            // The new snapshot is of the primary screen, so nothing is owed
+            // when the program returns to it.
+            recorded.events.borrow_mut().clear();
+            cx.executor().advance_clock(Duration::from_secs(10));
+            cx.run_until_parked();
+            assert!(pop_all(&mirror, 1, cx).is_empty() && recorded.events.borrow().is_empty());
+        }
+
+        #[gpui::test]
         async fn a_deferred_follow_that_runs_after_switching_off_subscribes_to_nothing(
             cx: &mut TestAppContext,
         ) {
@@ -1813,23 +2857,9 @@ mod tests {
             recorded.events.borrow_mut().clear();
 
             let entity_id = terminal.entity_id();
-            let window = cx.add_empty_window();
-            terminal.update_in(window, |terminal, window, cx| {
-                let bounds = terminal::TerminalBounds::new(
-                    gpui::px(10.),
-                    gpui::px(5.),
-                    gpui::Bounds {
-                        origin: gpui::Point::default(),
-                        size: gpui::Size {
-                            width: gpui::px(500.),
-                            height: gpui::px(200.),
-                        },
-                    },
-                );
-                terminal.set_size(bounds);
-                terminal.sync(window, cx);
-            });
-            mirror.update(cx, |mirror, cx| mirror.check_size(entity_id, cx));
+            // Nothing is printed, and nobody asks the mirror to look: the new
+            // size alone is what makes it speak.
+            resize_terminal(&terminal, 500., cx);
             cx.executor()
                 .advance_clock(MIN_SNAPSHOT_INTERVAL + Duration::from_millis(10));
             cx.run_until_parked();
@@ -1910,6 +2940,36 @@ mod tests {
                 sessions: vec![3]
             }));
             assert!(events.contains(&TerminalMirrorEvent::ListChanged));
+        }
+
+        #[gpui::test]
+        async fn one_terminals_size_is_read_without_listing_them_all(cx: &mut TestAppContext) {
+            let (mirror, _recorded) = mirror(cx);
+            mirror.update(cx, |mirror, cx| mirror.activate(cx));
+            let terminal = shell_terminal("sleep 30", cx).await;
+            let _other = shell_terminal("sleep 30", cx).await;
+            cx.run_until_parked();
+            let id = terminal_id(terminal.entity_id());
+
+            let before = mirror.read_with(cx, |mirror, cx| mirror.dimensions_of(&id, cx));
+            let listed = mirror
+                .read_with(cx, |mirror, cx| mirror.summaries(cx))
+                .into_iter()
+                .find(|summary| summary.id == id)
+                .map(|summary| (summary.columns, summary.rows));
+            assert!(before.is_some());
+            assert_eq!(before, listed);
+
+            resize_terminal(&terminal, 500., cx);
+            assert_eq!(
+                mirror.read_with(cx, |mirror, cx| mirror.dimensions_of(&id, cx)),
+                Some((100, 20)),
+                "it reads the terminal as it is now"
+            );
+            assert_eq!(
+                mirror.read_with(cx, |mirror, cx| mirror.dimensions_of("terminal-0", cx)),
+                None
+            );
         }
 
         #[gpui::test]

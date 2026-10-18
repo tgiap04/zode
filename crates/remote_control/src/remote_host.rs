@@ -8,14 +8,15 @@
 
 use std::sync::Arc;
 
+use futures::{FutureExt as _, future::LocalBoxFuture};
 use gpui::{
     App, AppContext as _, Context, DisplayWakeLock, Entity, EventEmitter, Global, Subscription,
     Task,
 };
 use keep_awake::KeepDisplayAwakeSetting;
 use remote_relay_client::{
-    ConnectionState, PinnedDevice, RelayClient, RelayEvent, RelayTransport, StopReason, TrustStore,
-    delete_keypair, load_or_create_keypair,
+    ConnectionState, PinnedDevice, RelayClient, RelayEvent, RelayTransport, StopReason, TrustError,
+    TrustStore, delete_keypair, load_or_create_keypair,
 };
 use remote_relay_protocol::Control;
 use settings::{Settings as _, SettingsStore};
@@ -26,7 +27,7 @@ use crate::{
     file_browse::{BrowseError, FileBrowser, FileReply},
     host_environment::{HostEnvironment, RegisteringCredentials},
     hosting::{HOUSEKEEPING_INTERVAL, Hosting, HostingParts, RequestSlot},
-    pairing_flow::PendingDecision,
+    pairing_flow::{PairingHistory, PendingDecision},
     remote_control_settings::RemoteControlSettings,
     terminal_mirror::{TerminalMirror, TerminalMirrorEvent},
 };
@@ -100,6 +101,67 @@ pub(crate) fn problem_message(state: &HostState) -> Option<String> {
     Some(message.to_string())
 }
 
+/// What the list of trusted devices has to say right now.
+pub(crate) enum TrustedDevices {
+    /// Nobody is signed in, so there is no account whose devices to list.
+    SignedOut,
+    Loading,
+    Listed {
+        devices: Vec<PinnedDevice>,
+        /// Some saved devices could not be read, so more may be trusted than
+        /// are listed.
+        unreadable: bool,
+    },
+}
+
+/// The pins of the signed-in account while the host is not running. They are
+/// the same pins the running host uses, so the devices can be listed and
+/// forgotten whether or not remote control is on.
+enum RestingTrust {
+    Loading { user_id: String, _load: Task<()> },
+    Loaded { user_id: String, store: TrustStore },
+}
+
+impl RestingTrust {
+    fn user_id(&self) -> &str {
+        match self {
+            Self::Loading { user_id, .. } | Self::Loaded { user_id, .. } => user_id,
+        }
+    }
+}
+
+/// What stopping trust in a device came to.
+struct Forgotten {
+    /// What to call it in a message.
+    what: String,
+    /// `Err` if nothing was changed because the saved devices cannot be
+    /// written to. Otherwise the write that saves the change, if there was one.
+    result: Result<Option<LocalBoxFuture<'static, Result<(), TrustError>>>, TrustError>,
+}
+
+/// Stops trusting `device_id`. A forget that looks as if it worked and did not
+/// is worse than one that says so, so both ways it can fail are reported by
+/// [`RemoteHost::finish_forgetting`].
+fn forget_pin(store: &mut TrustStore, device_id: &str, cx: &App) -> Forgotten {
+    let what = store
+        .get(device_id)
+        .map_or_else(|| "the device".to_string(), |pinned| pinned.name.clone());
+    let result = store
+        .try_forget(device_id, cx)
+        .map(|removed| removed.then(|| store.flush_checked().boxed_local()));
+    Forgotten { what, result }
+}
+
+fn forget_all_pins(store: &mut TrustStore, cx: &App) -> Forgotten {
+    let result = store
+        .try_forget_all(cx)
+        .map(|()| Some(store.flush_checked().boxed_local()));
+    Forgotten {
+        what: "the devices this Zode trusted".to_string(),
+        result,
+    }
+}
+
 struct GlobalRemoteHost(Entity<RemoteHost>);
 impl Global for GlobalRemoteHost {}
 
@@ -116,6 +178,11 @@ pub struct RemoteHost {
     sessions_available: bool,
     app_version: String,
     running: Option<Hosting>,
+    resting_trust: Option<RestingTrust>,
+    /// The pairing lockout and hourly allowances of the account that was last
+    /// hosted, kept while the host is stopped so turning remote control off and
+    /// on does not clear them. Another account starts fresh.
+    resting_pairing: Option<(String, PairingHistory)>,
     state: HostState,
     /// The account this host is running for, or has halted for. Starting is
     /// not attempted again for the same account until the setting is switched
@@ -128,6 +195,9 @@ pub struct RemoteHost {
     /// Whether the setting was on at the last look, to tell "just switched on
     /// while nobody is signed in" from "starting up before sign-in finished".
     was_enabled: bool,
+    /// Who was signed in at the last look, so that a change is told to whatever
+    /// shows the trusted devices of the account that is.
+    seen_user: Option<String>,
     /// Turned off by hand while the setting still reads on, which is what a
     /// failed settings write or a setting overridden elsewhere looks like. The
     /// host stays down until the setting is seen off.
@@ -178,11 +248,14 @@ impl RemoteHost {
             sessions_available: false,
             app_version,
             running: None,
+            resting_trust: None,
+            resting_pairing: None,
             state: HostState::Disabled,
             serving: None,
             startup: None,
             key_deletion: None,
             was_enabled: RemoteControlSettings::is_enabled(cx),
+            seen_user: None,
             switched_off_by_hand: false,
             display_lock: None,
             _subscriptions: subscriptions,
@@ -222,11 +295,106 @@ impl RemoteHost {
         sessions
     }
 
+    /// The devices trusted to control this Zode, whether or not remote control
+    /// is running: empty until they have been read.
     pub fn trusted_devices(&self) -> Vec<PinnedDevice> {
-        self.running
-            .as_ref()
-            .map(|running| running.trust.devices().to_vec())
+        self.trust_store()
+            .map(|store| store.devices().to_vec())
             .unwrap_or_default()
+    }
+
+    fn trust_store(&self) -> Option<&TrustStore> {
+        match (&self.running, &self.resting_trust) {
+            (Some(running), _) => Some(&running.trust),
+            (None, Some(RestingTrust::Loaded { store, .. })) => Some(store),
+            _ => None,
+        }
+    }
+
+    fn signed_in_user(&self, cx: &App) -> Option<String> {
+        self.account
+            .read(cx)
+            .status()
+            .user()
+            .map(|user| user.id.to_string())
+    }
+
+    pub(crate) fn trusted_devices_listing(&self, cx: &App) -> TrustedDevices {
+        if self.running.is_none() && self.startup.is_none() && self.signed_in_user(cx).is_none() {
+            return TrustedDevices::SignedOut;
+        }
+        match self.trust_store() {
+            Some(store) => TrustedDevices::Listed {
+                devices: store.devices().to_vec(),
+                unreadable: store.is_unreadable(),
+            },
+            None => TrustedDevices::Loading,
+        }
+    }
+
+    /// Reads the saved devices of the signed-in account when the host is not
+    /// running, so they can be listed and forgotten without turning remote
+    /// control on. A running host, and one about to start, already holds them.
+    pub(crate) fn load_trusted_devices(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_some() || self.startup.is_some() {
+            return;
+        }
+        let Some(user_id) = self.signed_in_user(cx) else {
+            return;
+        };
+        if self
+            .resting_trust
+            .as_ref()
+            .is_some_and(|resting| resting.user_id() == user_id)
+        {
+            return;
+        }
+        let load = TrustStore::load(user_id.clone(), cx);
+        let loading_for = user_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let store = load.await;
+            this.update(cx, |this, cx| {
+                this.finish_loading_trust(loading_for, store, cx);
+            })
+            .ok();
+        });
+        self.resting_trust = Some(RestingTrust::Loading {
+            user_id,
+            _load: task,
+        });
+    }
+
+    fn finish_loading_trust(&mut self, user_id: String, store: TrustStore, cx: &mut Context<Self>) {
+        let still_wanted = matches!(
+            &self.resting_trust,
+            Some(RestingTrust::Loading { user_id: loading, .. }) if *loading == user_id
+        );
+        if still_wanted {
+            self.resting_trust = Some(RestingTrust::Loaded { user_id, store });
+            cx.notify();
+        }
+    }
+
+    /// Keeps the pins of a host that is stopping, so what was forgotten or
+    /// trusted a moment ago is not read back from storage before it has been
+    /// written.
+    fn keep_trust(&mut self, hosting: Hosting, cx: &App) {
+        let Hosting {
+            user_id,
+            trust,
+            pairing,
+            ..
+        } = hosting;
+        self.resting_pairing = Some((user_id.clone(), pairing.into_history()));
+        self.rest_pins(user_id, trust, cx);
+    }
+
+    /// Holds `store` as the pins of the host that is not running, if `user_id`
+    /// is still the account that is signed in.
+    fn rest_pins(&mut self, user_id: String, store: TrustStore, cx: &App) {
+        if self.signed_in_user(cx).as_deref() == Some(user_id.as_str()) {
+            self.resting_trust = Some(RestingTrust::Loaded { user_id, store });
+        }
     }
 
     pub fn pending_pairing(&self) -> Option<&PendingDecision> {
@@ -239,8 +407,15 @@ impl RemoteHost {
             .is_some_and(|running| running.pairing.is_locked_out())
     }
 
-    /// Whether the question for `session_id` has been put on screen, marking it
-    /// so that a second window does not put it there again.
+    /// Whether the question for `session_id` is already on somebody's screen.
+    pub fn pairing_is_presented(&self, session_id: u32) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.pairing_presented == Some(session_id))
+    }
+
+    /// Marks the question for `session_id` as put on screen, so that a second
+    /// window does not put it there again. `false` if it already was.
     pub fn claim_pairing_presentation(&mut self, session_id: u32) -> bool {
         let Some(running) = self.running.as_mut() else {
             return false;
@@ -295,14 +470,17 @@ impl RemoteHost {
         }
     }
 
-    /// The question on screen was dismissed without an answer. A question that
-    /// is not answered is answered no.
-    pub fn reject_pairing_if_pending(&mut self, session_id: u32, cx: &mut Context<Self>) {
+    /// The question on screen was closed without an answer. The device is
+    /// turned away, but the digits were not compared, so it does not count as a
+    /// mismatch toward the lockout.
+    pub fn dismiss_pairing_if_pending(&mut self, session_id: u32, cx: &mut Context<Self>) {
         if self
             .pending_pairing()
             .is_some_and(|pending| pending.session_id == session_id)
+            && let Some(running) = self.running.as_mut()
         {
-            self.decide_pairing(session_id, false, cx);
+            running.dismiss_pairing(session_id, cx);
+            self.refresh(cx);
         }
     }
 
@@ -314,12 +492,49 @@ impl RemoteHost {
         self.refresh(cx);
     }
 
+    /// Removes a device from the trusted ones, whether or not remote control
+    /// is running.
     pub fn forget_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
-        if let Some(running) = self.running.as_mut() {
+        let forgotten = if let Some(running) = self.running.as_mut() {
             running.end_sessions_of(device_id, cx);
-            running.trust.forget(device_id, cx);
+            Some(forget_pin(&mut running.trust, device_id, cx))
+        } else if let Some(RestingTrust::Loaded { store, .. }) = self.resting_trust.as_mut() {
+            Some(forget_pin(store, device_id, cx))
+        } else {
+            None
+        };
+        if let Some(forgotten) = forgotten {
+            self.finish_forgetting(forgotten, cx);
         }
         self.refresh(cx);
+    }
+
+    /// Tells the person if a forget did not happen, or happened in memory and
+    /// did not reach storage: the device would be trusted again at the next
+    /// start.
+    fn finish_forgetting(&mut self, forgotten: Forgotten, cx: &mut Context<Self>) {
+        let Forgotten { what, result } = forgotten;
+        match result {
+            Err(error) => self.report_problem(format!("Could not forget {what}: {error}."), cx),
+            Ok(None) => {}
+            Ok(Some(write)) => {
+                cx.spawn(async move |this, cx| {
+                    if let Err(error) = write.await {
+                        this.update(cx, |this, cx| {
+                            this.report_problem(
+                                format!(
+                                    "Forgetting {what} did not reach storage ({error}), so it \
+                                     may be trusted again after Zode restarts."
+                                ),
+                                cx,
+                            );
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }
+        }
     }
 
     /// Takes everything down now, without waiting for the setting to change.
@@ -328,6 +543,16 @@ impl RemoteHost {
     pub fn turn_off(&mut self, cx: &mut Context<Self>) {
         self.switched_off_by_hand = true;
         self.stop(HostState::Disabled, cx);
+    }
+
+    /// Lets the host start again after [`Self::turn_off`], whatever the setting
+    /// read in the meantime: a person who turns remote control on has asked
+    /// for it, even if the write that turned it off did not go through.
+    pub(crate) fn resume_after_manual_off(&mut self, cx: &mut Context<Self>) {
+        if self.switched_off_by_hand {
+            self.switched_off_by_hand = false;
+            self.sync(cx);
+        }
     }
 
     /// Tells the person about something that went wrong outside the host.
@@ -350,10 +575,8 @@ impl RemoteHost {
 
     /// The only way out of a pairing lockout.
     pub fn unlock_pairing(&mut self, cx: &mut Context<Self>) {
-        if let Some(running) = self.running.as_mut()
-            && let Some(session_id) = running.pairing.unlock()
-        {
-            running.end_session(session_id, cx);
+        if let Some(running) = self.running.as_mut() {
+            running.unlock_pairing(cx);
         }
         self.refresh(cx);
     }
@@ -367,6 +590,18 @@ impl RemoteHost {
             .status()
             .user()
             .map(|user| user.id.to_string());
+
+        if self
+            .resting_trust
+            .as_ref()
+            .is_some_and(|resting| Some(resting.user_id()) != user_id.as_deref())
+        {
+            self.resting_trust = None;
+        }
+        if self.seen_user != user_id {
+            self.seen_user = user_id.clone();
+            cx.notify();
+        }
 
         let enabled = RemoteControlSettings::is_enabled(cx);
         let just_enabled = enabled && !self.was_enabled;
@@ -409,6 +644,15 @@ impl RemoteHost {
         self.state = HostState::Starting;
         let keychain = self.environment.keychain.clone();
         let pending_key_deletion = self.key_deletion.take();
+        // The pins read while the host was down are the ones to start with:
+        // reading them again could miss a change that is still being written.
+        let resting_pins = match self.resting_trust.take() {
+            Some(RestingTrust::Loaded {
+                user_id: loaded_for,
+                store,
+            }) if loaded_for == user_id => Some(store),
+            _ => None,
+        };
         self.startup = Some(cx.spawn(async move |this, cx| {
             if let Some(deletion) = pending_key_deletion {
                 deletion.await;
@@ -419,6 +663,9 @@ impl RemoteHost {
                     log::error!("remote control cannot start: {error:#}");
                     this.update(cx, |this, cx| {
                         this.startup = None;
+                        if let Some(store) = resting_pins {
+                            this.rest_pins(user_id.clone(), store, cx);
+                        }
                         this.state = HostState::Failed(format!("{error:#}"));
                         cx.emit(RemoteHostEvent::Problem {
                             message: format!("Remote control could not start: {error:#}"),
@@ -431,7 +678,10 @@ impl RemoteHost {
                     return;
                 }
             };
-            let trust = cx.update(|cx| TrustStore::load(user_id.clone(), cx)).await;
+            let trust = match resting_pins {
+                Some(store) => store,
+                None => cx.update(|cx| TrustStore::load(user_id.clone(), cx)).await,
+            };
             this.update(cx, |this, cx| {
                 this.startup = None;
                 this.begin(user_id, keypair, trust, cx);
@@ -449,6 +699,8 @@ impl RemoteHost {
     ) {
         // The setting or the account may have changed while the key loaded.
         if self.serving.as_deref() != Some(user_id.as_str()) {
+            self.rest_pins(user_id, trust, cx);
+            cx.notify();
             return;
         }
 
@@ -491,9 +743,8 @@ impl RemoteHost {
                     let Some(running) = this.running.as_mut() else {
                         return;
                     };
-                    let before = running.sessions.len();
                     running.housekeeping(cx);
-                    if running.sessions.len() != before {
+                    if running.take_changed() {
                         this.refresh(cx);
                     }
                 });
@@ -503,6 +754,10 @@ impl RemoteHost {
             }
         });
 
+        let pairing_history = match self.resting_pairing.take() {
+            Some((kept_for, history)) if kept_for == user_id => history,
+            _ => PairingHistory::default(),
+        };
         self.running = Some(Hosting::new(HostingParts {
             user_id,
             keypair,
@@ -515,6 +770,7 @@ impl RemoteHost {
             terminals: self.terminals.clone(),
             files: self.files.clone(),
             sessions_available: self.sessions_available,
+            pairing_history,
             app_version: self.app_version.clone(),
             housekeeping,
             subscriptions,
@@ -526,9 +782,13 @@ impl RemoteHost {
     /// Puts everything back as if remote control had never been on.
     /// `false` if there was nothing to put back.
     fn stop(&mut self, state: HostState, cx: &mut Context<Self>) -> bool {
-        let was_active = self.running.take().is_some()
-            | self.startup.take().is_some()
-            | self.serving.take().is_some();
+        let stopped_hosting = self.running.take();
+        let was_hosting = stopped_hosting.is_some();
+        if let Some(hosting) = stopped_hosting {
+            self.keep_trust(hosting, cx);
+        }
+        let was_active =
+            was_hosting | self.startup.take().is_some() | self.serving.take().is_some();
         if !was_active && self.state == state {
             return false;
         }
@@ -545,6 +805,10 @@ impl RemoteHost {
     }
 
     fn on_relay_event(&mut self, event: RelayEvent, cx: &mut Context<Self>) {
+        // A frame arrives for every keystroke and every chunk of output; most
+        // change nothing anyone sees.
+        let only_if_changed = matches!(event, RelayEvent::Frame { .. });
+        let mut forgotten = None;
         match event {
             RelayEvent::Stopped(reason) => {
                 self.on_relay_stopped(reason, cx);
@@ -577,7 +841,7 @@ impl RemoteHost {
                         } => running.on_frame(session_id, payload, cx),
                         RelayEvent::DeviceRevoked { device_id } => {
                             running.end_sessions_of(&device_id, cx);
-                            running.trust.forget(&device_id, cx);
+                            forgotten = Some(forget_pin(&mut running.trust, &device_id, cx));
                         }
                         // A host is never sent presence, and a relay error names no
                         // session it could end; both are logged by the client.
@@ -590,7 +854,38 @@ impl RemoteHost {
                 }
             }
         }
-        self.refresh(cx);
+        if let Some(forgotten) = forgotten {
+            self.finish_forgetting(forgotten, cx);
+        }
+        self.refresh_if_wanted(only_if_changed, cx);
+    }
+
+    /// Refreshes, unless `only_if_changed` and nothing shown has changed.
+    fn refresh_if_wanted(&mut self, only_if_changed: bool, cx: &mut Context<Self>) {
+        let changed = self
+            .running
+            .as_mut()
+            .is_some_and(|running| running.take_changed());
+        if changed || !only_if_changed {
+            self.refresh(cx);
+        }
+    }
+
+    /// Whether the connection to the relay has room for another frame.
+    #[cfg(test)]
+    pub(crate) fn relay_has_room(&self, cx: &App) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.client.read(cx).has_capacity_for(1))
+    }
+
+    /// Pushes `control` to every device that has said hello, as the host does
+    /// when something changes.
+    #[cfg(test)]
+    pub(crate) fn push_to_all(&mut self, control: &Control, cx: &mut Context<Self>) {
+        if let Some(running) = self.running.as_mut() {
+            running.broadcast(control, cx);
+        }
     }
 
     #[cfg(test)]
@@ -642,6 +937,7 @@ impl RemoteHost {
 
     fn on_relay_stopped(&mut self, reason: StopReason, cx: &mut Context<Self>) {
         let wipe = reason == StopReason::Revoked;
+        let mut wiped = None;
         let identity = self
             .running
             .as_ref()
@@ -652,7 +948,7 @@ impl RemoteHost {
                 // This device is no longer the account's. Nothing it trusted
                 // was trusted by anyone but the account, and its key is of no
                 // further use.
-                running.trust.forget_all(cx);
+                wiped = Some(forget_all_pins(&mut running.trust, cx));
             }
         }
         if wipe && let Some((user_id, _client)) = identity {
@@ -665,6 +961,9 @@ impl RemoteHost {
         }
         let serving = self.serving.clone();
         self.stop(HostState::Halted(reason), cx);
+        if let Some(wiped) = wiped {
+            self.finish_forgetting(wiped, cx);
+        }
         if let Some(message) = problem_message(&self.state) {
             cx.emit(RemoteHostEvent::Problem {
                 message,
@@ -685,7 +984,9 @@ impl RemoteHost {
                 let terminals = running.terminals.read(cx).summaries(cx);
                 running.broadcast(&Control::TerminalList { terminals }, cx);
             }
-            TerminalMirrorEvent::OutputReady { session_id } => running.flush(*session_id, cx),
+            TerminalMirrorEvent::OutputReady { session_id } => {
+                running.flush(*session_id, cx);
+            }
             TerminalMirrorEvent::Resized {
                 terminal_id,
                 columns,
@@ -711,7 +1012,9 @@ impl RemoteHost {
                 running.forget_streams_of(terminal_id, sessions);
             }
         }
-        self.refresh(cx);
+        // Only a change to the list of terminals is news to the indicator;
+        // output streaming and resizes are not, unless they ended a session.
+        self.refresh_if_wanted(!matches!(event, TerminalMirrorEvent::ListChanged), cx);
     }
 
     fn on_agent_event(&mut self, event: &AgentMirrorEvent, cx: &mut Context<Self>) {
@@ -732,11 +1035,14 @@ impl RemoteHost {
                 running.broadcast(&Control::AgentList { agents }, cx);
             }
         }
-        self.refresh(cx);
+        self.refresh_if_wanted(true, cx);
     }
 
     /// Recomputes what depends on the sessions and tells whoever is watching.
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if let Some(running) = self.running.as_mut() {
+            running.take_changed();
+        }
         if let Some(running) = &self.running {
             self.state = match running.client.read(cx).state() {
                 ConnectionState::Connected => HostState::Online,

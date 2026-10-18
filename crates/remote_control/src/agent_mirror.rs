@@ -107,14 +107,16 @@ fn summarize(view: &AgentView, view_id: EntityId, cx: &App) -> AgentSummary {
 
 impl AgentMirror {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let this = cx.entity();
+        // Held weakly: the callback lives as long as the app does, and the
+        // subscription that would end it is a field of this very entity.
+        let this = cx.weak_entity();
         let observe_new = cx.observe_new::<AgentView>(move |_view, window, cx| {
             if window.is_none() {
                 // A view with no window is not on anyone's screen.
                 return;
             }
             let view = cx.entity();
-            this.update(cx, |this, cx| this.track(view, cx));
+            this.update(cx, |this, cx| this.track(view, cx)).log_err();
         });
         Self {
             agents: HashMap::default(),
@@ -369,6 +371,18 @@ mod tests {
                 workspace.items_of_type::<AgentView>(cx).next()
             })
             .expect("the tab opened")
+    }
+
+    #[gpui::test]
+    fn the_mirror_is_released_when_nothing_else_holds_it(cx: &mut TestAppContext) {
+        let mirror = cx.new(AgentMirror::new);
+        let weak = mirror.downgrade();
+        drop(mirror);
+        cx.run_until_parked();
+        assert!(
+            weak.upgrade().is_none(),
+            "the callback that finds new tabs must not keep the mirror alive"
+        );
     }
 
     #[gpui::test]

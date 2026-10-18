@@ -13,7 +13,7 @@ use util::path;
 
 use crate::file_browse::{
     BrowseError, FileBrowser, FileReply, FileRequest, Listing, MAX_DIFF_BYTES, MAX_FILE_BYTES,
-    MAX_LIST_ENTRIES, answer_within, list_replies,
+    MAX_LIST_ENTRIES, answer_within, first_by_key, list_replies,
 };
 
 fn init(cx: &mut TestAppContext) {
@@ -739,6 +739,188 @@ async fn the_diff_holds_only_this_folders_visible_changes(cx: &mut TestAppContex
         assert!(!text.contains(left_out), "{left_out} leaked: {text}");
     }
     settle(fixture, cx).await;
+}
+
+#[gpui::test]
+async fn a_new_file_is_part_of_the_diff_unless_the_folder_hides_it(cx: &mut TestAppContext) {
+    let (directory, fixture) = monorepo(cx).await;
+    let root = directory.path().canonicalize().expect("a real path");
+    for path in [
+        "app/sub/fresh.txt",
+        "app/sub/secret.env",
+        "app/sub/hidden.txt",
+        "other/fresh.txt",
+    ] {
+        std::fs::create_dir_all(root.join(path).parent().expect("a parent")).expect("a folder");
+        std::fs::write(root.join(path), "brand new\n").expect("writes");
+    }
+
+    let (text, truncated) = diff(&fixture, cx).await.expect("a diff");
+    let text = String::from_utf8(text).expect("text");
+    assert!(!truncated, "{text}");
+    assert!(
+        text.contains("diff --git a/app/sub/fresh.txt b/app/sub/fresh.txt\nnew file mode"),
+        "{text}"
+    );
+    for left_out in ["other/fresh.txt", "secret.env", "hidden.txt"] {
+        assert!(!text.contains(left_out), "{left_out} leaked: {text}");
+    }
+    settle(fixture, cx).await;
+}
+
+/// A folder that is one file has no path inside it for the settings to name,
+/// so what hides a file is its own name.
+async fn single_file_fixture(
+    name: &str,
+    cx: &mut TestAppContext,
+) -> (tempfile::TempDir, Fixture, PathBuf) {
+    init(cx);
+    cx.executor().allow_parking();
+    let directory = tempfile::tempdir().expect("a directory");
+    let root = directory.path().canonicalize().expect("a real path");
+    git(&root, &["init", "-q", "-b", "main"]).await;
+    std::fs::write(root.join(name), "SECRET=1\n").expect("writes");
+    git(&root, &["add", "."]).await;
+    git(&root, &["commit", "-q", "-m", "first"]).await;
+    let file = root.join(name);
+    let fixture = fixture(Arc::new(RealFs::new(None, cx.executor())), &file, cx).await;
+    wait_for_repository(&fixture, cx).await;
+    (directory, fixture, file)
+}
+
+#[gpui::test]
+async fn the_diff_of_a_folder_that_is_one_private_file_is_empty(cx: &mut TestAppContext) {
+    let (_directory, plain, file) = single_file_fixture("plain.txt", cx).await;
+    std::fs::write(&file, "SECRET=2\n").expect("writes");
+    let (text, _) = diff(&plain, cx).await.expect("a diff");
+    let text = String::from_utf8(text).expect("text");
+    assert!(
+        text.contains("+SECRET=2"),
+        "a single ordinary file has a diff, which is what makes the next half mean something: {text}"
+    );
+    settle(plain, cx).await;
+
+    let (_directory, private, file) = single_file_fixture(".env", cx).await;
+    std::fs::write(&file, "SECRET=2\n").expect("writes");
+    let (text, _) = diff(&private, cx).await.expect("a diff");
+    let text = String::from_utf8(text).expect("text");
+    assert!(
+        !text.contains("SECRET"),
+        "a private file's diff was sent: {text}"
+    );
+    settle(private, cx).await;
+}
+
+#[gpui::test]
+async fn a_single_private_file_is_still_private_after_a_rescan(cx: &mut TestAppContext) {
+    init(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/work"),
+        json!({ ".env": "SECRET=1\n", "notes.txt": "n" }),
+    )
+    .await;
+    let fixture = fixture(fs.clone(), Path::new(path!("/work/.env")), cx).await;
+    let error = read(&fixture, "", cx).await.expect_err("private");
+    assert_eq!(error.code, error_code::NOT_FOUND);
+
+    fs.insert_file(path!("/work/.env"), b"SECRET=2\n".to_vec())
+        .await;
+    cx.run_until_parked();
+    let error = read(&fixture, "", cx)
+        .await
+        .expect_err("a change to the file does not make it public");
+    assert_eq!(error.code, error_code::NOT_FOUND);
+}
+
+#[gpui::test]
+async fn a_single_ordinary_file_can_be_read(cx: &mut TestAppContext) {
+    init(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/work"), json!({ "notes.txt": "n\n" }))
+        .await;
+    let fixture = fixture(fs.clone(), Path::new(path!("/work/notes.txt")), cx).await;
+    assert_eq!(read(&fixture, "", cx).await.expect("readable"), b"n\n");
+    fs.insert_file(path!("/work/notes.txt"), b"changed\n".to_vec())
+        .await;
+    cx.run_until_parked();
+    assert_eq!(
+        read(&fixture, "", cx).await.expect("readable"),
+        b"changed\n"
+    );
+}
+
+#[test]
+fn the_first_so_many_are_kept_in_order_and_the_rest_are_only_counted() {
+    let items = [5, 3, 9, 1, 7, 3, 8, 2];
+    let (first, total) = first_by_key(items.iter().copied(), 3, |item| *item);
+    assert_eq!(first, [1, 2, 3]);
+    assert_eq!(total, 8);
+
+    let (all, total) = first_by_key(items.iter().copied(), 20, |item| *item);
+    assert_eq!(all, [1, 2, 3, 3, 5, 7, 8, 9]);
+    assert_eq!(total, 8);
+
+    let (none, total) = first_by_key(items.iter().copied(), 0, |item| *item);
+    assert!(none.is_empty());
+    assert_eq!(total, 8);
+
+    let (empty, total) = first_by_key(std::iter::empty::<u8>(), 3, |item| *item);
+    assert!(empty.is_empty());
+    assert_eq!(total, 0);
+}
+
+#[test]
+fn at_most_one_key_more_than_asked_for_is_ever_held() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    struct Counted(u32);
+
+    impl Counted {
+        fn new(value: u32) -> Self {
+            let live = LIVE.fetch_add(1, Ordering::SeqCst) + 1;
+            PEAK.fetch_max(live, Ordering::SeqCst);
+            Self(value)
+        }
+    }
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            LIVE.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PartialEq for Counted {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+
+    impl Eq for Counted {}
+
+    impl PartialOrd for Counted {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for Counted {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.cmp(&other.0)
+        }
+    }
+
+    let (first, total) = first_by_key((0..10_000u32).rev(), 5, |item| Counted::new(*item));
+    assert_eq!(first, (0..5).collect::<Vec<_>>());
+    assert_eq!(total, 10_000);
+    assert!(
+        PEAK.load(Ordering::SeqCst) <= 6,
+        "{} keys were held at once",
+        PEAK.load(Ordering::SeqCst)
+    );
 }
 
 #[gpui::test]

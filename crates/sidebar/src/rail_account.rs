@@ -104,12 +104,12 @@ impl Sidebar {
                                     }
                                 },
                             )
-                            .when(remote_control_on, |menu| {
-                                menu.action(
-                                    "Manage Trusted Devices\u{2026}",
-                                    Box::new(remote_control::ManageDevices),
-                                )
-                            })
+                            // Offered while off too: a lost device is forgotten
+                            // before remote control is turned back on.
+                            .action(
+                                "Manage Trusted Devices\u{2026}",
+                                Box::new(remote_control::ManageDevices),
+                            )
                             .action(
                                 "Open a Zode on Your Account\u{2026}",
                                 Box::new(zed_actions::OpenZodeOnAccount),

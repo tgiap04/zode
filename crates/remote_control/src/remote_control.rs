@@ -17,6 +17,7 @@ mod file_browse;
 mod host_environment;
 mod hosting;
 mod ide_bridge;
+mod ide_heartbeat;
 mod indicator;
 mod pairing_flow;
 mod pairing_modal;
@@ -37,7 +38,7 @@ mod session_history_tests;
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, Context, Window, actions};
-use remote_relay_client::WebSocketTransport;
+use remote_relay_client::{RelayTransport, WebSocketTransport};
 use workspace::Workspace;
 use zode_account::Account;
 
@@ -69,8 +70,13 @@ actions!(
 );
 
 /// Turns remote control on. The host follows the setting, so writing it is
-/// all there is to do.
+/// nearly all there is to do: a host that was turned off by hand while the
+/// setting never changed -- the write that was meant to turn it off failed --
+/// has to be told it may start again.
 pub(crate) fn enable_remote_control(cx: &mut App) {
+    if let Some(host) = RemoteHost::global(cx) {
+        host.update(cx, |host, cx| host.resume_after_manual_off(cx));
+    }
     save_enabled(true, cx);
 }
 
@@ -129,26 +135,66 @@ pub fn init(cx: &mut App) {
     let files = cx.new(FileBrowser::new);
     let environment = HostEnvironment::from_account(&account, cx);
     let app_version = release_channel::AppVersion::global(cx).to_string();
+    install(
+        account,
+        environment,
+        Arc::new(WebSocketTransport),
+        agents,
+        terminals,
+        Some(files),
+        app_version,
+        cx,
+    );
+}
+
+/// Makes the host the app's: it is switched off when Zode quits, and every
+/// window gets its status bar item and its actions.
+fn install(
+    account: gpui::Entity<Account>,
+    environment: HostEnvironment,
+    transport: Arc<dyn RelayTransport>,
+    agents: gpui::Entity<AgentMirror>,
+    terminals: gpui::Entity<TerminalMirror>,
+    files: Option<gpui::Entity<FileBrowser>>,
+    app_version: String,
+    cx: &mut App,
+) -> gpui::Entity<RemoteHost> {
     let host = cx.new(|cx| {
         RemoteHost::new(
             account,
             environment,
-            Arc::new(WebSocketTransport),
+            transport,
             agents,
             terminals,
-            Some(files),
+            files,
             app_version,
             cx,
         )
     });
     host.update(cx, |host, _| host.set_sessions_available(true));
     RemoteHost::set_global(host.clone(), cx);
+    turn_off_when_zode_quits(host.clone(), cx);
 
-    cx.observe_new(move |workspace: &mut Workspace, window, cx| {
-        let Some(window) = window else {
-            return;
-        };
-        register_workspace(workspace, &host, window, cx);
+    cx.observe_new({
+        let host = host.clone();
+        move |workspace: &mut Workspace, window, cx| {
+            let Some(window) = window else {
+                return;
+            };
+            register_workspace(workspace, &host, window, cx);
+        }
+    })
+    .detach();
+    host
+}
+
+/// Quitting is turning remote control off. Quitting does not run the destructors
+/// that would otherwise do it, and a project server left running outlives Zode
+/// along with every terminal a device started in it.
+fn turn_off_when_zode_quits(host: gpui::Entity<RemoteHost>, cx: &mut App) {
+    cx.on_app_quit(move |cx| {
+        host.update(cx, |host, cx| host.turn_off(cx));
+        async {}
     })
     .detach();
 }

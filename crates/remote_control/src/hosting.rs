@@ -17,7 +17,7 @@ use futures::{FutureExt as _, select_biased};
 use gpui::{Context, Entity, Subscription, Task, WeakEntity};
 use remote_relay_client::{
     CredentialError, OpenMode, PinnedDevice, RelayClient, RelayCredential, RelayCredentials,
-    SendError, TrustStore, list_devices,
+    SendError, TrustStore, list_devices, sanitize_device_name,
     secure_session::{ResponderHandshakes, SecureChannel},
 };
 use remote_relay_protocol::{
@@ -29,8 +29,9 @@ use remote_relay_protocol::{
 use crate::{
     agent_mirror::AgentMirror,
     file_browse::{self, BrowseError, FileBrowser, FileReply, FileRequest},
-    ide_bridge::{self, IdeBridge, IdeOutput},
-    pairing_flow::PairingFlow,
+    ide_bridge::{self, IdeBridge, IdeLaunch, IdeOutput},
+    ide_heartbeat::RequestDetector,
+    pairing_flow::{MAX_PAIRING_REQUESTS_PER_HOUR, PairingFlow, PairingHistory, PairingRefusal},
     remote_control_settings::RemoteControlSettings,
     remote_host::{RemoteHost, RemoteHostEvent},
     session_history::{self, SessionRequest},
@@ -93,12 +94,21 @@ const MAX_QUEUED_REPLY_BYTES: usize = 8 * 1024 * 1024;
 /// listing or a file is smaller.
 const MAX_REPLY_BYTES: usize = file_browse::MAX_DIFF_BYTES;
 
-/// Stands in for the size of a control message that could not be measured.
+/// What a control message that carries no list counts for against a device's
+/// allowance, and what one that could not be measured counts for.
 const CONTROL_WEIGHT_FALLBACK: usize = 1024;
 
 /// What a device that has used up its queue may still have refused, in small
 /// messages, before it is judged to be ignoring what it is told and is ended.
 const REFUSAL_ALLOWANCE_BYTES: usize = 64 * 1024;
+
+const FALLBACK_DEVICE_NAME: &str = "A browser";
+
+/// Messages the host pushed unasked -- an agent's status, the list of terminals
+/// -- that may wait for a device that is not reading. A newer push makes an older
+/// one about the same thing stale, so what waits is bounded by how many things
+/// there are to say something about; this bounds the rest.
+const MAX_QUEUED_PUSHES: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenedKind {
@@ -127,9 +137,10 @@ pub(crate) struct ActiveSession {
     /// The project server this device asked for, at most one. Dropping it
     /// stops the server, so ending the session needs nothing more.
     ide: Option<IdeBridge>,
-    /// Answers to file requests, in the order the device must see them.
-    outbound: VecDeque<Outbound>,
-    outbound_bytes: usize,
+    /// Tells the project stream's pings from what the device asks for.
+    ide_requests: RequestDetector,
+    /// What waits for the relay to have room for it.
+    outbound: OutboundQueue,
     /// Work answering file requests and session listings, by ticket. Ending
     /// the session drops it, which cancels the work and its deadline.
     file_tasks: HashMap<u64, Task<()>>,
@@ -147,26 +158,185 @@ pub(crate) enum RequestSlot {
     Resume,
 }
 
-/// One frame of an answer, sealed only when the relay has room for it.
-enum Outbound {
-    Control(Control, usize),
+/// A control message waiting for the relay, sealed only when it has room.
+struct QueuedControl {
+    body: ControlBody,
+    /// What it counts for against the device's allowance. Nothing for a push.
+    weight: usize,
+    /// What it says something about, if the host pushed it unasked.
+    push: Option<PushKey>,
+}
+
+enum ControlBody {
+    Plain(Control),
+    /// A message that carries a list, encoded once to be weighed and kept encoded
+    /// so that sealing does not serialise it again.
+    Encoded(Vec<u8>),
+}
+
+impl QueuedControl {
+    /// Only the messages that carry a list vary in size, so only those are
+    /// encoded up front to be weighed; the rest are small and counted flat.
+    fn new(control: Control, push: Option<PushKey>) -> Self {
+        let (body, measured) = match control {
+            Control::AgentList { .. }
+            | Control::TerminalList { .. }
+            | Control::FilesListReply { .. }
+            | Control::SessionsListReply { .. } => match encode_control(&control) {
+                Ok(encoded) => {
+                    let weight = encoded.len();
+                    (ControlBody::Encoded(encoded), weight)
+                }
+                // Kept as is, so sealing reports why it cannot be sent.
+                Err(_) => (ControlBody::Plain(control), CONTROL_WEIGHT_FALLBACK),
+            },
+            control => (ControlBody::Plain(control), CONTROL_WEIGHT_FALLBACK),
+        };
+        Self {
+            body,
+            weight: if push.is_some() { 0 } else { measured },
+            push,
+        }
+    }
+}
+
+/// A frame of a file or a diff, or the end of a stream.
+enum Bulk {
     Data { stream_id: u32, bytes: Vec<u8> },
     EndOfStream { stream_id: u32 },
 }
 
-impl Outbound {
-    /// What it counts for against the queue's allowance.
+impl Bulk {
     fn weight(&self) -> usize {
         match self {
-            Outbound::Control(_, weight) => *weight,
-            Outbound::Data { bytes, .. } => bytes.len(),
-            Outbound::EndOfStream { .. } => 0,
+            Bulk::Data { bytes, .. } => bytes.len(),
+            Bulk::EndOfStream { .. } => 0,
         }
     }
+}
 
-    fn control(control: Control) -> Self {
-        let weight = encode_control(&control).map_or(CONTROL_WEIGHT_FALLBACK, |bytes| bytes.len());
-        Outbound::Control(control, weight)
+enum Outbound {
+    Control(QueuedControl),
+    Bulk(Bulk),
+}
+
+/// What a push is about. A newer push makes an older one about the same thing,
+/// or about less, stale.
+#[derive(Clone, PartialEq, Eq)]
+enum PushKey {
+    TerminalList,
+    AgentList,
+    Agent(String),
+    TerminalResized(String),
+    TerminalClosed(String),
+    Other,
+}
+
+fn push_key(control: &Control) -> PushKey {
+    match control {
+        Control::TerminalList { .. } => PushKey::TerminalList,
+        Control::AgentList { .. } => PushKey::AgentList,
+        Control::AgentUpdate { agent } => PushKey::Agent(agent.id.clone()),
+        Control::TerminalResized { terminal_id, .. } => {
+            PushKey::TerminalResized(terminal_id.clone())
+        }
+        Control::TerminalClosed { terminal_id, .. } => PushKey::TerminalClosed(terminal_id.clone()),
+        _ => PushKey::Other,
+    }
+}
+
+/// Whether `newer`, sent after `older`, leaves nothing worth saying in `older`.
+fn supersedes(newer: &PushKey, older: &PushKey) -> bool {
+    match (newer, older) {
+        (PushKey::Other, _) | (_, PushKey::Other) => false,
+        // A whole list says everything an update to one of its members did.
+        (PushKey::AgentList, PushKey::Agent(_)) => true,
+        // A terminal that closed has no size to report.
+        (PushKey::TerminalClosed(closed), PushKey::TerminalResized(resized)) => closed == resized,
+        (PushKey::TerminalClosed(_), PushKey::TerminalClosed(_)) => false,
+        (newer, older) => newer == older,
+    }
+}
+
+/// What waits for the relay to have room for it, for one device.
+#[derive(Default)]
+struct OutboundQueue {
+    /// Small messages, in the order the device must see them. They go ahead of
+    /// `bulk`: a reply should not wait behind a file.
+    controls: VecDeque<QueuedControl>,
+    /// How many of `controls` were pushed unasked.
+    queued_pushes: usize,
+    /// The frames of files and diffs, and the ends of streams, in order.
+    bulk: VecDeque<Bulk>,
+    /// What the device's answers waiting here count for against its allowance:
+    /// only what it asked for, so that what the host pushes cannot be the reason
+    /// a device is ended.
+    bytes: usize,
+}
+
+impl OutboundQueue {
+    fn has_waiting(&self) -> bool {
+        !self.controls.is_empty() || !self.bulk.is_empty()
+    }
+
+    /// Queues an answer to something the device asked for, which counts against
+    /// its allowance.
+    fn enqueue_reply(&mut self, control: Control) {
+        let queued = QueuedControl::new(control, None);
+        self.bytes += queued.weight;
+        self.controls.push_back(queued);
+    }
+
+    /// Queues something the host says unasked. It replaces what it makes stale,
+    /// so a device that is slow to read is told the latest and not everything,
+    /// and it never counts against the device.
+    fn enqueue_push(&mut self, control: Control) {
+        let key = push_key(&control);
+        if self.queued_pushes > 0 {
+            let before = self.controls.len();
+            self.controls.retain(|queued| {
+                !queued
+                    .push
+                    .as_ref()
+                    .is_some_and(|older| supersedes(&key, older))
+            });
+            self.queued_pushes -= before - self.controls.len();
+        }
+        if self.queued_pushes >= MAX_QUEUED_PUSHES
+            && let Some(oldest) = self
+                .controls
+                .iter()
+                .position(|queued| queued.push.is_some())
+        {
+            self.controls.remove(oldest);
+            self.queued_pushes -= 1;
+        }
+        self.controls
+            .push_back(QueuedControl::new(control, Some(key)));
+        self.queued_pushes += 1;
+    }
+
+    fn enqueue_bulk(&mut self, item: Bulk) {
+        self.bytes += item.weight();
+        self.bulk.push_back(item);
+    }
+
+    /// The next frame to send: a control message if one is waiting, since none
+    /// is large and a reply should not wait for a file, and otherwise the next
+    /// frame of a file. Control messages keep their order among themselves, and
+    /// a file's frames never overtake the message that names their stream: it
+    /// was queued first and every control message goes before any frame.
+    fn next(&mut self) -> Option<Outbound> {
+        if let Some(queued) = self.controls.pop_front() {
+            self.bytes = self.bytes.saturating_sub(queued.weight);
+            if queued.push.is_some() {
+                self.queued_pushes = self.queued_pushes.saturating_sub(1);
+            }
+            return Some(Outbound::Control(queued));
+        }
+        let item = self.bulk.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(item.weight());
+        Some(Outbound::Bulk(item))
     }
 }
 
@@ -179,12 +349,7 @@ impl ActiveSession {
         let running = self.file_tasks.len();
         let reserved = (running + 1) * MAX_REPLY_BYTES;
         running < MAX_FILE_REQUESTS_PER_SESSION
-            && self.outbound_bytes + reserved <= MAX_QUEUED_REPLY_BYTES
-    }
-
-    fn enqueue(&mut self, item: Outbound) {
-        self.outbound_bytes += item.weight();
-        self.outbound.push_back(item);
+            && self.outbound.bytes + reserved <= MAX_QUEUED_REPLY_BYTES
     }
 
     /// Queues `reply`, which names a new stream, then `bytes` on that stream
@@ -195,15 +360,24 @@ impl ActiveSession {
             Some(next) => next,
             None => HOST_STREAM_BASE,
         };
-        self.enqueue(Outbound::control(reply(stream_id)));
+        self.outbound.enqueue_reply(reply(stream_id));
         for chunk in bytes.chunks(MAX_INNER_PAYLOAD_LEN) {
-            self.enqueue(Outbound::Data {
+            self.outbound.enqueue_bulk(Bulk::Data {
                 stream_id,
                 bytes: chunk.to_vec(),
             });
         }
-        self.enqueue(Outbound::EndOfStream { stream_id });
+        self.outbound.enqueue_bulk(Bulk::EndOfStream { stream_id });
     }
+}
+
+/// Why a pairing request got no question put to the person.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefusalNotice {
+    CannotPin,
+    RateLimited,
+    TooManyAnswered,
+    LockedOut,
 }
 
 pub(crate) struct Hosting {
@@ -229,6 +403,11 @@ pub(crate) struct Hosting {
     /// whether the request it answers is still waiting.
     next_file_ticket: u64,
     pub(crate) pairing: PairingFlow,
+    /// The project server this host can start, once it has been looked for.
+    ide_launch: Option<Option<IdeLaunch>>,
+    /// The last refusal the person was told about, so a device that keeps
+    /// asking is said once and not once per request.
+    reported_refusal: Option<RefusalNotice>,
     handshakes: ResponderHandshakes,
     opened: HashMap<u32, Opened>,
     pub(crate) sessions: HashMap<u32, ActiveSession>,
@@ -238,6 +417,10 @@ pub(crate) struct Hosting {
     /// The OS has been asked to call the person back to Zode about this
     /// question, because no window was in front to put it on.
     pub(crate) pairing_notified: Option<u32>,
+    /// Something the indicator or a modal shows has changed since the host last
+    /// looked, which is what tells it a frame or a burst of output is worth a
+    /// redraw and most are not.
+    changed: bool,
     flush_retry: Option<Task<()>>,
     name_lookup: Option<Task<()>>,
     pub(crate) _housekeeping: Task<()>,
@@ -256,15 +439,38 @@ pub(crate) struct HostingParts {
     pub(crate) terminals: Entity<TerminalMirror>,
     pub(crate) files: Option<Entity<FileBrowser>>,
     pub(crate) sessions_available: bool,
+    pub(crate) pairing_history: PairingHistory,
     pub(crate) app_version: String,
     pub(crate) housekeeping: Task<()>,
     pub(crate) subscriptions: Vec<Subscription>,
+}
+
+/// "in about 12 minutes", rounded up so the wait is never understated.
+fn wait_phrase(wait: Duration) -> String {
+    let minutes = wait.as_secs().div_ceil(60).max(1);
+    if minutes == 1 {
+        "in about a minute".to_string()
+    } else {
+        format!("in about {minutes} minutes")
+    }
 }
 
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// A device name fit to show, and never empty: it comes from the account
+/// service, which any device on the account can write to, and ends up in the
+/// question, the notification, the indicator and the saved pin.
+fn displayable_device_name(raw: &str) -> String {
+    let name = sanitize_device_name(raw);
+    if name.is_empty() {
+        FALLBACK_DEVICE_NAME.to_string()
+    } else {
+        name
+    }
 }
 
 fn error_control(code: &str, message: &str) -> Control {
@@ -291,13 +497,16 @@ impl Hosting {
             sessions_available: parts.sessions_available,
             resume_cooldowns: HashMap::default(),
             next_file_ticket: 0,
-            pairing: PairingFlow::default(),
+            pairing: PairingFlow::resume(parts.pairing_history),
+            ide_launch: None,
+            reported_refusal: None,
             handshakes: ResponderHandshakes::default(),
             opened: HashMap::default(),
             sessions: HashMap::default(),
             app_version: parts.app_version,
             pairing_presented: None,
             pairing_notified: None,
+            changed: false,
             flush_retry: None,
             name_lookup: None,
             _housekeeping: parts.housekeeping,
@@ -316,6 +525,24 @@ impl Hosting {
             .read(cx)
             .credential()
             .map(|credential| credential.device_id.clone())
+    }
+
+    /// Where the project server is. Looking is a stat of the filesystem, so it is
+    /// done the first time a device asks and not again while this host runs.
+    fn project_server(&mut self, cx: &gpui::App) -> Option<IdeLaunch> {
+        self.ide_launch
+            .get_or_insert_with(|| ide_bridge::locate(cx))
+            .clone()
+    }
+
+    fn mark_changed(&mut self, cx: &mut Context<RemoteHost>) {
+        self.changed = true;
+        cx.emit(RemoteHostEvent::Changed);
+    }
+
+    /// Whether anything shown has changed since this was last asked.
+    pub(crate) fn take_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
     }
 
     fn close_at_relay(&self, session_id: u32, cx: &gpui::App) {
@@ -348,7 +575,7 @@ impl Hosting {
         if self.pairing_notified == Some(session_id) {
             self.pairing_notified = None;
         }
-        cx.emit(RemoteHostEvent::Changed);
+        self.mark_changed(cx);
         was_active
     }
 
@@ -503,6 +730,18 @@ impl Hosting {
                 public_key,
                 commitment,
             } => {
+                // Before the person is shown digits for a device that cannot be
+                // saved when they press Trust.
+                if let Err(error) = self.trust.check_can_pin(&peer_device_id) {
+                    log::info!("refused a pairing request: {error}");
+                    self.report_refusal(
+                        RefusalNotice::CannotPin,
+                        format!("A device asked to pair, but Zode did not ask you: {error}."),
+                        cx,
+                    );
+                    self.end_session(session_id, cx);
+                    return;
+                }
                 let nonce = match random_nonce() {
                     Ok(nonce) => nonce,
                     Err(error) => {
@@ -533,6 +772,30 @@ impl Hosting {
                     }
                     Err(refusal) => {
                         log::info!("refused a pairing request: {refusal:?}");
+                        match refusal {
+                            PairingRefusal::RateLimited { retry_after } => self.report_refusal(
+                                RefusalNotice::RateLimited,
+                                format!(
+                                    "A device asked to pair, but Zode has already asked you \
+                                     {MAX_PAIRING_REQUESTS_PER_HOUR} times this hour, so it did \
+                                     not ask again. Try again {}.",
+                                    wait_phrase(retry_after)
+                                ),
+                                cx,
+                            ),
+                            PairingRefusal::TooManyAnswered { retry_after } => self.report_refusal(
+                                RefusalNotice::TooManyAnswered,
+                                format!(
+                                    "Devices have started pairing too many times this hour, so \
+                                     Zode stopped answering them. If you did not do this, someone \
+                                     may be trying to guess a pairing code; try again {}.",
+                                    wait_phrase(retry_after)
+                                ),
+                                cx,
+                            ),
+                            PairingRefusal::LockedOut => self.report_lockout(cx),
+                            _ => {}
+                        }
                         self.end_session(session_id, cx);
                     }
                 }
@@ -544,6 +807,9 @@ impl Hosting {
                     }
                     Err(refusal) => {
                         log::info!("pairing failed: {refusal:?}");
+                        if self.pairing.is_locked_out() {
+                            self.report_lockout(cx);
+                        }
                         self.end_session(session_id, cx);
                     }
                 }
@@ -608,8 +874,24 @@ impl Hosting {
         cx: &mut Context<RemoteHost>,
     ) {
         let now = Self::now(cx);
-        if self.pairing.present(session_id, peer_name, now) {
-            cx.emit(RemoteHostEvent::Changed);
+        // The name is whatever the account service holds, and it ends up in the
+        // question, the notification, the indicator and the saved pin.
+        let peer_name = displayable_device_name(&peer_name);
+        let trust = &self.trust;
+        let asked = self.pairing.present(
+            session_id,
+            peer_name,
+            |device_id, key| {
+                trust
+                    .get(device_id)
+                    .filter(|pinned| pinned.public_key != *key)
+                    .map(|pinned| pinned.name.clone())
+            },
+            now,
+        );
+        if asked {
+            self.reported_refusal = None;
+            self.mark_changed(cx);
         } else {
             self.end_session(session_id, cx);
         }
@@ -625,27 +907,103 @@ impl Hosting {
         let now = Self::now(cx);
         if let Some(expired) = self.pairing.expire(now) {
             self.end_session(expired, cx);
+            if trust && expired == session_id {
+                cx.emit(RemoteHostEvent::Problem {
+                    message: "The request to pair ran out of time before it was answered. \
+                              Ask the other device to try again."
+                        .to_string(),
+                    retry: false,
+                });
+            }
         }
         let Some(decision) = self.pairing.decide(session_id, trust, now) else {
             return;
         };
         self.pairing_presented = None;
+        let mut replaced_key_of = None;
         if trust {
+            let replaces_key = self
+                .trust
+                .get(&decision.peer_device_id)
+                .is_some_and(|existing| existing.public_key != decision.peer_public_key);
             let device = PinnedDevice {
                 device_id: decision.peer_device_id.clone(),
                 public_key: decision.peer_public_key,
                 name: decision.peer_name.clone(),
                 paired_at: unix_now(),
             };
-            if let Err(error) = self.trust.pin(device, cx) {
-                log::error!("could not trust {}: {error}", decision.peer_name);
-                cx.emit(RemoteHostEvent::Problem {
-                    message: format!("Could not trust {}: {error}", decision.peer_name),
-                    retry: false,
-                });
+            match self.trust.pin(device, cx) {
+                Ok(()) => {
+                    replaced_key_of = replaces_key.then(|| decision.peer_device_id.clone());
+                }
+                Err(error) => {
+                    log::error!("could not trust {}: {error}", decision.peer_name);
+                    cx.emit(RemoteHostEvent::Problem {
+                        message: format!("Could not trust {}: {error}", decision.peer_name),
+                        retry: false,
+                    });
+                }
             }
+        } else if self.pairing.is_locked_out() {
+            self.report_lockout(cx);
         }
         self.end_session(decision.session_id, cx);
+        // Sessions made under the key that was replaced hold it still: their
+        // channels were built from it, and nothing checks the pin again.
+        if let Some(device_id) = replaced_key_of {
+            self.end_sessions_of(&device_id, cx);
+        }
+    }
+
+    /// The question was closed without an answer. The device is turned away,
+    /// but nothing is held against it: digits that were not compared did not
+    /// fail to match.
+    pub(crate) fn dismiss_pairing(&mut self, session_id: u32, cx: &mut Context<RemoteHost>) {
+        let now = Self::now(cx);
+        if let Some(expired) = self.pairing.expire(now) {
+            self.end_session(expired, cx);
+        }
+        let Some(decision) = self.pairing.dismiss(session_id, now) else {
+            return;
+        };
+        self.pairing_presented = None;
+        self.end_session(decision.session_id, cx);
+    }
+
+    /// The only way out of a pairing lockout.
+    pub(crate) fn unlock_pairing(&mut self, cx: &mut Context<RemoteHost>) {
+        if let Some(session_id) = self.pairing.unlock() {
+            self.end_session(session_id, cx);
+        }
+        self.reported_refusal = None;
+    }
+
+    fn report_lockout(&mut self, cx: &mut Context<RemoteHost>) {
+        self.report_refusal(
+            RefusalNotice::LockedOut,
+            "Pairing is locked after repeated mismatches, so devices cannot be added. \
+             Unlock it in Manage Trusted Devices."
+                .to_string(),
+            cx,
+        );
+    }
+
+    /// Tells the person that a device asked to pair and was turned away, once
+    /// for as long as the reason stands.
+    fn report_refusal(
+        &mut self,
+        notice: RefusalNotice,
+        message: String,
+        cx: &mut Context<RemoteHost>,
+    ) {
+        if self.reported_refusal == Some(notice) {
+            return;
+        }
+        self.reported_refusal = Some(notice);
+        cx.emit(RemoteHostEvent::Problem {
+            message,
+            retry: false,
+        });
     }
 
     /// A binary frame arrived on `session_id`.
@@ -676,11 +1034,10 @@ impl Hosting {
         let Some(opened) = self.opened.remove(&session_id) else {
             return;
         };
-        if self.confirmed_count() >= MAX_ACTIVE_SESSIONS {
-            log::warn!("refusing a handshake: {MAX_ACTIVE_SESSIONS} devices are already connected");
-            self.end_session(session_id, cx);
-            return;
-        }
+        // A device that finds every place taken is answered all the same: only
+        // once it has proven it holds the keys can it be told, in words, that
+        // there is no place for it. How many may be waiting to prove it is
+        // bounded below.
         if self.sessions.len() - self.confirmed_count() >= MAX_UNCONFIRMED_SESSIONS {
             log::warn!("refusing a handshake: too many peers have yet to prove themselves");
             self.end_session(session_id, cx);
@@ -701,7 +1058,7 @@ impl Hosting {
         let peer_name = self
             .trust
             .get(&opened.peer_device_id)
-            .map(|pinned| pinned.name.clone())
+            .map(|pinned| displayable_device_name(&pinned.name))
             .unwrap_or_default();
         if let Err(error) = self.client.read(cx).send_frame(session_id, &reply) {
             log::warn!("could not answer a handshake: {error}");
@@ -720,8 +1077,8 @@ impl Hosting {
                 streams: HashMap::default(),
                 confirmed: false,
                 ide: None,
-                outbound: VecDeque::new(),
-                outbound_bytes: 0,
+                ide_requests: RequestDetector::new(),
+                outbound: OutboundQueue::default(),
                 file_tasks: HashMap::default(),
                 resume: None,
                 next_host_stream: HOST_STREAM_BASE,
@@ -752,6 +1109,17 @@ impl Hosting {
                 log::warn!(
                     "ending session {session_id}: {MAX_ACTIVE_SESSIONS} devices are already connected"
                 );
+                self.queue_control(
+                    session_id,
+                    error_control(
+                        error_code::TOO_LARGE,
+                        &format!(
+                            "this Zode already has {MAX_ACTIVE_SESSIONS} devices connected; \
+                             disconnect one to connect another"
+                        ),
+                    ),
+                    cx,
+                );
                 self.end_session(session_id, cx);
                 return;
             }
@@ -759,7 +1127,7 @@ impl Hosting {
             session.last_activity = now;
             let device_name = session.peer_name.clone();
             cx.emit(RemoteHostEvent::SessionStarted { device_name });
-            cx.emit(RemoteHostEvent::Changed);
+            self.mark_changed(cx);
         }
 
         match frame.kind {
@@ -773,9 +1141,9 @@ impl Hosting {
             Ok(control) => control,
             Err(error) => {
                 log::debug!("a device sent a control message that does not parse: {error}");
-                self.send_control(
+                self.queue_control(
                     session_id,
-                    &error_control(
+                    error_control(
                         error_code::MALFORMED,
                         "that is not a message this host reads",
                     ),
@@ -784,13 +1152,16 @@ impl Hosting {
                 return;
             }
         };
+        // Only these two messages read whether there is a project server.
+        let ide_available = matches!(control, Control::Hello { .. } | Control::IdeOpen { .. })
+            && self.project_server(cx).is_some();
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
         let was_greeted = session.router.hello_done();
         let facts = HostFacts {
             app_version: &self.app_version,
-            ide_available: ide_bridge::locate(cx).is_some(),
+            ide_available,
             files_available: self.files.is_some(),
             sessions_available: self.sessions_available,
             proto_version: rpc::PROTOCOL_VERSION,
@@ -812,18 +1183,20 @@ impl Hosting {
     fn send_lists(&mut self, session_id: u32, cx: &mut Context<RemoteHost>) {
         let agents = self.agents.read(cx).summaries(cx);
         let terminals = self.terminals.read(cx).summaries(cx);
-        if self.send_control(session_id, &Control::AgentList { agents }, cx) {
-            self.send_control(session_id, &Control::TerminalList { terminals }, cx);
+        if self.queue_control(session_id, Control::AgentList { agents }, cx) {
+            self.queue_control(session_id, Control::TerminalList { terminals }, cx);
         }
     }
 
     fn apply(&mut self, session_id: u32, action: RouterAction, cx: &mut Context<RemoteHost>) {
         match action {
             RouterAction::Reply(control) => {
-                self.send_control(session_id, &control, cx);
+                self.queue_control(session_id, control, cx);
             }
             RouterAction::Refuse(control) => {
-                self.send_control(session_id, &control, cx);
+                // Sent now if the relay has room; a device being turned away is
+                // not waited for.
+                self.queue_control(session_id, control, cx);
                 self.end_session(session_id, cx);
             }
             RouterAction::Attach {
@@ -847,28 +1220,38 @@ impl Hosting {
             RouterAction::Files {
                 request_id,
                 request,
-            } => self.serve_files(session_id, request_id, request, cx),
+            } => {
+                self.note_activity(session_id, cx);
+                self.serve_files(session_id, request_id, request, cx);
+            }
             RouterAction::Sessions {
                 request_id,
                 request,
-            } => self.serve_sessions(session_id, request_id, request, cx),
+            } => {
+                self.note_activity(session_id, cx);
+                self.serve_sessions(session_id, request_id, request, cx);
+            }
             RouterAction::ReportSize { terminal_id } => {
-                let size = self
-                    .terminals
-                    .read(cx)
-                    .summaries(cx)
-                    .into_iter()
-                    .find(|summary| summary.id == terminal_id);
+                let size = self.terminals.read(cx).dimensions_of(&terminal_id, cx);
                 let control = match size {
-                    Some(summary) => Control::TerminalResized {
+                    Some((columns, rows)) => Control::TerminalResized {
                         terminal_id,
-                        columns: summary.columns,
-                        rows: summary.rows,
+                        columns,
+                        rows,
                     },
                     None => error_control(error_code::NOT_FOUND, "there is no such terminal"),
                 };
-                self.send_control(session_id, &control, cx);
+                self.queue_control(session_id, control, cx);
             }
+        }
+    }
+
+    /// Somebody is at the other end: it asked for something. A ping is not
+    /// asking for anything.
+    fn note_activity(&mut self, session_id: u32, cx: &gpui::App) {
+        let now = Self::now(cx);
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.last_activity = now;
         }
     }
 
@@ -887,9 +1270,9 @@ impl Hosting {
             .as_ref()
             .is_some_and(|ide| ide.stream_id == stream_id)
         {
-            self.send_control(
+            self.queue_control(
                 session_id,
-                &error_control(error_code::MALFORMED, "that stream is already in use"),
+                error_control(error_code::MALFORMED, "that stream is already in use"),
                 cx,
             );
             return;
@@ -899,9 +1282,9 @@ impl Hosting {
             .get(&stream_id)
             .is_some_and(|attached| *attached == terminal);
         if session.streams.contains_key(&stream_id) && !replaces_own {
-            self.send_control(
+            self.queue_control(
                 session_id,
-                &error_control(error_code::MALFORMED, "that stream is already in use"),
+                error_control(error_code::MALFORMED, "that stream is already in use"),
                 cx,
             );
             return;
@@ -911,9 +1294,9 @@ impl Hosting {
             .values()
             .any(|attached| *attached == terminal);
         if !already_attached && session.streams.len() >= MAX_ATTACHMENTS_PER_SESSION {
-            self.send_control(
+            self.queue_control(
                 session_id,
-                &error_control(error_code::TOO_LARGE, "too many terminals are attached"),
+                error_control(error_code::TOO_LARGE, "too many terminals are attached"),
                 cx,
             );
             return;
@@ -936,21 +1319,19 @@ impl Hosting {
                     columns,
                     rows,
                 };
-                if self.send_control(session_id, &attached, cx) {
-                    self.flush(session_id, cx);
-                }
+                self.queue_control(session_id, attached, cx);
             }
             Err(AttachError::NotFound) => {
-                self.send_control(
+                self.queue_control(
                     session_id,
-                    &error_control(error_code::NOT_FOUND, "there is no such terminal"),
+                    error_control(error_code::NOT_FOUND, "there is no such terminal"),
                     cx,
                 );
             }
             Err(AttachError::Inactive) => {
-                self.send_control(
+                self.queue_control(
                     session_id,
-                    &error_control(error_code::INTERNAL, "terminals are not being shared"),
+                    error_control(error_code::INTERNAL, "terminals are not being shared"),
                     cx,
                 );
             }
@@ -1024,34 +1405,44 @@ impl Hosting {
                 error_code::TOO_LARGE,
                 "this device already has a project connection open",
             );
-            self.send_control(session_id, &refusal, cx);
+            self.queue_control(session_id, refusal, cx);
             return;
         }
         if session.streams.contains_key(&stream_id) {
             let refusal = refusal(error_code::MALFORMED, "that stream is already in use");
-            self.send_control(session_id, &refusal, cx);
+            self.queue_control(session_id, refusal, cx);
             return;
         }
-        let Some(launch) = ide_bridge::locate(cx) else {
+        let Some(launch) = self.project_server(cx) else {
             let refusal = refusal(
                 crate::session_router::UNSUPPORTED,
                 "this Zode was installed without its project server",
             );
-            self.send_control(session_id, &refusal, cx);
+            self.queue_control(session_id, refusal, cx);
             return;
         };
         let bridge = match IdeBridge::start(&launch, stream_id, cx) {
             Ok(bridge) => bridge,
+            Err(error) if ide_bridge::is_too_many_stopping(&error) => {
+                log::info!("not starting a project server: {error}");
+                let refusal = refusal(
+                    error_code::RATE_LIMITED,
+                    "earlier project servers are still being stopped; try again shortly",
+                );
+                self.queue_control(session_id, refusal, cx);
+                return;
+            }
             Err(error) => {
                 log::warn!("could not start the project server: {error}");
                 let refusal = refusal(error_code::INTERNAL, "the project server did not start");
-                self.send_control(session_id, &refusal, cx);
+                self.queue_control(session_id, refusal, cx);
                 return;
             }
         };
         let now = Self::now(cx);
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.ide = Some(bridge);
+            session.ide_requests = RequestDetector::new();
             session.last_activity = now;
         }
         let path_style = if util::paths::PathStyle::local().is_windows() {
@@ -1066,7 +1457,7 @@ impl Hosting {
             shell: Some(util::shell::get_system_shell()),
             default_shell: Some(util::shell::get_default_system_shell()),
         };
-        self.send_control(session_id, &opened, cx);
+        self.queue_control(session_id, opened, cx);
     }
 
     fn on_ide_data(
@@ -1084,18 +1475,24 @@ impl Hosting {
             // The device is done with the project server. The session stays:
             // it still mirrors.
             session.ide = None;
-            self.send_end_of_stream(session_id, stream_id, cx);
+            self.queue_end_of_stream(session_id, stream_id, cx);
             return;
         }
         let Some(ide) = session.ide.as_ref() else {
             return;
         };
+        // Read before the bytes are handed on. The controlling Zode pings its
+        // project server every few seconds, so traffic alone says nothing about
+        // anyone being there.
+        let asked_for_something = session.ide_requests.sees_a_request(&frame.payload);
         if ide.send_input(frame.payload).is_err() {
             log::warn!("ending session {session_id}: it sent more than the project server reads");
             self.end_session(session_id, cx);
             return;
         }
-        session.last_activity = now;
+        if asked_for_something {
+            session.last_activity = now;
+        }
     }
 
     fn serve_files(
@@ -1249,7 +1646,7 @@ impl Hosting {
             .sessions
             .values()
             .any(|other| other.peer_device_id == *device_id && other.resume.is_some());
-        if one_is_opening || session.outbound_bytes >= MAX_QUEUED_REPLY_BYTES {
+        if one_is_opening || session.outbound.bytes >= MAX_QUEUED_REPLY_BYTES {
             self.queue_control(session_id, Self::rate_limited(request_id), cx);
             return;
         }
@@ -1323,27 +1720,53 @@ impl Hosting {
             }
             Ok(controls) => {
                 for control in controls {
-                    session.enqueue(Outbound::control(control));
+                    session.outbound.enqueue_reply(control);
                 }
                 self.flush(session_id, cx);
             }
         }
     }
 
-    /// Queues a small message behind whatever is already waiting for the
-    /// device, so it arrives in order and a full relay connection delays it
-    /// instead of ending the session. A device whose queue is this far over its
-    /// allowance is ignoring what it is told, and is ended.
-    fn queue_control(&mut self, session_id: u32, control: Control, cx: &mut Context<RemoteHost>) {
+    /// Queues the answer to something the device asked for behind the other
+    /// control messages waiting for it, so it arrives in order and a full relay
+    /// connection delays it instead of ending the session. The relay connection
+    /// is shared, so one device's output filling it is no reason to end
+    /// anybody's session. A device whose own queue is this far over its
+    /// allowance is ignoring what it is told, and is ended. `false` if the
+    /// session is gone, or ended here.
+    pub(crate) fn queue_control(
+        &mut self,
+        session_id: u32,
+        control: Control,
+        cx: &mut Context<RemoteHost>,
+    ) -> bool {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return false;
+        };
+        if session.outbound.bytes >= MAX_QUEUED_REPLY_BYTES + REFUSAL_ALLOWANCE_BYTES {
+            log::warn!("ending session {session_id}: it asks for more than it reads");
+            self.end_session(session_id, cx);
+            return false;
+        }
+        session.outbound.enqueue_reply(control);
+        self.flush(session_id, cx);
+        self.sessions.contains_key(&session_id)
+    }
+
+    /// Queues something the host says on its own account. Unlike an answer it
+    /// is not the device's doing, so a device that is slow to read is never
+    /// ended for it: what waits is replaced by newer news about the same thing,
+    /// and bounded.
+    pub(crate) fn push_control(
+        &mut self,
+        session_id: u32,
+        control: Control,
+        cx: &mut Context<RemoteHost>,
+    ) {
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
-        if session.outbound_bytes >= MAX_QUEUED_REPLY_BYTES + REFUSAL_ALLOWANCE_BYTES {
-            log::warn!("ending session {session_id}: it asks for more than it reads");
-            self.end_session(session_id, cx);
-            return;
-        }
-        session.enqueue(Outbound::control(control));
+        session.outbound.enqueue_push(control);
         self.flush(session_id, cx);
     }
 
@@ -1375,7 +1798,7 @@ impl Hosting {
             }
             Ok(FileReply::Listing(listing)) => {
                 for control in file_browse::list_replies(request_id, listing) {
-                    session.enqueue(Outbound::control(control));
+                    session.outbound.enqueue_reply(control);
                 }
             }
             Ok(FileReply::File(bytes)) => {
@@ -1404,7 +1827,7 @@ impl Hosting {
             let Some(session) = self.sessions.get_mut(&session_id) else {
                 return;
             };
-            if session.outbound.is_empty() {
+            if !session.outbound.has_waiting() {
                 return;
             }
             let client = self.client.read(cx);
@@ -1414,14 +1837,22 @@ impl Hosting {
                 self.schedule_flush_retry(cx);
                 return;
             }
-            let Some(item) = session.outbound.pop_front() else {
+            let Some(item) = session.outbound.next() else {
                 return;
             };
-            session.outbound_bytes = session.outbound_bytes.saturating_sub(item.weight());
             let sealed = match item {
-                Outbound::Control(control, _) => session.channel.seal_control(&control),
-                Outbound::Data { stream_id, bytes } => session.channel.seal_data(stream_id, bytes),
-                Outbound::EndOfStream { stream_id } => {
+                Outbound::Control(QueuedControl {
+                    body: ControlBody::Plain(control),
+                    ..
+                }) => session.channel.seal_control(&control),
+                Outbound::Control(QueuedControl {
+                    body: ControlBody::Encoded(encoded),
+                    ..
+                }) => session.channel.seal_encoded_control(encoded),
+                Outbound::Bulk(Bulk::Data { stream_id, bytes }) => {
+                    session.channel.seal_data(stream_id, bytes)
+                }
+                Outbound::Bulk(Bulk::EndOfStream { stream_id }) => {
                     session.channel.seal_end_of_stream(stream_id)
                 }
             };
@@ -1440,72 +1871,24 @@ impl Hosting {
         }
     }
 
-    fn send_end_of_stream(&mut self, session_id: u32, stream_id: u32, cx: &gpui::App) {
+    /// Tells the device a stream has ended, behind what is already waiting for
+    /// it, and when the relay has room.
+    fn queue_end_of_stream(
+        &mut self,
+        session_id: u32,
+        stream_id: u32,
+        cx: &mut Context<RemoteHost>,
+    ) {
         let Some(session) = self.sessions.get_mut(&session_id) else {
             return;
         };
-        let client = self.client.read(cx);
-        // Checked before sealing, as everywhere: a sealed frame that is not
-        // sent leaves a gap the peer can never read past. A stream that cannot
-        // be told it ended is not worth more than a log line; the device learns
-        // from the session or the relay ending.
-        if !client.has_capacity_for(1) {
-            log::debug!("could not end stream {stream_id}: the relay connection is full");
-            return;
-        }
-        match session.channel.seal_end_of_stream(stream_id) {
-            Ok(sealed) => {
-                if let Err(error) = client.send_frame(session_id, &sealed) {
-                    log::debug!("could not end stream {stream_id}: {error}");
-                }
-            }
-            Err(error) => log::debug!("could not end stream {stream_id}: {error}"),
-        }
+        session
+            .outbound
+            .enqueue_bulk(Bulk::EndOfStream { stream_id });
+        self.flush_outbound(session_id, cx);
     }
 
-    /// Seals and sends a control message. A session that cannot be written to
-    /// is ended: it is either gone or too slow to be worth holding.
-    pub(crate) fn send_control(
-        &mut self,
-        session_id: u32,
-        control: &Control,
-        cx: &mut Context<RemoteHost>,
-    ) -> bool {
-        let sent = self.try_send_control(session_id, control, cx);
-        if let Err(reason) = sent {
-            log::warn!("ending session {session_id}: {reason}");
-            self.end_session(session_id, cx);
-            return false;
-        }
-        true
-    }
-
-    fn try_send_control(
-        &mut self,
-        session_id: u32,
-        control: &Control,
-        cx: &gpui::App,
-    ) -> Result<(), String> {
-        let session = self
-            .sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| "it is already gone".to_string())?;
-        let client = self.client.read(cx);
-        // Checked before sealing: a sealed frame that is then not sent leaves a
-        // gap in the cipher's counter, and the peer could never read on.
-        if !client.has_capacity_for(1) {
-            return Err("the connection to the relay is full".to_string());
-        }
-        let sealed = session
-            .channel
-            .seal_control(control)
-            .map_err(|error| error.to_string())?;
-        client
-            .send_frame(session_id, &sealed)
-            .map_err(|error: SendError| error.to_string())
-    }
-
-    /// Sends a control message to every device that has said hello.
+    /// Pushes a control message to every device that has said hello.
     pub(crate) fn broadcast(&mut self, control: &Control, cx: &mut Context<RemoteHost>) {
         let greeted: Vec<u32> = self
             .sessions
@@ -1514,10 +1897,11 @@ impl Hosting {
             .map(|(id, _)| *id)
             .collect();
         for session_id in greeted {
-            self.send_control(session_id, control, cx);
+            self.push_control(session_id, control.clone(), cx);
         }
     }
 
+    /// Pushes a control message to each of `sessions`.
     pub(crate) fn send_to(
         &mut self,
         sessions: &[u32],
@@ -1525,9 +1909,7 @@ impl Hosting {
         cx: &mut Context<RemoteHost>,
     ) {
         for session_id in sessions {
-            if self.sessions.contains_key(session_id) {
-                self.send_control(*session_id, control, cx);
-            }
+            self.push_control(*session_id, control.clone(), cx);
         }
     }
 
@@ -1547,7 +1929,12 @@ impl Hosting {
             let Some(session) = self.sessions.get(&session_id) else {
                 return;
             };
-            if !session.router.hello_done() {
+            // What is still queued stopped for want of room, and output must not
+            // pass it if a place has come free since: the device would see a
+            // terminal's output before the message that tells it which stream
+            // that is. The retry that `flush_outbound` set up sends it all in
+            // order.
+            if session.outbound.has_waiting() || !session.router.hello_done() {
                 return;
             }
             if !self.client.read(cx).has_capacity_for(1) {
@@ -1605,7 +1992,7 @@ impl Hosting {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
                         session.ide = None;
                     }
-                    self.send_end_of_stream(session_id, stream_id, cx);
+                    self.queue_end_of_stream(session_id, stream_id, cx);
                     return;
                 }
             }
@@ -1733,7 +2120,7 @@ impl Hosting {
         let mut remaining = total;
         while remaining > 0 {
             let size = remaining.min(MAX_INNER_PAYLOAD_LEN);
-            session.enqueue(Outbound::Data {
+            session.outbound.enqueue_bulk(Bulk::Data {
                 stream_id: HOST_STREAM_BASE,
                 bytes: vec![0; size],
             });
@@ -1753,5 +2140,269 @@ impl Hosting {
             .iter()
             .filter(|(_, session)| session.confirmed)
             .map(|(id, session)| (*id, session))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remote_relay_protocol::{AgentStatus, AgentSummary, TerminalSummary};
+
+    #[test]
+    fn a_device_name_is_shown_as_it_was_written() {
+        assert_eq!(displayable_device_name("Ada's laptop"), "Ada's laptop");
+        assert_eq!(displayable_device_name("  Ada  "), "Ada");
+    }
+
+    #[test]
+    fn a_device_name_with_nothing_left_is_called_a_browser() {
+        for raw in ["", "   ", "\u{202e}\u{0}\n"] {
+            assert_eq!(
+                displayable_device_name(raw),
+                FALLBACK_DEVICE_NAME,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_name_is_cleaned_before_it_is_shown() {
+        assert_eq!(displayable_device_name("Ada\n\u{202e}laptop"), "Adalaptop");
+        assert!(displayable_device_name(&"x".repeat(5000)).chars().count() <= 64);
+    }
+
+    fn agent(id: &str, status: AgentStatus) -> AgentSummary {
+        AgentSummary {
+            id: id.to_string(),
+            name: "Claude Code".to_string(),
+            status,
+            title: None,
+            session_id: None,
+            agent: None,
+        }
+    }
+
+    fn update(id: &str, status: AgentStatus) -> Control {
+        Control::AgentUpdate {
+            agent: agent(id, status),
+        }
+    }
+
+    fn resized(terminal_id: &str, columns: u16) -> Control {
+        Control::TerminalResized {
+            terminal_id: terminal_id.to_string(),
+            columns,
+            rows: 24,
+        }
+    }
+
+    fn closed(terminal_id: &str) -> Control {
+        Control::TerminalClosed {
+            terminal_id: terminal_id.to_string(),
+            exit_code: None,
+        }
+    }
+
+    fn terminal_list(count: usize) -> Control {
+        Control::TerminalList {
+            terminals: (0..count)
+                .map(|index| TerminalSummary {
+                    id: format!("terminal-{index}"),
+                    title: "a title that is not short ".repeat(4),
+                    columns: 80,
+                    rows: 24,
+                })
+                .collect(),
+        }
+    }
+
+    /// Everything waiting, in the order it would be sent, as what it is.
+    fn drain(queue: &mut OutboundQueue) -> Vec<String> {
+        let mut sent = Vec::new();
+        while let Some(item) = queue.next() {
+            sent.push(match item {
+                Outbound::Control(QueuedControl {
+                    body: ControlBody::Plain(control),
+                    ..
+                }) => format!("{control:?}"),
+                Outbound::Control(QueuedControl {
+                    body: ControlBody::Encoded(bytes),
+                    ..
+                }) => match decode_control(&bytes) {
+                    Ok(Control::TerminalList { terminals }) => {
+                        format!("terminal list of {}", terminals.len())
+                    }
+                    Ok(Control::AgentList { agents }) => format!("agent list of {}", agents.len()),
+                    other => format!("{other:?}"),
+                },
+                Outbound::Bulk(Bulk::Data { bytes, .. }) => format!("data {}", bytes.len()),
+                Outbound::Bulk(Bulk::EndOfStream { stream_id }) => format!("end {stream_id}"),
+            });
+        }
+        sent
+    }
+
+    #[test]
+    fn a_control_without_a_list_weighs_a_flat_amount() {
+        for control in [
+            Control::Ping,
+            Control::Pong,
+            error_control(error_code::MALFORMED, "no"),
+        ] {
+            assert_eq!(
+                QueuedControl::new(control, None).weight,
+                CONTROL_WEIGHT_FALLBACK
+            );
+        }
+    }
+
+    #[test]
+    fn a_control_with_a_list_weighs_what_it_encodes_to() {
+        let control = terminal_list(200);
+        let encoded = serde_json::to_vec(&control).expect("encodes");
+        assert!(encoded.len() > CONTROL_WEIGHT_FALLBACK);
+        let queued = QueuedControl::new(control, None);
+        assert_eq!(queued.weight, encoded.len());
+        // Encoded once, here, and sealed from these bytes.
+        assert!(matches!(queued.body, ControlBody::Encoded(bytes) if bytes == encoded));
+    }
+
+    #[test]
+    fn what_the_host_pushes_never_counts_against_the_device() {
+        let mut queue = OutboundQueue::default();
+        for index in 0..1000 {
+            queue.enqueue_push(closed(&format!("terminal-{index}")));
+            queue.enqueue_push(terminal_list(50));
+        }
+        assert_eq!(queue.bytes, 0, "the device asked for none of it");
+
+        queue.enqueue_reply(Control::Pong);
+        assert_eq!(queue.bytes, CONTROL_WEIGHT_FALLBACK, "an answer does");
+        drain(&mut queue);
+        assert_eq!(queue.bytes, 0);
+        assert!(!queue.has_waiting());
+    }
+
+    #[test]
+    fn a_reply_goes_ahead_of_bulk_data_and_replies_keep_their_order() {
+        let mut queue = OutboundQueue::default();
+        let data = |size: usize| Bulk::Data {
+            stream_id: 7,
+            bytes: vec![0; size],
+        };
+        queue.enqueue_reply(Control::DiffReply {
+            request_id: 1,
+            stream_id: 7,
+            truncated: false,
+        });
+        queue.enqueue_bulk(data(10));
+        queue.enqueue_bulk(data(20));
+        queue.enqueue_bulk(Bulk::EndOfStream { stream_id: 7 });
+        queue.enqueue_reply(Control::Pong);
+        queue.enqueue_push(closed("terminal-1"));
+        queue.enqueue_reply(Control::Ping);
+
+        let sent = drain(&mut queue);
+        assert_eq!(
+            sent.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "DiffReply { request_id: 1, stream_id: 7, truncated: false }",
+                "Pong",
+                "TerminalClosed { terminal_id: \"terminal-1\", exit_code: None }",
+                "Ping",
+                "data 10",
+                "data 20",
+                "end 7"
+            ],
+            "controls first and in order, then the frames, which follow the reply that names them"
+        );
+    }
+
+    #[test]
+    fn a_newer_push_replaces_an_older_one_about_the_same_thing() {
+        let mut queue = OutboundQueue::default();
+        queue.enqueue_push(terminal_list(1));
+        queue.enqueue_push(update("agent-1", AgentStatus::Working));
+        queue.enqueue_push(update("agent-2", AgentStatus::Working));
+        queue.enqueue_push(terminal_list(2));
+        queue.enqueue_push(update("agent-1", AgentStatus::Finished));
+        queue.enqueue_push(resized("terminal-1", 80));
+        queue.enqueue_push(resized("terminal-1", 100));
+        queue.enqueue_push(resized("terminal-2", 90));
+
+        let sent = drain(&mut queue);
+        assert_eq!(
+            sent.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "AgentUpdate { agent: AgentSummary { id: \"agent-2\", name: \"Claude Code\", status: Working, title: None, session_id: None, agent: None } }",
+                "terminal list of 2",
+                "AgentUpdate { agent: AgentSummary { id: \"agent-1\", name: \"Claude Code\", status: Finished, title: None, session_id: None, agent: None } }",
+                "TerminalResized { terminal_id: \"terminal-1\", columns: 100, rows: 24 }",
+                "TerminalResized { terminal_id: \"terminal-2\", columns: 90, rows: 24 }",
+            ],
+            "only the latest about each thing is told, after what it replaced"
+        );
+    }
+
+    #[test]
+    fn a_whole_list_replaces_the_updates_it_includes_and_a_close_replaces_a_resize() {
+        let mut queue = OutboundQueue::default();
+        queue.enqueue_push(update("agent-1", AgentStatus::Working));
+        queue.enqueue_push(update("agent-2", AgentStatus::Idle));
+        queue.enqueue_push(resized("terminal-1", 80));
+        queue.enqueue_push(Control::AgentList {
+            agents: vec![agent("agent-2", AgentStatus::Idle)],
+        });
+        queue.enqueue_push(closed("terminal-1"));
+        queue.enqueue_push(closed("terminal-2"));
+
+        let sent = drain(&mut queue);
+        assert_eq!(
+            sent.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "agent list of 1",
+                "TerminalClosed { terminal_id: \"terminal-1\", exit_code: None }",
+                "TerminalClosed { terminal_id: \"terminal-2\", exit_code: None }",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_answer_is_never_dropped_for_a_push() {
+        let mut queue = OutboundQueue::default();
+        queue.enqueue_reply(Control::AgentList {
+            agents: vec![agent("agent-1", AgentStatus::Idle)],
+        });
+        queue.enqueue_reply(terminal_list(1));
+        queue.enqueue_push(Control::AgentList { agents: Vec::new() });
+        queue.enqueue_push(terminal_list(3));
+
+        let sent = drain(&mut queue);
+        assert_eq!(
+            sent.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "agent list of 1",
+                "terminal list of 1",
+                "agent list of 0",
+                "terminal list of 3"
+            ]
+        );
+    }
+
+    #[test]
+    fn pushes_that_cannot_be_replaced_are_bounded() {
+        let mut queue = OutboundQueue::default();
+        for index in 0..MAX_QUEUED_PUSHES + 10 {
+            queue.enqueue_push(closed(&format!("terminal-{index}")));
+        }
+        assert_eq!(queue.queued_pushes, MAX_QUEUED_PUSHES);
+        let sent = drain(&mut queue);
+        assert_eq!(sent.len(), MAX_QUEUED_PUSHES);
+        assert!(
+            sent[0].contains("terminal-10\""),
+            "the oldest were let go: {}",
+            sent[0]
+        );
+        assert_eq!(queue.queued_pushes, 0);
     }
 }

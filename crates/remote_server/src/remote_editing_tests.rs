@@ -2845,7 +2845,7 @@ mod terminals {
         // A dropped entity is released when effects next flush.
         cx.update(|_| {});
         wait_until(cx, "the server to free the place", |_| {
-            headless.read_with(server_cx, |headless, _| headless.open_terminal_count())
+            headless.read_with(server_cx, |headless, _| headless.running_terminal_count())
                 < MAX_TERMINALS_PER_CLIENT
         });
         project
@@ -2854,6 +2854,75 @@ mod terminals {
             })
             .await
             .expect("a place was freed");
+    }
+
+    /// A process that ignores the hang-up outlives its terminal's closing by
+    /// the grace period, with its watcher and event loop; opening and closing in
+    /// a loop must not get past the cap meanwhile.
+    #[gpui::test]
+    async fn test_a_terminal_that_is_closing_still_counts_toward_the_limit(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, headless) = setup(cx, server_cx).await;
+        // Each says when it is ignoring the hang-up: closing one that has not
+        // got that far yet would end it at once.
+        let ready_files: Vec<_> = (0..=MAX_TERMINALS_PER_CLIENT)
+            .map(|index| scratch_file(&format!("stubborn-{index}")))
+            .collect();
+        let stubborn = |index: usize| {
+            shell_task(&format!(
+                "trap '' HUP; touch {}; exec sleep 60",
+                ready_files[index].display()
+            ))
+        };
+        let mut open = Vec::new();
+        for index in 0..MAX_TERMINALS_PER_CLIENT {
+            open.push(
+                project
+                    .update(cx, |project, cx| {
+                        project.create_terminal_task(stubborn(index), cx)
+                    })
+                    .await
+                    .expect("within the limit"),
+            );
+        }
+        wait_until(cx, "every process to ignore the hang-up", |_| {
+            ready_files[..MAX_TERMINALS_PER_CLIENT]
+                .iter()
+                .all(|file| file.exists())
+        });
+
+        open.pop();
+        cx.update(|_| {});
+        wait_until(cx, "the server to take the terminal away", |_| {
+            headless.read_with(server_cx, |headless, _| headless.live_terminal_count())
+                < MAX_TERMINALS_PER_CLIENT
+        });
+        let refused = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(stubborn(MAX_TERMINALS_PER_CLIENT), cx)
+            })
+            .await;
+        let error = refused.err().expect("its process has not gone yet");
+        assert!(
+            format!("{error:#}").contains("too many terminals"),
+            "{error:#}"
+        );
+
+        wait_until(cx, "the closed terminal's process to be collected", |_| {
+            headless.read_with(server_cx, |headless, _| headless.running_terminal_count())
+                < MAX_TERMINALS_PER_CLIENT
+        });
+        project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(stubborn(MAX_TERMINALS_PER_CLIENT), cx)
+            })
+            .await
+            .expect("a place was freed");
+        for file in &ready_files {
+            std::fs::remove_file(file).ok();
+        }
     }
 
     #[gpui::test]

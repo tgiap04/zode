@@ -18,13 +18,13 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use agent_sessions::{AgentKind, Fork, SessionIndex, SessionSummary, provider_for};
-use agent_ui::{ResumeRefusal, SessionStore, resume_refusal, resume_session};
+use agent_ui::{ResumeRefusal, SessionStore, resume_refusal_in_background, resume_session};
 use futures::StreamExt as _;
-use gpui::{AnyWindowHandle, App, AsyncApp, Entity, WeakEntity, WindowHandle};
+use gpui::{AnyWindowHandle, App, AsyncApp, Entity, Global, WeakEntity, WindowHandle};
 use remote_relay_protocol::{Control, SessionCursor, SessionEntry, error_code};
 use settings::WorktreeId;
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
@@ -58,6 +58,12 @@ const MAX_SESSION_ID_BYTES: usize = 128;
 /// tag, the request id, the flags, and a cursor whose id is as long as an id
 /// may be.
 const REPLY_OVERHEAD: usize = 512;
+
+/// How long after one read of the sessions from disk the next may be asked for.
+/// A read opens every transcript there is, so a device that asks again as each
+/// answer arrives would keep the disk busy for as long as it likes; inside this
+/// time it is answered from the read that was just made.
+pub(crate) const MIN_FRESH_READ_INTERVAL: Duration = Duration::from_secs(5);
 
 /// What a device asked of the sessions on this host, once the router has
 /// checked its shape.
@@ -438,40 +444,63 @@ fn not_found() -> BrowseError {
     BrowseError::new(error_code::NOT_FOUND, "there is no such session")
 }
 
-/// The sessions index, once it has been read from disk since this was called
-/// if `refresh`, and in any case once it has been read at all.
+/// When the last read of the sessions from disk that a device asked for was
+/// done. One for the whole app: the disk is shared by every device.
+#[derive(Default)]
+struct FreshReads {
+    landed_at: Option<Instant>,
+}
+
+impl Global for FreshReads {}
+
+/// Whether a read from disk may be started now: always for the first one, for
+/// which there is nothing to answer from, and otherwise not until
+/// [`MIN_FRESH_READ_INTERVAL`] after the last.
+fn may_read_from_disk(generation: u64, last_landed_at: Option<Instant>, now: Instant) -> bool {
+    generation == 0
+        || last_landed_at
+            .is_none_or(|landed| now.saturating_duration_since(landed) >= MIN_FRESH_READ_INTERVAL)
+}
+
+/// The sessions index. If `refresh`, and a read from disk is allowed, it is one
+/// that began after this was called; otherwise the index as it is.
 ///
-/// Asking for a refresh is cheap: the store coalesces them, so any number of
-/// devices asking at once cost one more sweep. What this waits for is the
-/// generation moving on, which is the store's way of saying a sweep landed.
+/// Asking for a read is cheap: the store coalesces them, so any number of
+/// devices asking at once cost one more sweep. A sweep that is already running
+/// may have read the disk before this was asked, so it is not the answer: the
+/// store is asked for another to follow it, and what this waits for is the
+/// store being idle again, which only happens once that one has landed.
 async fn read_index(refresh: bool, cx: &mut AsyncApp) -> Result<Arc<SessionIndex>, BrowseError> {
     let (notify, mut landed) = futures::channel::mpsc::unbounded::<()>();
-    let (store, generation_before, _watch) = cx.update(|cx| {
+    let (store, reading, _watch) = cx.update(|cx| {
         let store = SessionStore::global(cx);
         // Set up before the refresh is asked for, so a sweep that lands the
         // moment it is cannot be missed.
         let watch = cx.observe(&store, move |_, _| {
             notify.unbounded_send(()).log_err();
         });
+        let now = cx.background_executor().now();
+        let last_landed_at = cx.default_global::<FreshReads>().landed_at;
         let generation = store.read(cx).generation();
-        let sweep = refresh || generation == 0;
-        if sweep {
+        let reading =
+            (refresh || generation == 0) && may_read_from_disk(generation, last_landed_at, now);
+        if reading {
             store.update(cx, |store, cx| store.refresh(cx));
         }
-        (store, sweep.then_some(generation), watch)
+        (store, reading, watch)
     });
-    loop {
-        let (generation, index) = cx.update(|cx| {
-            let store = store.read(cx);
-            (store.generation(), store.index().clone())
-        });
-        if generation_before.is_none_or(|before| generation > before) {
-            return Ok(index);
-        }
+    while reading && cx.update(|cx| store.read(cx).is_scanning()) {
         if landed.next().await.is_none() {
             return Err(BrowseError::internal("the session list could not be read"));
         }
     }
+    Ok(cx.update(|cx| {
+        if reading {
+            let now = cx.background_executor().now();
+            cx.default_global::<FreshReads>().landed_at = Some(now);
+        }
+        store.read(cx).index().clone()
+    }))
 }
 
 /// Answers a `sessions_list`. A first page is read fresh from disk, a later
@@ -485,12 +514,19 @@ pub(crate) async fn list(
     cx: &mut AsyncApp,
 ) -> Result<Vec<Control>, BrowseError> {
     let index = read_index(before.is_none(), cx).await?;
-    let (entries, next) = cx.update(|cx| {
-        let scopes: Vec<RootScope> = open_roots(cx).into_iter().map(|root| root.scope).collect();
+    let scopes: Vec<RootScope> =
+        cx.update(|cx| open_roots(cx).into_iter().map(|root| root.scope).collect());
+    // Judging every session on disk, thousands of them for a heavy user, is
+    // not work for the thread that draws the windows.
+    let (mut entries, next) = cx
+        .background_executor()
+        .spawn(async move { page(index.sessions(), &scopes, before.as_ref(), limit, |_| None) })
+        .await;
+    cx.update(|cx| {
         let mirror = agents.read(cx);
-        page(index.sessions(), &scopes, before.as_ref(), limit, |id| {
-            mirror.running_agent_for_session(id, cx)
-        })
+        for entry in &mut entries {
+            entry.open_agent_id = mirror.running_agent_for_session(&entry.id, cx);
+        }
     });
     Ok(session_replies(request_id, entries, next))
 }
@@ -529,7 +565,16 @@ pub(crate) async fn resume(
         }
     }
 
-    match resume_refusal(&session, if fork { Fork::New } else { Fork::Continue }) {
+    let refusal = cx
+        .update(|cx| {
+            resume_refusal_in_background(
+                &session,
+                if fork { Fork::New } else { Fork::Continue },
+                cx,
+            )
+        })
+        .await;
+    match refusal {
         Some(ResumeRefusal::Unsupported) => {
             return Err(BrowseError::new(
                 UNSUPPORTED,

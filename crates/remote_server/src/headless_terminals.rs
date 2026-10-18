@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -37,12 +37,14 @@ use util::ResultExt as _;
 
 use crate::HeadlessProject;
 
-/// Live terminals one client may hold at once. A client that wants more is
-/// told so, rather than being allowed to exhaust the host's processes.
+/// Terminals one client may have at once, those that are still being closed
+/// included: a closed terminal's process, watcher and event loop go on for a
+/// while, so a client that opens and closes in a loop is counted for what it is
+/// using. A client that wants more is told so, rather than being allowed to
+/// exhaust the host's processes and threads.
 pub const MAX_TERMINALS_PER_CLIENT: usize = 16;
 
 /// How long a closed terminal's child may take to go after the hang-up.
-#[cfg(unix)]
 pub(crate) const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The largest width or height a client may give a terminal. A pty has no use
@@ -422,15 +424,42 @@ impl Drop for LiveTerminal {
     }
 }
 
+/// One terminal whose process has not been collected yet, counted until this is
+/// dropped.
+struct CountedTerminal(Arc<AtomicUsize>);
+
+impl CountedTerminal {
+    fn begin(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter.clone())
+    }
+}
+
+impl Drop for CountedTerminal {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 pub struct HeadlessTerminals {
     live: HashMap<u64, LiveTerminal>,
+    /// Terminals the client has, and those it has closed whose watcher has not
+    /// finished: the cap is on these.
+    running: Arc<AtomicUsize>,
 }
 
 impl HeadlessTerminals {
+    /// Terminals the client has and has not closed.
     #[cfg(all(test, unix))]
-    pub fn len(&self) -> usize {
+    pub fn live_len(&self) -> usize {
         self.live.len()
+    }
+
+    /// Terminals that count toward the cap.
+    #[cfg(all(test, unix))]
+    pub fn running_len(&self) -> usize {
+        self.running.load(Ordering::SeqCst)
     }
 
     pub fn create(
@@ -443,11 +472,14 @@ impl HeadlessTerminals {
         if self.live.contains_key(&terminal_id) {
             return Err(anyhow!("terminal {terminal_id} already exists"));
         }
-        if self.live.len() >= MAX_TERMINALS_PER_CLIENT {
+        if self.running.load(Ordering::SeqCst) >= MAX_TERMINALS_PER_CLIENT {
             return Err(anyhow!(
                 "too many terminals: at most {MAX_TERMINALS_PER_CLIENT} may be open at once"
             ));
         }
+        // Held until the watcher thread is done, or until this returns if
+        // nothing was started.
+        let counted = CountedTerminal::begin(&self.running);
 
         let size = window_size(request.columns, request.rows);
         let options = tty::Options {
@@ -541,6 +573,7 @@ impl HeadlessTerminals {
             .spawn({
                 let closed = closed.clone();
                 move || {
+                    let _counted = counted;
                     #[cfg(test)]
                     let _watcher_count = watcher_count;
                     // Joining drops the pty, and with it the child's session.

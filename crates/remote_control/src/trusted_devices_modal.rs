@@ -4,7 +4,7 @@ use gpui::{App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subs
 use ui::{ListItem, ListItemSpacing, Modal, ModalFooter, ModalHeader, Section, prelude::*};
 use workspace::ModalView;
 
-use crate::remote_host::RemoteHost;
+use crate::remote_host::{RemoteHost, TrustedDevices};
 
 pub struct TrustedDevicesModal {
     host: Entity<RemoteHost>,
@@ -23,7 +23,15 @@ impl Focusable for TrustedDevicesModal {
 
 impl TrustedDevicesModal {
     pub fn new(host: Entity<RemoteHost>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let observation = cx.observe(&host, |_, _, cx| cx.notify());
+        // The devices are the account's, not the connection's: they are listed
+        // and can be forgotten while remote control is off or has stopped. The
+        // host lets go of what it read when it starts or the account changes, so
+        // whatever it says next, they are asked for again if they are missing.
+        let observation = cx.observe(&host, |_, host, cx| {
+            host.update(cx, |host, cx| host.load_trusted_devices(cx));
+            cx.notify();
+        });
+        host.update(cx, |host, cx| host.load_trusted_devices(cx));
         Self {
             host,
             focus_handle: cx.focus_handle(),
@@ -35,14 +43,35 @@ impl TrustedDevicesModal {
 impl Render for TrustedDevicesModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let host = self.host.read(cx);
-        let devices = host.trusted_devices();
         let locked = host.pairing_locked_out();
         let connected = !host.sessions().is_empty();
+        let running = host.has_relay_client();
+        let (devices, unreadable, notice) = match host.trusted_devices_listing(cx) {
+            TrustedDevices::SignedOut => (
+                Vec::new(),
+                false,
+                Some("Sign in to a Zode account to see the devices it trusts."),
+            ),
+            TrustedDevices::Loading => (
+                Vec::new(),
+                false,
+                Some("Loading the trusted devices\u{2026}"),
+            ),
+            TrustedDevices::Listed {
+                devices,
+                unreadable,
+            } => {
+                let notice = devices
+                    .is_empty()
+                    .then_some("No device is trusted. Pair one from the Zode web app.");
+                (devices, unreadable, notice)
+            }
+        };
 
-        let rows = if devices.is_empty() {
+        let listed = if let Some(notice) = notice {
             v_flex().child(
                 h_flex().px_2().py_1p5().child(
-                    Label::new("No device is trusted. Pair one from the Zode web app.")
+                    Label::new(notice)
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 ),
@@ -71,6 +100,30 @@ impl Render for TrustedDevicesModal {
                 )
             }))
         };
+        let rows = listed
+            .when(unreadable, |rows| {
+                rows.child(
+                    h_flex().px_2().py_1p5().child(
+                        Label::new(
+                            "Some saved devices could not be read, so more devices may be \
+                         trusted than are listed.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Warning),
+                    ),
+                )
+            })
+            .when(!running && !devices.is_empty(), |rows| {
+                rows.child(
+                    h_flex().px_2().py_1p5().child(
+                        Label::new(
+                            "Remote control is not running; devices forgotten here stay forgotten.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    ),
+                )
+            });
         // Bounded so a long list scrolls inside the card instead of pushing the
         // footer out of it.
         let list = div()

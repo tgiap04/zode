@@ -28,7 +28,7 @@ use workspace::{MultiWorkspace, Workspace, notifications::NotificationId};
 use super::*;
 use crate::{
     hosting::RESUME_COOLDOWN,
-    session_history::{ResumedToast, RootScope, open_roots, page},
+    session_history::{MIN_FRESH_READ_INTERVAL, ResumedToast, RootScope, open_roots, page},
 };
 
 const NEWEST: &str = "0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f";
@@ -51,6 +51,54 @@ impl SessionProvider for FakeProvider {
     fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
         self.sweeps.fetch_add(1, Ordering::SeqCst);
         Ok(self.sessions.clone())
+    }
+
+    fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
+        Ok(None)
+    }
+
+    fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
+        None
+    }
+
+    fn counts(&self, _session: &SessionSummary) -> anyhow::Result<SessionCounts> {
+        Ok(SessionCounts::default())
+    }
+
+    fn resume_command(&self, _session: &SessionSummary, _fork: Fork) -> Option<AgentCommand> {
+        None
+    }
+
+    fn deletion(&self, _session: &SessionSummary) -> Deletion {
+        Deletion::Nothing
+    }
+}
+
+/// Lists the sessions a script says it lists on each read: the n-th read
+/// returns what the n-th entry holds, and every one after the last returns the
+/// last.
+struct ScriptedProvider {
+    reads: Vec<Vec<SessionSummary>>,
+    sweeps: Arc<AtomicUsize>,
+}
+
+impl SessionProvider for ScriptedProvider {
+    fn agent(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+
+    fn availability(&self) -> Availability {
+        Availability::Ready
+    }
+
+    fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
+        let index = self.sweeps.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .reads
+            .get(index)
+            .or(self.reads.last())
+            .cloned()
+            .unwrap_or_default())
     }
 
     fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
@@ -462,6 +510,7 @@ async fn a_list_is_scoped_to_the_open_folders_ordered_paged_and_says_what_each_c
     assert!(!entries[0].can_fork, "Codex cannot fork");
     assert_eq!(sweeps.load(Ordering::SeqCst), 1, "a later page does not");
 
+    cx.executor().advance_clock(MIN_FRESH_READ_INTERVAL);
     connected.send(&browser, &list_request(3, None, None));
     cx.run_until_parked();
     let all = pages(connected.controls(&browser));
@@ -482,6 +531,86 @@ async fn a_list_is_scoped_to_the_open_folders_ordered_paged_and_says_what_each_c
         rig.host.read_with(cx, |host, _| host
             .file_requests_in_flight(connected.session_id)),
         0
+    );
+}
+
+#[gpui::test]
+async fn a_first_page_asked_again_at_once_is_answered_from_the_read_just_made(
+    cx: &mut TestAppContext,
+) {
+    let (_rig, browser, mut connected) = greeted(cx).await;
+    let folder = Folder::new();
+    let sweeps = install_sessions(cx, vec![session("a", AgentKind::Claude, &folder.root, 1)]);
+    let (_workspaces, cx) = window(cx, &[&folder]).await;
+
+    for request_id in 1..=5 {
+        connected.send(&browser, &list_request(request_id, None, None));
+        cx.run_until_parked();
+        let listed = pages(connected.controls(&browser));
+        assert_eq!(listed[0].0.len(), 1, "every ask is answered");
+    }
+    assert_eq!(
+        sweeps.load(Ordering::SeqCst),
+        1,
+        "five asks in a row cost one read of the disk"
+    );
+
+    cx.executor()
+        .advance_clock(MIN_FRESH_READ_INTERVAL - Duration::from_millis(1));
+    connected.send(&browser, &list_request(6, None, None));
+    cx.run_until_parked();
+    connected.controls(&browser);
+    assert_eq!(sweeps.load(Ordering::SeqCst), 1, "not quite long enough");
+
+    cx.executor().advance_clock(Duration::from_millis(1));
+    connected.send(&browser, &list_request(7, None, None));
+    cx.run_until_parked();
+    connected.controls(&browser);
+    assert_eq!(
+        sweeps.load(Ordering::SeqCst),
+        2,
+        "and once it has passed a first page reads again"
+    );
+}
+
+/// A sweep that is running when a list is asked for began before the ask, so
+/// what it read may be missing a session made a moment ago. The page must come
+/// from a read that began after.
+#[gpui::test(iterations = 30)]
+async fn a_sweep_already_running_is_not_the_answer_to_a_fresh_list(cx: &mut TestAppContext) {
+    let (_rig, browser, mut connected) = greeted(cx).await;
+    let folder = Folder::new();
+    let old = session("old", AgentKind::Claude, &folder.root, 100);
+    let new = session("new", AgentKind::Claude, &folder.root, 200);
+    let sweeps = Arc::new(AtomicUsize::new(0));
+    // The first read is the one that fills the store. The second is the sweep
+    // that is running when the list is asked for, and read the disk before
+    // `new` was made; the third began after.
+    let provider = Arc::new(ScriptedProvider {
+        reads: vec![vec![old.clone()], vec![old.clone()], vec![old, new]],
+        sweeps: sweeps.clone(),
+    });
+    cx.update(|cx| SessionStore::install_global_for_test(vec![provider], cx));
+    let (_workspaces, cx) = window(cx, &[&folder]).await;
+    connected.send(&browser, &list_request(1, None, None));
+    cx.run_until_parked();
+    connected.controls(&browser);
+    cx.executor().advance_clock(MIN_FRESH_READ_INTERVAL);
+
+    // Started by something else, and not yet run when the ask arrives.
+    cx.update(|_, cx| {
+        let store = SessionStore::global(cx);
+        store.update(cx, |store, cx| store.refresh(cx));
+    });
+    connected.send(&browser, &list_request(2, None, None));
+    cx.run_until_parked();
+    let listed = pages(connected.controls(&browser));
+    let ids: Vec<&str> = listed[0].0.iter().map(|entry| entry.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["new", "old"],
+        "{} reads",
+        sweeps.load(Ordering::SeqCst)
     );
 }
 
