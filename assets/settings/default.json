@@ -153,8 +153,10 @@
   // no connection for it and watches no terminal. Every device must be approved
   // once by comparing a six-digit code, and whenever one is connected the status
   // bar says so and offers a way to disconnect it.
-  // `idle_timeout_minutes` disconnects a device that sends nothing for that
-  // long; 0 turns the limit off.
+  // `idle_timeout_minutes` disconnects a device that has not been used for that
+  // long: typing in a terminal, browsing files, listing or resuming sessions,
+  // and requests from a project opened from another Zode count as use, while
+  // pings and that project's heartbeat do not. 0 turns the limit off.
   "remote_control": {
     "enabled": false,
     "idle_timeout_minutes": 30,

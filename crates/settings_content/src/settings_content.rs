@@ -1268,8 +1268,9 @@ pub struct RemoteControlSettingsContent {
     ///
     /// Default: false
     pub enabled: Option<bool>,
-    /// How many minutes a connected device may go without sending anything
-    /// before it is disconnected. 0 turns the limit off.
+    /// How many minutes a connected device may go unused before it is
+    /// disconnected. Typing, file and session requests and project requests
+    /// count as use; pings and heartbeats do not. 0 turns the limit off.
     ///
     /// Default: 30
     pub idle_timeout_minutes: Option<u64>,

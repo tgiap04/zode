@@ -262,7 +262,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Remote Control Idle Timeout",
-                description: "Minutes a connected device may send nothing before it is disconnected. 0 turns the limit off.",
+                description: "Minutes a connected device may go unused (pings and heartbeats do not count) before it is disconnected. 0 turns the limit off.",
                 field: Box::new(SettingField {
                     json_path: Some("remote_control.idle_timeout_minutes"),
                     pick: |settings_content| {
