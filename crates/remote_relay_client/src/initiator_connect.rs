@@ -225,6 +225,9 @@ impl RelayInitiator {
                         return Ok(None);
                     }
                     let (sender, receiver) = futures::channel::oneshot::channel();
+                    // A wait that gave up leaves its sender behind, and nothing
+                    // else drains it while the relay stays unreachable.
+                    this.connect_waiters.retain(|waiter| !waiter.is_canceled());
                     this.connect_waiters.push(sender);
                     Ok(Some(receiver))
                 })
@@ -254,6 +257,20 @@ impl RelayInitiator {
         host_key: [u8; KEY_LEN],
         cx: &mut AsyncApp,
     ) -> Result<Entity<RelaySession>, ConnectError> {
+        Self::establish_as(this, host_device_id, host_name, host_key, false, cx).await
+    }
+
+    /// [`RelayInitiator::establish`]. With `require_pin`, a host that stopped
+    /// being pinned with `host_key` while the handshake ran is refused: the
+    /// person forgot it, and a session must not come up behind that.
+    async fn establish_as(
+        this: &WeakEntity<Self>,
+        host_device_id: &str,
+        host_name: &str,
+        host_key: [u8; KEY_LEN],
+        require_pin: bool,
+        cx: &mut AsyncApp,
+    ) -> Result<Entity<RelaySession>, ConnectError> {
         let opened = Self::open_awaiting(this, host_device_id, OpenMode::Session, cx).await?;
         // One deadline for the whole handshake: a host that keeps sending
         // frames that are not its answer must not hold this open forever.
@@ -275,6 +292,9 @@ impl RelayInitiator {
         let host_name = host_name.to_string();
         let session_id = opened.session_id;
         opened.initiator.update(cx, |this, cx| {
+            if require_pin && !this.is_pinned_as(&host_device_id, &host_key) {
+                return Err(ConnectError::NotPaired);
+            }
             let writer = this
                 .writer(cx)
                 .ok_or_else(|| ConnectError::Relay("not connected".into()))?;
@@ -310,6 +330,14 @@ impl RelayInitiator {
             if let Some(reason) = session.read(cx).closed_reason() {
                 this.routes.remove(&session_id);
                 return Err(ConnectError::Relay(reason.to_string()));
+            }
+            // A route taken away without a word means frames were dropped
+            // and the relay was told to close the session: the channel's
+            // counter can never be read past the gap.
+            if !matches!(this.routes.get(&session_id), Some(Route::Awaiting(_))) {
+                return Err(ConnectError::Relay(
+                    "the session ended while it was being set up".into(),
+                ));
             }
             this.routes
                 .insert(session_id, Route::Session(session.downgrade()));
@@ -421,7 +449,15 @@ impl RelayInitiator {
                 })
                 .map_err(|_| ConnectError::Unavailable("the relay connection was closed".into()))?
                 .ok_or(ConnectError::NotPaired)?;
-            Self::establish(&this, &host_device_id, &pinned.name, pinned.public_key, cx).await
+            Self::establish_as(
+                &this,
+                &host_device_id,
+                &pinned.name,
+                pinned.public_key,
+                true,
+                cx,
+            )
+            .await
         })
     }
 }

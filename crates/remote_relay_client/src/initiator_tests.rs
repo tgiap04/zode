@@ -10,8 +10,11 @@ use remote_relay_protocol::{Control, DeviceKeypair};
 use serde_json::json;
 
 use crate::{
-    ConnectError, PinnedDevice, RelayEnvironment, RelayInitiator, RelaySession, RelaySessionEvent,
-    SessionError, encode_public_key, load_or_create_keypair,
+    ConnectError, OpenMode, PinnedDevice, RelayEnvironment, RelayEvent, RelayInitiator,
+    RelayInitiatorEvent, RelaySession, RelaySessionEvent, SessionError, StopReason, TrustError,
+    encode_public_key,
+    initiator::{AWAITING_QUEUE, PendingOpen, Route},
+    load_or_create_keypair,
     scripted_host::ScriptedHost,
     test_support::{FakeRelay, InMemoryKeychain, StaticCredentials},
 };
@@ -74,6 +77,46 @@ pub(crate) fn rig_with_host_key(
     devices: Vec<serde_json::Value>,
     host_keypair: Arc<DeviceKeypair>,
 ) -> Rig {
+    rig_with_directory(cx, relay, directory(devices), host_keypair)
+}
+
+/// A directory that also keeps the `Authorization` header of every write made
+/// to it, which is how a test sees whose credential a key was registered under.
+fn recording_directory(
+    devices: Vec<serde_json::Value>,
+    writes: Arc<parking_lot::Mutex<Vec<String>>>,
+) -> Arc<dyn HttpClient> {
+    FakeHttpClient::create(move |request| {
+        let devices = devices.clone();
+        let writes = writes.clone();
+        async move {
+            let body = if request.method() == "PUT" {
+                writes.lock().push(
+                    request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                "{}".to_string()
+            } else {
+                serde_json::Value::Array(devices).to_string()
+            };
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::from(body))
+                .expect("a response"))
+        }
+    })
+}
+
+pub(crate) fn rig_with_directory(
+    cx: &mut TestAppContext,
+    relay: FakeRelay,
+    http_client: Arc<dyn HttpClient>,
+    host_keypair: Arc<DeviceKeypair>,
+) -> Rig {
     init_db(cx);
     let host_key = *host_keypair.public_key();
     let host = cx.new(|cx| ScriptedHost::new(relay.transport(), USER, host_keypair, cx));
@@ -82,7 +125,7 @@ pub(crate) fn rig_with_host_key(
     let environment = RelayEnvironment {
         credentials: credentials.clone(),
         keychain: keychain.clone(),
-        http_client: directory(devices),
+        http_client,
         api_url: "https://api.test/api".into(),
         device_name: "Laptop".into(),
     };
@@ -827,4 +870,346 @@ async fn a_host_that_keeps_talking_without_answering_hello_still_times_out(
     }
     cx.run_until_parked();
     assert_eq!(task.await.err(), Some(ConnectError::TimedOut));
+}
+
+#[gpui::test]
+async fn relay_traffic_that_changes_nothing_on_screen_announces_no_change(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.pair_both(cx).await;
+    let changes = Arc::new(parking_lot::Mutex::new(0usize));
+    let _subscription = cx.update(|cx| {
+        let changes = changes.clone();
+        cx.subscribe(&rig.initiator, move |_, _: &RelayInitiatorEvent, _| {
+            *changes.lock() += 1;
+        })
+    });
+    let session = rig.connect(cx).await.expect("a session");
+    let session_id = session.read_with(cx, |session, _| session.session_id());
+    let (sender, _receiver) = RelaySession::stream_channel();
+    let stream_id = session.update(cx, |session, _| {
+        let stream_id = session.allocate_stream_id();
+        session
+            .register_stream(stream_id, sender)
+            .expect("registered");
+        stream_id
+    });
+    for _ in 0..20 {
+        rig.host.update(cx, |host, cx| {
+            host.send_data(session_id, stream_id, b"x", cx);
+            host.send_control(session_id, &Control::Ping, cx);
+        });
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        *changes.lock(),
+        0,
+        "frames and session set-up change nothing the devices list shows, and each change makes it reload"
+    );
+
+    rig.relay.drop_host_connection(None, "");
+    cx.run_until_parked();
+    assert!(
+        *changes.lock() > 0,
+        "a host going offline is what the list shows"
+    );
+}
+
+#[gpui::test]
+async fn forgetting_a_host_ends_the_sessions_open_to_it(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.pair_both(cx).await;
+    let session = rig.connect(cx).await.expect("a session");
+    let session_id = session.read_with(cx, |session, _| session.session_id());
+
+    let forgotten = rig.initiator.update(cx, |initiator, cx| {
+        initiator.try_forget_host(HOST_DEVICE, cx)
+    });
+    cx.run_until_parked();
+
+    assert!(forgotten.expect("the pins can be saved"));
+    assert!(
+        session.read_with(cx, |session, _| session.is_closed()),
+        "the session stayed authenticated after its host was forgotten"
+    );
+    assert!(
+        rig.host
+            .read_with(cx, |host, _| host.ended_sessions().contains(&session_id)),
+        "the relay was not told"
+    );
+    assert_eq!(routes_held(&rig, cx), 0);
+    assert!(
+        !rig.initiator
+            .read_with(cx, |initiator, _| initiator.is_paired(HOST_DEVICE))
+    );
+    assert_eq!(rig.connect(cx).await.err(), Some(ConnectError::NotPaired));
+    let again = rig.initiator.update(cx, |initiator, cx| {
+        initiator.try_forget_host(HOST_DEVICE, cx)
+    });
+    assert!(
+        !again.expect("nothing to save"),
+        "forgetting twice is a no-op"
+    );
+}
+
+#[gpui::test]
+async fn a_relay_that_answers_a_client_socket_as_a_host_is_refused(cx: &mut TestAppContext) {
+    let relay = FakeRelay::new();
+    relay.set_hello_role("host");
+    let rig = rig_with(cx, relay, vec![]);
+    assert_eq!(
+        rig.initiator
+            .read_with(cx, |initiator, _| initiator.stopped),
+        Some(StopReason::IncompatibleRelay),
+        "a socket that was registered in the other role must not be used"
+    );
+}
+
+#[gpui::test]
+async fn an_account_switch_does_not_register_the_old_key_under_the_new_account(
+    cx: &mut TestAppContext,
+) {
+    let writes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let probe = DeviceKeypair::generate().expect("a key");
+    let rig = rig_with_directory(
+        cx,
+        FakeRelay::new(),
+        recording_directory(vec![host_row(Some(*probe.public_key()))], writes.clone()),
+        Arc::new(DeviceKeypair::generate().expect("a key")),
+    );
+    let attempts = rig.relay.connection_attempts();
+
+    rig.credentials
+        .switch_account("someone-else", "their-device", "their-token");
+    rig.relay.close_client_socket(CLIENT_DEVICE, None, "");
+    for _ in 0..4 {
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        rig.relay.connection_attempts(),
+        attempts,
+        "the initiator must not reconnect as someone else"
+    );
+    assert!(
+        !writes
+            .lock()
+            .iter()
+            .any(|header| header.contains("their-token")),
+        "this device's key was registered under the other account: {:?}",
+        writes.lock()
+    );
+
+    rig.credentials
+        .switch_account(USER, CLIENT_DEVICE, "client-token");
+    for _ in 0..12 {
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+    }
+    assert!(
+        rig.relay.is_client_connected(CLIENT_DEVICE),
+        "signing back in as the first account resumes the connection"
+    );
+}
+
+#[gpui::test]
+async fn a_write_that_keeps_making_progress_is_never_given_up_on(cx: &mut TestAppContext) {
+    let relay = FakeRelay::new();
+    relay.set_outbound_capacity(1);
+    let probe = DeviceKeypair::generate().expect("a key");
+    let rig = rig_with(cx, relay, vec![host_row(Some(*probe.public_key()))]);
+    rig.pair_both(cx).await;
+    let session = rig.connect(cx).await.expect("a session");
+    cx.run_until_parked();
+
+    let big = vec![7u8; remote_relay_protocol::MAX_INNER_PAYLOAD_LEN * 8];
+    let weak = session.downgrade();
+    rig.relay.pause_client_delivery();
+    let write =
+        cx.spawn(async move |mut cx| crate::send_data_waiting(&weak, 5, &big, &mut cx).await);
+    // Each stall is well under the limit; together they are over it.
+    for _ in 0..3 {
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(20));
+        cx.run_until_parked();
+        rig.relay.resume_delivery();
+        cx.executor().advance_clock(Duration::from_millis(60));
+        cx.run_until_parked();
+        rig.relay.pause_client_delivery();
+    }
+    rig.relay.resume_delivery();
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(30));
+        cx.run_until_parked();
+    }
+    assert_eq!(write.await, Ok(()));
+}
+
+#[gpui::test]
+async fn a_session_whose_frames_overflowed_while_it_was_set_up_is_not_handed_out(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx);
+    rig.pair_both(cx).await;
+    rig.host
+        .update(cx, |host, _| host.flood_after_hello(AWAITING_QUEUE * 2));
+    let outcome = rig.connect(cx).await;
+    assert!(
+        outcome.is_err(),
+        "frames were dropped, so the channel could never be read again"
+    );
+    cx.run_until_parked();
+    assert_eq!(routes_held(&rig, cx), 0);
+}
+
+#[gpui::test]
+async fn a_session_id_that_is_announced_again_does_not_replace_the_session_in_use(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx);
+    rig.pair_both(cx).await;
+    let session = rig.connect(cx).await.expect("a session");
+    let session_id = session.read_with(cx, |session, _| session.session_id());
+    let announce = |cx: &mut TestAppContext| {
+        rig.initiator.update(cx, |initiator, cx| {
+            initiator.on_relay_event(
+                RelayEvent::SessionOpened {
+                    session_id,
+                    peer_device_id: HOST_DEVICE.into(),
+                    mode: OpenMode::Session,
+                },
+                cx,
+            );
+        });
+    };
+
+    // Someone is waiting for exactly this session: it is refused, not given
+    // the id of one already in use.
+    let (respond, answer) = futures::channel::oneshot::channel();
+    rig.initiator.update(cx, |initiator, _| {
+        initiator.pending_open = Some(PendingOpen {
+            host_device_id: HOST_DEVICE.into(),
+            mode: OpenMode::Session,
+            respond,
+        });
+    });
+    announce(cx);
+    assert!(matches!(
+        answer.await.expect("an answer"),
+        Err(ConnectError::Unavailable(_))
+    ));
+
+    // Nobody is waiting: nothing is closed at the relay, which would end the
+    // session that holds the id.
+    announce(cx);
+    cx.run_until_parked();
+    assert!(!session.read_with(cx, |session, _| session.is_closed()));
+    assert!(
+        !rig.host
+            .read_with(cx, |host, _| host.ended_sessions().contains(&session_id)),
+        "the live session was closed at the relay"
+    );
+    let still_the_route = rig.initiator.read_with(cx, |initiator, _| {
+        matches!(
+            initiator.routes.get(&session_id),
+            Some(Route::Session(route)) if route.upgrade().is_some_and(|held| held == session)
+        )
+    });
+    assert!(still_the_route);
+}
+
+#[gpui::test]
+async fn waiting_for_a_relay_that_never_answers_leaves_no_waiters_behind(cx: &mut TestAppContext) {
+    let relay = FakeRelay::new();
+    relay.refuse_connections(503);
+    let rig = rig_with(cx, relay, vec![]);
+    let weak = rig.initiator.downgrade();
+    for _ in 0..4 {
+        let attempt = cx.spawn({
+            let weak = weak.clone();
+            async move |mut cx| {
+                RelayInitiator::open_awaiting(&weak, HOST_DEVICE, OpenMode::Session, &mut cx)
+                    .await
+                    .err()
+            }
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(crate::initiator::CONNECT_WAIT + Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(attempt.await.is_some(), "the relay never connects");
+    }
+    assert!(
+        rig.initiator
+            .read_with(cx, |initiator, _| initiator.connect_waiters.len())
+            <= 1,
+        "every timed-out wait left a sender behind"
+    );
+}
+
+#[gpui::test]
+async fn a_forget_that_could_not_be_saved_is_reported_by_the_checked_flush(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx);
+    rig.pair_both(cx).await;
+    let saved = rig
+        .initiator
+        .update(cx, |initiator, cx| initiator.flush_pins_checked(cx))
+        .await;
+    assert_eq!(saved, Ok(()), "a pin that was saved is not an error");
+
+    let connection = cx.update(|cx| db::AppDatabase::global(cx).clone());
+    connection
+        .write(|connection| {
+            connection
+                .exec("DROP TABLE kv_store")
+                .and_then(|mut statement| statement())
+        })
+        .await
+        .expect("the table is dropped");
+    let forgotten = rig.initiator.update(cx, |initiator, cx| {
+        initiator.try_forget_host(HOST_DEVICE, cx)
+    });
+    assert!(forgotten.expect("the pins were readable"));
+    let outcome = rig
+        .initiator
+        .update(cx, |initiator, cx| initiator.flush_pins_checked(cx))
+        .await;
+    assert!(
+        matches!(outcome, Err(TrustError::NotSaved(_))),
+        "the person is told a forget will not survive a restart: {outcome:?}"
+    );
+}
+
+#[gpui::test]
+async fn a_host_forgotten_while_its_handshake_runs_is_not_connected_to(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.pair_both(cx).await;
+    // The host's answer is held up, so the handshake is still running when
+    // the person forgets the host.
+    rig.relay.pause_delivery();
+    let connecting = rig
+        .initiator
+        .update(cx, |initiator, cx| initiator.connect(HOST_DEVICE, cx));
+    cx.run_until_parked();
+    rig.initiator
+        .update(cx, |initiator, cx| initiator.forget_host(HOST_DEVICE, cx));
+    rig.relay.resume_delivery();
+    for _ in 0..10 {
+        cx.executor().advance_clock(Duration::from_millis(10));
+        cx.run_until_parked();
+    }
+
+    assert_eq!(
+        connecting.await.err(),
+        Some(ConnectError::NotPaired),
+        "a session came up to a host that was forgotten while it was being set up"
+    );
+    cx.run_until_parked();
+    assert_eq!(routes_held(&rig, cx), 0);
+    assert!(
+        !rig.host
+            .read_with(cx, |host, _| host.ended_sessions().is_empty()),
+        "the relay was not told to close the session"
+    );
 }

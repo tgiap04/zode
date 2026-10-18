@@ -46,6 +46,11 @@ const MAX_MIRRORED_ITEMS: usize = 256;
 /// memory without bound.
 pub const MAX_STREAM_QUEUE_BYTES: usize = 1024 * 1024;
 
+/// What one queued message costs beyond its bytes: the queue node and the
+/// vector's header. Charged to the cap, or a host sending one byte at a time
+/// could park a million messages inside it.
+const STREAM_MESSAGE_OVERHEAD: usize = 64;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_RETRY: Duration = Duration::from_millis(25);
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(30);
@@ -73,17 +78,21 @@ enum StreamSendError {
 
 impl StreamSender {
     fn try_send(&self, bytes: Vec<u8>) -> Result<(), StreamSendError> {
-        let length = bytes.len();
-        if self.queued.load(Ordering::Acquire).saturating_add(length) > MAX_STREAM_QUEUE_BYTES {
+        let cost = queue_cost(&bytes);
+        if self.queued.load(Ordering::Acquire).saturating_add(cost) > MAX_STREAM_QUEUE_BYTES {
             return Err(StreamSendError::Full);
         }
-        self.queued.fetch_add(length, Ordering::AcqRel);
+        self.queued.fetch_add(cost, Ordering::AcqRel);
         if self.sender.unbounded_send(bytes).is_err() {
-            self.queued.fetch_sub(length, Ordering::AcqRel);
+            self.queued.fetch_sub(cost, Ordering::AcqRel);
             return Err(StreamSendError::Closed);
         }
         Ok(())
     }
+}
+
+fn queue_cost(bytes: &[u8]) -> usize {
+    bytes.len().saturating_add(STREAM_MESSAGE_OVERHEAD)
 }
 
 impl Stream for StreamReceiver {
@@ -95,7 +104,7 @@ impl Stream for StreamReceiver {
     ) -> Poll<Option<Self::Item>> {
         let polled = Pin::new(&mut self.receiver).poll_next(cx);
         if let Poll::Ready(Some(bytes)) = &polled {
-            self.queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+            self.queued.fetch_sub(queue_cost(bytes), Ordering::AcqRel);
         }
         polled
     }
@@ -606,15 +615,17 @@ impl Drop for RelaySession {
 
 /// Writes `bytes` of any size to `stream_id`, a frame at a time, waiting while
 /// the relay connection has no room. Gives up with
-/// [`SessionError::Backpressure`] after waiting [`WRITE_DEADLINE`] in all.
+/// [`SessionError::Backpressure`] once a single frame has waited
+/// [`WRITE_DEADLINE`]: a write that keeps being accepted is making progress,
+/// however long it is.
 pub async fn send_data_waiting(
     session: &WeakEntity<RelaySession>,
     stream_id: u32,
     bytes: &[u8],
     cx: &mut AsyncApp,
 ) -> Result<(), SessionError> {
-    let mut waited = Duration::ZERO;
     for chunk in bytes.chunks(MAX_INNER_PAYLOAD_LEN) {
+        let mut waited = Duration::ZERO;
         loop {
             let outcome = session
                 .update(cx, |session, cx| {
@@ -635,4 +646,58 @@ pub async fn send_data_waiting(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt as _;
+
+    #[test]
+    fn a_stream_of_tiny_messages_is_charged_for_the_messages_not_only_their_bytes() {
+        let (sender, _receiver) = RelaySession::stream_channel();
+        let mut accepted = 0usize;
+        while sender.try_send(vec![0u8]).is_ok() {
+            accepted += 1;
+            assert!(accepted <= MAX_STREAM_QUEUE_BYTES, "the queue never filled");
+        }
+        assert!(
+            accepted <= MAX_STREAM_QUEUE_BYTES / STREAM_MESSAGE_OVERHEAD,
+            "{accepted} one-byte messages were queued under a cap of {MAX_STREAM_QUEUE_BYTES} bytes"
+        );
+        assert!(accepted > 0);
+    }
+
+    #[test]
+    fn what_the_reader_takes_makes_room_again() {
+        let (sender, mut receiver) = RelaySession::stream_channel();
+        let payload = vec![0u8; 1024];
+        while sender.try_send(payload.clone()).is_ok() {}
+        assert!(matches!(
+            sender.try_send(payload.clone()),
+            Err(StreamSendError::Full)
+        ));
+
+        assert_eq!(smol::block_on(receiver.next()), Some(payload.clone()));
+        assert!(sender.try_send(payload.clone()).is_ok());
+        assert!(matches!(
+            sender.try_send(payload),
+            Err(StreamSendError::Full)
+        ));
+    }
+
+    #[test]
+    fn a_stream_nobody_reads_is_closed_not_full() {
+        let (sender, receiver) = RelaySession::stream_channel();
+        drop(receiver);
+        assert!(matches!(
+            sender.try_send(vec![1]),
+            Err(StreamSendError::Closed)
+        ));
+        assert_eq!(
+            sender.queued.load(Ordering::Acquire),
+            0,
+            "a refused message must not stay charged to the queue"
+        );
+    }
 }

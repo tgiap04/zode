@@ -2,10 +2,14 @@
 //!
 //! Nothing is trusted until a person at this screen says the digits match, and
 //! even then the host is pinned only after an encrypted session to it has
-//! been brought up with the key the pairing produced. The key must also be the
-//! one the account's directory lists for that device: a relay that sits in the
-//! middle of a pairing can show each end a key of its own, but cannot change
-//! what the directory says.
+//! been brought up with the key the pairing produced. Those two are the gate:
+//! a relay in the middle of a pairing can show each end a key of its own, but
+//! then the digits on the two screens differ.
+//!
+//! The key must also be the one the account's directory lists for that
+//! device. That is not a gate of its own, because the directory and the relay
+//! are run by the same party; it only turns an interception by anyone else on
+//! the network into a refusal before the person is asked.
 
 use std::time::Duration;
 

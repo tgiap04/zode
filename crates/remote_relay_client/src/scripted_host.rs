@@ -45,9 +45,13 @@ pub struct ScriptedHost {
     sessions: HashMap<u32, HostedSession>,
     gate: PairingGate,
     pair_session: Option<u32>,
+    /// The session whose pairing exchange holds the gate, whatever step it has
+    /// reached.
+    exchange_session: Option<u32>,
     pair_outcome: Option<([u8; 32], String, String)>,
     responder: Option<Responder>,
     silent_on_hello: bool,
+    flood_after_hello: usize,
     received_controls: Vec<(u32, Control)>,
     received_data: Vec<(u32, u32, Vec<u8>)>,
     ended_sessions: Vec<u32>,
@@ -85,9 +89,11 @@ impl ScriptedHost {
             sessions: HashMap::new(),
             gate: PairingGate::new(),
             pair_session: None,
+            exchange_session: None,
             pair_outcome: None,
             responder: None,
             silent_on_hello: false,
+            flood_after_hello: 0,
             received_controls: Vec::new(),
             received_data: Vec::new(),
             ended_sessions: Vec::new(),
@@ -114,6 +120,12 @@ impl ScriptedHost {
     /// Leaves `hello` unanswered, as a host that is up but wedged does.
     pub fn stay_silent_on_hello(&mut self) {
         self.silent_on_hello = true;
+    }
+
+    /// Follows every `hello_ack` with `frames` pings, which arrive right
+    /// behind it, before whoever is connecting has read anything.
+    pub fn flood_after_hello(&mut self, frames: usize) {
+        self.flood_after_hello = frames;
     }
 
     pub fn respond_with(&mut self, responder: impl FnMut(&Control) -> Vec<Control> + 'static) {
@@ -180,6 +192,12 @@ impl ScriptedHost {
         if self.pair_session == Some(session_id) {
             self.pair_session = None;
             self.pair_outcome = None;
+        }
+        // Nobody is left to answer an exchange whose session is gone, and it
+        // must not keep the next one out.
+        if self.exchange_session == Some(session_id) {
+            self.exchange_session = None;
+            self.gate.cancel_pending();
         }
     }
 
@@ -292,6 +310,7 @@ impl ScriptedHost {
                     now,
                 ) {
                     Ok(accept) => {
+                        self.exchange_session = Some(session_id);
                         if let Err(error) = self.client.read(cx).send_pairing(session_id, &accept) {
                             log::warn!("the scripted host could not accept: {error}");
                         }
@@ -372,6 +391,7 @@ impl ScriptedHost {
                 });
                 replies.push(Control::AgentList { agents: vec![] });
                 replies.push(Control::TerminalList { terminals: vec![] });
+                replies.extend(std::iter::repeat_n(Control::Ping, self.flood_after_hello));
             }
             Control::Ping => replies.push(Control::Pong),
             other => {

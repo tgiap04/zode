@@ -191,5 +191,20 @@ mod tests {
             down.credential(&mut cx.to_async()).await.err(),
             Some(CredentialError::Unavailable(_))
         ));
+
+        let merely_mentions_it = RegisteringCredentials::new(
+            &environment(403, "device_revoked", Arc::default()),
+            [4; KEY_LEN],
+        );
+        assert!(
+            matches!(
+                merely_mentions_it
+                    .credential(&mut cx.to_async())
+                    .await
+                    .err(),
+                Some(CredentialError::Unavailable(_))
+            ),
+            "only the revocation answer wipes this device's pairings"
+        );
     }
 }

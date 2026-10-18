@@ -207,12 +207,21 @@ impl PairingAcceptor {
 /// Holds the acceptor's pairing state across exchanges: one exchange at a
 /// time, each with an expiry, and a lockout after repeated failures.
 ///
+/// An exchange counts as in progress from its request until the person has
+/// answered the digits ([`PairingGate::confirm_digits`] or
+/// [`PairingGate::reject_digits`]) or its deadline passes, so no second one
+/// starts while someone is still comparing.
+///
 /// Without the single-exchange rule a relay can open exchanges faster than a
 /// person can look at one, and without the lockout it can retry until the
 /// digits happen to agree.
 #[derive(Default)]
 pub struct PairingGate {
     pending: Option<PairingAcceptor>,
+    /// The deadline of an exchange whose digits are on screen. It is the
+    /// exchange's own deadline, not a fresh one, so the gate lets go of it at
+    /// the same moment a caller that times the whole exchange does.
+    deciding_until: Option<Instant>,
     failed_attempts: u32,
 }
 
@@ -236,11 +245,14 @@ impl PairingGate {
         if self.is_locked_out() {
             return Err(PairingError::LockedOut);
         }
-        if self
+        let in_progress = self
             .pending
             .as_ref()
-            .is_some_and(|pending| now < pending.deadline)
-        {
+            .map(|pending| pending.deadline)
+            .into_iter()
+            .chain(self.deciding_until)
+            .any(|deadline| now < deadline);
+        if in_progress {
             return Err(PairingError::Busy);
         }
         let (acceptor, accept) = PairingAcceptor::receive_request(
@@ -251,10 +263,13 @@ impl PairingGate {
             now,
         )?;
         self.pending = Some(acceptor);
+        self.deciding_until = None;
         Ok(accept)
     }
 
-    /// Ends the pending exchange whatever the outcome: a reveal is one try.
+    /// Ends the pending request whatever the outcome: a reveal is one try. A
+    /// reveal that checks out moves the exchange on to the person comparing
+    /// digits, which holds the gate until they answer.
     pub fn reveal(
         &mut self,
         requester_nonce: [u8; NONCE_LEN],
@@ -264,26 +279,40 @@ impl PairingGate {
             return Err(PairingError::LockedOut);
         }
         let acceptor = self.pending.take().ok_or(PairingError::NoPendingExchange)?;
+        let deadline = acceptor.deadline;
         let outcome = acceptor.receive_reveal(requester_nonce, now);
-        if outcome == Err(PairingError::CommitmentMismatch) {
-            self.failed_attempts += 1;
+        match &outcome {
+            Ok(_) => self.deciding_until = Some(deadline),
+            Err(PairingError::CommitmentMismatch) => self.failed_attempts += 1,
+            Err(_) => {}
         }
         outcome
     }
 
     /// The person compared the digits and they did not match.
     pub fn reject_digits(&mut self) {
+        self.deciding_until = None;
         self.failed_attempts += 1;
     }
 
     /// The person compared the digits and they matched.
     pub fn confirm_digits(&mut self) {
+        self.deciding_until = None;
         self.failed_attempts = 0;
+    }
+
+    /// Drops the exchange in progress, at whatever step it has reached,
+    /// because its session is gone and nobody can answer it any more. Counts
+    /// for nothing against the lockout: an abandoned exchange is not a failed
+    /// guess.
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
+        self.deciding_until = None;
     }
 
     /// An explicit user action, and the only way out of a lockout.
     pub fn reset_lockout(&mut self) {
         self.failed_attempts = 0;
-        self.pending = None;
+        self.cancel_pending();
     }
 }

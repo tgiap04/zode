@@ -57,6 +57,10 @@ impl ResponderHandshakes {
 
     /// Starts waiting for `session_id`'s first message, from the one device
     /// whose pinned key is `remote_public_key`.
+    ///
+    /// Handshakes past their deadline stop counting against the limit but stay
+    /// in the table until [`ResponderHandshakes::expire`] returns them: it is
+    /// the only way the caller learns which sessions to close at the relay.
     pub fn expect(
         &mut self,
         session_id: u32,
@@ -64,16 +68,22 @@ impl ResponderHandshakes {
         prologue: Vec<u8>,
         now: Instant,
     ) -> Result<(), HandshakeRefusal> {
-        self.awaited.retain(|_, awaited| now < awaited.deadline);
-        if !self.awaited.contains_key(&session_id) && self.awaited.len() >= MAX_HALF_OPEN_HANDSHAKES
-        {
+        let waiting = self
+            .awaited
+            .values()
+            .filter(|awaited| now < awaited.deadline)
+            .count();
+        if !self.awaited.contains_key(&session_id) && waiting >= MAX_HALF_OPEN_HANDSHAKES {
             return Err(HandshakeRefusal::TooManyOpen);
         }
         // A relay that announces the same session again must not get a fresh
-        // 10 seconds out of it, or it could keep a slot occupied for good.
+        // 10 seconds out of it, or it could keep a slot occupied for good. One
+        // whose time has run out but has not been swept yet is not waiting any
+        // more, so announcing it again starts a new wait.
         let deadline = self
             .awaited
             .get(&session_id)
+            .filter(|existing| now < existing.deadline)
             .map_or(now + HANDSHAKE_TIMEOUT, |existing| existing.deadline);
         self.awaited.insert(
             session_id,
@@ -190,7 +200,16 @@ impl SecureChannel {
 
     pub fn seal_control(&mut self, control: &Control) -> Result<Vec<u8>, ChannelError> {
         self.require_confirmed()?;
-        let frame = InnerFrame::control(encode_control(control)?)?;
+        self.seal_encoded_control(encode_control(control)?)
+    }
+
+    /// Seals a control that [`encode_control`] has already encoded, for a
+    /// caller that needed the encoded size before deciding to send it and
+    /// would otherwise encode a large message twice. The bytes are sent as
+    /// given: only their size is checked, not that they are a control.
+    pub fn seal_encoded_control(&mut self, encoded: Vec<u8>) -> Result<Vec<u8>, ChannelError> {
+        self.require_confirmed()?;
+        let frame = InnerFrame::control(encoded)?;
         Ok(self.session.encrypt_frame(&frame)?)
     }
 
@@ -360,6 +379,48 @@ mod tests {
     }
 
     #[test]
+    fn a_control_encoded_beforehand_is_sealed_like_one_encoded_here() {
+        let pair = pair();
+        let now = Instant::now();
+        let mut table = ResponderHandshakes::default();
+        table
+            .expect(1, *pair.initiator.public_key(), pair.prologue.clone(), now)
+            .unwrap();
+        let (mut initiator, first) = initiator_message(&pair);
+        let (session, reply) = table
+            .accept(1, pair.responder.private_key(), &first, now)
+            .unwrap();
+        initiator.read_message(&reply).unwrap();
+        let mut initiator = SecureChannel::new(initiator.into_session().unwrap());
+        let mut responder = SecureChannel::new(session);
+
+        let encoded = encode_control(&Control::Pong).unwrap();
+        assert!(
+            matches!(
+                responder.seal_encoded_control(encoded.clone()),
+                Err(ChannelError::NotConfirmed)
+            ),
+            "a peer that has not proven itself gets nothing, however the control was encoded"
+        );
+
+        let ping = initiator.seal_control(&Control::Ping).unwrap();
+        responder.open(&ping).unwrap();
+        let sealed = responder.seal_encoded_control(encoded).unwrap();
+        assert_eq!(
+            read_control(&initiator.open(&sealed).unwrap()).unwrap(),
+            Control::Pong
+        );
+
+        assert!(
+            matches!(
+                responder.seal_encoded_control(vec![b' '; MAX_INNER_PAYLOAD_LEN + 1]),
+                Err(ChannelError::Frame(_))
+            ),
+            "a payload over the frame limit is refused, not truncated"
+        );
+    }
+
+    #[test]
     fn announcing_a_session_again_does_not_extend_its_deadline() {
         let pair = pair();
         let start = Instant::now();
@@ -376,6 +437,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(table.expire(start + HANDSHAKE_TIMEOUT), vec![1]);
+    }
+
+    #[test]
+    fn announcing_a_session_whose_time_has_run_out_starts_a_new_wait() {
+        let pair = pair();
+        let start = Instant::now();
+        let mut table = ResponderHandshakes::default();
+        table
+            .expect(
+                1,
+                *pair.initiator.public_key(),
+                pair.prologue.clone(),
+                start,
+            )
+            .unwrap();
+
+        let again = start + HANDSHAKE_TIMEOUT + Duration::from_secs(1);
+        table
+            .expect(
+                1,
+                *pair.initiator.public_key(),
+                pair.prologue.clone(),
+                again,
+            )
+            .unwrap();
+
+        assert!(
+            table.expire(again).is_empty(),
+            "the session is waiting again, so there is nothing to close"
+        );
+        let (_, message) = initiator_message(&pair);
+        table
+            .accept(1, pair.responder.private_key(), &message, again)
+            .expect("the new wait is not already over");
     }
 
     #[test]
@@ -488,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_entries_make_room_for_new_ones() {
+    fn expired_entries_make_room_for_new_ones_but_are_still_reported_by_expire() {
         let pair = pair();
         let start = Instant::now();
         let mut table = ResponderHandshakes::default();
@@ -497,15 +592,20 @@ mod tests {
                 .expect(session_id, *pair.initiator.public_key(), vec![1], start)
                 .unwrap();
         }
+        let later = start + HANDSHAKE_TIMEOUT;
         table
-            .expect(
-                99,
-                *pair.initiator.public_key(),
-                vec![1],
-                start + HANDSHAKE_TIMEOUT,
-            )
+            .expect(99, *pair.initiator.public_key(), vec![1], later)
             .unwrap();
+
+        let mut expired = table.expire(later);
+        expired.sort_unstable();
+        assert_eq!(
+            expired,
+            (0..MAX_HALF_OPEN_HANDSHAKES as u32).collect::<Vec<_>>(),
+            "every session that ran out of time is handed back to be closed"
+        );
         assert_eq!(table.len(), 1);
+        assert!(table.is_expecting(99));
     }
 
     #[test]

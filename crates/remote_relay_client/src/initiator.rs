@@ -23,10 +23,10 @@ use smol::channel::{Receiver, Sender, TrySendError};
 use zode_account::Account;
 
 use crate::{
-    ConnectionState, OpenMode, PinnedDevice, RegisteringCredentials, RelayClient, RelayEnvironment,
-    RelayEvent, RelayRole, RelaySession, RelayTransport, RelayWriter, StopReason, TrustRole,
-    TrustStore, WebSocketTransport, delete_keypair, list_devices, load_or_create_keypair,
-    session::RetiredSessions,
+    ConnectionState, CredentialError, OpenMode, PinnedDevice, RegisteringCredentials, RelayClient,
+    RelayCredential, RelayCredentials, RelayEnvironment, RelayEvent, RelayRole, RelaySession,
+    RelayTransport, RelayWriter, StopReason, TrustError, TrustRole, TrustStore, WebSocketTransport,
+    delete_keypair, list_devices, load_or_create_keypair, session::RetiredSessions,
 };
 
 /// How long to wait for the relay to connect before giving up on an action.
@@ -120,6 +120,37 @@ pub(crate) struct Identity {
     pub(crate) keypair: Arc<DeviceKeypair>,
     pub(crate) user_id: String,
     pub(crate) device_id: String,
+}
+
+/// The signed-in account's credential, but only while it is still that of the
+/// account and device this initiator started as. Its key, its pins and its
+/// handshake identity are all that account's, so a credential for anyone else
+/// must not reach the account directory or the relay with them.
+struct BoundCredentials {
+    inner: Arc<dyn RelayCredentials>,
+    user_id: String,
+    device_id: String,
+}
+
+impl RelayCredentials for BoundCredentials {
+    fn credential(&self, cx: &mut AsyncApp) -> Task<Result<RelayCredential, CredentialError>> {
+        let credential = self.inner.credential(cx);
+        let user_id = self.user_id.clone();
+        let device_id = self.device_id.clone();
+        cx.background_spawn(async move {
+            let credential = credential.await?;
+            if credential.user_id != user_id || credential.device_id != device_id {
+                return Err(CredentialError::Unavailable(
+                    "the signed-in account changed".into(),
+                ));
+            }
+            Ok(credential)
+        })
+    }
+
+    fn invalidate(&self) {
+        self.inner.invalidate();
+    }
 }
 
 struct GlobalRelayInitiator(WeakEntity<RelayInitiator>);
@@ -246,8 +277,19 @@ impl RelayInitiator {
                 return Err(message);
             }
         };
+        let bound = RelayEnvironment {
+            credentials: Arc::new(BoundCredentials {
+                inner: environment.credentials.clone(),
+                user_id: identity.user_id.clone(),
+                device_id: identity.device_id.clone(),
+            }),
+            keychain: environment.keychain.clone(),
+            http_client: environment.http_client.clone(),
+            api_url: environment.api_url.clone(),
+            device_name: environment.device_name.clone(),
+        };
         let credentials = Arc::new(RegisteringCredentials::new(
-            &environment,
+            &bound,
             *identity.keypair.public_key(),
         ));
         this.update(cx, |this, cx| {
@@ -322,13 +364,46 @@ impl RelayInitiator {
             .unwrap_or_default()
     }
 
+    /// Stops trusting a host, which also ends every session open to it: a
+    /// session that stayed up would keep a Zode the person no longer trusts
+    /// running projects on this one. A failure to forget is logged; see
+    /// [`RelayInitiator::try_forget_host`] to tell the person.
     pub fn forget_host(&mut self, device_id: &str, cx: &mut Context<Self>) {
-        if let Some(trust) = self.hosts_trust.as_mut()
-            && trust.forget(device_id, cx)
-        {
+        if let Err(error) = self.try_forget_host(device_id, cx) {
+            log::error!("could not forget a host: {error}");
+        }
+    }
+
+    /// [`RelayInitiator::forget_host`] that says why nothing happened. `Ok(false)`
+    /// if the host was not pinned. When the saved pins could not be read the
+    /// host stays trusted, so its sessions are left running too.
+    pub fn try_forget_host(
+        &mut self,
+        device_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<bool, TrustError> {
+        let forgotten = match self.hosts_trust.as_mut() {
+            Some(trust) => trust.try_forget(device_id, cx)?,
+            None => false,
+        };
+        let held: Vec<(u32, Entity<RelaySession>)> = self
+            .routes
+            .iter()
+            .filter_map(|(session_id, route)| match route {
+                Route::Session(session) => Some((*session_id, session.upgrade()?)),
+                Route::Awaiting(_) => None,
+            })
+            .filter(|(_, session)| session.read(cx).host_device_id() == device_id)
+            .collect();
+        for (session_id, session) in held {
+            self.routes.remove(&session_id);
+            session.update(cx, |session, cx| session.close(cx));
+        }
+        if forgotten {
             cx.emit(RelayInitiatorEvent::Changed);
             cx.notify();
         }
+        Ok(forgotten)
     }
 
     /// Resolves once any pin written just before has reached the database.
@@ -336,6 +411,27 @@ impl RelayInitiator {
         self.hosts_trust
             .as_mut()
             .map_or_else(|| Task::ready(()), TrustStore::flush)
+    }
+
+    /// [`RelayInitiator::flush_pins`] that says whether the write failed. A
+    /// forget that fails here is still in effect until the app restarts, which
+    /// brings the host back, so the person should be told.
+    pub fn flush_pins_checked(&mut self, cx: &mut Context<Self>) -> Task<Result<(), TrustError>> {
+        match self.hosts_trust.as_mut() {
+            Some(trust) => {
+                let flushed = trust.flush_checked();
+                cx.spawn(async move |_, _| flushed.await)
+            }
+            None => Task::ready(Ok(())),
+        }
+    }
+
+    /// Whether `host_device_id` is pinned with exactly `public_key`.
+    pub(crate) fn is_pinned_as(&self, host_device_id: &str, public_key: &[u8; KEY_LEN]) -> bool {
+        self.hosts_trust
+            .as_ref()
+            .and_then(|trust| trust.get(host_device_id))
+            .is_some_and(|pinned| pinned.public_key == *public_key)
     }
 
     /// The account's Zodes this one may reach, with who is online and who is
@@ -428,49 +524,76 @@ impl RelayInitiator {
         }
     }
 
-    fn on_relay_event(&mut self, event: RelayEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_relay_event(&mut self, event: RelayEvent, cx: &mut Context<Self>) {
         self.forget_retired_routes();
-        match event {
+        // Whoever listens for `Changed` reloads what it shows, so only what it
+        // shows may announce one: frames arrive many times a second.
+        let changed = match event {
             RelayEvent::Connected => {
                 for waiter in self.connect_waiters.drain(..) {
                     if waiter.send(()).is_err() {
                         log::debug!("nobody was waiting for the relay to connect");
                     }
                 }
+                true
             }
             RelayEvent::Disconnected => {
                 self.online.clear();
                 self.end_all_routes("the connection to the relay dropped", cx);
+                true
             }
-            RelayEvent::Presence { hosts } => self.online = hosts.into_iter().collect(),
+            RelayEvent::Presence { hosts } => {
+                let online: HashSet<String> = hosts.into_iter().collect();
+                let changed = online != self.online;
+                self.online = online;
+                changed
+            }
             RelayEvent::SessionOpened {
                 session_id,
                 peer_device_id,
                 mode,
-            } => self.on_opened(session_id, peer_device_id, mode, cx),
+            } => {
+                self.on_opened(session_id, peer_device_id, mode, cx);
+                false
+            }
             RelayEvent::SessionClosed { session_id, reason } => {
                 self.end_route(session_id, reason, false, cx);
+                false
             }
             RelayEvent::Pairing {
                 session_id,
                 message,
-            } => self.deliver(session_id, SidEvent::Pairing(message), cx),
+            } => {
+                self.deliver(session_id, SidEvent::Pairing(message), cx);
+                false
+            }
             RelayEvent::Frame {
                 session_id,
                 payload,
-            } => self.deliver(session_id, SidEvent::Frame(payload), cx),
+            } => {
+                self.deliver(session_id, SidEvent::Frame(payload), cx);
+                false
+            }
             // Told to hosts only.
-            RelayEvent::DeviceRevoked { .. } => {}
-            RelayEvent::Error { code } => self.fail_pending_open(match code.as_str() {
-                "not_found" => ConnectError::HostOffline,
-                "rate_limited" => ConnectError::RateLimited,
-                "unauthorized" => ConnectError::Unauthorized,
-                other => ConnectError::Relay(other.to_string()),
-            }),
-            RelayEvent::Stopped(reason) => self.on_stopped(reason, cx),
+            RelayEvent::DeviceRevoked { .. } => false,
+            RelayEvent::Error { code } => {
+                self.fail_pending_open(match code.as_str() {
+                    "not_found" => ConnectError::HostOffline,
+                    "rate_limited" => ConnectError::RateLimited,
+                    "unauthorized" => ConnectError::Unauthorized,
+                    other => ConnectError::Relay(other.to_string()),
+                });
+                false
+            }
+            RelayEvent::Stopped(reason) => {
+                self.on_stopped(reason, cx);
+                true
+            }
+        };
+        if changed {
+            cx.emit(RelayInitiatorEvent::Changed);
+            cx.notify();
         }
-        cx.emit(RelayInitiatorEvent::Changed);
-        cx.notify();
     }
 
     fn on_stopped(&mut self, reason: StopReason, cx: &mut Context<Self>) {
@@ -514,6 +637,16 @@ impl RelayInitiator {
         let wanted = self.pending_open.as_ref().is_some_and(|pending| {
             pending.host_device_id == peer_device_id && pending.mode == mode
         });
+        // Closing it at the relay would end the session that holds the id.
+        if self.routes.contains_key(&session_id) {
+            log::warn!("the relay announced session {session_id} while it was in use");
+            if wanted {
+                self.fail_pending_open(ConnectError::Unavailable(
+                    "the relay reused a session that is still in use; try again".into(),
+                ));
+            }
+            return;
+        }
         if !wanted {
             log::debug!("closing a session nobody asked for");
             self.close_at_relay(session_id, cx);

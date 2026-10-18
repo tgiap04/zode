@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use snow::{Builder, HandshakeState, TransportState};
+use snow::{
+    Builder, HandshakeState, TransportState,
+    params::DHChoice,
+    resolvers::{CryptoResolver as _, DefaultResolver},
+};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
@@ -140,6 +144,20 @@ impl DeviceKeypair {
         Ok(Self {
             private_key: private_key?,
             public_key: key_from_slice(&keypair.public)?,
+        })
+    }
+
+    /// Rebuilds a keypair from its private half alone, deriving the public
+    /// half, so a stored pair can be checked against itself.
+    pub fn from_private_key(private_key: Zeroizing<[u8; KEY_LEN]>) -> Result<Self, NoiseError> {
+        let mut dh = DefaultResolver
+            .resolve_dh(&DHChoice::Curve25519)
+            .ok_or(NoiseError::Noise(snow::Error::Dh))?;
+        dh.set(private_key.as_slice());
+        let public_key = key_from_slice(dh.pubkey())?;
+        Ok(Self {
+            private_key,
+            public_key,
         })
     }
 
@@ -408,11 +426,13 @@ impl Session {
         Ok(decode_inner_frame(&plaintext)?)
     }
 
-    /// Cuts one stream's bytes into data frames and seals each.
+    /// Cuts one stream's bytes into data frames and seals each, or none.
     ///
-    /// Checks up front that the session has nonces left for every chunk: a
-    /// stream cut off halfway by exhaustion leaves the peer with a truncated
-    /// file it cannot tell from a complete one.
+    /// Checks up front that the session has nonces left for every chunk, for a
+    /// caller that holds a whole stream before sending it. A caller that seals
+    /// frame by frame as bytes arrive cannot know the length in advance; for
+    /// it, exhaustion ends the session partway, which the peer sees as the
+    /// session closing and not as a stream that ended cleanly.
     pub fn encrypt_data_chunks(
         &mut self,
         stream_id: u32,

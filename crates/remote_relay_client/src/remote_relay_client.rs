@@ -27,8 +27,9 @@ mod session;
 pub mod test_support;
 mod trust_store;
 
-use std::{sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
+use async_tungstenite::tungstenite::http::Uri;
 use gpui::{AsyncApp, Context, EventEmitter, Task, WeakEntity};
 use rand::Rng as _;
 use remote_relay_protocol::{
@@ -43,6 +44,7 @@ pub use credentials::{
 pub use device_identity::{
     DirectoryDevice, DirectoryError, decode_public_key, delete_keypair, encode_public_key,
     list_devices, load_or_create_keypair, local_device_name, register_public_key,
+    sanitize_device_name, sanitize_display_text,
 };
 pub use environment::{RegisteringCredentials, RelayEnvironment};
 pub use initiator::{ConnectError, InitiatorState, RelayHost, RelayInitiator, RelayInitiatorEvent};
@@ -119,6 +121,16 @@ pub enum RelayRole {
     Client,
 }
 
+impl RelayRole {
+    /// How the relay's hello names the role.
+    fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Client => "client",
+        }
+    }
+}
+
 /// The relay address for `role`. A host is the relay's default, so its address
 /// carries nothing extra.
 pub fn relay_url_for(api_url: &str, role: RelayRole) -> String {
@@ -129,17 +141,31 @@ pub fn relay_url_for(api_url: &str, role: RelayRole) -> String {
 }
 
 /// Whether `url` would send the access token over an unencrypted connection
-/// to a machine other than this one.
+/// to a machine other than this one. The host is read the way the connection
+/// will read it, so a name in front of an `@` cannot stand in for the machine
+/// that is really reached.
 fn sends_token_in_the_clear(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("ws://") else {
+    let Ok(uri) = url.parse::<Uri>() else {
+        return url
+            .get(..5)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ws://"));
+    };
+    if !uri
+        .scheme_str()
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ws"))
+    {
         return false;
+    }
+    let Some(host) = uri.host() else {
+        return true;
     };
-    let authority = rest.split(['/', '?']).next().unwrap_or_default();
-    let host = match authority.strip_prefix('[') {
-        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
-        None => authority.split(':').next().unwrap_or_default(),
-    };
-    !matches!(host, "localhost" | "127.0.0.1" | "::1")
+    let is_this_machine = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    !is_this_machine
 }
 
 /// Why a client stopped for good rather than reconnecting.
@@ -410,11 +436,12 @@ impl RelayClient {
     async fn run(this: WeakEntity<Self>, cx: &mut AsyncApp) {
         let mut backoff = Backoff::default();
         loop {
-            let Ok((credentials, transport, url)) = this.read_with(cx, |this, _| {
+            let Ok((credentials, transport, url, role)) = this.read_with(cx, |this, _| {
                 (
                     this.credentials.clone(),
                     this.transport.clone(),
                     this.url.clone(),
+                    this.role,
                 )
             }) else {
                 return;
@@ -487,7 +514,7 @@ impl RelayClient {
             }
             let connected_at = cx.background_executor().now();
 
-            let ended = Self::read_until_closed(&this, &link, cx).await;
+            let ended = Self::read_until_closed(&this, &link, role, cx).await;
 
             if cx.background_executor().now().duration_since(connected_at) >= STABLE_CONNECTION {
                 backoff.reset();
@@ -544,6 +571,7 @@ impl RelayClient {
     async fn read_until_closed(
         this: &WeakEntity<Self>,
         link: &RelayLink,
+        role: RelayRole,
         cx: &mut AsyncApp,
     ) -> Ended {
         while let Ok(inbound) = link.inbound.recv().await {
@@ -566,6 +594,18 @@ impl RelayClient {
                     Ok(Some(RelayText::Hello { relay, .. })) if relay != RELAY_PROTOCOL_VERSION => {
                         log::error!(
                             "the relay speaks version {relay}, not {RELAY_PROTOCOL_VERSION}"
+                        );
+                        return Ended::Stop(StopReason::IncompatibleRelay);
+                    }
+                    // A relay that ignored `?role=` has registered this socket
+                    // as the other kind, which for a client means taking the
+                    // device's host slot away from the real host.
+                    Ok(Some(RelayText::Hello {
+                        role: announced, ..
+                    })) if announced != role.as_wire_name() => {
+                        log::error!(
+                            "the relay registered this socket as a {announced}, not a {}",
+                            role.as_wire_name()
                         );
                         return Ended::Stop(StopReason::IncompatibleRelay);
                     }
@@ -672,6 +712,32 @@ mod tests {
     }
 
     #[test]
+    fn the_host_the_token_is_sent_to_is_the_one_the_connection_will_reach() {
+        for url in [
+            "ws://localhost:80@evil.example/api/relay",
+            "ws://127.0.0.1:80@evil.example/api/relay",
+            "ws://[::1]@evil.example/api/relay",
+            "ws://user:secret@evil.example/api/relay",
+            "ws://localhost.evil.example/api/relay",
+            "ws://evil.example:80/localhost",
+            "WS://relay.example.com/api/relay",
+            "ws://not a url",
+        ] {
+            assert!(sends_token_in_the_clear(url), "{url}");
+        }
+        for url in [
+            "ws://user@localhost:8000/api/relay",
+            "ws://LOCALHOST:8000/api/relay",
+            "ws://127.0.0.1/api/relay",
+            "ws://[::1]:8000/api/relay",
+            "wss://user@relay.example.com/api/relay",
+            "wss://localhost:80@evil.example/api/relay",
+        ] {
+            assert!(!sends_token_in_the_clear(url), "{url}");
+        }
+    }
+
+    #[test]
     fn the_relay_address_follows_the_api_address() {
         assert_eq!(
             relay_url("https://api.zodekit.site/api"),
@@ -700,6 +766,28 @@ mod tests {
         assert_eq!(stop_reason_for_close(Some(4408), ""), None);
         assert_eq!(stop_reason_for_close(Some(1001), ""), None);
         assert_eq!(stop_reason_for_close(None, ""), None);
+    }
+
+    #[test]
+    fn only_the_exact_code_and_reason_say_the_device_was_revoked() {
+        for (code, reason) in [
+            (Some(4403), "device_revoked "),
+            (Some(4403), " device_revoked"),
+            (Some(4403), "Device_Revoked"),
+            (Some(4403), "not_device_revoked"),
+            (Some(4403), "device_revoked_by_admin"),
+            (Some(4403), "session_revoked: device_revoked"),
+            (Some(4401), "device_revoked"),
+            (Some(1008), "device_revoked"),
+            (Some(4409), "device_revoked"),
+            (None, "device_revoked"),
+        ] {
+            assert_ne!(
+                stop_reason_for_close(code, reason),
+                Some(StopReason::Revoked),
+                "{code:?} {reason:?} must not wipe the device"
+            );
+        }
     }
 
     #[test]
@@ -1158,6 +1246,20 @@ mod tests {
     async fn a_hello_from_another_relay_version_halts_as_incompatible(cx: &mut TestAppContext) {
         let relay = FakeRelay::new();
         relay.set_hello_version(2);
+        let (client, _recorded) = client(&relay, cx);
+        cx.run_until_parked();
+        assert_eq!(
+            client.read_with(cx, |client, _| client.state()),
+            ConnectionState::Stopped(StopReason::IncompatibleRelay)
+        );
+    }
+
+    #[gpui::test]
+    async fn a_relay_that_registers_the_socket_in_the_other_role_halts_as_incompatible(
+        cx: &mut TestAppContext,
+    ) {
+        let relay = FakeRelay::new();
+        relay.set_hello_role("client");
         let (client, _recorded) = client(&relay, cx);
         cx.run_until_parked();
         assert_eq!(

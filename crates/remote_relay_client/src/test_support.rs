@@ -217,6 +217,7 @@ struct RelayState {
     client_delivery_paused: bool,
     outbound_capacity: Option<usize>,
     hello_version: Option<u32>,
+    hello_role: Option<String>,
 }
 
 /// What a client gets from the relay.
@@ -280,6 +281,12 @@ impl FakeRelay {
     /// The protocol version the relay announces in its hello.
     pub fn set_hello_version(&self, version: u32) {
         self.state.lock().hello_version = Some(version);
+    }
+
+    /// The role the relay announces in its hello to every socket, whatever
+    /// the socket asked for, as a relay that ignores `?role=` would.
+    pub fn set_hello_role(&self, role: &str) {
+        self.state.lock().hello_role = Some(role.to_string());
     }
 
     pub fn accept_connections(&self) {
@@ -404,6 +411,15 @@ impl FakeRelay {
         for session_id in sessions {
             self.end_session(session_id, reason);
         }
+    }
+
+    /// The version and role a hello announces to a socket of `role`.
+    fn hello_fields(&self, role: &str) -> (u32, String) {
+        let state = self.state.lock();
+        (
+            state.hello_version.unwrap_or(1),
+            state.hello_role.clone().unwrap_or_else(|| role.to_string()),
+        )
     }
 
     /// What the relay tells a client about the hosts it may open sessions to:
@@ -815,8 +831,8 @@ impl FakeTransport {
             generation
         };
 
-        let hello_version = relay.state.lock().hello_version.unwrap_or(1);
-        let hello = json!({"t": "hello", "relay": hello_version, "role": "client"}).to_string();
+        let (hello_version, hello_role) = relay.hello_fields("client");
+        let hello = json!({"t": "hello", "relay": hello_version, "role": hello_role}).to_string();
         for text in [hello, relay.presence_for(&device_id)] {
             if inbound_sender.try_send(WireInbound::Text(text)).is_err() {
                 log::debug!("the client's queue is full or gone");
@@ -913,8 +929,8 @@ impl FakeTransport {
             relay: relay.clone(),
             generation,
         };
-        let hello_version = relay.state.lock().hello_version.unwrap_or(1);
-        let hello = json!({"t": "hello", "relay": hello_version, "role": "host"}).to_string();
+        let (hello_version, hello_role) = relay.hello_fields("host");
+        let hello = json!({"t": "hello", "relay": hello_version, "role": hello_role}).to_string();
         if inbound_sender.try_send(WireInbound::Text(hello)).is_err() {
             log::debug!("the host's queue is full or gone");
         }

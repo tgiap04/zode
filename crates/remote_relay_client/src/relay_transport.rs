@@ -43,6 +43,12 @@ const SILENCE_LIMIT: Duration = Duration::from_secs(75);
 /// waiting longer would park the pump, and with it everything queued behind.
 const WRITE_LIMIT: Duration = Duration::from_secs(15);
 
+/// How long opening the socket may take, from the first packet to the end of
+/// the upgrade. Nothing else bounds it: the silence and write limits only start
+/// once the socket is up, so a path that dies mid-handshake would otherwise
+/// leave the client connecting for good, with no retry and no log.
+const CONNECT_LIMIT: Duration = Duration::from_secs(20);
+
 /// The most a refusal body is read for: it carries one short error code.
 const MAX_REFUSAL_BODY_BYTES: usize = 1024;
 
@@ -178,6 +184,16 @@ pub(crate) async fn connect_websocket(
     url: &str,
     bearer: &str,
 ) -> Result<WebSocketStream<ConnectStream>, TransportError> {
+    connect_websocket_within(url, bearer, CONNECT_LIMIT).await
+}
+
+/// [`connect_websocket`], giving up after `limit` with
+/// [`TransportError::Unreachable`] so that the usual backoff retries.
+pub(crate) async fn connect_websocket_within(
+    url: &str,
+    bearer: &str,
+    limit: Duration,
+) -> Result<WebSocketStream<ConnectStream>, TransportError> {
     let mut request = url
         .into_client_request()
         .context("the relay address is not a valid WebSocket request")
@@ -200,16 +216,20 @@ pub(crate) async fn connect_websocket(
     let config = WebSocketConfig::default()
         .max_message_size(Some(largest_message))
         .max_frame_size(Some(largest_message));
-    match connect_async_with_tls_connector_and_config(request, Some(connector), Some(config)).await
-    {
-        Ok((socket, _response)) => Ok(socket),
-        Err(async_tungstenite::tungstenite::Error::Http(response)) => {
+    let connecting =
+        connect_async_with_tls_connector_and_config(request, Some(connector), Some(config));
+    match tokio::time::timeout(limit, connecting).await {
+        Ok(Ok((socket, _response))) => Ok(socket),
+        Ok(Err(async_tungstenite::tungstenite::Error::Http(response))) => {
             Err(TransportError::Refused {
                 status: response.status().as_u16(),
                 reason: refusal_reason(response.body().as_deref()),
             })
         }
-        Err(error) => Err(TransportError::Unreachable(error.to_string())),
+        Ok(Err(error)) => Err(TransportError::Unreachable(error.to_string())),
+        Err(_) => Err(TransportError::Unreachable(format!(
+            "the relay did not answer within {limit:?}"
+        ))),
     }
 }
 
@@ -492,6 +512,31 @@ mod tests {
                 .err()
                 .expect("nothing is listening");
             assert!(matches!(error, TransportError::Unreachable(_)), "{error}");
+        });
+    }
+
+    #[test]
+    fn a_relay_that_accepts_the_connection_and_never_answers_is_given_up_on() {
+        run(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("address");
+            // Takes the connection, reads nothing and says nothing: what a
+            // load balancer or a captive portal does with a request it will
+            // never answer.
+            let (release, held) = channel::bounded::<()>(1);
+            tokio::spawn(async move {
+                let _stream = listener.accept().await;
+                held.recv().await.ok();
+            });
+            let url = format!("ws://{address}/api/relay");
+            let attempt = connect_websocket_within(&url, "t", Duration::from_millis(300));
+            let error = tokio::time::timeout(Duration::from_secs(5), attempt)
+                .await
+                .expect("the attempt outlived its limit")
+                .err()
+                .expect("nothing answered");
+            assert!(matches!(error, TransportError::Unreachable(_)), "{error}");
+            drop(release);
         });
     }
 

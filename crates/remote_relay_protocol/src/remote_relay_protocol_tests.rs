@@ -1027,6 +1027,83 @@ fn a_reveal_is_one_try() {
 }
 
 #[test]
+fn no_second_exchange_starts_while_the_digits_are_being_compared() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    begin(&mut gate, start).expect("begins");
+    gate.reveal([0xB0; NONCE_LEN], start).expect("reveals");
+    assert_eq!(
+        begin(&mut gate, start + Duration::from_secs(1)),
+        Err(PairingError::Busy),
+        "the reveal has been taken but a person is still comparing"
+    );
+
+    gate.confirm_digits();
+    begin(&mut gate, start + Duration::from_secs(2)).expect("free once the digits matched");
+    gate.reveal([0xB0; NONCE_LEN], start + Duration::from_secs(2))
+        .expect("reveals");
+    assert_eq!(
+        begin(&mut gate, start + Duration::from_secs(3)),
+        Err(PairingError::Busy)
+    );
+    gate.reject_digits();
+    begin(&mut gate, start + Duration::from_secs(4)).expect("free once the digits differed");
+}
+
+#[test]
+fn the_comparison_holds_the_gate_only_until_the_exchange_expires() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    begin(&mut gate, start).expect("begins");
+    gate.reveal([0xB0; NONCE_LEN], start + Duration::from_secs(5))
+        .expect("reveals");
+    assert_eq!(
+        begin(&mut gate, start + PAIRING_EXPIRY - Duration::from_secs(1)),
+        Err(PairingError::Busy)
+    );
+    begin(&mut gate, start + PAIRING_EXPIRY)
+        .expect("a person who walked away does not hold the gate for good");
+}
+
+#[test]
+fn a_failed_reveal_does_not_hold_the_gate() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    begin(&mut gate, start).expect("begins");
+    assert_eq!(
+        gate.reveal([0xB1; NONCE_LEN], start),
+        Err(PairingError::CommitmentMismatch)
+    );
+    begin(&mut gate, start).expect("nothing is being compared after a mismatch");
+}
+
+#[test]
+fn cancelling_frees_the_gate_and_leaves_the_failure_count_alone() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS - 1 {
+        gate.reject_digits();
+    }
+
+    begin(&mut gate, start).expect("begins");
+    gate.cancel_pending();
+    begin(&mut gate, start).expect("a cancelled request no longer holds the gate");
+
+    gate.reveal([0xB0; NONCE_LEN], start).expect("reveals");
+    gate.cancel_pending();
+    begin(&mut gate, start).expect("nor does a cancelled comparison");
+
+    assert!(!gate.is_locked_out(), "cancelling is not a failed attempt");
+    gate.reject_digits();
+    assert!(
+        gate.is_locked_out(),
+        "the failures counted before the cancel are still counted"
+    );
+    gate.cancel_pending();
+    assert!(gate.is_locked_out(), "cancelling does not unlock pairing");
+}
+
+#[test]
 fn repeated_failures_lock_pairing_until_the_user_resets_it() {
     let start = Instant::now();
     let mut gate = PairingGate::new();
@@ -1061,6 +1138,25 @@ fn rejected_digits_count_and_confirmed_digits_clear_the_count() {
     assert!(!gate.is_locked_out());
     gate.reject_digits();
     assert!(gate.is_locked_out());
+}
+
+#[test]
+fn a_keypair_can_be_rebuilt_from_its_private_half() {
+    let original = DeviceKeypair::generate().expect("keys");
+    let rebuilt =
+        DeviceKeypair::from_private_key(Zeroizing::new(*original.private_key())).expect("rebuilds");
+    assert_eq!(rebuilt.public_key(), original.public_key());
+
+    // RFC 7748 section 6.1, Alice's key pair.
+    let private_key: [u8; KEY_LEN] =
+        unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+            .try_into()
+            .expect("32 bytes");
+    let alice = DeviceKeypair::from_private_key(Zeroizing::new(private_key)).expect("rebuilds");
+    assert_eq!(
+        hex(alice.public_key()),
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+    );
 }
 
 // ---- handshake hardening ----
