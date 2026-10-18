@@ -1,17 +1,29 @@
 //! The uncommitted changes under one folder of a repository, read for someone
 //! who must not be handed more than they asked for: only the paths the caller
-//! keeps, and never more than a fixed number of bytes held in memory.
+//! keeps, never more than a fixed number of bytes held in memory, and never
+//! more than a fixed time spent.
+//!
+//! Uncommitted means staged or not, and new files git does not track yet
+//! included -- up to [`MAX_UNTRACKED_FILES`] of them, each costing a run of git.
 //!
 //! No external diff program and no textconv program is run. The repository's
 //! own git filters (a `clean` filter named in its attributes, say) still apply,
 //! exactly as they do to any `git status` or `git diff` Zode runs.
 
-use std::sync::Arc;
+mod patch;
+mod process;
 
-use anyhow::{Context as _, Result, bail};
-use futures::AsyncReadExt as _;
-use util::command::Stdio;
+use std::{
+    pin::pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use anyhow::{Result, bail};
+use futures::future::{Either, select};
+use gpui::BackgroundExecutor;
+
+use self::{patch::retain_allowed_files, process::run};
 use crate::repository::{GitBinary, RepoPath};
 
 /// The most bytes of changed-path names read before the repository is judged
@@ -21,6 +33,17 @@ const MAX_NAME_LIST_BYTES: usize = 4 * 1024 * 1024;
 /// The most bytes of file names given to one run of git, which keeps a command
 /// line inside what every platform accepts.
 const MAX_PATHSPEC_BYTES_PER_RUN: usize = 16 * 1024;
+
+/// The most files git does not track yet that are shown. Each is read by a run
+/// of git of its own, so a folder of generated files costs a bounded number of
+/// processes, not one per file.
+const MAX_UNTRACKED_FILES: usize = 100;
+
+/// How long, from the start of the read, new files go on being started. They
+/// are the least of what is asked for, and each run of git is a process in
+/// the repository's queue, so what is left of the deadline is not spent on
+/// them.
+const UNTRACKED_TIME_BUDGET: Duration = Duration::from_secs(8);
 
 /// Decides, for a path inside the repository, whether its changes may be sent.
 pub type PathFilter = Arc<dyn Fn(&RepoPath) -> bool + Send + Sync>;
@@ -34,12 +57,19 @@ pub struct ScopedDiff {
     pub keep: PathFilter,
     /// The most bytes of diff returned.
     pub max_bytes: usize,
+    /// How long the whole read may take. When it runs out the git that is
+    /// running is stopped and the read is an error.
+    pub deadline: Duration,
+    /// Keeps the time for `deadline`.
+    pub executor: BackgroundExecutor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedDiff {
     pub text: String,
-    /// The diff continued past `max_bytes` and was cut at the end of a line.
+    /// The diff is not all of the changes: it continued past `max_bytes` and
+    /// was cut at the end of a line, or files git does not track yet were left
+    /// out.
     pub truncated: bool,
 }
 
@@ -99,44 +129,39 @@ fn parse_changed_paths(listing: &[u8]) -> Vec<(&str, RepoPath)> {
         .collect()
 }
 
-struct Collected {
-    bytes: Vec<u8>,
-    /// More was available than `limit` allowed, and the program was stopped.
-    overflowed: bool,
+/// `names` in runs short enough for one command line each, in order, so the
+/// runs joined are the one diff.
+fn pathspec_runs(names: &[String]) -> Vec<Vec<&str>> {
+    let mut runs: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut current_bytes = 0;
+    for name in names {
+        if current_bytes + name.len() + 1 > MAX_PATHSPEC_BYTES_PER_RUN && !current.is_empty() {
+            runs.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current_bytes += name.len() + 1;
+        current.push(name);
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    runs
 }
 
-/// Runs `command` and keeps at most `limit` bytes of its output. A program that
-/// has more to say is killed rather than waited for, so neither its output nor
-/// its running time is bounded by what it chooses to produce.
-async fn collect_bounded(mut command: util::command::Command, limit: usize) -> Result<Collected> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let mut child = command.spawn().context("could not start git")?;
-    let stdout = child.stdout.take().context("git has no output to read")?;
-    let mut bytes = Vec::new();
-    stdout
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .context("could not read what git printed")?;
-    if bytes.len() > limit {
-        child.kill().context("could not stop git")?;
-        return Ok(Collected {
-            bytes,
-            overflowed: true,
-        });
-    }
-    let status = child.status().await.context("could not wait for git")?;
-    if !status.success() {
-        bail!("git exited with {status}");
-    }
-    Ok(Collected {
-        bytes,
-        overflowed: false,
-    })
+/// Whether the repository has a commit to compare with. Not having one is the
+/// only answer that is not an error: a repository git cannot read is not one
+/// with no history.
+async fn has_a_commit(git: &GitBinary) -> Result<bool> {
+    let output = run(
+        git.build_command(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]),
+        MAX_NAME_LIST_BYTES,
+    )
+    .await?;
+    // `--quiet` makes a name that is not a commit exit with 1 and say nothing;
+    // anything else it says is something wrong with the repository.
+    let output = output.ensure_succeeded("rev-parse", &[1])?;
+    Ok(output.status.is_some_and(|status| status.success()))
 }
 
 /// `None` when the repository has no commit yet, so there is nothing to compare
@@ -145,86 +170,95 @@ pub(crate) async fn diff_head_to_worktree(
     git: &GitBinary,
     request: ScopedDiff,
 ) -> Result<Option<BoundedDiff>> {
-    let head_exists = git
-        .build_command(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .context("could not start git")?
-        .success();
-    if !head_exists {
+    let deadline = request.deadline;
+    let timer = request.executor.timer(deadline);
+    // Dropping the read is what stops the git it is waiting for.
+    match select(pin!(read_diff(git, request)), pin!(timer)).await {
+        Either::Left((outcome, _)) => outcome,
+        Either::Right(((), _)) => bail!("git took longer than {deadline:?}"),
+    }
+}
+
+async fn read_diff(git: &GitBinary, request: ScopedDiff) -> Result<Option<BoundedDiff>> {
+    let started = request.executor.now();
+    if !has_a_commit(git).await? {
         return Ok(None);
     }
+    let allowed = |path: &RepoPath| path.starts_with(&request.scope) && (request.keep)(path);
+    // `--` and a path always, so that a file named like a revision cannot be
+    // taken for one. The repository root is `.`.
+    let scope = if request.scope.is_empty() {
+        "."
+    } else {
+        request.scope.as_unix_str()
+    };
 
     // The patterns are file names, not globs, however odd the names are.
-    let mut names_arguments = vec![
-        "--literal-pathspecs".to_string(),
-        "diff".into(),
-        "--name-only".into(),
-        "-z".into(),
-        "--no-renames".into(),
-        "--no-ext-diff".into(),
-        "--no-textconv".into(),
-        "HEAD".into(),
-    ];
-    // Left off when there is no folder to name: for an untrusted repository
-    // `build_command` appends an option after the arguments, which a bare `--`
-    // would turn into a file name that matches nothing.
-    if !request.scope.is_empty() {
-        names_arguments.push("--".into());
-        names_arguments.push(request.scope.as_unix_str().to_string());
-    }
-    let names = collect_bounded(git.build_command(&names_arguments), MAX_NAME_LIST_BYTES).await?;
+    let names = run(
+        git.build_command(&[
+            "--literal-pathspecs",
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--",
+            scope,
+        ]),
+        MAX_NAME_LIST_BYTES,
+    )
+    .await?
+    .ensure_succeeded("diff --name-only", &[])?;
     if names.overflowed {
         bail!("too many files have changed to list");
     }
-    let kept: Vec<String> = parse_changed_paths(&names.bytes)
+    let kept: Vec<String> = parse_changed_paths(&names.stdout)
         .into_iter()
-        .filter(|(_, path)| path.starts_with(&request.scope) && (request.keep)(path))
+        .filter(|(_, path)| allowed(path))
         .map(|(name, _)| name.to_string())
         .collect();
 
-    // Several runs when the names would not fit one command line; the names
-    // arrive in order, so the runs joined are the one diff.
     let mut text = Vec::new();
     let mut truncated = false;
-    let mut chunk: Vec<&str> = Vec::new();
-    let mut chunk_bytes = 0;
-    let mut chunks: Vec<Vec<&str>> = Vec::new();
-    for name in &kept {
-        if chunk_bytes + name.len() + 1 > MAX_PATHSPEC_BYTES_PER_RUN && !chunk.is_empty() {
-            chunks.push(std::mem::take(&mut chunk));
-            chunk_bytes = 0;
-        }
-        chunk_bytes += name.len() + 1;
-        chunk.push(name);
-    }
-    if !chunk.is_empty() {
-        chunks.push(chunk);
-    }
-    for names in chunks {
-        let mut arguments: Vec<&str> = vec![
+    // Several runs when the names would not fit one command line.
+    for names in pathspec_runs(&kept) {
+        // The prefixes are named so that a user's `diff.mnemonicPrefix` cannot
+        // change the headers the result is judged by, and the submodule format
+        // so that a user's `diff.submodule = log` cannot print a change with no
+        // header at all. For an untrusted repository `build_command` appends
+        // one more token after the names, which is read as one more file name.
+        let mut arguments = vec![
             "--literal-pathspecs",
             "diff",
             "--no-renames",
             "--no-ext-diff",
             "--no-textconv",
             "--no-color",
+            "--submodule=short",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "HEAD",
             "--",
         ];
-        // For an untrusted repository `build_command` appends one more token
-        // here, which is read as one more file name and matches nothing.
         arguments.extend(names);
-        let remaining = request.max_bytes - text.len();
-        let output = collect_bounded(git.build_command(&arguments), remaining).await?;
-        text.extend_from_slice(&output.bytes);
+        let remaining = request.max_bytes.saturating_sub(text.len());
+        let output = run(git.build_command(&arguments), remaining)
+            .await?
+            .ensure_succeeded("diff", &[])?;
+        // A name given to git also names what is beneath it, so what came back
+        // is judged again.
+        text.extend(retain_allowed_files(&output.stdout, allowed));
         if output.overflowed {
             truncated = true;
             break;
         }
     }
+    if !truncated {
+        truncated = append_untracked(git, scope, &request, &allowed, started, &mut text).await?;
+    }
+
     let (text, cut_raw) = cut_bytes_at_line_end(text, request.max_bytes);
     // Bytes that are not valid text become longer when decoded, so the decoded
     // text is held to the limit again.
@@ -238,345 +272,94 @@ pub(crate) async fn diff_head_to_worktree(
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{path::Path, process::Command};
-
-    use gpui::TestAppContext;
-    use util::rel_path::RelPath;
-
-    use super::*;
-    use crate::repository::{GitRepository as _, RealGitRepository, repo_path};
-
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "a test setting up a throwaway repository, where blocking is harmless"
-    )]
-    fn run_git(directory: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
-            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
-            .args(arguments)
-            .current_dir(directory)
-            .env("GIT_CONFIG_GLOBAL", "")
-            .env("GIT_CONFIG_SYSTEM", "")
-            .status()
-            .expect("git runs");
-        assert!(status.success(), "git {arguments:?}");
+/// Adds to `text` the files under `scope` that git does not track and that
+/// `allowed` accepts, each as a new file. Whether any were left out: too many,
+/// too much text, too long since `started`, or one that could not be read.
+async fn append_untracked(
+    git: &GitBinary,
+    scope: &str,
+    request: &ScopedDiff,
+    allowed: &impl Fn(&RepoPath) -> bool,
+    started: Instant,
+    text: &mut Vec<u8>,
+) -> Result<bool> {
+    let listing = run(
+        git.build_command(&[
+            "--literal-pathspecs",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            scope,
+        ]),
+        MAX_NAME_LIST_BYTES,
+    )
+    .await?
+    .ensure_succeeded("ls-files", &[])?;
+    if listing.overflowed {
+        return Ok(true);
     }
-
-    fn write(directory: &Path, path: &str, contents: &str) {
-        let full = directory.join(path);
-        std::fs::create_dir_all(full.parent().expect("a parent")).expect("a directory");
-        std::fs::write(full, contents).expect("writes");
-    }
-
-    /// A repository with a commit holding `app/inside.txt`, `app/private.txt`,
-    /// `other/outside.txt` and `root.txt`, all with one line.
-    fn committed_repository() -> tempfile::TempDir {
-        let directory = tempfile::tempdir().expect("a directory");
-        run_git(directory.path(), &["init", "-q", "-b", "main"]);
-        for path in [
-            "app/inside.txt",
-            "app/private.txt",
-            "other/outside.txt",
-            "root.txt",
-        ] {
-            write(directory.path(), path, "before\n");
+    let mut left_out = false;
+    let mut shown = 0;
+    for (name, path) in parse_changed_paths(&listing.stdout) {
+        if request.executor.now().saturating_duration_since(started) >= UNTRACKED_TIME_BUDGET {
+            left_out = true;
+            break;
         }
-        run_git(directory.path(), &["add", "."]);
-        run_git(directory.path(), &["commit", "-q", "-m", "first"]);
-        directory
-    }
-
-    fn repository(directory: &Path, cx: &TestAppContext) -> RealGitRepository {
-        RealGitRepository::new(
-            &directory.join(".git"),
-            None,
-            Some("git".into()),
-            cx.executor(),
+        if !allowed(&path) {
+            continue;
+        }
+        // The name is given to git as a file to compare, with no `--` to say
+        // so, which would make a name that starts with one an option.
+        if name.starts_with('-') || shown == MAX_UNTRACKED_FILES {
+            left_out = true;
+            continue;
+        }
+        shown += 1;
+        let remaining = request.max_bytes.saturating_sub(text.len());
+        // No `--` and no prefix: for an untrusted repository `build_command`
+        // appends an option after the names, which `--no-index` takes where a
+        // `--` would make it a third file to compare.
+        let compared = run(
+            git.build_command(&[
+                "diff",
+                "--no-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "/dev/null",
+                name,
+            ]),
+            remaining,
         )
-        .expect("a repository")
-    }
-
-    fn request(
-        scope: &str,
-        keep: impl Fn(&RepoPath) -> bool + Send + Sync + 'static,
-    ) -> ScopedDiff {
-        ScopedDiff {
-            scope: if scope.is_empty() {
-                RepoPath::from_rel_path(RelPath::empty())
-            } else {
-                repo_path(scope)
-            },
-            keep: Arc::new(keep),
-            max_bytes: 2 * 1024 * 1024,
+        .await
+        // Exit code 1 is how git says the files differ.
+        .and_then(|output| output.ensure_succeeded("diff --no-index", &[1]));
+        match compared {
+            // Git says a file differs with exit code 1, and also that it could
+            // not read one (a symlink to a folder, a folder that is a
+            // repository of its own), with nothing printed.
+            Ok(output) if output.stdout.is_empty() => {
+                log::warn!("a new file could not be compared: {}", output.stderr);
+                left_out = true;
+            }
+            Ok(output) => {
+                text.extend(retain_allowed_files(&output.stdout, allowed));
+                if output.overflowed {
+                    return Ok(true);
+                }
+            }
+            Err(error) => {
+                log::warn!("a new file is left out of the diff: {error:#}");
+                left_out = true;
+            }
         }
     }
-
-    #[test]
-    fn a_cut_lands_on_a_line_end_and_on_a_character() {
-        assert_eq!(
-            cut_at_line_end("a\nb\n".into(), 10),
-            ("a\nb\n".into(), false)
-        );
-        assert_eq!(cut_at_line_end("a\nbbbb\n".into(), 4), ("a\n".into(), true));
-        assert_eq!(cut_at_line_end("ééé".into(), 3), ("é".into(), true));
-    }
-
-    #[test]
-    fn raw_bytes_are_cut_at_a_line_end_before_they_are_decoded() {
-        assert_eq!(
-            cut_bytes_at_line_end(b"a\nb\n".to_vec(), 10),
-            (b"a\nb\n".to_vec(), false)
-        );
-        assert_eq!(
-            cut_bytes_at_line_end(b"a\n\xe9\xe9\xe9\n".to_vec(), 5),
-            (b"a\n".to_vec(), true)
-        );
-        assert_eq!(
-            cut_bytes_at_line_end(b"abcdef".to_vec(), 4),
-            (b"abcd".to_vec(), true),
-            "a line longer than the limit is cut where the limit falls"
-        );
-    }
-
-    #[test]
-    fn a_changed_path_that_is_not_text_is_left_out_and_the_rest_stay() {
-        let listing = b"app/one.txt\0app/\xff\xfe.txt\0app/two.txt\0";
-        let names: Vec<&str> = parse_changed_paths(listing)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        assert_eq!(names, ["app/one.txt", "app/two.txt"]);
-    }
-
-    /// Latin-1 text is not valid UTF-8 and grows when decoded, which must not
-    /// carry the diff past its limit.
-    #[gpui::test]
-    async fn text_that_grows_when_decoded_still_fits_the_limit(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let directory = committed_repository();
-        let line = b"\xe9\xe9\xe9\xe9\xe9\xe9\xe9\xe9\n";
-        let latin_one: Vec<u8> = line
-            .iter()
-            .copied()
-            .cycle()
-            .take(line.len() * 2000)
-            .collect();
-        std::fs::write(directory.path().join("root.txt"), latin_one).expect("writes");
-        let repository = repository(directory.path(), cx);
-
-        let mut limited = request("", |_| true);
-        limited.max_bytes = 4_000;
-        let cut = repository
-            .diff_head_to_worktree_scoped(limited)
-            .await
-            .expect("a diff")
-            .expect("a commit");
-        assert!(cut.truncated);
-        assert!(cut.text.len() <= 4_000, "{} bytes", cut.text.len());
-        assert!(cut.text.ends_with('\n'));
-    }
-
-    /// A program with no end to what it prints is stopped at the limit; an
-    /// unbounded read would never return.
-    #[cfg(unix)]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the program under test is `yes`, which has no counterpart in util::command's allowed constructors"
-    )]
-    #[gpui::test]
-    async fn a_program_that_never_stops_printing_is_stopped_at_the_limit(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let collected = collect_bounded(util::command::new_command("yes"), 1000)
-            .await
-            .expect("collected");
-        assert!(collected.overflowed);
-        assert_eq!(collected.bytes.len(), 1001);
-    }
-
-    #[gpui::test]
-    async fn only_changes_under_the_scope_and_kept_by_the_filter_are_returned(
-        cx: &mut TestAppContext,
-    ) {
-        cx.executor().allow_parking();
-        let directory = committed_repository();
-        for path in [
-            "app/inside.txt",
-            "app/private.txt",
-            "other/outside.txt",
-            "root.txt",
-        ] {
-            write(directory.path(), path, "after\n");
-        }
-        // A change that is only staged still counts.
-        run_git(directory.path(), &["add", "app/inside.txt"]);
-        let repository = repository(directory.path(), cx);
-
-        let scoped = repository
-            .diff_head_to_worktree_scoped(request("app", |path| {
-                path.as_unix_str() != "app/private.txt"
-            }))
-            .await
-            .expect("a diff")
-            .expect("a commit to compare with");
-        assert!(!scoped.truncated);
-        assert!(
-            scoped
-                .text
-                .contains("diff --git a/app/inside.txt b/app/inside.txt")
-        );
-        assert!(scoped.text.contains("-before\n+after\n"));
-        for left_out in ["private.txt", "outside.txt", "root.txt"] {
-            assert!(
-                !scoped.text.contains(left_out),
-                "{left_out}: {}",
-                scoped.text
-            );
-        }
-
-        let whole = repository
-            .diff_head_to_worktree_scoped(request("", |_| true))
-            .await
-            .expect("a diff")
-            .expect("a commit");
-        for file in ["inside.txt", "private.txt", "outside.txt", "root.txt"] {
-            assert!(whole.text.contains(file), "{file}");
-        }
-    }
-
-    #[gpui::test]
-    async fn a_scope_that_shares_a_prefix_with_another_folder_does_not_leak_it(
-        cx: &mut TestAppContext,
-    ) {
-        cx.executor().allow_parking();
-        let directory = committed_repository();
-        write(directory.path(), "app-extra/more.txt", "x\n");
-        run_git(directory.path(), &["add", "."]);
-        run_git(directory.path(), &["commit", "-q", "-m", "second"]);
-        write(directory.path(), "app-extra/more.txt", "y\n");
-        write(directory.path(), "app/inside.txt", "after\n");
-        let repository = repository(directory.path(), cx);
-
-        let scoped = repository
-            .diff_head_to_worktree_scoped(request("app", |_| true))
-            .await
-            .expect("a diff")
-            .expect("a commit");
-        assert!(scoped.text.contains("app/inside.txt"));
-        assert!(!scoped.text.contains("app-extra"), "{}", scoped.text);
-    }
-
-    #[gpui::test]
-    async fn a_program_named_by_the_repository_is_not_run(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let directory = committed_repository();
-        let marker = directory.path().join("ran-a-program");
-        let program = directory.path().join("program.sh");
-        std::fs::write(
-            &program,
-            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", marker.display()),
-        )
-        .expect("writes");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
-                .expect("executable");
-        }
-        write(directory.path(), ".gitattributes", "*.txt diff=custom\n");
-        run_git(
-            directory.path(),
-            &[
-                "config",
-                "diff.custom.command",
-                program.to_str().expect("text"),
-            ],
-        );
-        run_git(
-            directory.path(),
-            &[
-                "config",
-                "diff.custom.textconv",
-                program.to_str().expect("text"),
-            ],
-        );
-        write(directory.path(), "root.txt", "after\n");
-        let repository = repository(directory.path(), cx);
-
-        let scoped = repository
-            .diff_head_to_worktree_scoped(request("", |_| true))
-            .await
-            .expect("a diff")
-            .expect("a commit");
-        assert!(scoped.text.contains("-before\n+after\n"), "{}", scoped.text);
-        assert!(!marker.exists(), "a configured program ran");
-    }
-
-    #[gpui::test]
-    async fn a_diff_over_the_limit_is_cut_at_a_line_end_and_the_program_stopped(
-        cx: &mut TestAppContext,
-    ) {
-        cx.executor().allow_parking();
-        let directory = committed_repository();
-        let big: String = (0..60_000)
-            .map(|index| format!("line {index:08} of text\n"))
-            .collect();
-        write(directory.path(), "root.txt", &big);
-        let repository = repository(directory.path(), cx);
-
-        let mut limited = request("", |_| true);
-        limited.max_bytes = 100_000;
-        let cut = repository
-            .diff_head_to_worktree_scoped(limited)
-            .await
-            .expect("a diff")
-            .expect("a commit");
-        assert!(cut.truncated);
-        assert!(cut.text.len() <= 100_000);
-        assert!(cut.text.starts_with("diff --git"));
-        assert!(cut.text.ends_with('\n'));
-    }
-
-    #[gpui::test]
-    async fn a_repository_without_a_commit_has_nothing_to_compare_with(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let directory = tempfile::tempdir().expect("a directory");
-        run_git(directory.path(), &["init", "-q", "-b", "main"]);
-        write(directory.path(), "a.txt", "a\n");
-        let repository = repository(directory.path(), cx);
-
-        let outcome = repository
-            .diff_head_to_worktree_scoped(request("", |_| true))
-            .await
-            .expect("not an error");
-        assert_eq!(outcome, None);
-    }
-
-    #[gpui::test]
-    async fn names_that_look_like_patterns_are_taken_literally(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let directory = committed_repository();
-        // `[a]b.txt` read as a glob would also match `ab.txt`. Both names are
-        // valid on every platform, unlike `*` or `?`.
-        write(directory.path(), "[a]b.txt", "bracket\n");
-        write(directory.path(), "ab.txt", "plain\n");
-        run_git(directory.path(), &["add", "."]);
-        run_git(directory.path(), &["commit", "-q", "-m", "odd name"]);
-        write(directory.path(), "[a]b.txt", "changed\n");
-        write(directory.path(), "ab.txt", "changed\n");
-        let repository = repository(directory.path(), cx);
-
-        let scoped = repository
-            .diff_head_to_worktree_scoped(request("", |path| path.as_unix_str() == "[a]b.txt"))
-            .await
-            .expect("a diff")
-            .expect("a commit");
-        assert!(scoped.text.contains("a/[a]b.txt"));
-        assert!(
-            !scoped.text.contains("a/ab.txt"),
-            "the bracket name was taken as a pattern: {}",
-            scoped.text
-        );
-    }
+    Ok(left_out)
 }
+
+#[cfg(test)]
+mod tests;
