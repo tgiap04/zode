@@ -1033,6 +1033,7 @@ struct SerializableItemDescriptor {
 struct SerializableItemRegistry {
     descriptors_by_kind: HashMap<Arc<str>, SerializableItemDescriptor>,
     descriptors_by_type: HashMap<TypeId, SerializableItemDescriptor>,
+    excluded: HashSet<EntityId>,
 }
 
 impl Global for SerializableItemRegistry {}
@@ -1079,6 +1080,9 @@ impl SerializableItemRegistry {
         cx: &App,
     ) -> Option<Box<dyn SerializableItemHandle>> {
         let this = cx.try_global::<Self>()?;
+        if this.excluded.contains(&view.entity_id()) {
+            return None;
+        }
         let descriptor = this.descriptors_by_type.get(&view.entity_type())?;
         Some((descriptor.view_to_serializable_item)(view))
     }
@@ -1110,6 +1114,34 @@ pub fn register_serializable_item<I: SerializableItem>(cx: &mut App) {
     registry
         .descriptors_by_type
         .insert(TypeId::of::<I>(), descriptor);
+}
+
+/// Makes `to_serializable_item_handle` answer `None` for `item`, so what
+/// records items through it, the saved layout of the workspace and the queue of
+/// items to save, leaves it out. Code that records items some other way has to
+/// ask the same question itself, as the terminal panel does for its own panes.
+///
+/// For a tab built from a serialisable type that shows something a restart
+/// cannot bring back: recorded, it would reopen as a fresh item of that type,
+/// which is a different thing.
+pub fn exclude_from_serialization<I: Item>(item: &Entity<I>, cx: &mut App) {
+    let item_id = item.entity_id();
+    cx.default_global::<SerializableItemRegistry>()
+        .excluded
+        .insert(item_id);
+    cx.observe_release(item, move |_, cx| {
+        cx.default_global::<SerializableItemRegistry>()
+            .excluded
+            .remove(&item_id);
+    })
+    .detach();
+}
+
+/// Whether a pane draws the buttons at the ends of its tab bar, which is the
+/// user's `tab_bar.show_tab_bar_buttons`. A pane that keeps its own controls
+/// there has to offer them somewhere else when this is false.
+pub fn tab_bar_buttons_shown(cx: &App) -> bool {
+    TabBarSettings::get_global(cx).show_tab_bar_buttons
 }
 
 pub struct AppState {
@@ -6947,8 +6979,9 @@ impl Workspace {
         // nothing, so that event never reaches it, and `active_pane` would go on
         // naming the pane just removed -- every tab opened into it would land
         // where nobody can see it.
+        let painted = self.project.read(cx).activity() == ProjectActivity::Active;
         if let Some(replacement) = &replacement {
-            if self.project.read(cx).activity() == ProjectActivity::Active {
+            if painted {
                 self.set_active_pane(replacement, window, cx);
             } else {
                 // `set_active_pane` without the window title, which belongs to
@@ -6961,8 +6994,12 @@ impl Workspace {
             }
         }
         // `focus_on` is focused even over an open modal; a fallback pane is not,
-        // so the modal keeps the keyboard.
+        // so the modal keeps the keyboard. A pane that is not painted is focused
+        // by neither: the window would be left focused on a handle that is in no
+        // element tree, and when focus is then found lost, the project that
+        // registered its listener last takes it, whichever one is in front.
         let focus_target = match focus_on {
+            _ if !painted => None,
             Some(focus_on) => Some(focus_on.clone()),
             None => replacement.filter(|_| !self.has_active_modal(window, cx)),
         };
@@ -12196,6 +12233,63 @@ mod tests {
 
         // Preparing to close succeeds, even though serialization failed.
         assert!(task.await.unwrap());
+    }
+
+    #[gpui::test]
+    async fn test_an_item_excluded_from_serialization_is_not_recorded(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            register_serializable_item::<TestItem>(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let kept = cx.new(|cx| TestItem::new(cx));
+        let excluded = cx.new(|cx| TestItem::new(cx));
+        let pane = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(kept.clone()), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(excluded.clone()), None, true, window, cx);
+            workspace.active_pane().clone()
+        });
+        let serializable = |cx: &mut VisualTestContext| {
+            pane.read_with(cx, |pane, cx| {
+                pane.items()
+                    .filter(|item| item.to_serializable_item_handle(cx).is_some())
+                    .map(|item| item.item_id())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            serializable(cx),
+            vec![kept.entity_id(), excluded.entity_id()]
+        );
+
+        cx.update(|_, cx| exclude_from_serialization(&excluded, cx));
+        assert_eq!(
+            serializable(cx),
+            vec![kept.entity_id()],
+            "an excluded item is left out of what is recorded"
+        );
+
+        let excluded_id = excluded.entity_id();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(excluded_id, false, true, window, cx)
+        });
+        drop(excluded);
+        // The queue of items waiting to be saved held one until it was drained.
+        cx.executor().advance_clock(SERIALIZATION_THROTTLE_TIME);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(
+                !cx.global::<SerializableItemRegistry>()
+                    .excluded
+                    .contains(&excluded_id),
+                "the exclusion goes when the item does"
+            );
+        });
     }
 
     #[gpui::test]

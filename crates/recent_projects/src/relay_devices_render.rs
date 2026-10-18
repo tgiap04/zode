@@ -3,14 +3,32 @@
 use gpui::{Entity, FontWeight, SharedString, Window};
 use release_channel::AppVersion;
 use remote::RelayConnectionOptions;
-use remote_relay_client::{PairingAttempt, PairingFailure, PairingStep, RelayHost, RelaySession};
-use remote_relay_protocol::{AgentStatus, AgentSummary, TerminalSummary};
+use remote_relay_client::{
+    PairingAttempt, PairingFailure, PairingStep, RelayHost, RelaySession, sanitize_device_name,
+};
+use remote_relay_protocol::{AgentStatus, TerminalSummary};
 use ui::{
     Divider, Indicator, ListItem, ListItemSpacing, ListSubHeader, Modal, ModalFooter, ModalHeader,
     Section, prelude::*,
 };
 
-use crate::relay_devices::{RelayDevices, RelayDevicesEvent, State};
+use crate::relay_devices::{RelayDevices, RelayDevicesEvent, State, display_text};
+
+/// How tall a list inside the dialog may grow before it scrolls, so that the
+/// footer stays inside the dialog.
+fn list_max_height() -> Rems {
+    rems(22.)
+}
+
+/// An agent on the other Zode, with its text already made fit to draw and the
+/// terminal it is attached through.
+struct AgentRow {
+    id: String,
+    label: String,
+    name: String,
+    status: AgentStatus,
+    terminal: TerminalSummary,
+}
 
 impl RelayDevices {
     fn render_host_row(&self, host: &RelayHost, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -57,19 +75,21 @@ impl RelayDevices {
             .selectable(false)
             .start_slot(Indicator::dot().color(dot))
             .child(
-                v_flex().child(Label::new(host.name.clone())).child(
-                    Label::new(if host.online {
-                        status.to_string()
-                    } else {
-                        format!("{status}, offline")
-                    })
-                    .size(LabelSize::Small)
-                    .color(if host.key_changed {
-                        Color::Warning
-                    } else {
-                        Color::Muted
-                    }),
-                ),
+                v_flex()
+                    .child(Label::new(host.name.clone()).truncate())
+                    .child(
+                        Label::new(if host.online {
+                            status.to_string()
+                        } else {
+                            format!("{status}, offline")
+                        })
+                        .size(LabelSize::Small)
+                        .color(if host.key_changed {
+                            Color::Warning
+                        } else {
+                            Color::Muted
+                        }),
+                    ),
             )
             .end_slot(action)
             .into_any_element()
@@ -172,19 +192,48 @@ impl RelayDevices {
         session: &Entity<RelaySession>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (name, host_version, can_open, agents, terminals) = {
+        let local_version = AppVersion::global(cx).to_string();
+        let (name, host_version, same_version, can_open, any_agents, agents, terminals) = {
             let session = session.read(cx);
+            let host_version = session.host().app_version.as_str();
+            let terminals: Vec<TerminalSummary> = session
+                .terminals()
+                .iter()
+                .map(|terminal| TerminalSummary {
+                    id: terminal.id.clone(),
+                    title: display_text(&terminal.title),
+                    columns: terminal.columns,
+                    rows: terminal.rows,
+                })
+                .collect();
+            let agents = session
+                .agents()
+                .iter()
+                .filter_map(|agent| {
+                    // An agent is attached through its terminal, which carries
+                    // the same id; one with no terminal has nothing to show yet.
+                    let terminal = terminals.iter().find(|terminal| terminal.id == agent.id)?;
+                    Some(AgentRow {
+                        id: agent.id.clone(),
+                        label: display_text(agent.title.as_deref().unwrap_or(&agent.name)),
+                        name: display_text(&agent.name),
+                        status: agent.status,
+                        terminal: terminal.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
             (
-                session.host_name().to_string(),
-                session.host().app_version.clone(),
+                sanitize_device_name(session.host_name()),
+                display_text(host_version),
+                host_version == local_version,
                 session.host().can("ide"),
-                session.agents().to_vec(),
-                session.terminals().to_vec(),
+                !session.agents().is_empty(),
+                agents,
+                terminals,
             )
         };
-        let local_version = AppVersion::global(cx).to_string();
-        let same_version = local_version == host_version;
 
+        let no_terminals = terminals.is_empty();
         let open_note = if !same_version {
             Some(format!(
                 "{name} runs version {host_version} and this Zode runs {local_version}. Update \
@@ -225,68 +274,68 @@ impl RelayDevices {
                     })),
             )
             .child(Divider::horizontal())
-            .child(ListSubHeader::new("Agents").inset(true))
-            .children(self.agent_rows(session, &agents, &terminals, cx))
-            .when(agents.is_empty(), |this| {
-                this.child(empty_note("None running"))
-            })
-            .child(ListSubHeader::new("Terminals").inset(true))
-            .children(terminals.iter().map(|terminal| {
-                self.terminal_row(session, terminal.clone(), cx)
-                    .into_any_element()
-            }))
-            .when(terminals.is_empty(), |this| {
-                this.child(empty_note("None open"))
-            })
+            // Bounded like the list of hosts: the host can share up to a few
+            // hundred of each, and the rows below the dialog's edge could
+            // otherwise not be reached, nor the Back button under them.
+            .child(
+                div()
+                    .id("relay-session-items")
+                    .debug_selector(|| "relay-session-items".into())
+                    .w_full()
+                    .max_h(list_max_height())
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .child(ListSubHeader::new("Agents").inset(true))
+                            .children(self.agent_rows(session, agents, cx))
+                            .when(!any_agents, |this| this.child(empty_note("None running")))
+                            .child(ListSubHeader::new("Terminals").inset(true))
+                            .children(
+                                terminals
+                                    .into_iter()
+                                    .map(|terminal| self.terminal_row(session, terminal, cx)),
+                            )
+                            .when(no_terminals, |this| this.child(empty_note("None open"))),
+                    ),
+            )
             .into_any_element()
     }
 
     fn agent_rows(
         &self,
         session: &Entity<RelaySession>,
-        agents: &[AgentSummary],
-        terminals: &[TerminalSummary],
+        agents: Vec<AgentRow>,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         agents
-            .iter()
-            .filter_map(|agent| {
-                // An agent is attached through its terminal, which carries the
-                // same id; one with no terminal has nothing to show yet.
-                let terminal = terminals.iter().find(|terminal| terminal.id == agent.id)?;
-                let label = agent.title.clone().unwrap_or_else(|| agent.name.clone());
+            .into_iter()
+            .map(|agent| {
                 let session = session.clone();
-                let terminal = terminal.clone();
-                Some(
-                    ListItem::new(SharedString::from(format!("relay-agent-{}", agent.id)))
-                        .inset(true)
-                        .spacing(ListItemSpacing::Sparse)
-                        .selectable(false)
-                        .child(
-                            v_flex().child(Label::new(label)).child(
-                                Label::new(format!(
-                                    "{} · {}",
-                                    agent.name,
-                                    agent_status_label(agent.status)
-                                ))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                            ),
-                        )
-                        .end_slot(
-                            Button::new(SharedString::from(format!("agent-{}", agent.id)), "Open")
-                                .label_size(LabelSize::Small)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_terminal(
-                                        session.clone(),
-                                        terminal.clone(),
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        )
-                        .into_any_element(),
-                )
+                let terminal = agent.terminal;
+                ListItem::new(SharedString::from(format!("relay-agent-{}", agent.id)))
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .selectable(false)
+                    .child(
+                        v_flex().child(Label::new(agent.label).truncate()).child(
+                            Label::new(format!(
+                                "{} · {}",
+                                agent.name,
+                                agent_status_label(agent.status)
+                            ))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate(),
+                        ),
+                    )
+                    .end_slot(
+                        Button::new(SharedString::from(format!("agent-{}", agent.id)), "Open")
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_terminal(session.clone(), terminal.clone(), window, cx)
+                            })),
+                    )
+                    .into_any_element()
             })
             .collect()
     }
@@ -296,7 +345,7 @@ impl RelayDevices {
         session: &Entity<RelaySession>,
         terminal: TerminalSummary,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
         let session = session.clone();
         ListItem::new(SharedString::from(format!(
             "relay-terminal-{}",
@@ -305,7 +354,7 @@ impl RelayDevices {
         .inset(true)
         .spacing(ListItemSpacing::Sparse)
         .selectable(false)
-        .child(Label::new(terminal.title.clone()))
+        .child(Label::new(terminal.title.clone()).truncate())
         .end_slot(
             Button::new(
                 SharedString::from(format!("terminal-{}", terminal.id)),
@@ -316,6 +365,7 @@ impl RelayDevices {
                 this.open_terminal(session.clone(), terminal.clone(), window, cx)
             })),
         )
+        .into_any_element()
     }
 }
 
@@ -336,14 +386,13 @@ impl Render for RelayDevices {
                 )
                 .into_any_element(),
             State::Hosts(hosts) => {
-                let hosts = hosts.clone();
                 // Bounded so a long list scrolls inside the dialog instead of
                 // pushing the footer out of it.
                 div()
                     .id("relay-hosts-list")
                     .debug_selector(|| "relay-hosts-list".into())
                     .w_full()
-                    .max_h(rems(22.))
+                    .max_h(list_max_height())
                     .overflow_y_scroll()
                     .child(
                         v_flex().children(hosts.iter().map(|host| self.render_host_row(host, cx))),
@@ -359,7 +408,11 @@ impl Render for RelayDevices {
             }
             State::Connecting(host) => v_flex()
                 .p_3()
-                .child(Label::new(format!("Connecting to {}…", host.name)).color(Color::Muted))
+                .child(
+                    Label::new(format!("Connecting to {}…", host.name))
+                        .color(Color::Muted)
+                        .truncate(),
+                )
                 .into_any_element(),
             State::Host { session, .. } => {
                 let session = session.clone();
@@ -421,15 +474,18 @@ fn agent_status_label(status: AgentStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext, WeakEntity};
+    use gpui::{DismissEvent, Modifiers, TestAppContext, VisualTestContext, WeakEntity};
     use http_client::{AsyncBody, FakeHttpClient, Response};
+    use project::Project;
     use remote_relay_client::{
         RelayEnvironment, RelayInitiator,
         scripted_host::ScriptedHost,
         test_support::{FakeRelay, InMemoryKeychain, StaticCredentials},
     };
-    use remote_relay_protocol::DeviceKeypair;
-    use std::sync::Arc;
+    use remote_relay_protocol::{Control, DeviceKeypair};
+    use std::{cell::Cell, rc::Rc, sync::Arc};
+    use terminal_view::TerminalView;
+    use workspace::{AppState, Workspace};
 
     /// An initiator whose account directory lists `rows`, registered as the
     /// global the dialog reaches for.
@@ -438,7 +494,21 @@ mod tests {
         rows: serde_json::Value,
         cx: &mut TestAppContext,
     ) -> Entity<RelayInitiator> {
+        fresh_database(cx);
+        initiator_on_current_database(relay, rows, cx)
+    }
+
+    fn fresh_database(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(db::AppDatabase::test_new()));
+    }
+
+    /// [`initiator_listing`] over whatever the database already holds, for a
+    /// test that seeds it first.
+    fn initiator_on_current_database(
+        relay: &FakeRelay,
+        rows: serde_json::Value,
+        cx: &mut TestAppContext,
+    ) -> Entity<RelayInitiator> {
         let rows = rows.to_string();
         let environment = RelayEnvironment {
             credentials: Arc::new(StaticCredentials::new("user", "client-device", "token")),
@@ -626,5 +696,516 @@ mod tests {
              list {:?} tall",
             list.size.height
         );
+    }
+
+    /// A host of this account that lists itself in the directory, and the
+    /// initiator the dialog reaches for.
+    fn relay_with_host(cx: &mut TestAppContext) -> (Entity<ScriptedHost>, Entity<RelayInitiator>) {
+        fresh_database(cx);
+        relay_with_host_on_current_database(cx)
+    }
+
+    fn relay_with_host_on_current_database(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ScriptedHost>, Entity<RelayInitiator>) {
+        let relay = FakeRelay::new();
+        let host_key = Arc::new(DeviceKeypair::generate().expect("a key"));
+        let host = cx.new(|cx| ScriptedHost::new(relay.transport(), "user", host_key.clone(), cx));
+        let initiator = initiator_on_current_database(
+            &relay,
+            serde_json::json!([
+                {"deviceId": "host-device", "kind": "ide", "name": "Studio", "publicKey": remote_relay_client::encode_public_key(host_key.public_key())},
+            ]),
+            cx,
+        );
+        (host, initiator)
+    }
+
+    /// Pairs `view` with the host through the same steps a person takes, then
+    /// connects to it, and gives the session the dialog ended up holding.
+    fn pair_and_connect(
+        view: &Entity<RelayDevices>,
+        host: &Entity<ScriptedHost>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<RelaySession> {
+        cx.run_until_parked();
+        let studio = view.read_with(cx, |view, _| match &view.state {
+            State::Hosts(hosts) => hosts[0].clone(),
+            _ => panic!("expected the host list"),
+        });
+        view.update(cx, |view, cx| view.pair(studio.clone(), cx));
+        cx.run_until_parked();
+        let attempt = view.read_with(cx, |view, _| match &view.state {
+            State::Pairing { attempt, .. } => attempt.clone(),
+            _ => panic!("expected a pairing in progress"),
+        });
+        attempt.update(cx, |attempt, cx| attempt.confirm_digits(cx));
+        cx.run_until_parked();
+        host.update(cx, |host, cx| host.decide_pairing(true, cx));
+        cx.run_until_parked();
+        view.update(cx, |view, cx| view.connect(studio, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| match &view.state {
+            State::Host { session, .. } => session.clone(),
+            _ => panic!("expected a connected host"),
+        })
+    }
+
+    /// The id the connected host knows its one session with this Zode by.
+    fn host_session_id(host: &Entity<ScriptedHost>, cx: &mut VisualTestContext) -> u32 {
+        host.read_with(cx, |host, _| {
+            let ids = host.session_ids();
+            assert_eq!(ids.len(), 1, "one session with this Zode");
+            ids[0]
+        })
+    }
+
+    #[gpui::test]
+    async fn a_host_with_many_terminals_scrolls_instead_of_growing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            workspace::AppState::test(cx);
+        });
+        let (host, _initiator) = relay_with_host(cx);
+        let (view, cx) =
+            cx.add_window_view(|_window, cx| RelayDevices::new(WeakEntity::new_invalid(), cx));
+        let _session = pair_and_connect(&view, &host, cx);
+
+        let session_id = host_session_id(&host, cx);
+        let terminals = (0..40)
+            .map(|index| remote_relay_protocol::TerminalSummary {
+                id: format!("terminal-{index}"),
+                title: format!("shell {index}"),
+                columns: 80,
+                rows: 24,
+            })
+            .collect();
+        host.update(cx, |host, cx| {
+            host.send_control(session_id, &Control::TerminalList { terminals }, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let list = cx
+            .debug_bounds("relay-session-items")
+            .expect("the agents and terminals must be drawn");
+        let bound = cx.update(|window, _| list_max_height().to_pixels(window.rem_size()));
+        assert!(
+            (list.size.height - bound).abs() < gpui::px(1.),
+            "forty terminals must fill the list's bound of {bound:?} and scroll past it, got a \
+             list {:?} tall",
+            list.size.height
+        );
+    }
+
+    /// A workspace the dialog was opened from, a terminal of the connected host
+    /// opened as a tab, and the dialog closed the way the modal layer closes it
+    /// on `DismissEvent`: its view and the session it held are dropped.
+    struct MirrorTab {
+        host: Entity<ScriptedHost>,
+        /// The dialog reaches the initiator through a weak global, so a test
+        /// that opens a second dialog has to keep it alive itself.
+        _initiator: Entity<RelayInitiator>,
+        workspace: Entity<Workspace>,
+        session: WeakEntity<RelaySession>,
+        host_session_id: u32,
+        stream_id: u32,
+    }
+
+    async fn open_a_mirror_tab_and_close_the_dialog<'a>(
+        cx: &'a mut TestAppContext,
+        terminal_title: &str,
+    ) -> (MirrorTab, &'a mut VisualTestContext) {
+        let app_state = cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            workspace::register_serializable_item::<TerminalView>(cx);
+            app_state
+        });
+        let (host, initiator) = relay_with_host(cx);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let view = workspace.update_in(cx, |_, _, cx| {
+            let weak_workspace = cx.weak_entity();
+            cx.new(|cx| RelayDevices::new(weak_workspace, cx))
+        });
+        let session = pair_and_connect(&view, &host, cx);
+        let host_session_id = host_session_id(&host, cx);
+
+        let dismissed = Rc::new(Cell::new(false));
+        let watch = cx.update(|_, cx| {
+            let dismissed = dismissed.clone();
+            cx.subscribe(&view, move |_, _: &DismissEvent, _| dismissed.set(true))
+        });
+        let terminal = remote_relay_protocol::TerminalSummary {
+            id: "terminal-1".into(),
+            title: terminal_title.into(),
+            columns: 80,
+            rows: 24,
+        };
+        view.update_in(cx, |view, window, cx| {
+            view.open_terminal(session.clone(), terminal, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            dismissed.get(),
+            "opening the tab closes the dialog it was opened from"
+        );
+        let stream_id = host.read_with(cx, |host, _| {
+            host.received_controls()
+                .iter()
+                .find_map(|(_, control)| match control {
+                    Control::TerminalAttach {
+                        terminal_id,
+                        stream_id,
+                    } if terminal_id == "terminal-1" => Some(*stream_id),
+                    _ => None,
+                })
+                .expect("the other Zode is asked for the terminal")
+        });
+
+        let weak_session = session.downgrade();
+        drop(watch);
+        drop(view);
+        drop(session);
+        cx.run_until_parked();
+        (
+            MirrorTab {
+                host,
+                _initiator: initiator,
+                workspace,
+                session: weak_session,
+                host_session_id,
+                stream_id,
+            },
+            cx,
+        )
+    }
+
+    impl MirrorTab {
+        fn terminal_view(&self, cx: &mut VisualTestContext) -> Option<Entity<TerminalView>> {
+            self.workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .items()
+                    .find_map(|item| item.downcast::<TerminalView>())
+            })
+        }
+
+        fn screen(&self, cx: &mut VisualTestContext) -> String {
+            let view = self.terminal_view(cx).expect("the tab is open");
+            view.read_with(cx, |view, cx| view.terminal().read(cx).get_content())
+        }
+
+        fn host_prints(&self, bytes: &[u8], cx: &mut VisualTestContext) {
+            self.host.update(cx, |host, cx| {
+                host.send_data(self.host_session_id, self.stream_id, bytes, cx)
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    async fn a_mirror_tab_outlives_the_dialog_it_was_opened_from(cx: &mut TestAppContext) {
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, "zsh").await;
+
+        assert!(
+            tab.session.upgrade().is_some(),
+            "the tab owns the session its terminal lives on"
+        );
+        assert!(
+            tab.terminal_view(cx).is_some(),
+            "the tab is not closed as exited"
+        );
+
+        tab.host_prints(b"still here", cx);
+        assert!(
+            tab.screen(cx).contains("still here"),
+            "what the other Zode prints still arrives"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_session_is_released_when_the_other_zode_ends_the_stream(cx: &mut TestAppContext) {
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, "zsh").await;
+
+        tab.host_prints(b"", cx);
+
+        assert!(
+            tab.session.upgrade().is_none(),
+            "a stream that is over holds nothing open"
+        );
+    }
+
+    #[gpui::test]
+    async fn closing_the_tab_releases_the_session(cx: &mut TestAppContext) {
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, "zsh").await;
+
+        let (pane, item_id) = tab.workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane().clone();
+            let item_id = pane
+                .read(cx)
+                .active_item()
+                .expect("the mirror tab is active")
+                .item_id();
+            (pane, item_id)
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(item_id, false, true, window, cx)
+        });
+        cx.run_until_parked();
+        // What the tab held is only let go of by the update that follows it.
+        cx.update(|_, _| {});
+        cx.run_until_parked();
+
+        assert!(
+            tab.host
+                .read_with(cx, |host, _| host.received_controls().iter().any(
+                    |(_, control)| matches!(control, Control::TerminalDetach { .. })
+                )),
+            "the other Zode is told the tab is gone"
+        );
+        assert!(
+            tab.session.upgrade().is_none(),
+            "nothing keeps the session once the tab is closed"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_title_of_a_mirror_tab_is_made_fit_to_draw(cx: &mut TestAppContext) {
+        let hostile = format!("zsh\u{202E}\nrm -rf{}", "x".repeat(500));
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, &hostile).await;
+
+        let title = tab
+            .terminal_view(cx)
+            .expect("the tab is open")
+            .read_with(cx, |view, cx| view.terminal().read(cx).title(false));
+        assert!(
+            title.chars().count() <= 2 * crate::relay_devices::MAX_DISPLAY_CHARS + 2,
+            "the title was not clamped: {} characters",
+            title.chars().count()
+        );
+        assert!(
+            !title.chars().any(|character| character.is_control()
+                || ('\u{202A}'..='\u{202E}').contains(&character)),
+            "the title still carries characters that break or reorder the line"
+        );
+        assert!(title.starts_with("Studio: zshrm -rf"), "got {title:?}");
+    }
+
+    /// A terminal tab that is not a mirror, to tell "never recorded" from
+    /// "this test never registered terminals as recordable".
+    fn ordinary_terminal_tab(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<TerminalView> {
+        let (commands, _unused) = futures::channel::mpsc::unbounded();
+        let builder = terminal::TerminalBuilder::new_remote_backed(
+            commands,
+            terminal::RemoteBackedOptions::default(),
+            Default::default(),
+            settings::AlternateScroll::On,
+            None,
+            0,
+            &cx.background_executor,
+            util::paths::PathStyle::local(),
+        )
+        .expect("a terminal surface");
+        let terminal = cx.update(|_, cx| cx.new(|cx| builder.subscribe(cx)));
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().downgrade());
+        workspace.update_in(cx, |_, window, cx| {
+            let weak_workspace = cx.weak_entity();
+            cx.new(|cx| TerminalView::new(terminal, weak_workspace, None, project, window, cx))
+        })
+    }
+
+    #[gpui::test]
+    async fn a_mirror_tab_is_left_out_of_the_saved_layout(cx: &mut TestAppContext) {
+        use workspace::ItemHandle as _;
+
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, "zsh").await;
+        let mirror = tab.terminal_view(cx).expect("the tab is open");
+        let ordinary = ordinary_terminal_tab(&tab.workspace, cx);
+
+        cx.update(|_, cx| {
+            assert!(
+                ordinary.to_serializable_item_handle(cx).is_some(),
+                "a terminal tab is ordinarily recorded"
+            );
+            assert!(
+                mirror.to_serializable_item_handle(cx).is_none(),
+                "a tab for a terminal on another Zode would come back as a local shell"
+            );
+        });
+    }
+
+    fn pairing_studio(view: &Entity<RelayDevices>, cx: &mut VisualTestContext) -> RelayHost {
+        view.read_with(cx, |view, _| match &view.state {
+            State::Hosts(hosts) => hosts[0].clone(),
+            _ => panic!("expected the host list"),
+        })
+    }
+
+    fn open_dialog(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<RelayDevices> {
+        workspace.update_in(cx, |_, _, cx| {
+            let weak_workspace = cx.weak_entity();
+            cx.new(|cx| RelayDevices::new(weak_workspace, cx))
+        })
+    }
+
+    fn connected_session(
+        view: &Entity<RelayDevices>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<RelaySession> {
+        view.read_with(cx, |view, _| match &view.state {
+            State::Host { session, .. } => session.clone(),
+            _ => panic!("expected a connected host"),
+        })
+    }
+
+    fn mirror_tabs(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_pane()
+                .read(cx)
+                .items()
+                .filter(|item| item.downcast::<TerminalView>().is_some())
+                .count()
+        })
+    }
+
+    #[gpui::test]
+    async fn dialogs_opened_one_after_another_share_one_session_to_a_host(cx: &mut TestAppContext) {
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, "zsh").await;
+
+        let second = open_dialog(&tab.workspace, cx);
+        cx.run_until_parked();
+        let studio = pairing_studio(&second, cx);
+        second.update(cx, |view, cx| view.connect(studio, cx));
+        cx.run_until_parked();
+
+        let session = connected_session(&second, cx);
+        assert_eq!(
+            session.entity_id(),
+            tab.session.entity_id(),
+            "the host is already connected to; its session is used again"
+        );
+        second.update_in(cx, |view, window, cx| {
+            let terminal = remote_relay_protocol::TerminalSummary {
+                id: "terminal-2".into(),
+                title: "bash".into(),
+                columns: 80,
+                rows: 24,
+            };
+            view.open_terminal(session.clone(), terminal, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(mirror_tabs(&tab.workspace, cx), 2);
+        assert_eq!(
+            tab.host.read_with(cx, |host, _| host.session_ids().len()),
+            1,
+            "two tabs, one session: the host allows only a few"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_session_nothing_holds_is_not_used_again(cx: &mut TestAppContext) {
+        let (tab, cx) = open_a_mirror_tab_and_close_the_dialog(cx, "zsh").await;
+        let closed_session = tab.session.entity_id();
+        let (pane, item_id) = tab.workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane().clone();
+            let item_id = pane.read(cx).active_item().expect("the tab").item_id();
+            (pane, item_id)
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(item_id, false, true, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|_, _| {});
+        cx.run_until_parked();
+        assert!(tab.session.upgrade().is_none(), "the tab let go of it");
+
+        let second = open_dialog(&tab.workspace, cx);
+        cx.run_until_parked();
+        let studio = pairing_studio(&second, cx);
+        second.update(cx, |view, cx| view.connect(studio, cx));
+        cx.run_until_parked();
+
+        let session = connected_session(&second, cx);
+        assert_ne!(session.entity_id(), closed_session);
+        assert!(!session.read_with(cx, |session, _| session.is_closed()));
+    }
+
+    #[gpui::test]
+    async fn pairing_again_says_so_when_the_saved_trust_cannot_be_read(cx: &mut TestAppContext) {
+        let app_state = cx.update(AppState::test);
+        fresh_database(cx);
+        let kvp = cx.update(|cx| db::kvp::KeyValueStore::global(cx));
+        kvp.write_kvp("remote_control_hosts:user".into(), "{not json".into())
+            .await
+            .expect("a saved record");
+        let (_host, _initiator) = relay_with_host_on_current_database(cx);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let view = open_dialog(&workspace, cx);
+        cx.run_until_parked();
+        let studio = pairing_studio(&view, cx);
+
+        view.update(cx, |view, cx| view.forget_and_pair(studio, cx));
+        cx.run_until_parked();
+
+        view.read_with(cx, |view, _| match &view.state {
+            State::Problem(message) => assert!(
+                message.contains("could not be read"),
+                "the reason is shown, got {message:?}"
+            ),
+            _ => panic!("a forget that was refused must not go on to pair"),
+        });
+    }
+
+    #[gpui::test]
+    async fn pairing_again_says_so_when_the_forget_could_not_be_saved(cx: &mut TestAppContext) {
+        let app_state = cx.update(AppState::test);
+        let (host, _initiator) = relay_with_host(cx);
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let view = open_dialog(&workspace, cx);
+        let _session = pair_and_connect(&view, &host, cx);
+
+        let connection = cx.update(|_, cx| db::AppDatabase::global(cx).clone());
+        connection
+            .write(|connection| {
+                connection
+                    .exec("DROP TABLE kv_store")
+                    .and_then(|mut statement| statement())
+            })
+            .await
+            .expect("the table to go");
+        let studio = RelayHost {
+            device_id: "host-device".into(),
+            name: "Studio".into(),
+            public_key: None,
+            online: true,
+            paired: true,
+            key_changed: true,
+        };
+
+        view.update(cx, |view, cx| view.forget_and_pair(studio, cx));
+        cx.run_until_parked();
+
+        view.read_with(cx, |view, _| match &view.state {
+            State::Problem(message) => assert!(
+                message.contains("could not be saved"),
+                "the reason is shown, got {message:?}"
+            ),
+            _ => panic!("a forget that did not reach the database must not go on to pair"),
+        });
     }
 }

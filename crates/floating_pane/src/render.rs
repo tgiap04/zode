@@ -349,8 +349,11 @@ impl FloatingPane {
             .into_any_element()
     }
 
-    /// The strip that moves the window, with its minimise and close buttons.
+    /// The strip that moves the window, with its minimise and close buttons, and
+    /// the `+` menu when the tab bar has none.
     fn render_title_bar(&self, placement: Bounds<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        // An empty window shows the same list as its body, and has no tab bar.
+        let needs_plus = !workspace::tab_bar_buttons_shown(cx) && !self.is_empty(cx);
         h_flex()
             .id("floating-pane-title")
             .h(Tab::container_height(cx))
@@ -372,6 +375,9 @@ impl FloatingPane {
             .child(
                 h_flex()
                     .gap_0p5()
+                    .when(needs_plus, |buttons| {
+                        buttons.child(crate::entries::title_bar_menu(cx.weak_entity()))
+                    })
                     // Two buttons, and the difference between them is the whole
                     // reason the second exists: one hides the window and leaves
                     // everything running, the other ends it.

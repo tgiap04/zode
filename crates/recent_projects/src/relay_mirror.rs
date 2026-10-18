@@ -5,9 +5,14 @@
 //! terminal is a surface the stream draws on.
 
 use anyhow::{Context as _, Result};
-use futures::{Stream, StreamExt as _, channel::mpsc};
+use futures::{
+    FutureExt as _, Stream, StreamExt as _,
+    channel::{mpsc, oneshot},
+};
 use gpui::{AppContext as _, Entity, WeakEntity, Window};
-use remote_relay_client::{RelaySession, RelaySessionEvent, StreamReceiver, send_data_waiting};
+use remote_relay_client::{
+    RelaySession, RelaySessionEvent, StreamReceiver, sanitize_device_name, send_data_waiting,
+};
 use remote_relay_protocol::{Control, TerminalSummary};
 use settings::Settings as _;
 use terminal::{
@@ -17,6 +22,8 @@ use terminal::{
 use terminal_view::TerminalView;
 use util::{ResultExt as _, paths::PathStyle};
 use workspace::Workspace;
+
+use crate::relay_devices::display_text;
 
 /// Opens `terminal` of the host `session` is connected to as a tab in the
 /// workspace's active pane.
@@ -57,12 +64,15 @@ pub(crate) fn open_mirror_tab(
             cx,
         )
     });
+    // The tab is a window onto a terminal on another computer. Saved with the
+    // layout it would come back as a local shell.
+    workspace::exclude_from_serialization(&view, cx);
     workspace.update(cx, |workspace, cx| {
         workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
     });
 
     pump(
-        session.downgrade(),
+        session.clone(),
         surface.downgrade(),
         terminal.id.clone(),
         stream_id,
@@ -88,7 +98,11 @@ fn attach_terminal(
         settings.alternate_scroll,
         settings.max_scroll_history_lines,
     );
-    let title = format!("{host_name}: {}", terminal.title);
+    let title = format!(
+        "{}: {}",
+        sanitize_device_name(&host_name),
+        display_text(&terminal.title)
+    );
     let surface = TerminalBuilder::new_remote_backed(
         commands_sender,
         RemoteBackedOptions {
@@ -119,8 +133,13 @@ fn attach_terminal(
     Ok(surface)
 }
 
+/// Carries the stream both ways until the tab or the stream is done. Each
+/// direction holds the session itself, not a handle that lets it go: the dialog
+/// the tab was opened from closes as soon as the tab exists, and the session
+/// must outlive it. Both let go of the session when they end, which is when the
+/// tab is closed or the other Zode ends the terminal or the stream.
 fn pump(
-    session: WeakEntity<RelaySession>,
+    session: Entity<RelaySession>,
     surface: WeakEntity<Terminal>,
     terminal_id: String,
     stream_id: u32,
@@ -128,17 +147,22 @@ fn pump(
     mut commands: mpsc::UnboundedReceiver<RemoteTerminalCommand>,
     cx: &mut gpui::App,
 ) {
+    // Dropped when the output side ends, which is what tells the input side
+    // that nothing is left to type into.
+    let (output_ended, input_stopped) = oneshot::channel::<()>();
+
     // What the other Zode prints.
     cx.spawn({
         let session = session.clone();
         let surface = surface.clone();
         let terminal_id = terminal_id.clone();
         async move |cx| {
+            let _output_ended = output_ended;
             // Closing of the terminal is announced as a control message that
             // names it, not on the stream.
-            let closed = cx.update(|cx| {
+            let (closed, _subscription) = cx.update(|cx| {
                 let (sender, receiver) = mpsc::unbounded();
-                let subscription = session.upgrade().map(|session| {
+                let subscription =
                     cx.subscribe(&session, move |_, event: &RelaySessionEvent, _| {
                         if let RelaySessionEvent::Control(Control::TerminalClosed {
                             terminal_id,
@@ -150,11 +174,9 @@ fn pump(
                         {
                             log::debug!("the mirror tab stopped listening for its terminal");
                         }
-                    })
-                });
+                    });
                 (receiver, subscription)
             });
-            let (closed, _subscription) = closed;
             forward_terminal_events(output, closed, &terminal_id, |event| match event {
                 TerminalEvent::Output(bytes) => surface
                     .update(cx, |terminal, cx| terminal.feed_remote_output(bytes, cx))
@@ -174,36 +196,53 @@ fn pump(
     .detach();
 
     // What is typed here. Ends when the tab is closed, which is when the
-    // terminal and its command channel are dropped.
+    // terminal and its command channel are dropped, or when the output side
+    // has ended.
     cx.spawn(async move |cx| {
-        while let Some(command) = commands.next().await {
-            match command {
-                RemoteTerminalCommand::Input(bytes) => {
-                    if let Err(error) = send_data_waiting(&session, stream_id, &bytes, cx).await {
-                        log::warn!("could not send keystrokes to the other Zode: {error}");
-                        surface
-                            .update(cx, |terminal, cx| terminal.remote_process_exited(None, cx))
-                            .ok();
-                        return;
+        let mut input_stopped = input_stopped.fuse();
+        let session_handle = session.downgrade();
+        let tab_closed = loop {
+            // Commands first, so a close that is already queued is still
+            // told to the other Zode.
+            futures::select_biased! {
+                command = commands.next() => match command {
+                    Some(RemoteTerminalCommand::Input(bytes)) => {
+                        if let Err(error) =
+                            send_data_waiting(&session_handle, stream_id, &bytes, cx).await
+                        {
+                            log::warn!("could not send keystrokes to the other Zode: {error}");
+                            surface
+                                .update(cx, |terminal, cx| {
+                                    terminal.remote_process_exited(None, cx)
+                                })
+                                .ok();
+                            break false;
+                        }
                     }
-                }
-                // The other Zode decides the size of what it draws.
-                RemoteTerminalCommand::Resize { .. } => {}
-                RemoteTerminalCommand::Close => break,
+                    // The other Zode decides the size of what it draws.
+                    Some(RemoteTerminalCommand::Resize { .. }) => {}
+                    Some(RemoteTerminalCommand::Close) | None => break true,
+                },
+                _ = input_stopped => break false,
             }
-        }
-        session
-            .update(cx, |session, cx| {
-                session.send_control(
-                    &Control::TerminalDetach {
-                        terminal_id: terminal_id.clone(),
-                    },
-                    cx,
-                )?;
-                session.send_end_of_stream(stream_id, cx)
-            })
-            .log_err()
-            .and_then(|result| result.log_err());
+        };
+        session.update(cx, |session, cx| {
+            if tab_closed {
+                session
+                    .send_control(
+                        &Control::TerminalDetach {
+                            terminal_id: terminal_id.clone(),
+                        },
+                        cx,
+                    )
+                    .and_then(|()| session.send_end_of_stream(stream_id, cx))
+                    .log_err();
+            }
+            // Dropping the stream's sender ends what the output side waits on,
+            // so it too lets go of the session; otherwise a quiet terminal
+            // would keep a closed tab's connection open.
+            session.unregister_stream(stream_id);
+        });
     })
     .detach();
 }

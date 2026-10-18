@@ -4,7 +4,7 @@ use std::sync::Arc;
 use container::kubeconfig::ConfigTarget;
 use container::{
     BackendEvent, ContainerBackend, ContainerError, DestructivePlan, DockerBackend,
-    KubernetesBackend, PruneScope, Resource, ResourceAction, ResourceKind,
+    KubernetesBackend, PruneScope, ResourceAction, ResourceKind,
 };
 use futures::StreamExt as _;
 use futures::future::Either;
@@ -23,6 +23,8 @@ use ui::prelude::*;
 use workspace::Workspace;
 use workspace::dock::PanelEvent;
 
+use crate::search::Listing;
+
 /// What the panel knows about the list right now.
 ///
 /// `Failed` keeps the error rather than a message, so the view can tell
@@ -30,7 +32,7 @@ use workspace::dock::PanelEvent;
 /// words and neither of which is a fault worth a dialog.
 pub(crate) enum ListState {
     Loading,
-    Ready(Vec<Resource>),
+    Ready(Listing),
     Failed(ContainerError),
 }
 
@@ -737,7 +739,7 @@ impl ContainerPanel {
         self.load = Some(cx.spawn(async move |this, cx| {
             let listed = backend.list(kind).await;
             let state = match listed {
-                Ok(resources) => ListState::Ready(resources),
+                Ok(resources) => ListState::Ready(Listing::new(resources)),
                 Err(error) => ListState::Failed(error),
             };
             this.update(cx, |this, cx| {

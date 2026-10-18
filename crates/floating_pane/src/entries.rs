@@ -197,14 +197,32 @@ pub(crate) fn tab_bar_menu(this: WeakEntity<FloatingPane>) -> AnyElement {
     // says nothing about which button it is.
     h_flex()
         .debug_selector(|| "floating-pane-tab-bar-add".into())
-        .child(menu_for(this))
+        .child(menu_for("floating-pane-tab-bar-menu", "plus", this))
         .into_any_element()
 }
 
-fn menu_for(this: WeakEntity<FloatingPane>) -> AnyElement {
-    PopoverMenu::new("floating-pane-tab-bar-menu")
+/// The same `+` in the title bar. The tab bar draws its buttons only when the
+/// user's `tab_bar.show_tab_bar_buttons` is on; with it off there would be no
+/// way to add a tab to a window that already has one.
+pub(crate) fn title_bar_menu(this: WeakEntity<FloatingPane>) -> AnyElement {
+    h_flex()
+        .debug_selector(|| "floating-pane-title-bar-add".into())
+        .child(menu_for(
+            "floating-pane-title-bar-menu",
+            "floating-pane-title-bar-plus",
+            this,
+        ))
+        .into_any_element()
+}
+
+fn menu_for(
+    menu_id: &'static str,
+    trigger_id: &'static str,
+    this: WeakEntity<FloatingPane>,
+) -> AnyElement {
+    PopoverMenu::new(menu_id)
         .trigger_with_tooltip(
-            IconButton::new("plus", IconName::Plus).icon_size(IconSize::Small),
+            IconButton::new(trigger_id, IconName::Plus).icon_size(IconSize::Small),
             Tooltip::text("New\u{2026}"),
         )
         .anchor(Anchor::TopRight)

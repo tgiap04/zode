@@ -5,27 +5,91 @@
 //! own name, and what is matched should not depend on which columns the width
 //! happened to leave on screen.
 
-use container::{Resource, ResourceKind};
+use std::{
+    cell::{OnceCell, RefCell},
+    ops::Deref,
+    rc::Rc,
+};
+
+use container::{Resource, ResourceKind, RunState};
 use gpui::{Context, Entity, Subscription, Window};
 use ui::prelude::*;
 use ui_input::{ErasedEditorEvent, InputField};
 
 use crate::container_panel::{ContainerPanel, ListState};
 
-/// Whether `resource` has every word of `query` somewhere in its name or its
-/// details, ignoring case.
+/// The rows an engine last answered with, and what narrowing them costs.
 ///
-/// Every word rather than the whole phrase, so `nginx running` finds the
-/// running nginx however the columns order those two facts.
-pub(crate) fn matches(resource: &Resource, query: &str) -> bool {
-    let haystack = std::iter::once(resource.name.as_str())
+/// The panel narrows the list on every frame it draws, and a row that is busy
+/// spins, which draws every frame. So what a frame cannot change is kept: the
+/// text to look in is made once, the first time anything is typed, and the
+/// answer to the last query is remembered. A new answer from the engine is a
+/// new `Listing`, which is what ends both.
+pub(crate) struct Listing {
+    resources: Vec<Resource>,
+    haystacks: OnceCell<Vec<String>>,
+    last_answer: RefCell<Option<(String, Rc<[usize]>)>>,
+}
+
+impl Listing {
+    pub(crate) fn new(resources: Vec<Resource>) -> Self {
+        Self {
+            resources,
+            haystacks: OnceCell::new(),
+            last_answer: RefCell::new(None),
+        }
+    }
+
+    /// The positions of the rows that have every word of `query` somewhere in
+    /// their name, details or state, ignoring case.
+    ///
+    /// Every word rather than the whole phrase, so `nginx running` finds the
+    /// running nginx however the columns order those two facts.
+    fn matching(&self, query: &str) -> Rc<[usize]> {
+        if let Some((asked, answer)) = &*self.last_answer.borrow()
+            && asked == query
+        {
+            return answer.clone();
+        }
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let haystacks = self
+            .haystacks
+            .get_or_init(|| self.resources.iter().map(haystack).collect());
+        let answer: Rc<[usize]> = haystacks
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| words.iter().all(|word| text.contains(word.as_str())))
+            .map(|(position, _)| position)
+            .collect();
+        *self.last_answer.borrow_mut() = Some((query.to_string(), answer.clone()));
+        answer
+    }
+}
+
+impl Deref for Listing {
+    type Target = Vec<Resource>;
+
+    fn deref(&self) -> &Vec<Resource> {
+        &self.resources
+    }
+}
+
+/// Everything about `resource` a query may name, lowercased, one field per
+/// line. A query word has no whitespace in it, so it cannot match across two
+/// fields.
+fn haystack(resource: &Resource) -> String {
+    let state = match resource.state {
+        RunState::Running => Some("running"),
+        RunState::Paused => Some("paused"),
+        RunState::Stopped => Some("stopped"),
+        RunState::Unknown => None,
+    };
+    std::iter::once(resource.name.as_str())
         .chain(resource.detail.iter().map(|(_, value)| value.as_str()))
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>();
-    query
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .all(|word| haystack.iter().any(|field| field.contains(&word)))
+        .chain(state)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase()
 }
 
 /// The field, once it exists, and the subscription that redraws the list as it
@@ -47,11 +111,15 @@ impl ContainerPanel {
     }
 
     /// The rows the list shows: all of them, or those the query matches.
-    pub(crate) fn visible<'a>(&self, resources: &'a [Resource], cx: &App) -> Vec<&'a Resource> {
+    pub(crate) fn visible<'a>(&self, listing: &'a Listing, cx: &App) -> Vec<&'a Resource> {
         let query = self.query(cx);
-        resources
+        if query.is_empty() {
+            return listing.iter().collect();
+        }
+        listing
+            .matching(&query)
             .iter()
-            .filter(|resource| query.is_empty() || matches(resource, &query))
+            .filter_map(|&position| listing.get(position))
             .collect()
     }
 
@@ -151,8 +219,14 @@ impl ContainerPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::matches;
+    use super::Listing;
     use container::{Resource, ResourceKind, RunState};
+
+    fn matches(resource: &Resource, query: &str) -> bool {
+        !Listing::new(vec![resource.clone()])
+            .matching(query)
+            .is_empty()
+    }
 
     fn pod(name: &str, namespace: &str, status: &str) -> Resource {
         Resource {
@@ -190,5 +264,65 @@ mod tests {
     fn an_empty_query_matches_everything() {
         assert!(matches(&pod("a", "b", "c"), ""));
         assert!(matches(&pod("a", "b", "c"), "   "));
+    }
+
+    fn container(name: &str, status: &str, state: RunState) -> Resource {
+        Resource {
+            kind: ResourceKind::Container,
+            id: name.into(),
+            name: name.into(),
+            state,
+            detail: vec![("Image", "nginx:latest".into()), ("Status", status.into())],
+            parent: None,
+        }
+    }
+
+    /// Docker's `Status` column says "Up 2 minutes", never "running", so the
+    /// word the dot stands for has to be searchable on its own.
+    #[test]
+    fn a_container_is_found_by_its_state_whatever_its_status_text_says() {
+        let up = container("web", "Up 2 minutes", RunState::Running);
+        assert!(matches(&up, "running"));
+        assert!(matches(&up, "web RUNNING"));
+        assert!(!matches(&up, "stopped"));
+
+        let paused = container("db", "Up 3 minutes (Paused)", RunState::Paused);
+        assert!(matches(&paused, "paused"));
+        assert!(!matches(&paused, "running"));
+
+        let stopped = container("old", "Exited (0) 2 hours ago", RunState::Stopped);
+        assert!(matches(&stopped, "stopped"));
+        assert!(!matches(&stopped, "running"));
+    }
+
+    #[test]
+    fn a_row_with_no_state_is_not_found_by_one() {
+        let mut image = container("nginx", "", RunState::Unknown);
+        image.kind = ResourceKind::Image;
+        assert!(!matches(&image, "running"));
+        assert!(matches(&image, "nginx"));
+    }
+
+    #[test]
+    fn a_word_does_not_match_across_two_fields() {
+        let split = pod("ab", "cd", "Pending");
+        assert!(!matches(&split, "bc"));
+        assert!(matches(&split, "ab cd"));
+    }
+
+    #[test]
+    fn the_answer_to_the_same_query_is_worked_out_once() {
+        let listing = Listing::new(vec![
+            container("web", "Up", RunState::Running),
+            container("db", "Up", RunState::Running),
+        ]);
+        let first = listing.matching("web");
+        assert_eq!(&*first, &[0]);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &listing.matching("web")),
+            "a second frame with the same query reuses the answer"
+        );
+        let other = listing.matching("db");
+        assert_eq!(&*other, &[1], "a different query is answered afresh");
     }
 }

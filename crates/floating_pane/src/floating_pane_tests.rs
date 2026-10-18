@@ -2201,4 +2201,72 @@ mod chrome {
             );
         });
     }
+
+    fn set_tab_bar_buttons(shown: bool, cx: &mut gpui::VisualTestContext) {
+        use gpui::UpdateGlobal as _;
+
+        cx.update(|_window, cx| {
+            settings::SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.tab_bar.get_or_insert_default().show_tab_bar_buttons = Some(shown);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+    }
+
+    /// With the tab bar's buttons switched off, the `+` in the tab bar is gone
+    /// and so is the only other way to add a tab to a window that has one.
+    #[gpui::test]
+    async fn the_title_bar_offers_new_when_the_tab_bar_draws_no_buttons(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, cx) = super::a_painted_window(cx).await;
+        window.update_in(cx, |window, window_handle, cx| {
+            window.new_markdown_note(window_handle, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|_window, _cx| {});
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("floating-pane-title-bar-add").is_none(),
+            "with the tab bar's own `+` drawn there is only one"
+        );
+
+        set_tab_bar_buttons(false, cx);
+
+        assert!(
+            cx.debug_bounds("floating-pane-tab-bar-add").is_none(),
+            "the tab bar draws no buttons"
+        );
+        let plus = cx
+            .debug_bounds("floating-pane-title-bar-add")
+            .expect("a window with a tab must still offer a way to add another");
+        cx.simulate_click(plus.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New Markdown Note").is_some(),
+            "the title bar offers what this window can hold"
+        );
+        assert!(
+            cx.debug_bounds("MENU_ITEM-New File").is_none(),
+            "and not the workspace actions that open behind it"
+        );
+    }
+
+    /// An empty window's body is already that list, and it has no tab bar, so
+    /// switching the buttons off must not add a second copy beside it.
+    #[gpui::test]
+    async fn an_empty_window_draws_no_plus_when_the_tab_bar_draws_no_buttons(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_window, cx) = super::a_painted_window(cx).await;
+
+        set_tab_bar_buttons(false, cx);
+
+        assert!(cx.debug_bounds("floating-pane-empty").is_some());
+        assert!(cx.debug_bounds("floating-pane-title-bar-add").is_none());
+    }
 }

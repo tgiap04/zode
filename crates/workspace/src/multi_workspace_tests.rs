@@ -3515,3 +3515,73 @@ async fn a_pane_closed_in_the_background_leaves_the_front_project_focused(cx: &m
         );
     });
 }
+
+/// Which project registered its focus-lost listener last must not decide who
+/// gets the keyboard back: here the project in front was opened first, and the
+/// one closing a pane in the background was opened after it.
+#[gpui::test]
+async fn a_pane_closed_in_a_project_opened_later_leaves_the_front_project_focused(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project_a = Project::test(fs.clone(), [], cx).await;
+    let project_b = Project::test(fs.clone(), [], cx).await;
+    let (multi, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    multi.update(cx, |multi, cx| multi.test_enable_background_retention(cx));
+    let workspace_a = multi.read_with(cx, |multi, _| multi.workspace().clone());
+    let front = workspace_a.update_in(cx, |workspace, window, cx| {
+        let front = workspace.active_pane().clone();
+        let item = cx.new(|cx| TestItem::new(cx));
+        front.update(cx, |pane, cx| {
+            pane.add_item(Box::new(item), true, true, None, window, cx)
+        });
+        front
+    });
+    cx.run_until_parked();
+
+    let workspace_b = multi.update_in(cx, |multi, window, cx| {
+        multi.test_add_workspace(project_b, window, cx)
+    });
+    let (right, closing) = workspace_b.update_in(cx, |workspace, window, cx| {
+        let left = workspace.active_pane().clone();
+        let staying = cx.new(|cx| TestItem::new(cx));
+        left.update(cx, |pane, cx| {
+            pane.add_item(Box::new(staying), true, true, None, window, cx)
+        });
+        let right = workspace.split_pane(left, SplitDirection::Right, window, cx);
+        let closing = cx.new(|cx| TestItem::new(cx));
+        right.update(cx, |pane, cx| {
+            pane.add_item(Box::new(closing.clone()), true, true, None, window, cx)
+        });
+        (right, closing)
+    });
+    cx.run_until_parked();
+
+    multi.update_in(cx, |multi, window, cx| {
+        multi.activate(workspace_a.clone(), None, window, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(
+            front.read(cx).focus_handle(cx).contains_focused(window, cx),
+            "switching back puts the keyboard in the project that came to the front"
+        );
+    });
+
+    right.update_in(cx, |pane, window, cx| {
+        pane.remove_item(closing.entity_id(), false, true, window, cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(
+            front.read(cx).focus_handle(cx).contains_focused(window, cx),
+            "the project in front keeps the keyboard"
+        );
+    });
+    workspace_b.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.panes().len(), 1, "the emptied pane is gone");
+    });
+}
