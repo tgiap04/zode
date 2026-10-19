@@ -1440,6 +1440,80 @@ mod git_worktrees {
         assert!(Fs::is_dir(fs.as_ref(), &worktree_base).await);
     }
 
+    #[gpui::test]
+    async fn test_a_removed_worktree_leaves_the_list_at_once(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                ".git": {},
+                "file.txt": "content",
+            }),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        let repository = project.read_with(cx, |project, cx| {
+            project.repositories(cx).values().next().unwrap().clone()
+        });
+        let worktree_path = PathBuf::from(path!("/worktrees/root/feature/root"));
+
+        cx.update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.create_worktree(
+                    git::repository::CreateWorktreeTarget::NewBranch {
+                        branch_name: "feature".to_string(),
+                        base_sha: Some("abc123".to_string()),
+                    },
+                    worktree_path.clone(),
+                )
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        project
+            .update(cx, |project, cx| {
+                project
+                    .git_store()
+                    .update(cx, |store, cx| store.refresh_all_repositories_and_wait(cx))
+            })
+            .await;
+        cx.executor().run_until_parked();
+
+        let listed = |cx: &mut TestAppContext| {
+            repository.read_with(cx, |repository, _| {
+                repository
+                    .snapshot()
+                    .linked_worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == worktree_path)
+            })
+        };
+        assert!(listed(cx), "the new worktree should be listed first");
+
+        // A real watcher is not guaranteed to report what `git worktree remove` touched,
+        // so the list must not depend on a file event arriving.
+        fs.pause_events();
+        cx.update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.remove_worktree(worktree_path.clone(), false)
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        cx.executor().run_until_parked();
+
+        assert!(
+            !listed(cx),
+            "a removed worktree must leave the list without waiting for another scan"
+        );
+    }
+
     use crate::Project;
 }
 

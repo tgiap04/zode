@@ -6515,10 +6515,11 @@ impl Repository {
     /// dirty one. That is the safe default for anything user-initiated.
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let this = self.this.clone();
         let original_repo_abs_path = self.snapshot.original_repo_abs_path.clone();
         self.send_job(
             Some(format!("git worktree remove: {}", path.display()).into()),
-            move |repo, cx| async move {
+            move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, fs, .. }) => {
                         // When forcing, delete the worktree directory ourselves before
@@ -6569,6 +6570,13 @@ impl Repository {
                             )
                             .await;
                         }
+
+                        // Nothing else re-reads the worktree list, so without this the
+                        // removed worktree stays listed until some unrelated scan.
+                        this.update(&mut cx, |repository, cx| {
+                            drop(repository.schedule_scan(None, cx));
+                        })
+                        .ok();
 
                         Ok(())
                     }
