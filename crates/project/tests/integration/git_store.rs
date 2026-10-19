@@ -1514,6 +1514,69 @@ mod git_worktrees {
         );
     }
 
+    #[gpui::test]
+    async fn test_a_repository_whose_directory_is_gone_is_forgotten_on_the_next_scan(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                "keep": { ".git": {}, "a.txt": "a" },
+                "gone": { ".git": {}, "b.txt": "b" },
+            }),
+        )
+        .await;
+
+        let project = Project::test(
+            fs.clone(),
+            [path!("/root/keep").as_ref(), path!("/root/gone").as_ref()],
+            cx,
+        )
+        .await;
+        cx.executor().run_until_parked();
+        let paths = |cx: &mut TestAppContext| {
+            let mut paths: Vec<PathBuf> = project.read_with(cx, |project, cx| {
+                project
+                    .repositories(cx)
+                    .values()
+                    .map(|repository| repository.read(cx).work_directory_abs_path.to_path_buf())
+                    .collect()
+            });
+            paths.sort();
+            paths
+        };
+        assert_eq!(paths(cx).len(), 2);
+
+        // Deleted with no file event reaching the project, the way a checkout removed by
+        // git is not reliably reported: only a scan can find out.
+        fs.pause_events();
+        fs.remove_dir(
+            path!("/root/gone").as_ref(),
+            fs::RemoveOptions {
+                recursive: true,
+                ignore_if_not_exists: false,
+            },
+        )
+        .await
+        .unwrap();
+        project
+            .update(cx, |project, cx| {
+                project
+                    .git_store()
+                    .update(cx, |store, cx| store.refresh_all_repositories_and_wait(cx))
+            })
+            .await;
+        cx.executor().run_until_parked();
+
+        assert_eq!(
+            paths(cx),
+            vec![PathBuf::from(path!("/root/keep"))],
+            "a repository that can never be scanned again must not keep showing its last state"
+        );
+    }
+
     use crate::Project;
 }
 

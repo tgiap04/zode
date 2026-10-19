@@ -1865,6 +1865,39 @@ impl GitStore {
         self.refresh_all_repositories_and_wait(cx).detach();
     }
 
+    /// Drops every repository whose working directory is `removed` or inside
+    /// it, for a checkout that no longer exists on disk.
+    pub fn forget_repositories_under(&mut self, removed: &Path, cx: &mut Context<Self>) {
+        let gone: Vec<RepositoryId> = self
+            .repositories
+            .iter()
+            .filter(|(_, repository)| {
+                repository
+                    .read(cx)
+                    .work_directory_abs_path
+                    .starts_with(removed)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in gone {
+            self.repositories.remove(&id);
+            self.worktree_ids.remove(&id);
+            if let Some((client, project_id)) = self.downstream_client() {
+                client
+                    .send(proto::RemoveRepository {
+                        project_id: project_id.to_proto(),
+                        id: id.to_proto(),
+                    })
+                    .log_err();
+            }
+            if self.active_repo_id == Some(id) {
+                self.active_repo_id = None;
+                cx.emit(GitStoreEvent::ActiveRepositoryChanged(None));
+            }
+            cx.emit(GitStoreEvent::RepositoryRemoved(id));
+        }
+    }
+
     /// [`Self::refresh_all_repositories`], but resolves once every scan it started has
     /// finished -- for a caller that shows the user something spinning and has to know when
     /// to stop.
@@ -6516,6 +6549,7 @@ impl Repository {
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         let this = self.this.clone();
+        let git_store = self.git_store.clone();
         let original_repo_abs_path = self.snapshot.original_repo_abs_path.clone();
         self.send_job(
             Some(format!("git worktree remove: {}", path.display()).into()),
@@ -6577,6 +6611,14 @@ impl Repository {
                             drop(repository.schedule_scan(None, cx));
                         })
                         .ok();
+                        // A file or terminal opened in the removed checkout gave the
+                        // project a repository of its own for it, and that one can
+                        // never be scanned again: its directory is gone.
+                        git_store
+                            .update(&mut cx, |store, cx| {
+                                store.forget_repositories_under(&path, cx)
+                            })
+                            .ok();
 
                         Ok(())
                     }
@@ -7117,6 +7159,8 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<()>> {
         let this = cx.weak_entity();
+        let git_store = self.git_store.clone();
+        let work_directory_abs_path = self.work_directory_abs_path.clone();
         self.send_keyed_job(
             Some(GitJobKey::ReloadGitState),
             None,
@@ -7126,10 +7170,31 @@ impl Repository {
                 let Some(this) = this.upgrade() else {
                     return Ok(());
                 };
-                let RepositoryState::Local(LocalRepositoryState { backend, .. }) = state else {
+                let RepositoryState::Local(LocalRepositoryState { backend, fs, .. }) = state else {
                     bail!("not a local repository")
                 };
-                let snapshot = compute_snapshot(this.clone(), backend.clone(), &mut cx).await?;
+                let snapshot = match compute_snapshot(this.clone(), backend.clone(), &mut cx).await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        // A checkout deleted from under the project fails every scan from
+                        // then on, so its last snapshot -- still listing it -- would be
+                        // shown for good. Only a directory that is really gone counts:
+                        // any other failure may pass.
+                        if !fs.is_dir(&work_directory_abs_path).await {
+                            log::info!(
+                                "forgetting the repository at {}: its directory is gone",
+                                work_directory_abs_path.display()
+                            );
+                            git_store
+                                .update(&mut cx, |store, cx| {
+                                    store.forget_repositories_under(&work_directory_abs_path, cx)
+                                })
+                                .ok();
+                        }
+                        return Err(error);
+                    }
+                };
                 this.update(&mut cx, |this, cx| {
                     this.clear_pending_ops(cx);
                 });
