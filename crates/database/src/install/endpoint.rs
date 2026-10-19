@@ -1,50 +1,49 @@
 //! Where a build looks for its drivers, now that they are served from Zode's
 //! own API rather than a GitHub release.
 //!
-//! The version is the app's own. A driver speaks a pinned protocol
-//! (`crate::PROTOCOL_VERSION`), and the build that shipped this app is the one
-//! whose drivers were built against it -- so an app never fetches from a
-//! version other than its own, and never runs a driver left by another.
+//! The manifest comes from `latest`; an archive comes from the immutable path
+//! its manifest names. Both halves of one install therefore describe the same
+//! publish, which they could not if an archive were also read from a URL that
+//! moves. A driver speaks a pinned protocol (`crate::PROTOCOL_VERSION`), but the
+//! only place that is checked is the handshake, not anywhere in this path.
 
 use anyhow::{Context as _, Result};
-use url::Url;
+use url::{Host, Url};
 
-/// The name the manifest is published under, at every version.
-pub const MANIFEST_ASSET: &str = "zode-db-drivers-manifest.json";
+use crate::install::manifest::MANIFEST_ASSET;
 
-/// Hosts that are the machine's own loopback, for which plain HTTP is allowed.
+/// The path segment the server answers with whichever version was published
+/// last.
 ///
-/// A developer pointing `ZODE_API_URL` at `http://localhost:8000/api` must
-/// still be able to install a driver; nothing else gets that exemption.
-const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
+/// No published version can be called this: the server requires a version to
+/// start with a digit.
+const LATEST: &str = "latest";
 
-/// `{base}/drivers/{version}/{asset}` -- the one contract this crate shares
-/// with `script/build-driver-manifest` on the other side.
+/// `{base}/drivers/{version}/{asset}`, plus `{base}/drivers/latest/` for the
+/// manifest alone -- the one contract this crate shares with the server and
+/// with `script/publish-drivers-to-web` on the other side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DriverEndpoint {
     base: String,
-    version: String,
 }
 
 impl DriverEndpoint {
-    pub fn new(base: impl Into<String>, version: impl Into<String>) -> Self {
-        Self {
-            base: base.into(),
-            version: version.into(),
-        }
+    pub fn new(base: impl Into<String>) -> Self {
+        Self { base: base.into() }
     }
 
-    pub fn version(&self) -> &str {
-        &self.version
+    pub fn latest_manifest_url(&self) -> String {
+        format!(
+            "{}/drivers/{LATEST}/{MANIFEST_ASSET}",
+            self.base.trim_end_matches('/')
+        )
     }
 
-    pub fn asset_url(&self, asset: &str) -> String {
-        let Self { base, version } = self;
-        format!("{}/drivers/{version}/{asset}", base.trim_end_matches('/'))
-    }
-
-    pub fn manifest_url(&self) -> String {
-        self.asset_url(MANIFEST_ASSET)
+    pub fn asset_url(&self, version: &str, asset: &str) -> String {
+        format!(
+            "{}/drivers/{version}/{asset}",
+            self.base.trim_end_matches('/')
+        )
     }
 
     /// Rejects a `url` that does not point at exactly the origin this
@@ -73,7 +72,7 @@ impl DriverEndpoint {
         );
 
         let same_origin = target.scheme() == base.scheme()
-            && target.host_str() == base.host_str()
+            && target.host() == base.host()
             && target.port_or_known_default() == base.port_or_known_default();
         anyhow::ensure!(
             same_origin,
@@ -82,16 +81,28 @@ impl DriverEndpoint {
             origin_of(&base),
         );
 
-        let loopback = target
-            .host_str()
-            .map(|host| LOOPBACK_HOSTS.contains(&host))
-            .unwrap_or(false);
         anyhow::ensure!(
-            target.scheme() == "https" || loopback,
+            target.scheme() == "https" || is_loopback(&target),
             "driver asset url is not https: {url:?}"
         );
 
         Ok(())
+    }
+}
+
+/// Whether the url names the machine's own loopback, for which plain HTTP is
+/// allowed.
+///
+/// A developer pointing `ZODE_API_URL` at `http://localhost:8000/api` must still
+/// be able to install a driver; nothing else gets that exemption. Judged on the
+/// parsed host rather than on its text: `host_str` writes an IPv6 address inside
+/// brackets, so `[::1]` would never equal a bare `::1` in a list of names.
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain == "localhost",
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -109,30 +120,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn urls_are_built_under_the_configured_api_base() {
-        let endpoint = DriverEndpoint::new("https://api.zodekit.site/api", "0.1.1");
+    fn the_manifest_is_read_from_latest_and_an_archive_from_its_own_version() {
+        let endpoint = DriverEndpoint::new("https://api.zodekit.site/api");
         assert_eq!(
-            endpoint.manifest_url(),
-            "https://api.zodekit.site/api/drivers/0.1.1/zode-db-drivers-manifest.json"
+            endpoint.latest_manifest_url(),
+            "https://api.zodekit.site/api/drivers/latest/zode-db-drivers-manifest.json"
         );
         assert_eq!(
-            endpoint.asset_url("zode-db-postgres-aarch64-apple-darwin.tar.gz"),
-            "https://api.zodekit.site/api/drivers/0.1.1/zode-db-postgres-aarch64-apple-darwin.tar.gz"
+            endpoint.asset_url("0.1.4", "zode-db-postgres-aarch64-apple-darwin.tar.gz"),
+            "https://api.zodekit.site/api/drivers/0.1.4/zode-db-postgres-aarch64-apple-darwin.tar.gz"
         );
     }
 
     /// A trailing slash on the configured base must not double up in the URL.
     #[test]
     fn a_trailing_slash_on_the_base_does_not_duplicate() {
-        let endpoint = DriverEndpoint::new("https://api.zodekit.site/api/", "0.1.1");
+        let endpoint = DriverEndpoint::new("https://api.zodekit.site/api/");
         assert_eq!(
-            endpoint.asset_url("asset.tar.gz"),
-            "https://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz"
+            endpoint.asset_url("0.1.4", "asset.tar.gz"),
+            "https://api.zodekit.site/api/drivers/0.1.4/asset.tar.gz"
+        );
+        assert_eq!(
+            endpoint.latest_manifest_url(),
+            "https://api.zodekit.site/api/drivers/latest/zode-db-drivers-manifest.json"
         );
     }
 
     fn endpoint() -> DriverEndpoint {
-        DriverEndpoint::new("https://api.zodekit.site/api", "0.1.1")
+        DriverEndpoint::new("https://api.zodekit.site/api")
     }
 
     #[test]
@@ -184,7 +199,7 @@ mod tests {
 
     #[test]
     fn plain_http_on_a_public_host_is_refused_even_if_same_origin() {
-        let endpoint = DriverEndpoint::new("http://api.zodekit.site/api", "0.1.1");
+        let endpoint = DriverEndpoint::new("http://api.zodekit.site/api");
         assert!(
             endpoint
                 .ensure_trusted("http://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz")
@@ -196,10 +211,49 @@ mod tests {
     /// developer running the API themselves.
     #[test]
     fn plain_http_on_loopback_is_allowed() {
-        let endpoint = DriverEndpoint::new("http://localhost:8000/api", "0.1.1");
+        let endpoint = DriverEndpoint::new("http://localhost:8000/api");
         endpoint
             .ensure_trusted("http://localhost:8000/api/drivers/0.1.1/asset.tar.gz")
             .unwrap();
+    }
+
+    /// `Url::host_str` spells an IPv6 host with its brackets, so comparing it
+    /// against a list of bare addresses never matched `[::1]`.
+    #[test]
+    fn plain_http_on_every_spelling_of_loopback_is_allowed() {
+        for base in [
+            "http://localhost:8000/api",
+            "http://LOCALHOST:8000/api",
+            "http://127.0.0.1:8000/api",
+            "http://127.0.0.2:8000/api",
+            "http://[::1]:8000/api",
+        ] {
+            let endpoint = DriverEndpoint::new(base);
+            let url = format!("{base}/drivers/0.1.1/asset.tar.gz");
+            endpoint
+                .ensure_trusted(&url)
+                .unwrap_or_else(|error| panic!("{base} must be allowed: {error}"));
+        }
+    }
+
+    /// Only the machine's own loopback gets the exemption. These all look
+    /// local to a person and none of them is.
+    #[test]
+    fn plain_http_on_anything_but_loopback_is_refused() {
+        for base in [
+            "http://[::2]:8000/api",
+            "http://[fe80::1]:8000/api",
+            "http://192.168.1.10:8000/api",
+            "http://localhost.example:8000/api",
+            "http://0.0.0.0:8000/api",
+        ] {
+            let endpoint = DriverEndpoint::new(base);
+            let url = format!("{base}/drivers/0.1.1/asset.tar.gz");
+            assert!(
+                endpoint.ensure_trusted(&url).is_err(),
+                "{base} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -209,7 +263,7 @@ mod tests {
 
     #[test]
     fn an_unparsable_base_is_refused_rather_than_ignored() {
-        let endpoint = DriverEndpoint::new("not a url", "0.1.1");
+        let endpoint = DriverEndpoint::new("not a url");
         assert!(
             endpoint
                 .ensure_trusted("https://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz")

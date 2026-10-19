@@ -442,9 +442,9 @@ pub fn debug_adapters_dir() -> &'static PathBuf {
 /// them: a driver arrives when an engine is first connected to, so an install
 /// carries only the drivers its user actually asked for.
 ///
-/// One directory per driver, one directory per version inside it, so an app
-/// that has been updated does not run a driver built against an older protocol
-/// simply because it was the one already on disk.
+/// One directory per driver, one directory per published version inside it, so
+/// a newer download unpacks beside a driver that may still be running rather
+/// than over it.
 pub fn database_drivers_dir() -> &'static PathBuf {
     static DATABASE_DRIVERS_DIR: OnceLock<PathBuf> = OnceLock::new();
     DATABASE_DRIVERS_DIR.get_or_init(|| data_dir().join("database_drivers"))

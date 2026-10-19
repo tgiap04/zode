@@ -4,10 +4,10 @@
 //! `tree::build_rows`. This module only turns a `TreeRow` into pixels.
 
 use gpui::{AnyElement, ClickEvent};
-use ui::{Tooltip, prelude::*};
+use ui::{Disclosure, Tab, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
-use crate::branch_panel::tree::TreeRow;
+use crate::branch_panel::tree::{RowKey, TreeRow};
 
 mod agent;
 mod worktree_card;
@@ -59,8 +59,8 @@ impl BranchPanel {
 
             TreeRow::Empty { label } => h_flex()
                 .w_full()
-                .px_3()
-                .py_1()
+                .px_2()
+                .py_1p5()
                 .child(
                     Label::new(label.clone())
                         .size(LabelSize::Small)
@@ -83,58 +83,49 @@ impl BranchPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tooltip = current_branch.unwrap_or_else(|| "detached HEAD".into());
+        let group = SharedString::from(format!("repo-row-{ix}"));
+        let menu_is_open = self.menu_is_open();
 
         h_flex()
             .id(("repo", ix))
+            .group(group.clone())
+            .debug_selector(|| "repo-row".into())
             .w_full()
-            .h(px(34.))
-            .px_2()
-            .gap_1p5()
+            .h(Tab::content_height(cx))
+            .pl_2()
+            .pr_1p5()
+            .gap_1()
+            .child(div().debug_selector(|| "repo-disclosure".into()).child(
+                Disclosure::new(("repo-disclosure", ix), expanded).on_click(cx.listener(
+                    move |panel, _: &ClickEvent, _, cx| {
+                        panel.toggle_row(RowKey::Repo(id), cx);
+                    },
+                )),
+            ))
             .child(
-                div()
-                    .flex_none()
-                    .size(px(20.))
-                    .rounded_sm()
-                    .bg(cx.theme().colors().element_background)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        Icon::new(IconName::FolderGit)
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
-                    ),
+                Icon::new(IconName::FolderGit)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
             )
-            .child(
-                div().flex_1().min_w_0().child(
-                    Label::new(name)
-                        .weight(gpui::FontWeight::SEMIBOLD)
-                        .truncate(),
-                ),
-            )
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(IconSize::XSmall)
-                .color(Color::Muted),
-            )
+            .child(div().flex_1().min_w_0().child(Label::new(name).truncate()))
+            // Shown on hover, except while a menu is up: the menu opens under the
+            // pointer, and a button that vanished with the hover would take the
+            // thing that opened the menu away from under it.
             .child(
                 IconButton::new(("repo-menu", ix), IconName::Ellipsis)
-                    .icon_size(IconSize::XSmall)
+                    .icon_size(IconSize::Small)
+                    .when(!menu_is_open, |button| button.visible_on_hover(group))
                     .on_click(cx.listener(move |panel, event: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         let menu = panel.repo_context_menu(id, window, cx);
                         panel.open_context_menu(menu, event.position(), window, cx);
                     })),
             )
-            .when(!self.menu_is_open(), |this| {
+            .when(!menu_is_open, |this| {
                 this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
             })
             .on_click(cx.listener(move |panel, _: &ClickEvent, _, cx| {
-                panel.toggle_row(crate::branch_panel::tree::RowKey::Repo(id), cx);
+                panel.toggle_row(RowKey::Repo(id), cx);
             }))
             .on_mouse_down(
                 gpui::MouseButton::Right,

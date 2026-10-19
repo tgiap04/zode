@@ -50,7 +50,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use util::paths::{PathStyle, RemotePathBuf};
@@ -66,6 +66,7 @@ pub struct MockRemoteConnection {
     options: MockConnectionOptions,
     server_channel: Arc<ChannelClient>,
     server_cx: SendableCx,
+    terminals_over_rpc: AtomicBool,
 }
 
 /// Wrapper to pass `AsyncApp` across thread boundaries in tests.
@@ -104,6 +105,13 @@ pub struct MockConnectionRegistry {
 impl Global for MockConnectionRegistry {}
 
 impl MockConnectionRegistry {
+    /// Makes a registered connection carry terminals over the connection.
+    pub fn route_terminals_over_rpc(&mut self, opts: &MockConnectionOptions) {
+        if let Some((_, connection)) = self.pending.get(&opts.id) {
+            connection.terminals_over_rpc.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// Called by `ConnectionPool::connect` to retrieve a pre-registered mock connection.
     pub fn take(
         &mut self,
@@ -169,6 +177,7 @@ impl MockConnection {
             options: opts.clone(),
             server_channel: server_client.clone(),
             server_cx: SendableCx::new(server_cx),
+            terminals_over_rpc: AtomicBool::new(false),
         });
 
         let (tx, rx) = oneshot::channel();
@@ -302,6 +311,10 @@ impl RemoteConnection for MockRemoteConnection {
 
     fn has_wsl_interop(&self) -> bool {
         false
+    }
+
+    fn terminals_over_rpc(&self) -> bool {
+        self.terminals_over_rpc.load(Ordering::SeqCst)
     }
 }
 

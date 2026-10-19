@@ -57,14 +57,15 @@ pub(crate) fn footprint_parts(footprint: &ProjectFootprint) -> (SharedString, Sh
     (memory, cpu)
 }
 
-/// The icon that stands for memory. Neither this nor [`CPU_ICON`] is a
-/// purpose-built glyph -- this repo ships no CPU or memory-module icon among
-/// its 265 -- so the badge's tooltip and the popover rows carry the words
-/// "RAM" and "CPU" as well, rather than leaving the icons to carry the meaning
-/// alone.
-pub(crate) const MEMORY_ICON: IconName = IconName::Database;
+/// The icon that stands for memory: digits held in storage. Neither this nor
+/// [`CPU_ICON`] is a purpose-built glyph -- this repo ships no CPU or
+/// memory-module icon -- so the badge's tooltip and the popover rows carry the
+/// words "RAM" and "CPU" as well, rather than leaving the icons to carry the
+/// meaning alone. Not `Database`, which is the database tool everywhere else.
+pub(crate) const MEMORY_ICON: IconName = IconName::Binary;
 
-/// The icon that stands for CPU. See [`MEMORY_ICON`] for why it is a bolt.
+/// The icon that stands for CPU. See [`MEMORY_ICON`] for why it is a stand-in.
+/// Not the glyph the keep-awake item beside it uses.
 pub(crate) const CPU_ICON: IconName = IconName::BoltOutlined;
 
 /// The label/memory/cpu text a `Footprints` actually draws, one entry per row.

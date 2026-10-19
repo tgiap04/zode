@@ -9,7 +9,7 @@
 use editor::Editor;
 use gpui::{DismissEvent, Entity, EventEmitter, Focusable, SharedString, WeakEntity};
 use project::ProjectGroupKey;
-use ui::prelude::*;
+use ui::{Modal, ModalFooter, ModalHeader, Section, prelude::*};
 use workspace::{ModalView, MultiWorkspace, project_appearance::MAX_INITIALS};
 
 pub struct InitialsModal {
@@ -92,48 +92,39 @@ impl Render for InitialsModal {
 
         v_flex()
             .key_context("InitialsModal")
+            .debug_selector(|| "initials-modal".into())
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::confirm))
             .elevation_3(cx)
-            .w_80()
+            .occlude()
             .overflow_hidden()
+            .w(rems(28.))
+            .max_h(rems(40.))
             .child(
-                div()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        Label::new(format!("Initials for {}", self.label))
-                            .size(LabelSize::Small)
+                Modal::new("initials-modal-body", None)
+                    .header(ModalHeader::new().headline(format!("Initials for {}", self.label)))
+                    .section(
+                        Section::new().child(self.editor.clone()).child(
+                            Label::new(format!(
+                                "The avatar draws at most {MAX_INITIALS}; the rest is cut."
+                            ))
+                            .size(LabelSize::XSmall)
                             .color(Color::Muted),
+                        ),
                     ),
             )
+            // Outside `Modal::footer`, which takes a bare `ModalFooter` and so has
+            // nowhere to put the fill this strip has always had.
             .child(
                 div()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .child(self.editor.clone()),
-            )
-            .child(
-                h_flex()
+                    .debug_selector(|| "initials-modal-footer".into())
                     .bg(colors.editor_background)
                     .rounded_b_sm()
-                    .w_full()
-                    .p_2()
-                    .gap_1()
-                    .justify_between()
                     .child(
-                        Label::new(format!(
-                            "The avatar draws at most {MAX_INITIALS}; the rest is cut."
-                        ))
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    )
-                    .child(
-                        Button::new("initials-use-default", "Use Default")
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(Self::clear)),
+                        ModalFooter::new().start_slot(
+                            Button::new("initials-use-default", "Use Default")
+                                .on_click(cx.listener(Self::clear)),
+                        ),
                     ),
             )
     }

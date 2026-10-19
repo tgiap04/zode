@@ -64,6 +64,10 @@ fn serialize_pane(pane: &Entity<Pane>, active: bool, cx: &mut App) -> Serialized
         .items()
         .filter_map(|item| {
             let terminal_view = item.act_as::<TerminalView>(cx)?;
+            // A tab the workspace keeps out of its own layout is kept out of
+            // this one too: restored here it would be a local shell standing
+            // in for whatever the tab showed.
+            item.to_serializable_item_handle(cx)?;
             if terminal_view.read(cx).terminal().read(cx).task().is_some() {
                 None
             } else {
@@ -505,5 +509,93 @@ impl TerminalDb {
             FROM terminals
             WHERE item_id = ? AND workspace_id = ?
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use project::FakeFs;
+    use settings::SettingsStore;
+    use workspace::MultiWorkspace;
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            crate::init(cx);
+        });
+    }
+
+    /// A terminal tab with no process behind it, which is how a tab for a
+    /// terminal on another computer is built.
+    fn surface_tab(
+        workspace: &Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<TerminalView> {
+        let (commands, _unread) = futures::channel::mpsc::unbounded();
+        let builder = terminal::TerminalBuilder::new_remote_backed(
+            commands,
+            terminal::RemoteBackedOptions::default(),
+            Default::default(),
+            settings::AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            util::paths::PathStyle::local(),
+        )
+        .expect("a terminal surface");
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let weak_workspace = cx.weak_entity();
+        let project = workspace.project().downgrade();
+        cx.new(|cx| TerminalView::new(terminal, weak_workspace, None, project, window, cx))
+    }
+
+    #[gpui::test]
+    async fn a_tab_the_workspace_does_not_record_is_not_recorded_in_the_panel(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        let (terminal_panel, ordinary) = window
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    let panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
+                    let ordinary = surface_tab(workspace, window, cx);
+                    let kept_out = surface_tab(workspace, window, cx);
+                    workspace::exclude_from_serialization(&kept_out, cx);
+                    let pane = panel.read(cx).active_pane.clone();
+                    pane.update(cx, |pane, cx| {
+                        pane.add_item(Box::new(ordinary.clone()), true, true, None, window, cx);
+                        pane.add_item(Box::new(kept_out.clone()), true, true, None, window, cx);
+                    });
+                    (panel, ordinary)
+                })
+            })
+            .unwrap();
+
+        let recorded = terminal_panel.update(cx, |panel, cx| {
+            serialize_pane_group(&panel.center, &panel.active_pane, cx)
+        });
+
+        let SerializedPaneGroup::Pane(pane) = recorded else {
+            panic!("a panel that was never split is one pane");
+        };
+        assert_eq!(
+            pane.children,
+            vec![ordinary.entity_id().as_u64()],
+            "only the tab the workspace records is recorded"
+        );
+        assert_eq!(
+            pane.active_item, None,
+            "the active tab is the one left out, so none is recorded as active"
+        );
     }
 }

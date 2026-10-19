@@ -31,6 +31,7 @@ client = [
 # crate with `default-features = false` and must not compile the machinery that
 # downloads drivers.
 install = [
+    "signing",
     "dep:async-compression",
     "dep:async-tar",
     "dep:collections",
@@ -38,10 +39,15 @@ install = [
     "dep:http_client",
     "dep:parking_lot",
     "dep:paths",
+    "dep:semver",
     "dep:sha2",
     "dep:smol",
     "dep:url",
 ]
+# Signing and checking the manifest that names every driver. Kept apart from
+# `install` so the release tooling can sign with the very code the app verifies
+# with, without compiling the downloader.
+signing = ["dep:base64", "dep:ring"]
 test-support = ["client"]
 # Starting a driver binary and speaking the protocol to it. std only, so a
 # driver crate can take this as a dev-dependency without gpui coming with it.
@@ -61,8 +67,11 @@ parking_lot = { workspace = true, optional = true }
 smol = { workspace = true, optional = true }
 async-compression = { workspace = true, optional = true }
 async-tar = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 http_client = { workspace = true, optional = true }
 paths = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 util = { workspace = true, optional = true }

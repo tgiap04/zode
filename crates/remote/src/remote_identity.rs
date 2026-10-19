@@ -22,8 +22,13 @@ pub enum RemoteConnectionIdentity {
         name: String,
         remote_user: String,
     },
+    Relay {
+        host_device_id: String,
+    },
     #[cfg(any(test, feature = "test-support"))]
-    Mock { id: u64 },
+    Mock {
+        id: u64,
+    },
 }
 
 impl From<&RemoteConnectionOptions> for RemoteConnectionIdentity {
@@ -42,6 +47,9 @@ impl From<&RemoteConnectionOptions> for RemoteConnectionIdentity {
                 container_id: options.container_id.clone(),
                 name: options.name.clone(),
                 remote_user: options.remote_user.clone(),
+            },
+            RemoteConnectionOptions::Relay(options) => Self::Relay {
+                host_device_id: options.host_device_id.clone(),
             },
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(options) => Self::Mock { id: options.id },

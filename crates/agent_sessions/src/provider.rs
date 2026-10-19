@@ -1,9 +1,13 @@
 use crate::{
-    AgentCommand, Availability, CompletedSubagents, Deletion, Fork, SessionCounts, SessionSummary,
-    SubagentSummary,
+    AgentCommand, Availability, Deletion, Fork, SessionCounts, SessionSummary, SubagentSummary,
+    TranscriptProgress,
 };
 use anyhow::Result;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 /// Whether `id` is safe to use as a single path component.
 ///
@@ -101,8 +105,8 @@ pub trait SessionProvider: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// The tool calls this session has reported a result for, reading from byte
-    /// `from` onward.
+    /// The tool calls this session has reported a result for, and the turn
+    /// landmarks it wrote, reading from byte `from` onward.
     ///
     /// Incremental because the whole-file alternative is not affordable: a live
     /// transcript grows continuously and reaches megabytes, so re-reading it on
@@ -113,15 +117,61 @@ pub trait SessionProvider: Send + Sync {
     /// The caller pairs these against [`SubagentSummary::tool_use_id`]: spawned,
     /// and not yet reported, is a subagent still running. Nothing here decides
     /// that — a provider reports what the store says and no more.
-    fn completed_subagents(
+    fn transcript_progress(
         &self,
         _session: &SessionSummary,
         from: u64,
-    ) -> Result<CompletedSubagents> {
-        Ok(CompletedSubagents {
+    ) -> Result<TranscriptProgress> {
+        Ok(TranscriptProgress {
             tool_use_ids: Vec::new(),
+            turn_marks: Vec::new(),
+            subagent_events: Vec::new(),
             scanned_to: from,
+            restarted: false,
+            identity: None,
         })
+    }
+
+    /// The session this one handed over to, if the agent's CLI has moved on to
+    /// another transcript since `since` while a tab was still running it.
+    ///
+    /// What clearing a conversation does: the CLI opens a new transcript beside
+    /// the old one and never writes to the old one again, so a reader that
+    /// stays with the id it started on goes quiet without anything having
+    /// failed. `since` is when the tab began, because a transcript last written
+    /// before then cannot belong to a process that started after it. `claimed`
+    /// is every session another tab is already following; none of those is this
+    /// one's successor.
+    ///
+    /// `Ok(None)` for every store that cannot say, and for one that has nothing
+    /// to report. The caller asks only when the current transcript has stopped
+    /// growing while the CLI keeps writing, so a store may do real directory
+    /// reads here.
+    fn successor(
+        &self,
+        _session: &SessionSummary,
+        _since: SystemTime,
+        _claimed: &[Arc<str>],
+    ) -> Result<Option<SessionSummary>> {
+        Ok(None)
+    }
+
+    /// How long it has been since the most recent write by any of this
+    /// session's subagents, or `None` when there is nothing to judge by.
+    ///
+    /// Read from the subagents' own transcripts' modification times, never their
+    /// contents. A subagent started in the background is reported "launched" to
+    /// the parent within a second and keeps working for minutes, so the parent's
+    /// transcript cannot say whether it is still alive; its own file can.
+    fn background_quiet_for(&self, _session: &SessionSummary) -> Result<Option<Duration>> {
+        Ok(None)
+    }
+
+    /// Whether [`TranscriptProgress::turn_marks`] is meaningful for this store.
+    /// A store that cannot say reports nothing, which a caller must not read as
+    /// "no turn ever ended".
+    fn reports_turns(&self) -> bool {
+        false
     }
 
     /// `None` when this agent cannot honour the request — Codex and Copilot have

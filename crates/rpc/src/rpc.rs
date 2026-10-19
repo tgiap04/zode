@@ -16,4 +16,4 @@ mod proto_client;
 #[cfg(feature = "gpui")]
 pub use proto_client::*;
 
-pub const PROTOCOL_VERSION: u32 = 68;
+pub const PROTOCOL_VERSION: u32 = 69;

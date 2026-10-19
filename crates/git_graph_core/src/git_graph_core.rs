@@ -321,6 +321,13 @@ impl GraphData {
         self.max_lanes = 0;
     }
 
+    fn occupied_lanes(&self) -> usize {
+        self.lane_states
+            .iter()
+            .rposition(|lane| !lane.is_empty())
+            .map_or(0, |last| last + 1)
+    }
+
     pub fn first_empty_lane_idx(&mut self) -> ActiveLaneIdx {
         self.lane_states
             .iter()
@@ -355,6 +362,10 @@ impl GraphData {
             let commit_lane = commit_lane.unwrap_or_else(|| self.first_empty_lane_idx());
 
             let commit_color = self.get_lane_color(commit_lane);
+
+            // Lanes that end at this commit still curve into it across the top half of its row,
+            // so they count toward its width even though they are free once it is processed.
+            let lanes_arriving = self.occupied_lanes();
 
             if let Some(lanes) = self.parent_to_lanes.remove(&commit.sha) {
                 for lane_column in lanes {
@@ -449,10 +460,8 @@ impl GraphData {
             // its lane as it is processed, so the states no longer mention the row the node is
             // still drawn on — the root commit came out as occupying nothing at all.
             let lanes = self
-                .lane_states
-                .iter()
-                .rposition(|lane| !lane.is_empty())
-                .map_or(0, |last| last + 1)
+                .occupied_lanes()
+                .max(lanes_arriving)
                 .max(commit_lane + 1);
 
             self.commits.push(Rc::new(CommitEntry {
@@ -791,6 +800,32 @@ mod tests {
                 .iter()
                 .all(|commit| commit.lanes <= data.max_lanes),
             "and none may exceed it"
+        );
+    }
+
+    /// A branch that ends at a commit curves into it across the top of that commit's row, so the
+    /// row is as wide as the branch even though the branch's lane is free once the commit is in.
+    /// Counting only the lanes left open afterwards put the subject on top of that curve.
+    #[test]
+    fn a_branch_joining_a_commit_widens_that_commits_row() {
+        let mut data = GraphData::new(8);
+        data.add_commits(&[
+            commit(1, &[2, 3]),
+            commit(2, &[4]),
+            commit(3, &[4]),
+            commit(4, &[5]),
+            commit(5, &[]),
+        ]);
+
+        let joined = data
+            .commits
+            .iter()
+            .find(|commit| commit.data.sha == oid(4))
+            .expect("the commit both branches join");
+        assert!(
+            joined.lanes >= 2,
+            "the second branch arrives on this row, so its lane must be counted: {:?}",
+            data.commits.iter().map(|c| c.lanes).collect::<Vec<_>>()
         );
     }
 }

@@ -1,5 +1,6 @@
 pub mod clippy;
 pub mod compliance;
+pub mod driver_manifest;
 pub mod licenses;
 pub mod package_conformity;
 pub mod publish_gpui;

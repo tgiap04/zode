@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Builds the database driver sidecars into the same directory as a development
-# build of Zode, which is where the app looks for them.
+# build of Zode, which is where the app looks for them first.
 #
-# They are not in `default-members`, so `cargo run` does not build them and a
-# fresh checkout has none -- every database connection then fails with "could
-# not start the driver". Run this once after a checkout, and again whenever a
-# driver changes.
+# They are not in `default-members`, so `cargo run` does not build them, and a
+# checkout without them downloads drivers like a release does. Build them when
+# working on a driver, or when the running version publishes none. A driver
+# built here is used ahead of any download until it is deleted. Run this again
+# whenever a driver changes.
 #
 #   script/build-database-drivers            # debug, beside `cargo run`
 #   script/build-database-drivers --release  # beside `cargo run --release`

@@ -1,8 +1,11 @@
 use container::{BackendKind, ContainerError, Resource, ResourceAction, ResourceKind, RunState};
 use gpui::{Anchor, AnyElement, App, Context, PathPromptOptions, Window};
-use ui::{Banner, ContextMenu, Indicator, PopoverMenu, Severity, Tab, TabBar, Table, prelude::*};
+use ui::{
+    Banner, CommonAnimationExt as _, ContextMenu, Indicator, PopoverMenu, Severity, Tab, TabBar,
+    Table, prelude::*,
+};
 
-use crate::container_panel::{ContainerPanel, ListState};
+use crate::container_panel::{Busy, ContainerPanel, ListState};
 use crate::terminal::TerminalIntent;
 
 impl Render for ContainerPanel {
@@ -22,6 +25,9 @@ impl Render for ContainerPanel {
             // other's message.
             .when_some(self.config_error.clone(), |element, error| {
                 element.child(self.render_config_error_banner(&error, cx))
+            })
+            .when(self.shows_search(cx), |element| {
+                element.child(self.render_search(window, cx))
             })
             .child(
                 div()
@@ -109,7 +115,7 @@ impl ContainerPanel {
                     )
                     .end_icon(
                         Icon::new(IconName::ChevronDown)
-                            .size(IconSize::XSmall)
+                            .size(IconSize::Small)
                             .color(Color::Muted),
                     ),
                 ui::Tooltip::text("Choose an engine"),
@@ -169,7 +175,7 @@ impl ContainerPanel {
                         )
                         .end_icon(
                             Icon::new(IconName::ChevronDown)
-                                .size(IconSize::XSmall)
+                                .size(IconSize::Small)
                                 .color(Color::Muted),
                         ),
                     ui::Tooltip::text("Choose a kubeconfig"),
@@ -284,19 +290,29 @@ impl ContainerPanel {
     /// tells you less than "Images · 42", and it is the one number that answers
     /// "did the refresh do anything" without reading the table.
     fn render_tools(&self, cx: &mut Context<Self>) -> AnyElement {
+        // "3/42" while a search narrows the list, so a short list is never
+        // mistaken for everything there is.
         let count = match &self.state {
-            ListState::Ready(resources) => Some(resources.len()),
+            ListState::Ready(resources) => {
+                let total = resources.len();
+                // The plain total while a row is open: the field is out of sight
+                // then, and a count narrowed by a filter nobody can see reads
+                // as missing rows.
+                if self.detail.is_some() || self.query(cx).is_empty() {
+                    Some(total.to_string())
+                } else {
+                    Some(format!("{}/{total}", self.visible(resources, cx).len()))
+                }
+            }
             _ => None,
         };
         h_flex()
             .gap_0p5()
             .when_some(count, |element, count| {
                 element.child(
-                    div().mr_1().child(
-                        Label::new(count.to_string())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
+                    div()
+                        .mr_1()
+                        .child(Label::new(count).size(LabelSize::Small).color(Color::Muted)),
                 )
             })
             .child(
@@ -312,7 +328,7 @@ impl ContainerPanel {
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Error)
                         .tooltip(|_window, cx| {
-                            ui::Tooltip::simple("Remove everything unused\u{2026}", cx)
+                            ui::Tooltip::simple("Remove Everything Unused\u{2026}", cx)
                         })
                         .on_click(cx.listener(|this, _, window, cx| this.start_prune(window, cx))),
                 )
@@ -327,7 +343,7 @@ impl ContainerPanel {
                     .icon_size(IconSize::Small)
                     .tooltip(|_window, cx| {
                         ui::Tooltip::for_action(
-                            "Open in a floating window",
+                            "Open in a Floating Window",
                             &zed_actions::container::OpenInFloatingWindow,
                             cx,
                         )
@@ -360,8 +376,20 @@ impl ContainerPanel {
                 format!("No {}", self.active_kind.label().to_lowercase()),
             ),
             ListState::Ready(resources) => {
+                let visible: Vec<Resource> =
+                    self.visible(resources, cx).into_iter().cloned().collect();
+                if visible.is_empty() {
+                    return note(
+                        Some(IconName::MagnifyingGlass),
+                        format!(
+                            "No {} match \"{}\"",
+                            self.active_kind.label().to_lowercase(),
+                            self.query(cx)
+                        ),
+                    );
+                }
                 let columns = columns_for(self.active_kind, self.shows_every_column());
-                self.render_list(resources, columns, cx)
+                self.render_list(visible, columns, cx)
             }
         }
     }
@@ -422,6 +450,7 @@ impl ContainerPanel {
             .child(
                 div().pt_1().child(
                     Button::new("container-refresh-after-error", "Refresh")
+                        .start_icon(Icon::new(IconName::RotateCw).size(IconSize::Small))
                         .loading(self.reloading)
                         .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
                 ),
@@ -435,20 +464,17 @@ impl ContainerPanel {
 /// One function for both empty and loading so the two never drift into different
 /// vertical positions -- a message that jumps when the list arrives reads as a
 /// flicker rather than an answer.
-fn note(icon: Option<IconName>, message: impl Into<SharedString>) -> AnyElement {
+pub(crate) fn note(icon: Option<IconName>, message: impl Into<SharedString>) -> AnyElement {
     v_flex()
         .size_full()
         .items_center()
         .justify_center()
+        .p_4()
         .gap_1()
         .when_some(icon, |element, icon| {
             element.child(Icon::new(icon).size(IconSize::XLarge).color(Color::Muted))
         })
-        .child(
-            Label::new(message)
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        )
+        .child(Label::new(message).color(Color::Muted))
         .into_any_element()
 }
 
@@ -520,7 +546,7 @@ impl ContainerPanel {
     /// knowledge would be wrong for three of the four.
     fn render_list(
         &self,
-        resources: &[Resource],
+        resources: Vec<Resource>,
         columns: &'static [&'static str],
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -532,8 +558,8 @@ impl ContainerPanel {
         let has_trailing = !actions.is_empty() || logs || shell || removable;
         // Handed to the closure as *data*, not as elements: `AnyElement` is not
         // `Clone`, and `uniform_list` asks for a range again on every frame.
-        let resources = std::rc::Rc::new(resources.to_vec());
-        let in_flight = std::rc::Rc::new(self.in_flight.clone());
+        let resources = std::rc::Rc::new(resources);
+        let busy_rows = std::rc::Rc::new(self.busy_rows());
         let count = resources.len();
         // One extra column for the buttons, and only when there are buttons: a
         // `Table` is built with a column count, so an unused trailing column
@@ -583,7 +609,7 @@ impl ContainerPanel {
                                     cells.push(render_trailing(
                                         resource,
                                         actions,
-                                        in_flight.get(&resource.id).copied(),
+                                        busy_rows.get(&resource.id).copied(),
                                         logs,
                                         shell,
                                         removable,
@@ -667,15 +693,45 @@ pub(crate) fn render_row(resource: &Resource, columns: &[&str]) -> Vec<AnyElemen
         .iter()
         .map(|column| match *column {
             "" => state_dot(resource.state).into_any_element(),
-            "Name" => Label::new(resource.name.clone())
-                .size(LabelSize::Small)
-                .into_any_element(),
-            other => Label::new(detail(other))
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
+            "Name" => truncated_text(
+                cell_id(resource, column),
+                resource.name.clone(),
+                Color::Default,
+            ),
+            other => truncated_text(cell_id(resource, column), detail(other), Color::Muted),
         })
         .collect()
+}
+
+fn cell_id(resource: &Resource, column: &str) -> SharedString {
+    format!("container-cell-{}-{column}", resource.id).into()
+}
+
+/// Text that is cut with an ellipsis when its column is too narrow, and shows
+/// all of itself on hover: container and image names are routinely longer than
+/// the column, and the end is often the part that tells two of them apart.
+pub(crate) fn truncated_text(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    color: Color,
+) -> AnyElement {
+    let text = text.into();
+    if text.is_empty() {
+        return div().into_any_element();
+    }
+    let tooltip = text.clone();
+    div()
+        .id(id)
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(color)
+                .truncate(),
+        )
+        .tooltip(move |_window, cx| ui::Tooltip::simple(tooltip.clone(), cx))
+        .into_any_element()
 }
 
 /// Green for up, amber for frozen, muted for down, and nothing at all for
@@ -700,28 +756,33 @@ pub(crate) fn state_dot(state: RunState) -> impl IntoElement {
         })
 }
 
-/// The buttons for one row, or what is being attempted instead.
-///
-/// While an action is running the row says so rather than showing buttons:
-/// `docker stop` waits ten seconds before killing, and buttons that do nothing
-/// for ten seconds read as broken.
 /// Everything the row can be asked to do: lifecycle buttons, then the two
-/// terminals.
+/// terminals -- or, while something is running on it, a spinner saying what.
+///
+/// Busy replaces every button rather than only the lifecycle ones: `docker stop`
+/// waits ten seconds before killing, and a removal leaves a row that is about to
+/// be gone, so a terminal or a second remove aimed at it is a click that can only
+/// fail.
 ///
 /// Terminals last, and visually apart, because they are the two that open
 /// something new rather than changing what is there.
 pub(crate) fn render_trailing(
     resource: &Resource,
     actions: &'static [ResourceAction],
-    running: Option<ResourceAction>,
+    busy: Option<Busy>,
     logs: bool,
     shell: bool,
     removable: bool,
     handle: gpui::WeakEntity<ContainerPanel>,
 ) -> AnyElement {
+    if let Some(busy) = busy {
+        return render_busy(&resource.id, busy);
+    }
+    let id_for_selector = resource.id.clone();
     h_flex()
-        .gap_1()
-        .child(render_actions(resource, actions, running, handle.clone()))
+        .debug_selector(move || format!("container-row-buttons:{id_for_selector}"))
+        .gap_0p5()
+        .child(render_actions(resource, actions, handle.clone()))
         .when(logs, |element| {
             let id = resource.id.clone();
             let name = resource.name.clone();
@@ -731,7 +792,7 @@ pub(crate) fn render_trailing(
                     SharedString::from(format!("logs-{}", resource.id)),
                     IconName::ListTree,
                 )
-                .icon_size(IconSize::XSmall)
+                .icon_size(IconSize::Small)
                 .tooltip(|_window, cx| ui::Tooltip::simple("Follow logs in a terminal", cx))
                 .on_click(move |_event, window, cx| {
                     handle
@@ -762,7 +823,7 @@ pub(crate) fn render_trailing(
                         SharedString::from(format!("shell-{}", resource.id)),
                         IconName::Terminal,
                     )
-                    .icon_size(IconSize::XSmall)
+                    .icon_size(IconSize::Small)
                     .tooltip(|_window, cx| ui::Tooltip::simple("Open a shell in a terminal", cx))
                     .on_click(move |_event, window, cx| {
                         handle
@@ -788,7 +849,7 @@ pub(crate) fn render_trailing(
                     SharedString::from(format!("remove-{}", resource.id)),
                     IconName::Trash,
                 )
-                .icon_size(IconSize::XSmall)
+                .icon_size(IconSize::Small)
                 .icon_color(Color::Error)
                 .tooltip(|_window, cx| ui::Tooltip::simple("Remove\u{2026}", cx))
                 // Opens the confirmation and nothing else. The button cannot
@@ -803,21 +864,54 @@ pub(crate) fn render_trailing(
         .into_any_element()
 }
 
+/// The spinner and what it is doing, shared by the list row and the open row's
+/// header so a start and a removal wait the same way.
+fn render_busy(id: &str, busy: Busy) -> AnyElement {
+    h_flex()
+        .debug_selector({
+            let id = id.to_string();
+            move || format!("container-busy:{id}")
+        })
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .debug_selector({
+                    let id = id.to_string();
+                    move || format!("container-busy-spinner:{id}")
+                })
+                .child(
+                    Icon::new(IconName::LoadCircle)
+                        .size(IconSize::Small)
+                        .color(Color::Accent)
+                        // Keyed by the resource, not by its position: a row above
+                        // this one going away shifts every position, and a
+                        // position-keyed animation would restart the rotation of
+                        // rows still working.
+                        .with_keyed_rotate_animation(
+                            (
+                                gpui::ElementId::from("container-busy-spinner"),
+                                SharedString::from(id.to_string()),
+                            ),
+                            2,
+                        ),
+                ),
+        )
+        .child(
+            Label::new(busy.progress_label())
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .into_any_element()
+}
+
 fn render_actions(
     resource: &Resource,
     actions: &'static [ResourceAction],
-    running: Option<ResourceAction>,
     handle: gpui::WeakEntity<ContainerPanel>,
 ) -> AnyElement {
-    if let Some(running) = running {
-        return Label::new(format!("{}...", running.label()))
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-            .into_any_element();
-    }
-
     h_flex()
-        .gap_1()
+        .gap_0p5()
         .children(actions.iter().copied().filter_map(|action| {
             if !action_is_useful(action, resource.state) {
                 return None;
@@ -842,7 +936,7 @@ fn render_actions(
                     SharedString::from(format!("act-{}-{}", action.label(), resource.id)),
                     icon,
                 )
-                .icon_size(IconSize::XSmall)
+                .icon_size(IconSize::Small)
                 .tooltip(move |_window, cx| ui::Tooltip::simple(action.label(), cx))
                 .on_click(move |_event, _window, cx| {
                     handle

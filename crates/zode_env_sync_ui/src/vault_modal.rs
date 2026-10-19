@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use editor::Editor;
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
     PromptLevel, Subscription, WeakEntity, Window,
@@ -9,6 +8,8 @@ use ui::{
     CommonAnimationExt, ListItem, ListSeparator, Modal, ModalFooter, ModalHeader, Section, Tooltip,
     prelude::*,
 };
+use ui_input::{ErasedEditorEvent, InputField};
+use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 use zode_env_sync::{EntryId, EnvSession, EnvStatus, ProjectId};
 
@@ -43,13 +44,13 @@ pub struct VaultModal {
     focus_handle: FocusHandle,
     purpose: Purpose,
     /// The name being typed for a new project, and whether that row is open.
-    name_input: Entity<Editor>,
+    name_input: Entity<InputField>,
     naming: bool,
     /// The new name for a stored file, and which one is being renamed.
     ///
     /// Its own editor rather than sharing `name_input`: both rows can be open
     /// at once, and one field holding two answers would show the wrong one.
-    rename_input: Entity<Editor>,
+    rename_input: Entity<InputField>,
     renaming: Option<EntryId>,
     _subscriptions: Vec<Subscription>,
 }
@@ -113,24 +114,29 @@ impl VaultModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name_input = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("acme-api", window, cx);
-            editor
-        });
+        let name_input = cx.new(|cx| InputField::new(window, cx, "acme-api"));
+        let rename_input = cx.new(|cx| InputField::new(window, cx, "services/api/.env"));
 
-        let rename_input = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("services/api/.env", window, cx);
-            editor
-        });
-
-        let mut subscriptions = vec![cx.observe(&session, |_this, _session, cx| cx.notify())];
-        subscriptions.push(cx.subscribe(&name_input, |_this, _editor, event, cx| {
-            if matches!(event, editor::EditorEvent::BufferEdited) {
-                cx.notify();
-            }
-        }));
+        // Only the name field is watched: the Add button's enabled state
+        // follows what is typed there, while the rename row has no control
+        // that reads its text before the user presses Save.
+        let name_editor = name_input.read(cx).editor().clone();
+        let name_edited = name_editor.subscribe(
+            Box::new({
+                let this = cx.weak_entity();
+                move |event, _window, cx| {
+                    if event == ErasedEditorEvent::BufferEdited {
+                        this.update(cx, |_this, cx| cx.notify()).log_err();
+                    }
+                }
+            }),
+            window,
+            cx,
+        );
+        let subscriptions = vec![
+            cx.observe(&session, |_this, _session, cx| cx.notify()),
+            name_edited,
+        ];
 
         // Unlock first, THEN load. Both were kicked off together before, and
         // because unlocking is asynchronous the load always ran without a key
@@ -373,7 +379,7 @@ impl VaultModal {
             .relative_path_for(entry)
             .unwrap_or_default();
         self.rename_input
-            .update(cx, |editor, cx| editor.set_text(current, window, cx));
+            .update(cx, |field, cx| field.set_text(&current, window, cx));
         self.renaming = Some(entry);
         window.focus(&self.rename_input.focus_handle(cx), cx);
         cx.notify();
@@ -398,7 +404,7 @@ impl VaultModal {
 
         self.renaming = None;
         self.rename_input
-            .update(cx, |editor, cx| editor.set_text("", window, cx));
+            .update(cx, |field, cx| field.clear(window, cx));
         cx.notify();
     }
 
@@ -412,7 +418,7 @@ impl VaultModal {
             .update(cx, |session, cx| session.add_project(name, cx));
         self.naming = false;
         self.name_input
-            .update(cx, |editor, cx| editor.set_text("", window, cx));
+            .update(cx, |field, cx| field.clear(window, cx));
         cx.notify();
 
         // A project made while a file is waiting exists *for* that file, and a
@@ -529,7 +535,6 @@ impl VaultModal {
 
 impl Render for VaultModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
         let (headline, description) = self.heading();
 
         // Read out of the purpose before the session borrow, so the row
@@ -568,7 +573,6 @@ impl Render for VaultModal {
                         Button::new("env-vault-set-up", "Set Up Environment Sync")
                             .style(ButtonStyle::Filled)
                             .start_icon(Icon::new(IconName::LockOutlined).size(IconSize::Small))
-                            .label_size(LabelSize::Small)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.session
                                     .update(cx, |session, cx| session.create_key(cx))
@@ -598,7 +602,6 @@ impl Render for VaultModal {
                             Button::new("env-vault-first-project", "New Project\u{2026}")
                                 .style(ButtonStyle::Filled)
                                 .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
-                                .label_size(LabelSize::Small)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.naming = true;
                                     window.focus(&this.name_input.focus_handle(cx), cx);
@@ -668,10 +671,9 @@ impl Render for VaultModal {
                 header = header.end_slot(
                     Button::new(
                         SharedString::from(format!("env-vault-add-file-{}", project_id.as_hex())),
-                        "Add file\u{2026}",
+                        "Add File\u{2026}",
                     )
-                    .label_size(LabelSize::XSmall)
-                    .start_icon(Icon::new(IconName::Plus).size(IconSize::Indicator))
+                    .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
                     .tooltip(Tooltip::text(
                         "Pick a file on this machine, including dotfiles",
                     ))
@@ -711,17 +713,7 @@ impl Render for VaultModal {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border_focused)
-                                    .bg(colors.editor_background)
-                                    .child(self.rename_input.clone()),
-                            )
+                            .child(div().flex_1().child(self.rename_input.clone()))
                             .child(
                                 Button::new(
                                     SharedString::from(format!(
@@ -731,7 +723,6 @@ impl Render for VaultModal {
                                     "Save",
                                 )
                                 .style(ButtonStyle::Filled)
-                                .label_size(LabelSize::XSmall)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.commit_rename(window, cx)
                                 })),
@@ -825,8 +816,9 @@ impl Render for VaultModal {
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
             .occlude()
-            .w(rems(42.))
+            .w(rems(40.))
             .max_h(rems(40.))
+            .debug_selector(|| "env-vault-modal".into())
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
                 // The open row first, the window second. Escape closing
                 // everything would throw away a half-typed name to answer
@@ -882,7 +874,7 @@ impl Render for VaultModal {
                                             // moment anything is typed.
                                             .child(
                                                 Label::new("Project name")
-                                                    .size(LabelSize::XSmall)
+                                                    .size(LabelSize::Small)
                                                     .color(Color::Muted),
                                             )
                                             .child(
@@ -893,24 +885,13 @@ impl Render for VaultModal {
                                                     .child(
                                                         div()
                                                             .flex_1()
-                                                            .px_2()
-                                                            .py_1()
-                                                            .rounded_sm()
-                                                            .border_1()
-                                                            .border_color(colors.border_focused)
-                                                            .bg(colors.editor_background)
                                                             .child(self.name_input.clone()),
                                                     )
                                                     .child(
                                                         Button::new("env-vault-create", "Add")
                                                             .style(ButtonStyle::Filled)
-                                                            .label_size(LabelSize::Small)
                                                             .disabled(
-                                                                self.name_input
-                                                                    .read(cx)
-                                                                    .text(cx)
-                                                                    .trim()
-                                                                    .is_empty(),
+                                                                self.name_input.read(cx).is_empty(cx),
                                                             )
                                                             .on_click(cx.listener(
                                                                 |this, _, window, cx| {
@@ -933,7 +914,7 @@ impl Render for VaultModal {
                                                     Icon::new(IconName::LoadCircle)
                                                         .size(IconSize::Small)
                                                         .color(Color::Muted)
-                                                        .with_rotate_animation(3),
+                                                        .with_rotate_animation(2),
                                                 )
                                             })
                                             .when(!working && color != Color::Muted, |this| {
@@ -943,7 +924,7 @@ impl Render for VaultModal {
                                                     } else {
                                                         IconName::Warning
                                                     })
-                                                    .size(IconSize::Small)
+                                                    .size(IconSize::XSmall)
                                                     .color(color),
                                                 )
                                             })
@@ -962,7 +943,6 @@ impl Render for VaultModal {
                                 div().when(unlocked && !manifest.projects.is_empty(), |this| {
                                     this.child(
                                         Button::new("env-vault-new-project", "New Project\u{2026}")
-                                            .label_size(LabelSize::Small)
                                             .start_icon(
                                                 Icon::new(IconName::Plus).size(IconSize::Small),
                                             )
@@ -981,11 +961,11 @@ impl Render for VaultModal {
                                 }),
                             )
                             .end_slot(
-                                Button::new("env-vault-close", "Close")
-                                    .label_size(LabelSize::Small)
-                                    .on_click(cx.listener(|_this, _, _window, cx| {
-                                        cx.emit(DismissEvent)
-                                    })),
+                                h_flex().gap_1().child(
+                                    Button::new("env-vault-close", "Close").on_click(
+                                        cx.listener(|_this, _, _window, cx| cx.emit(DismissEvent)),
+                                    ),
+                                ),
                             ),
                     ),
             )
@@ -1005,6 +985,9 @@ mod tests {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+            // The name and rename fields are `InputField`s, and the factory
+            // behind every one of them is installed here.
+            editor::init(cx);
         });
     }
 
@@ -1063,6 +1046,60 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// A window of lists is the medium tier of modal widths.
+    #[gpui::test]
+    fn the_window_is_the_medium_width(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(Some(populated()), cx);
+        let (_modal, cx) = cx.add_window_view(|window, cx| {
+            VaultModal::new(session, WeakEntity::new_invalid(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("env-vault-modal")
+            .expect("the modal must be drawn");
+        let medium = cx.update(|window, _| rems(40.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, medium);
+    }
+
+    /// The Add button's enabled state is read from the name field when the
+    /// window draws, so an edit to the field has to reach the window. The field
+    /// is its own view now, and nothing but its edit event carries that across.
+    #[gpui::test]
+    fn typing_a_project_name_redraws_the_window(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(Some(populated()), cx);
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            VaultModal::new(session, WeakEntity::new_invalid(), window, cx)
+        });
+        cx.run_until_parked();
+
+        let redraws = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        cx.update(|_window, cx| {
+            cx.observe(&modal, {
+                let redraws = redraws.clone();
+                move |_modal, _cx| redraws.set(redraws.get() + 1)
+            })
+            .detach();
+        });
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.naming = true;
+            modal
+                .name_input
+                .update(cx, |field, cx| field.set_text("acme-web", window, cx));
+        });
+        cx.run_until_parked();
+
+        assert!(
+            redraws.get() > 0,
+            "an edit to the name field must notify the window that reads it"
+        );
     }
 
     #[gpui::test]
@@ -1165,7 +1202,7 @@ mod tests {
             modal.naming = true;
             modal
                 .name_input
-                .update(cx, |editor, cx| editor.set_text("acme-api", window, cx));
+                .update(cx, |field, cx| field.set_text("acme-api", window, cx));
             modal.create_project(window, cx);
         });
         cx.run_until_parked();
@@ -1284,9 +1321,9 @@ mod tests {
         // A name that leaves the project is refused, and the row stays open --
         // closing it would throw away what was typed along with the reason.
         modal.update_in(cx, |modal, window, cx| {
-            modal.rename_input.update(cx, |editor, cx| {
-                editor.set_text("../escape/.env", window, cx)
-            });
+            modal
+                .rename_input
+                .update(cx, |field, cx| field.set_text("../escape/.env", window, cx));
             modal.commit_rename(window, cx);
             assert_eq!(
                 modal.renaming,
@@ -1296,8 +1333,8 @@ mod tests {
         });
 
         modal.update_in(cx, |modal, window, cx| {
-            modal.rename_input.update(cx, |editor, cx| {
-                editor.set_text("services/api/.env", window, cx)
+            modal.rename_input.update(cx, |field, cx| {
+                field.set_text("services/api/.env", window, cx)
             });
             modal.commit_rename(window, cx);
             assert_eq!(modal.renaming, None, "a good name closes the row");

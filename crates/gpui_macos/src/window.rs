@@ -450,6 +450,9 @@ struct MacWindowState {
     external_files_dragged: bool,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
+    // The window's frame when the current run of left clicks began, so a
+    // title bar double-click can tell whether AppKit already acted on it.
+    frame_at_first_click: Option<NSRect>,
     fullscreen_restore_bounds: Bounds<Pixels>,
     move_tab_to_new_window_callback: Option<Box<dyn FnMut()>>,
     merge_all_windows_callback: Option<Box<dyn FnMut()>>,
@@ -781,6 +784,7 @@ impl MacWindow {
                 do_command_handled: None,
                 external_files_dragged: false,
                 first_mouse: false,
+                frame_at_first_click: None,
                 fullscreen_restore_bounds: Bounds::default(),
                 move_tab_to_new_window_callback: None,
                 merge_all_windows_callback: None,
@@ -1643,9 +1647,19 @@ impl PlatformWindow for MacWindow {
         let this = self.0.lock();
         let window = this.native_window;
         let closed = this.closed.clone();
+        let frame_at_first_click = this.frame_at_first_click;
         this.foreground_executor
             .spawn(async move {
                 if_window_not_closed(closed, || {
+                    // Some macOS releases act on a double-click in a transparent
+                    // title bar themselves, before this runs. Acting again
+                    // would undo it: `zoom:` toggles, so a window AppKit just
+                    // filled is zoomed straight back to where it was.
+                    if let Some(before) = frame_at_first_click
+                        && frame_changed(before, unsafe { NSWindow::frame(window) })
+                    {
+                        return;
+                    }
                     unsafe {
                         let defaults: id = NSUserDefaults::standardUserDefaults();
                         let domain = ns_string("NSGlobalDomain");
@@ -2064,7 +2078,11 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
         };
 
         match &event {
-            PlatformInput::MouseDown(_) => {
+            PlatformInput::MouseDown(down) => {
+                if down.button == MouseButton::Left && down.click_count == 1 {
+                    lock.frame_at_first_click =
+                        Some(unsafe { NSWindow::frame(lock.native_window) });
+                }
                 drop(lock);
                 unsafe {
                     let input_context: id = msg_send![this, inputContext];
@@ -2175,6 +2193,16 @@ extern "C" fn window_will_exit_fullscreen(this: &Object, _: Sel, _: id) {
             lock.native_window.setTitlebarAppearsTransparent_(YES);
         }
     }
+}
+
+/// Whether a window frame moved or changed size, ignoring sub-point
+/// differences that rounding alone produces.
+fn frame_changed(before: NSRect, after: NSRect) -> bool {
+    const TOLERANCE: f64 = 0.5;
+    (before.origin.x - after.origin.x).abs() > TOLERANCE
+        || (before.origin.y - after.origin.y).abs() > TOLERANCE
+        || (before.size.width - after.size.width).abs() > TOLERANCE
+        || (before.size.height - after.size.height).abs() > TOLERANCE
 }
 
 pub(crate) fn is_macos_version_at_least(version: NSOperatingSystemVersion) -> bool {
@@ -2886,5 +2914,33 @@ extern "C" fn toggle_tab_bar(this: &Object, _sel: Sel, _id: id) {
             callback();
             window_state.lock().toggle_tab_bar_callback = Some(callback);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_changed;
+    use cocoa::foundation::{NSPoint, NSRect, NSSize};
+
+    fn frame(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+        NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
+    }
+
+    /// The frames AppKit reported around a title bar double-click on a 1920
+    /// point wide display: filled to the screen's width before Zode's handler
+    /// ran, which must then leave it alone.
+    #[test]
+    fn a_window_appkit_already_filled_counts_as_changed() {
+        assert!(frame_changed(
+            frame(39.0, 45.0, 1730.0, 1005.0),
+            frame(0.0, 45.0, 1920.0, 1005.0)
+        ));
+    }
+
+    #[test]
+    fn a_window_that_did_not_move_is_unchanged_despite_rounding() {
+        let before = frame(39.0, 45.0, 1730.0, 1005.0);
+        assert!(!frame_changed(before, before));
+        assert!(!frame_changed(before, frame(39.25, 45.0, 1730.0, 1004.75)));
     }
 }

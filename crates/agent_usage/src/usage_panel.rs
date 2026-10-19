@@ -30,11 +30,14 @@ use gpui::{
 };
 use project::AgentId;
 use settings::AgentUsageDisplay;
-use ui::{ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, Tooltip, prelude::*};
+use ui::{
+    Disclosure, ListItem, ListItemSpacing, ToggleButtonGroup, ToggleButtonGroupStyle,
+    ToggleButtonSimple, Tooltip, prelude::*,
+};
 use workspace::{StatusBarSettings, item::Settings as _};
 
 use crate::{
-    AgentUsageIndicator, SourceState, UsageWindow, agent_display_name, agent_icon,
+    AgentUsageIndicator, REFRESH_ICON, SourceState, UsageWindow, agent_display_name, agent_icon,
     format_countdown, most_constrained,
 };
 
@@ -43,11 +46,11 @@ use crate::{
 /// A fixed width rather than a flexible one: `flex_1` and `self_stretch` both
 /// resolve to zero under a parent that is not a flex container on that axis, and
 /// a bar of zero width is invisible without being an error anyone would notice.
-const BAR_WIDTH: Pixels = px(28.);
+const BAR_WIDTH: Rems = rems(1.75);
 
 /// The panel's own width, so the rows line up with each other rather than with
 /// whatever the longest agent name happens to be.
-const PANEL_WIDTH: Pixels = px(340.);
+const PANEL_WIDTH: Rems = rems(21.);
 
 pub struct UsagePanel {
     indicator: WeakEntity<AgentUsageIndicator>,
@@ -185,6 +188,14 @@ impl UsagePanel {
         }
     }
 
+    /// How much of the track a reading fills.
+    ///
+    /// Clamped because `percent` is a byte the agent filled in: a reading over
+    /// 100 would otherwise draw past the end of its own track.
+    pub(crate) fn meter_fraction(percent: u8) -> f32 {
+        (f32::from(percent) / 100.).min(1.)
+    }
+
     fn render_window(window: &UsageWindow, cx: &App) -> AnyElement {
         let tag = Self::window_tag(window);
 
@@ -204,16 +215,17 @@ impl UsagePanel {
             .child(
                 // Two nested divs and an explicit width, because the filled part
                 // is a fraction of a known width -- there is nothing here for a
-                // flex rule to divide up.
+                // flex rule to divide up. Not `ui::ProgressBar`: it never draws
+                // less than a 2% fill, so 0% would not read as empty.
                 div()
                     .w(BAR_WIDTH)
-                    .h(px(4.))
+                    .h_1()
                     .rounded_full()
                     .bg(cx.theme().colors().element_background)
                     .child(
                         div()
                             .h_full()
-                            .w(BAR_WIDTH * (f32::from(window.percent) / 100.))
+                            .w(relative(Self::meter_fraction(window.percent)))
                             .rounded_full()
                             .bg(cx.theme().colors().text_muted),
                     ),
@@ -253,20 +265,13 @@ impl UsagePanel {
 
         v_flex()
             .w_full()
-            .gap_0p5()
             .child(
-                h_flex()
-                    .id(SharedString::from(format!("usage-row-{}", agent.as_ref())))
-                    .w_full()
-                    .gap_1p5()
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .flex_none()
-                            .child(Icon::new(agent_icon(&source.agent)).size(IconSize::Small)),
-                    )
-                    // The mark, the name and the chevron keep their size; the
-                    // status is the one thing allowed to give way.
+                // The mark, the name and the disclosure keep their size; the
+                // status is the one thing allowed to give way.
+                ListItem::new(SharedString::from(format!("usage-row-{}", agent.as_ref())))
+                    .spacing(ListItemSpacing::Dense)
+                    .rounded()
+                    .start_slot(Icon::new(agent_icon(&source.agent)).size(IconSize::Small))
                     .child(
                         div()
                             .flex_none()
@@ -287,15 +292,13 @@ impl UsagePanel {
                                 .truncate(),
                         ),
                     )
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                    )
+                    // Drawn only, with no handler of its own: a click on it
+                    // reaches the row's, so the whole row is one target and
+                    // there is one place that toggles.
+                    .end_slot(Disclosure::new(
+                        SharedString::from(format!("usage-disclosure-{}", agent.as_ref())),
+                        expanded,
+                    ))
                     // Expanding is reading what is already in hand, so it fires no
                     // request -- opening the detail must never be a reason to
                     // touch the network or spawn a process.
@@ -309,12 +312,13 @@ impl UsagePanel {
             // A silent agent has no summary line at all rather than an empty one:
             // its row is the name and the reason, which is a complete answer.
             .when(!expanded && !summary.is_empty(), |column| {
-                column.child(h_flex().pl_5().gap_2().children(summary))
+                column.child(h_flex().pl_7().py_0p5().gap_1p5().children(summary))
             })
             .when(expanded, |column| {
                 column.child(
                     v_flex()
-                        .pl_5()
+                        .pl_7()
+                        .py_0p5()
                         .gap_0p5()
                         // Expanded with nothing to expand: the reason is already on
                         // the row above, and repeating it would be noise -- but
@@ -432,13 +436,13 @@ impl Render for UsagePanel {
                 h_flex()
                     .w_full()
                     .justify_between()
-                    .child(Label::new("Usage"))
+                    .child(Label::new("Usage").size(LabelSize::Small))
                     .child(
                         h_flex()
                             .gap_1()
                             .child(Label::new(scope).size(LabelSize::Small).color(Color::Muted))
                             .child(
-                                IconButton::new("agent-usage-refresh", IconName::ArrowCircle)
+                                IconButton::new("agent-usage-refresh", REFRESH_ICON)
                                     .icon_size(IconSize::Small)
                                     // Swaps the glyph for `LoadCircle` and spins
                                     // it. Colour alone said "working" only to
@@ -491,6 +495,7 @@ mod tests {
             active_toolchain_button: true,
             vim_mode_button: true,
             image_info_button: true,
+            app_version_button: true,
         }
     }
 
@@ -523,6 +528,17 @@ mod tests {
         assert_eq!(UsagePanel::scope_label(&only_claude), "Claude only");
         assert_eq!(UsagePanel::scope_label(&only_codex), "Codex only");
         assert_eq!(UsagePanel::scope_label(&neither), "none on the bar");
+    }
+
+    /// The meter's fill is a share of its track, and a share is what a test can
+    /// assert: 0% has to be no fill at all rather than a sliver, and a reading the
+    /// agent reports over 100 must not draw past the end of the track.
+    #[test]
+    fn the_meter_fills_exactly_the_share_it_reads_and_never_past_the_track() {
+        assert_eq!(UsagePanel::meter_fraction(0), 0.);
+        assert_eq!(UsagePanel::meter_fraction(50), 0.5);
+        assert_eq!(UsagePanel::meter_fraction(100), 1.);
+        assert_eq!(UsagePanel::meter_fraction(180), 1.);
     }
 
     /// A silent agent's row carries the reason, which is the one thing the status

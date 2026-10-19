@@ -13,10 +13,40 @@
 
 use crate::connection_modal::{ConnectionModal, Step};
 use crate::driver_registry::{self, CatalogueEntry};
-use database::install::InstallProgress;
+use database::install::{DriverInstaller, InstallProgress};
 use futures::{StreamExt as _, select_biased};
 use gpui::{Context, Window};
+use std::sync::Arc;
 use ui::prelude::*;
+
+/// A place in line for a download that other windows may be waiting on too,
+/// given up if this is dropped before the answer came.
+///
+/// The installer counts the callers waiting and stops a download only when the
+/// last of them leaves, so every way a window can stop waiting has to say so:
+/// pressing Cancel, but also Esc, a click outside, or the window closing, none
+/// of which go through Cancel. Tying it to the task that waits means they all
+/// do, and a Cancel pressed afterwards still counts for something.
+struct Waiting {
+    installer: Arc<DriverInstaller>,
+    id: String,
+    answered: bool,
+}
+
+impl Waiting {
+    /// The download finished, one way or the other: nothing is left to give up.
+    fn answered(&mut self) {
+        self.answered = true;
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        if !self.answered {
+            self.installer.forget(&self.id);
+        }
+    }
+}
 
 impl ConnectionModal {
     /// Downloads the driver for `engine`, then continues into its form.
@@ -35,6 +65,11 @@ impl ConnectionModal {
         // joining a download already running still sees the bar move.
         let mut progress = installer.watch(&id);
         let install = installer.install(&id);
+        let mut waiting = Waiting {
+            installer,
+            id: id.clone(),
+            answered: false,
+        };
 
         self.error = None;
         self.step = Step::Downloading {
@@ -60,6 +95,7 @@ impl ConnectionModal {
                     outcome = install => break outcome,
                 }
             };
+            waiting.answered();
 
             this.update_in(cx, |this, window, cx| match outcome {
                 Ok(_) => {
@@ -69,6 +105,8 @@ impl ConnectionModal {
                     this.reload_engines(cx);
                     let engine = CatalogueEntry {
                         installed: true,
+                        downloaded: true,
+                        hand_placed: false,
                         ..engine
                     };
                     this.open(engine, window, cx);
@@ -87,13 +125,12 @@ impl ConnectionModal {
 
     /// Abandons a download and goes back to the engine list.
     ///
-    /// Nothing half-installed survives: the archive is unpacked into a staging
-    /// directory and moved into place in one rename, so stopping before that
-    /// leaves the store as it was.
+    /// Dropping the task is what gives up this window's place in the download
+    /// (see [`Waiting`]), and what stops it if nobody else is waiting. Nothing
+    /// half-installed survives: the archive is unpacked into a staging directory
+    /// and moved into place in one rename, and what a stopped download had
+    /// written is removed with it.
     pub(crate) fn cancel_download(&mut self, cx: &mut Context<Self>) {
-        if let Step::Downloading { engine, .. } = &self.step {
-            driver_registry::installer(cx).forget(&engine.driver);
-        }
         self.set_task(None);
         self.step = Step::PickEngine;
         cx.notify();
@@ -113,6 +150,85 @@ impl ConnectionModal {
             return;
         }
         self.download_driver(engine, window, cx);
+    }
+
+    /// Deletes the driver an engine has in the download store, after asking.
+    ///
+    /// Asked about because the driver may serve more than the engine clicked:
+    /// CockroachDB and PostgreSQL share one, and removing it for one removes it
+    /// for both. A driver Zode downloaded is a click from coming back, so that
+    /// is all that is asked. One with no marker may have been placed by hand --
+    /// or downloaded by an earlier Zode, which Zode cannot tell -- so the
+    /// question names what is about to be deleted and says it may not be
+    /// downloadable again.
+    pub(crate) fn remove_driver(
+        &mut self,
+        engine: CatalogueEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !engine.downloaded {
+            return;
+        }
+        let driver = engine.driver.clone();
+        let driver_name = driver_registry::global(cx)
+            .read(cx)
+            .get(&driver)
+            .map(|descriptor| descriptor.name.to_string())
+            .unwrap_or_else(|| engine.name.to_string());
+        let (question, detail) = if engine.hand_placed {
+            let directory = driver_registry::store_root(cx).join(driver.as_str());
+            (
+                format!(
+                    "Remove the {driver_name} driver from {}?",
+                    directory.display()
+                ),
+                format!(
+                    "Everything in {} is deleted. Zode cannot tell whether it downloaded this \
+                     driver or you put it there yourself; if you did, it cannot be downloaded \
+                     again. Every engine that connects through it will need a driver again. \
+                     Connections already open keep working until they are closed.",
+                    directory.display()
+                ),
+            )
+        } else {
+            (
+                format!("Remove the downloaded {driver_name} driver?"),
+                "Every engine that connects through it will need it downloaded again. \
+                 Connections already open keep working until they are closed."
+                    .to_string(),
+            )
+        };
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &question,
+            Some(&detail),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let removal = this.update(cx, |_, cx| driver_registry::remove_download(driver, cx));
+            let Ok(removal) = removal else {
+                return;
+            };
+            let outcome = removal.await;
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(()) => this.error = None,
+                    Err(error) => {
+                        this.error = Some(
+                            format!("Could not remove the {driver_name} driver: {error:#}").into(),
+                        )
+                    }
+                }
+                this.reload_engines(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// What the progress line says, and how far along the bar is.

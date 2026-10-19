@@ -8,8 +8,9 @@
 
 use std::sync::Arc;
 
+use agent_sessions::SubagentSummary;
 use git::repository::{Branch, Worktree as GitWorktree};
-use gpui::SharedString;
+use gpui::{App, SharedString};
 use project::git_store::RepositoryId;
 
 /// Identifies a collapsible row. Kept separate from [`TreeRow`] because the
@@ -114,17 +115,6 @@ pub(crate) enum AgentActivity {
     Responding,
 }
 
-/// What one agent row's subagent list is held under.
-///
-/// Not the session id alone: the same conversation can be open in two tabs, and
-/// expanding one of them must not expand the other. A tab is keyed by its view
-/// and a finished transcript by the id its store knows it as.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum SubagentKey {
-    Open(gpui::EntityId),
-    Past(Arc<str>),
-}
-
 /// The mark for a tab that still exists, from the two questions asked of it.
 ///
 /// Split out because the case worth pinning is the quiet one: a tab whose CLI
@@ -212,14 +202,17 @@ impl AgentEntry {
         )
     }
 
-    /// What this row's subagent list is remembered under, or `None` when there
-    /// is nothing left to remember it by.
-    pub(crate) fn subagent_key(&self) -> Option<SubagentKey> {
+    /// The subagents running under this row's session, newest first.
+    ///
+    /// Only an open tab has any: a session with no tab has no CLI alive to be
+    /// running them.
+    pub(crate) fn running_subagents(&self, cx: &App) -> Vec<SubagentSummary> {
         match self {
             AgentEntry::Open { view, .. } => view
                 .upgrade()
-                .map(|view| SubagentKey::Open(view.entity_id())),
-            AgentEntry::Past { id, .. } => Some(SubagentKey::Past(id.clone())),
+                .map(|view| view.read(cx).running_subagents(cx).cloned().collect())
+                .unwrap_or_default(),
+            AgentEntry::Past { .. } => Vec::new(),
         }
     }
 

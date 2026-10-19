@@ -1,9 +1,6 @@
 use extension_host::ExtensionStore;
-use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Subscription,
-    Window,
-};
-use ui::{Tooltip, prelude::*};
+use gpui::{App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window};
+use ui::{Modal, ModalFooter, ModalHeader, Tooltip, prelude::*};
 use workspace::ModalView;
 use zode_sync::{Kind, SyncSession, SyncStatus};
 
@@ -77,7 +74,7 @@ impl SyncModal {
                 .py_2()
                 .gap_1()
                 .bg(colors.editor_background)
-                .border_b_1()
+                .border_t_1()
                 .border_color(colors.border_variant)
                 .child(
                     Label::new(format!(
@@ -92,8 +89,7 @@ impl SyncModal {
                         .buffer_font(cx),
                 )
                 .child(
-                    Button::new("sync-install-missing", "Install all")
-                        .label_size(LabelSize::Small)
+                    Button::new("sync-install-missing", "Install All")
                         .tooltip(Tooltip::text("Installs from the registry, one at a time"))
                         .on_click(cx.listener(move |_this, _, _window, cx| {
                             let store = ExtensionStore::global(cx);
@@ -122,7 +118,7 @@ impl SyncModal {
             .gap_2()
             .justify_between()
             .items_center()
-            .border_b_1()
+            .border_t_1()
             .border_color(border)
             .child(
                 v_flex().child(Label::new(title_for(kind))).child(
@@ -136,7 +132,6 @@ impl SyncModal {
                     .gap_1()
                     .child(
                         Button::new(("sync-pull", kind as usize), "Pull")
-                            .label_size(LabelSize::Small)
                             .disabled(busy)
                             .tooltip(Tooltip::text(
                                 "Fetch the stored copy and show what would change",
@@ -159,7 +154,6 @@ impl SyncModal {
                     .child(
                         Button::new(("sync-push", kind as usize), "Push")
                             .style(ButtonStyle::Filled)
-                            .label_size(LabelSize::Small)
                             .disabled(busy)
                             .tooltip(Tooltip::text("Send this machine's copy"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -225,48 +219,45 @@ impl Render for SyncModal {
             .collect();
         rows.extend(self.missing_extensions_row(cx));
 
-        v_flex()
+        div()
             .key_context("SyncModal")
             .track_focus(&self.focus_handle)
             .elevation_3(cx)
-            .w(rems(34.))
-            .overflow_hidden()
+            .occlude()
+            .w(rems(40.))
+            .max_h(rems(40.))
+            .debug_selector(|| "account-sync-modal".into())
             .on_action(cx.listener(|_, _: &menu::Cancel, _window, cx| cx.emit(DismissEvent)))
             .child(
-                v_flex()
-                    .p_3()
-                    .gap_0p5()
-                    .child(Label::new("Sync settings").weight(FontWeight::MEDIUM))
-                    .child(
-                        Label::new(
-                            "Encrypted on this machine. The server never sees the contents.",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .border_t_1()
-                    .border_color(colors.border_variant)
+                Modal::new("account-sync", None)
+                    .header(
+                        ModalHeader::new()
+                            .child(Headline::new("Sync settings").size(HeadlineSize::Small))
+                            .description(
+                                "Encrypted on this machine. The server never sees the contents.",
+                            ),
+                    )
+                    // Each row carries the rule above it, so the last one does not
+                    // stack its own rule on the footer's.
+                    //
                     // Built before the container so the borrow of `cx` ends
                     // before the container's own styling reads the theme.
-                    .children(rows),
+                    .child(v_flex().children(rows)),
             )
             .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .justify_between()
-                    .items_center()
-                    .bg(colors.editor_background)
-                    .child(Label::new(message).size(LabelSize::XSmall).color(tone))
-                    .child(
-                        Button::new("sync-close", "Close")
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|_, _, _window, cx| cx.emit(DismissEvent))),
-                    ),
+                // `ModalFooter` has no fill of its own, so this band gives it the
+                // editor background the body above it uses.
+                div().w_full().bg(colors.editor_background).child(
+                    ModalFooter::new()
+                        .start_slot(Label::new(message).size(LabelSize::XSmall).color(tone))
+                        .end_slot(
+                            h_flex().gap_1().child(
+                                Button::new("sync-close", "Close").on_click(
+                                    cx.listener(|_, _, _window, cx| cx.emit(DismissEvent)),
+                                ),
+                            ),
+                        ),
+                ),
             )
     }
 }
@@ -320,6 +311,23 @@ mod tests {
     #[gpui::test]
     fn the_window_draws_when_idle(cx: &mut TestAppContext) {
         draw_with(SyncStatus::Idle, cx);
+    }
+
+    /// A window of rows is the medium tier of modal widths.
+    #[gpui::test]
+    fn the_window_is_the_medium_width(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(cx);
+        let (_modal, cx) = cx.add_window_view(|_window, cx| SyncModal::new(session, cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("account-sync-modal")
+            .expect("the modal must be drawn");
+        let medium = cx.update(|window, _| rems(40.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, medium);
     }
 
     #[gpui::test]

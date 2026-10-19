@@ -53,7 +53,7 @@ type in it and the id becomes real.
 
 **A session you deleted.** Deleting a session from the history panel removes the
 conversation, not the tab that was in it. A Claude tab starts fresh under its own
-id. A Codex, Copilot or opencode tab says the session is no longer on this
+id. A Codex, Copilot or opencode tab says the session is not available on this
 machine and offers to start a new one, rather than quietly opening a blank
 session that looks like a continuation.
 
@@ -64,12 +64,29 @@ the trash, so deleting one asks opencode itself to remove it (`opencode session
 delete`). **That cannot be undone.** A bulk delete says so explicitly whenever
 the sweep includes an opencode session.
 
+Deleting does not stop an agent that is still running in an open tab. If a tab
+is running the session you are about to delete, the confirmation says so and
+suggests closing the tab first. The agent may keep writing to its transcript
+after it is moved, so the tab can stop reporting finished turns and the session
+can come back in the history list. Zode does not refuse the delete: closing the
+tab is your call.
+
 ## Forked sessions are not tracked
 
-Forking (`--fork-session` for Claude Code, `--fork` for opencode) tells the CLI
-to make a **new** session id, and it does not say which. A forked tab therefore
-comes back empty rather than resuming the session it was forked from, which is
-the one thing that would be actively misleading.
+**Continue in New Session…** in the history panel forks a session. The tab
+starts the CLI in the folder the session ran in with the agent's own fork flag
+(`--resume <id> --fork-session` for Claude Code, `-s <id> --fork` for opencode),
+so the new tab starts from the conversation so far. Codex and Copilot have no
+fork, so the entry is disabled for them. If the original is gone from the
+agent's store, the tab says the session is not available rather than opening a
+blank one.
+
+The CLI makes a **new** session id for the branch, and it does not say which, so
+Zode cannot write it down. A forked tab is therefore not tracked: after you
+restart Zode it comes back empty rather than resuming the branch, which is the
+one thing that would be actively misleading. Starting the agent again in that
+tab, after its CLI has ended, forks the original once more and gives a new
+branch.
 
 ## What starting looks like
 
@@ -79,6 +96,19 @@ several CLI processes at startup, each loading its transcript and any MCP server
 it is configured with. The [project footprint
 indicator](./project-footprint-indicator.md) on the status bar is where that shows
 up.
+
+## Where Claude Code's transcripts are read from
+
+Zode reads Claude Code's transcripts from the `projects` folder under
+`CLAUDE_CONFIG_DIR` when that variable is set to an absolute path, and from
+`~/.claude/projects` otherwise. It reads the variable from its own environment.
+An empty value and a relative path are ignored: a relative path is relative to
+the CLI's working directory, which Zode does not have, so Zode reads the default
+folder instead.
+
+Only transcripts named by a session UUID are listed. A `.jsonl` file with any
+other name is skipped, because its name is what gets passed to `--resume`, and
+Claude Code cannot resume a transcript it did not name that way.
 
 ## Where it is stored
 

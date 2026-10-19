@@ -1,13 +1,14 @@
-use crate::session_history::{
-    actions::cwd_exists,
-    panel::{AgentHistoryPanel, CountState},
-};
+use crate::session_history::panel::{AgentHistoryPanel, CountState};
 use agent_sessions::{AgentKind, Fork, SessionSummary};
 use gpui::{Anchor, Context, FontWeight, Window};
 use std::path::{Path, PathBuf};
-use ui::{ContextMenu, ContextMenuEntry, IconName, PopoverMenu, Tooltip, prelude::*};
+use ui::{
+    Chip, ContextMenu, ContextMenuEntry, Disclosure, IconName, ListItem, PopoverMenu,
+    PopoverMenuHandle, Tab, Tooltip, prelude::*,
+};
+use util::ResultExt as _;
 
-/// An agent group's header: vendor mark, name, total, and a disclosure.
+/// An agent group's header: disclosure, vendor mark, name, and total.
 ///
 /// The glyph comes from `crate::agent_icon` rather than a match of its own — the
 /// rail, the tab, the session row and this header must all draw the same mark,
@@ -20,48 +21,42 @@ pub(crate) fn render_agent_group(
     cx: &mut Context<AgentHistoryPanel>,
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
-    h_flex()
-        .id(("agent-history-agent", ix))
+    // The surface and rule are the header's own; `ListItem` brings the height,
+    // the spacing and the click target.
+    div()
         .w_full()
-        .px_2()
-        .py_1p5()
-        .gap_1p5()
-        .justify_between()
         .bg(colors.elevated_surface_background)
         .border_b_1()
         .border_color(colors.border)
         .child(
-            h_flex()
-                .gap_1p5()
-                .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
+            ListItem::new(("agent-history-agent", ix))
+                .height(Tab::content_height(cx))
+                .selectable(false)
+                .start_slot(
+                    h_flex()
+                        .gap_1()
+                        .child(Disclosure::new(
+                            ("agent-history-agent-toggle", ix),
+                            !collapsed,
+                        ))
+                        .child(
+                            Icon::new(crate::agent_icon(agent.builtin_agent_id()))
+                                .size(IconSize::Small),
+                        ),
                 )
-                .child(
-                    Icon::new(crate::agent_icon(agent.builtin_agent_id())).size(IconSize::XSmall),
+                .child(Label::new(agent.label()).weight(FontWeight::MEDIUM))
+                .end_slot(
+                    Label::new(count.to_string())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                 )
-                .child(
-                    Label::new(agent.label())
-                        .size(LabelSize::Small)
-                        .weight(FontWeight::MEDIUM),
-                ),
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if !this.collapsed_agents.remove(&agent) {
+                        this.collapsed_agents.insert(agent);
+                    }
+                    cx.notify();
+                })),
         )
-        .child(
-            Label::new(count.to_string())
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
-        )
-        .on_click(cx.listener(move |this, _, _window, cx| {
-            if !this.collapsed_agents.remove(&agent) {
-                this.collapsed_agents.insert(agent);
-            }
-            cx.notify();
-        }))
 }
 
 /// The inner header: one project, under the agent that ran there.
@@ -76,46 +71,37 @@ pub(crate) fn render_group(
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
     let path = path.to_path_buf();
-    h_flex()
-        .id(("agent-history-group", ix))
+    div()
         .w_full()
-        // Indented past the agent header it belongs to.
-        .pl_5()
-        .pr_2()
-        .py_1()
-        .gap_1()
-        .justify_between()
         .bg(colors.elevated_surface_background)
         .border_b_1()
         .border_color(colors.border)
         .child(
-            h_flex()
-                .gap_1()
-                .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
+            ListItem::new(("agent-history-group", ix))
+                .height(Tab::content_height(cx))
+                .selectable(false)
+                // Indented past the agent header it belongs to.
+                .indent_level(1)
+                .start_slot(Disclosure::new(
+                    ("agent-history-group-toggle", ix),
+                    !collapsed,
+                ))
+                .child(Label::new(label.to_string()))
+                .end_slot(
+                    Label::new(count.to_string())
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                 )
-                .child(Label::new(label.to_string()).size(LabelSize::Small)),
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    // Keyed by (agent, path): closing a project under one agent
+                    // must not close the same project under another.
+                    let key = (agent, path.clone());
+                    if !this.collapsed_groups.remove(&key) {
+                        this.collapsed_groups.insert(key);
+                    }
+                    cx.notify();
+                })),
         )
-        .child(
-            Label::new(count.to_string())
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
-        )
-        .on_click(cx.listener(move |this, _, _window, cx| {
-            // Keyed by (agent, path): closing a project under one agent must not
-            // close the same project under another.
-            let key = (agent, path.clone());
-            if !this.collapsed_groups.remove(&key) {
-                this.collapsed_groups.insert(key);
-            }
-            cx.notify();
-        }))
 }
 
 /// One session: what it was, who ran it, and what can be done with it.
@@ -127,9 +113,10 @@ pub(crate) fn render_session(
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
     let expanded = panel.expanded_rows.contains(&session.id);
-    let alive = cwd_exists(session);
+    let alive = panel.cwd_alive(&session.cwd);
     let can_fork = panel.can_fork(session);
     let roots = panel.project_roots(cx);
+    let menu_handle = panel.menu_handle(&session.id);
 
     v_flex()
         .id(("agent-history-session", ix))
@@ -145,8 +132,17 @@ pub(crate) fn render_session(
         .child(
             h_flex()
                 .w_full()
-                .gap_1()
-                .justify_between()
+                .gap_1p5()
+                .child(
+                    // Through `agent_icon` rather than a match of its own: the
+                    // rail, the tab and this row must draw the same vendor
+                    // mark, and three copies of the mapping is three places to
+                    // forget when an agent is added.
+                    leading_slot().child(
+                        Icon::new(crate::agent_icon(session.agent.builtin_agent_id()))
+                            .size(IconSize::Small),
+                    ),
+                )
                 .child(
                     div().flex_1().overflow_hidden().child(
                         Label::new(session.title.clone())
@@ -154,12 +150,29 @@ pub(crate) fn render_session(
                             .color(Color::Default),
                     ),
                 )
-                .child(render_controls(ix, session, alive, can_fork, expanded, cx)),
+                .child(render_controls(
+                    ix,
+                    session,
+                    alive,
+                    can_fork,
+                    expanded,
+                    menu_handle,
+                    cx,
+                )),
         )
-        .child(render_preview(session, expanded))
-        .child(render_facts(session, panel))
-        .child(render_badges(session, &roots, alive, cx))
-        .children(expanded.then(|| render_details(session, cx)))
+        .child(
+            // Everything under the title lines up with it, not with the mark.
+            h_flex().w_full().gap_1p5().child(leading_slot()).child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(render_preview(session, expanded))
+                    .child(render_facts(session, panel))
+                    .child(render_badges(session, &roots, alive, cx))
+                    .children(expanded.then(|| render_details(session, cx))),
+            ),
+        )
         .on_click(cx.listener({
             let id = session.id.clone();
             move |this, _, _window, cx| {
@@ -171,17 +184,25 @@ pub(crate) fn render_session(
         }))
 }
 
+/// The fixed-width column that holds the vendor mark, and that the lines under
+/// the title leave empty so they start where the title does.
+fn leading_slot() -> Div {
+    h_flex().size_4().flex_none().justify_center()
+}
+
 fn row_group(ix: usize) -> SharedString {
     SharedString::from(format!("agent-history-row-{ix}"))
 }
 
-/// The hover toolbar and the menu behind the ellipsis.
+/// The hover toolbar, the menu behind the ellipsis, and the disclosure that
+/// stays visible to say the row opens.
 fn render_controls(
     ix: usize,
     session: &SessionSummary,
     alive: bool,
     can_fork: bool,
     expanded: bool,
+    menu_handle: PopoverMenuHandle<ContextMenu>,
     cx: &mut Context<AgentHistoryPanel>,
 ) -> impl IntoElement {
     let group = row_group(ix);
@@ -189,7 +210,7 @@ fn render_controls(
         .flex_none()
         .gap_0p5()
         .child(
-            IconButton::new(("resume", ix), IconName::PlayOutlined)
+            IconButton::new(("resume", ix), IconName::PlayFilled)
                 .icon_size(IconSize::Small)
                 .disabled(!alive)
                 .visible_on_hover(group.clone())
@@ -214,7 +235,7 @@ fn render_controls(
             IconButton::new(("fork", ix), IconName::Plus)
                 .icon_size(IconSize::Small)
                 .disabled(!alive || !can_fork)
-                .visible_on_hover(group)
+                .visible_on_hover(group.clone())
                 // Two different reasons this can be off, and the tooltip must name
                 // the one that applies: a dead directory first, since that is
                 // checked first.
@@ -236,21 +257,23 @@ fn render_controls(
                 })),
         )
         .child(
-            Icon::new(if expanded {
-                IconName::ChevronUp
-            } else {
-                IconName::ChevronDown
-            })
-            .size(IconSize::Small)
-            .color(Color::Muted),
-        )
-        .child(
             // Wrapped only so a test can find the trigger's bounds and click it;
             // `IconButton` has no probe of its own.
             div()
                 .debug_selector(move || format!("agent-history-menu:{ix}"))
-                .child(render_menu(ix, session, alive, can_fork, cx)),
+                .child(render_menu(
+                    ix,
+                    session,
+                    alive,
+                    can_fork,
+                    menu_handle,
+                    group,
+                    cx,
+                )),
         )
+        // A click on this reaches the row's own handler, which is the toggle: the
+        // disclosure only has to be there to show the state, and to be a target.
+        .child(Disclosure::new(("agent-history-expand", ix), expanded))
 }
 
 /// The ellipsis menu.
@@ -272,11 +295,20 @@ fn render_menu(
     session: &SessionSummary,
     alive: bool,
     can_fork: bool,
+    menu_handle: PopoverMenuHandle<ContextMenu>,
+    group: SharedString,
     cx: &mut Context<AgentHistoryPanel>,
 ) -> impl IntoElement {
-    let panel = cx.entity();
+    // Weak: the handle that stores this menu's builder is a field of the panel,
+    // so a strong handle captured here would have the panel own itself.
+    let panel = cx.weak_entity();
     let session = session.clone();
+    // Hovering the row is what reveals the trigger, and opening the menu moves
+    // the pointer off the row. Without the exception the trigger would vanish
+    // out from under the menu it just opened.
+    let menu_open = menu_handle.is_deployed();
     PopoverMenu::new(("agent-history-menu", ix))
+        .with_handle(menu_handle)
         .menu(move |window, cx| {
             let panel = panel.clone();
             let session = session.clone();
@@ -286,11 +318,12 @@ fn render_menu(
                 move |mut menu, _window, _cx| {
                     let has_log = session.log_path.is_some();
                     // Every entry runs against the panel entity, deferred past this
-                    // click by `Entity::update` — the panel is not leased here, but
-                    // the handler runs later and must not assume it still is.
+                    // click by `WeakEntity::update` — the panel is not leased here,
+                    // but the handler runs later and must not assume it still is,
+                    // or that it still exists.
                     let add = |menu: ContextMenu,
                                label: &'static str,
-                               icon: Option<IconName>,
+                               icon: IconName,
                                enabled: bool,
                                action: fn(
                         &mut AgentHistoryPanel,
@@ -300,21 +333,22 @@ fn render_menu(
                     )| {
                         let panel = panel.clone();
                         let session = session.clone();
-                        let mut entry = ContextMenuEntry::new(label).disabled(!enabled).handler(
-                            move |window, cx| {
-                                panel.update(cx, |panel, cx| action(panel, &session, window, cx));
-                            },
-                        );
-                        if let Some(icon) = icon {
-                            entry = entry.icon(icon);
-                        }
-                        menu.item(entry)
+                        menu.item(
+                            ContextMenuEntry::new(label)
+                                .icon(icon)
+                                .disabled(!enabled)
+                                .handler(move |window, cx| {
+                                    panel
+                                        .update(cx, |panel, cx| action(panel, &session, window, cx))
+                                        .log_err();
+                                }),
+                        )
                     };
 
                     menu = add(
                         menu,
                         "Resume in Worktree",
-                        Some(IconName::PlayOutlined),
+                        IconName::PlayFilled,
                         alive,
                         |panel, session, window, cx| {
                             panel.resume(session, Fork::Continue, window, cx)
@@ -323,14 +357,14 @@ fn render_menu(
                     menu = add(
                         menu,
                         "Continue in New Session…",
-                        Some(IconName::Plus),
+                        IconName::Plus,
                         alive && can_fork,
                         |panel, session, window, cx| panel.resume(session, Fork::New, window, cx),
                     );
                     menu = add(
                         menu,
                         "Copy Resume Command",
-                        Some(IconName::Copy),
+                        IconName::Copy,
                         true,
                         |panel, session, _window, cx| panel.copy_resume_command(session, cx),
                     );
@@ -338,21 +372,21 @@ fn render_menu(
                     menu = add(
                         menu,
                         "Open Log",
-                        Some(IconName::FileCode),
+                        IconName::FileCode,
                         has_log,
                         |panel, session, window, cx| panel.open_log(session, window, cx),
                     );
                     menu = add(
                         menu,
                         "Reveal Log",
-                        Some(IconName::Folder),
+                        IconName::Folder,
                         has_log,
                         |panel, session, _window, cx| panel.reveal_log(session, cx),
                     );
                     menu = add(
                         menu,
                         "Open Working Directory",
-                        Some(IconName::Folder),
+                        IconName::Folder,
                         alive,
                         |panel, session, _window, cx| panel.open_working_directory(session, cx),
                     );
@@ -360,14 +394,14 @@ fn render_menu(
                     menu = add(
                         menu,
                         "Copy Session ID",
-                        None,
+                        IconName::Copy,
                         true,
                         |panel, session, _window, cx| panel.copy(session.id.to_string(), cx),
                     );
                     menu = add(
                         menu,
                         "Copy Log Path",
-                        None,
+                        IconName::Copy,
                         has_log,
                         |panel, session, _window, cx| {
                             if let Some(path) = &session.log_path {
@@ -379,7 +413,7 @@ fn render_menu(
                     add(
                         menu,
                         "Delete",
-                        Some(IconName::Trash),
+                        IconName::Trash,
                         true,
                         |panel, session, window, cx| panel.delete(session, window, cx),
                     )
@@ -393,6 +427,7 @@ fn render_menu(
         .trigger(
             IconButton::new(("agent-history-menu-trigger", ix), IconName::Ellipsis)
                 .icon_size(IconSize::Small)
+                .when(!menu_open, |button| button.visible_on_hover(group))
                 .tooltip(Tooltip::text("More…")),
         )
 }
@@ -415,7 +450,7 @@ fn render_preview(session: &SessionSummary, expanded: bool) -> impl IntoElement 
         .when(!expanded, |this| this.max_h(rems(2.6)).overflow_hidden())
 }
 
-/// Agent, message counts, when, and which model — the row of small print.
+/// Agent, message counts, when, and which model — the row of secondary facts.
 fn render_facts(session: &SessionSummary, panel: &AgentHistoryPanel) -> impl IntoElement {
     let counts = panel.counts.get(&session.id).copied();
     let messages = match counts {
@@ -443,32 +478,27 @@ fn render_facts(session: &SessionSummary, panel: &AgentHistoryPanel) -> impl Int
         .w_full()
         .gap_1p5()
         .child(
-            // Through `agent_icon` rather than a match of its own: the rail, the
-            // tab and this row must draw the same vendor mark, and three copies
-            // of the mapping is three places to forget when an agent is added.
-            Icon::new(crate::agent_icon(session.agent.builtin_agent_id())).size(IconSize::XSmall),
-        )
-        .child(
             Label::new(session.agent.label())
-                .size(LabelSize::XSmall)
+                .size(LabelSize::Small)
                 .color(Color::Muted),
         )
         .children(messages.map(|messages| {
             Label::new(messages)
-                .size(LabelSize::XSmall)
+                .size(LabelSize::Small)
                 .color(Color::Muted)
         }))
         .children(subagents.map(|subagents| {
             Label::new(subagents)
-                .size(LabelSize::XSmall)
+                .size(LabelSize::Small)
                 .color(Color::Muted)
         }))
-        .child(Label::new(when).size(LabelSize::XSmall).color(Color::Muted))
-        .children(session.model.clone().map(|model| {
-            Label::new(model)
-                .size(LabelSize::XSmall)
-                .color(Color::Muted)
-        }))
+        .child(Label::new(when).size(LabelSize::Small).color(Color::Muted))
+        .children(
+            session
+                .model
+                .clone()
+                .map(|model| Label::new(model).size(LabelSize::Small).color(Color::Muted)),
+        )
         .child(div().flex_1())
 }
 
@@ -490,22 +520,20 @@ fn render_badges(
     h_flex()
         .w_full()
         .gap_1()
+        // The worktree badge is outlined with no fill and the branch badge is
+        // filled with no rule, so each overrides one of the chip's defaults. The
+        // chip also sets the label in the buffer font.
         .children(worktree.map(|(label, color)| {
-            div()
-                .px_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(colors.border)
-                .child(Label::new(label).size(LabelSize::XSmall).color(color))
+            Chip::new(label)
+                .label_color(color)
+                .bg_color(gpui::transparent_black())
         }))
         .children(session.branch.clone().map(|branch| {
-            h_flex()
-                .px_1()
-                .gap_0p5()
-                .rounded_sm()
-                .bg(colors.element_background)
-                .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall))
-                .child(Label::new(branch).size(LabelSize::XSmall))
+            Chip::new(branch)
+                .truncate()
+                .icon(IconName::GitBranch)
+                .bg_color(colors.element_background)
+                .border_color(gpui::transparent_black())
         }))
 }
 

@@ -71,15 +71,20 @@ impl DriverState {
 
 /// Where the binary being run came from.
 ///
-/// Carried so that a failure can say which of the three a driver was started
+/// Carried so that a failure can say which of these a driver was started
 /// from. A driver misbehaving because it is a stale build beside the executable
 /// looks identical, from the error alone, to one that downloaded badly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriverOrigin {
     /// Beside the running executable: a development build, or a bundle.
     BesideExecutable,
-    /// Downloaded, under `paths::database_drivers_dir()`.
+    /// Downloaded by Zode, under `paths::database_drivers_dir()`. The only
+    /// origin Zode may delete, because a click fetches it back.
     Store,
+    /// Placed by hand in that same directory, which is what the install error
+    /// tells someone with no route to the API to do. Found and used like any
+    /// other, but never offered for removal: nothing can fetch it again.
+    Manual,
     /// A bare name left to `PATH`, put there deliberately by someone.
     Path,
     /// Declared by an extension, which names its own path.

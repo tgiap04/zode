@@ -3,11 +3,12 @@ use anyhow::Result;
 use collections::HashMap;
 use editor::Editor;
 use gpui::{
-    App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
-    WeakEntity, Window,
+    App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Subscription, Task, WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
-use ui::{IconName, prelude::*};
+use ui::{ContextMenu, IconName, PopoverMenuHandle, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -41,6 +42,15 @@ pub struct AgentHistoryPanel {
     /// is a view over the index, recomputed per render.
     pub(crate) store: Entity<crate::SessionStore>,
     pub(crate) counts: HashMap<Arc<str>, CountState>,
+    /// Whether each working directory the sessions ran in still exists, as of
+    /// the last sweep. Rows read this instead of stating the disk: a render runs
+    /// per row per frame, and a stat on a stalled network mount would hold the
+    /// window for as long as the mount stalls.
+    cwd_alive: HashMap<PathBuf, bool>,
+    cwd_check: Option<Task<()>>,
+    /// One per row whose menu has been drawn, so a row can tell that its menu is
+    /// open. Keyed by session id like `counts`, and dropped with them on refresh.
+    menu_handles: HashMap<Arc<str>, PopoverMenuHandle<ContextMenu>>,
     /// The real editor behind the search box. Its text is the filter — read on
     /// render rather than mirrored into a field, so the two cannot disagree.
     pub(crate) filter_editor: Entity<Editor>,
@@ -102,12 +112,20 @@ impl AgentHistoryPanel {
             }),
             // The sweep finishes on the store, not here. Without this the panel
             // would show an empty list until something else happened to notify it.
-            cx.observe(&store, |this, _, cx| {
-                this.loading = false;
+            //
+            // Only a finished sweep ends the wait. The store notifies for a
+            // forgotten session too, and one landing mid-sweep that cleared
+            // `loading` would re-enable Delete-all over an index the sweep is
+            // about to replace.
+            cx.observe(&store, |this, store, cx| {
+                if !store.read(cx).is_scanning() {
+                    this.loading = false;
+                    this.check_working_directories(cx);
+                }
                 cx.notify();
             }),
         ];
-        Self {
+        let mut panel = Self {
             filter_editor,
             _subscriptions: subscriptions,
             workspace: workspace.weak_handle(),
@@ -115,6 +133,9 @@ impl AgentHistoryPanel {
             providers: agent_sessions::default_providers(),
             store,
             counts: HashMap::default(),
+            cwd_alive: HashMap::default(),
+            cwd_check: None,
+            menu_handles: HashMap::default(),
             collapsed_agents: Default::default(),
             collapsed_groups: Default::default(),
             expanded_rows: Default::default(),
@@ -123,7 +144,47 @@ impl AgentHistoryPanel {
             loaded_once: false,
             width: None,
             list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(400.)),
-        }
+        };
+        panel.check_working_directories(cx);
+        panel
+    }
+
+    /// Whether the directory a session ran in is there. A directory not checked
+    /// yet reads as present: the controls it gates re-check in the background
+    /// before they act, and a row that flashed "gone" until the check landed
+    /// would be wrong more often than not.
+    pub(crate) fn cwd_alive(&self, cwd: &std::path::Path) -> bool {
+        self.cwd_alive.get(cwd).copied().unwrap_or(true)
+    }
+
+    /// Stats every distinct working directory in the index on the background
+    /// executor and keeps the answers. Replaces the previous answers outright,
+    /// so the map never holds more than the index does.
+    fn check_working_directories(&mut self, cx: &mut Context<Self>) {
+        let directories: Vec<PathBuf> = self
+            .sessions(cx)
+            .iter()
+            .map(|session| session.cwd.clone())
+            .collect::<collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let checked = cx.background_spawn(async move {
+            directories
+                .into_iter()
+                .map(|directory| {
+                    let exists = super::actions::directory_exists(&directory);
+                    (directory, exists)
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        self.cwd_check = Some(cx.spawn(async move |this, cx| {
+            let checked = checked.await;
+            this.update(cx, |this, cx| {
+                this.cwd_alive = checked;
+                cx.notify();
+            })
+            .log_err();
+        }));
     }
 
     pub async fn load(
@@ -162,6 +223,7 @@ impl AgentHistoryPanel {
         }
         self.loading = true;
         self.counts.clear();
+        self.menu_handles.clear();
         self.store.update(cx, |store, cx| store.refresh(cx));
     }
 
@@ -209,6 +271,14 @@ impl AgentHistoryPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// The handle behind one row's ellipsis menu, made on first ask.
+    pub(crate) fn menu_handle(&mut self, session_id: &Arc<str>) -> PopoverMenuHandle<ContextMenu> {
+        self.menu_handles
+            .entry(session_id.clone())
+            .or_default()
+            .clone()
     }
 
     pub(crate) fn provider_for(

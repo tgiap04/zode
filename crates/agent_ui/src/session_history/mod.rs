@@ -17,7 +17,8 @@ mod panel_tests;
 mod row;
 
 pub use actions::{
-    DeleteAll, DeleteTarget, PROJECT_SCOPE, delete_all_detail, delete_session,
-    execute_session_deletion, plan_delete_all, resume_session, sessions_in_project,
+    DeleteAll, DeleteTarget, PROJECT_SCOPE, ResumeRefusal, delete_all_detail, delete_session,
+    execute_session_deletion, plan_delete_all, resume_refusal, resume_refusal_in_background,
+    resume_session, sessions_in_project,
 };
 pub use panel::AgentHistoryPanel;

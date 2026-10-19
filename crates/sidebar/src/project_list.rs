@@ -1,3 +1,4 @@
+use agent_ui::AgentView;
 use gpui::{App, Entity, SharedString};
 use project::ProjectGroupKey;
 use std::collections::HashMap;
@@ -25,6 +26,10 @@ pub(crate) struct ListEntry {
     /// Narrower than `Project::has_stale_diagnostics` on its own -- see
     /// [`is_reindexing`].
     pub(crate) is_reindexing: bool,
+    /// Agent tabs across every live workspace of the group that hold
+    /// something for the user (see `AgentView::needs_attention`). Counted per
+    /// tab; a remembered-but-closed group has no tabs and reads 0.
+    pub(crate) waiting_agents: usize,
 }
 
 /// Whether a project is genuinely mid-reindex, as opposed to merely
@@ -148,6 +153,17 @@ pub(crate) fn rebuild_contents(
                 )
             })
             .unwrap_or((None, false));
+        let waiting_agents = group
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .read(cx)
+                    .items_of_type::<AgentView>(cx)
+                    .filter(|view| view.read(cx).needs_attention())
+                    .count()
+            })
+            .sum();
         rail_entries.push(ListEntry {
             key: group.key.clone(),
             label,
@@ -155,6 +171,7 @@ pub(crate) fn rebuild_contents(
             is_active,
             activity,
             is_reindexing,
+            waiting_agents,
         });
     }
 

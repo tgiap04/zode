@@ -23,7 +23,12 @@ const COMMAND_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 /// read this. A resume into a directory that no longer exists would start the CLI
 /// in a place with none of the files the conversation is about.
 pub(crate) fn cwd_exists(session: &SessionSummary) -> bool {
-    is_local_absolute_path(&session.cwd) && session.cwd.is_dir()
+    directory_exists(&session.cwd)
+}
+
+/// [`cwd_exists`] for a bare path. Stats the disk, so never from a render.
+pub(crate) fn directory_exists(path: &Path) -> bool {
+    is_local_absolute_path(path) && path.is_dir()
 }
 
 /// M2 -- every provider's `cwd` is untrusted data (it is read from a store this
@@ -55,6 +60,72 @@ fn is_local_absolute_path(path: &Path) -> bool {
     }
 }
 
+/// Why [`resume_session`] would do nothing for a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumeRefusal {
+    /// The agent has no way to do what was asked -- Codex and Copilot cannot
+    /// fork.
+    Unsupported,
+    /// The directory the session ran in is not there any more.
+    CwdGone,
+}
+
+/// Whether [`resume_session`] would refuse `session`, and why.
+///
+/// `resume_session` returns nothing and opens nothing when it refuses, which is
+/// right for a button that is already disabled and wrong for a caller that has
+/// to tell somebody else why nothing happened. This is the same two checks, in
+/// the same order, asked first.
+pub fn resume_refusal(session: &SessionSummary, fork: Fork) -> Option<ResumeRefusal> {
+    // Asked only so the control stays disabled where the agent cannot honour
+    // it — Codex has no fork. The command itself is rebuilt at spawn time from
+    // the id, so what comes back here is discarded.
+    if agent_sessions::provider_for(session.agent)
+        .resume_command(session, fork)
+        .is_none()
+    {
+        return Some(ResumeRefusal::Unsupported);
+    }
+    if !cwd_exists(session) {
+        return Some(ResumeRefusal::CwdGone);
+    }
+    None
+}
+
+/// [`resume_refusal`], answered on the background executor.
+///
+/// The check stats the directory the session ran in and builds the agent's
+/// store, which for two of the four stores canonicalizes a path. On a stalled
+/// network mount that is as long as the mount stalls, and a caller on the
+/// foreground thread -- which is every caller there is -- would hold the whole
+/// window for it. [`resume_session`] uses this; a caller that reports the
+/// refusal itself should wait on it rather than call [`resume_refusal`].
+pub fn resume_refusal_in_background(
+    session: &SessionSummary,
+    fork: Fork,
+    cx: &App,
+) -> Task<Option<ResumeRefusal>> {
+    let session = session.clone();
+    cx.background_spawn(async move { resume_refusal(&session, fork) })
+}
+
+/// What a tab opened onto `session` is bound to.
+///
+/// A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint a
+/// *new* id, so a tab carrying the id we resumed from would come back on the
+/// original conversation rather than the fork -- the one failure this whole
+/// feature exists to avoid, and silent. It is not untracked either: a tab with
+/// no intent starts the CLI with no arguments, and nothing would have been
+/// forked. It carries its source instead, which is only read to build the
+/// command that branches off it.
+fn intent_for_resume(session: &SessionSummary, fork: Fork) -> SessionIntent {
+    let id: gpui::SharedString = session.id.to_string().into();
+    match fork {
+        Fork::Continue => SessionIntent::Tracked(id),
+        Fork::New => SessionIntent::Fork(id),
+    }
+}
+
 /// Opens a tab back on `session`, or branches a new one off it.
 ///
 /// Free rather than a method on the history panel: the sidebar reaches the same
@@ -62,6 +133,10 @@ fn is_local_absolute_path(path: &Path) -> bool {
 /// resumed -- the agent must support it, the working directory must still exist,
 /// a fork must not carry the id it forked from -- belong to the operation, not
 /// to whichever surface asked for it.
+///
+/// Whether it may be resumed is decided off the foreground thread (see
+/// [`resume_refusal_in_background`]), so the tab opens a moment after this
+/// returns, and not at all when the answer is no.
 pub fn resume_session(
     workspace: &Entity<workspace::Workspace>,
     session: &SessionSummary,
@@ -69,33 +144,81 @@ pub fn resume_session(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let provider = agent_sessions::provider_for(session.agent);
-    // Asked only so the control stays disabled where the agent cannot honour
-    // it — Codex has no fork. The command itself is rebuilt at spawn time from
-    // the id, so what comes back here is discarded.
-    if provider.resume_command(session, fork).is_none() {
-        return;
-    }
-    if !cwd_exists(session) {
-        return;
-    }
+    let refusal = resume_refusal_in_background(session, fork, cx);
     let agent = session.agent.builtin_agent_id();
-    // A fork is deliberately NOT tracked. `--fork-session` makes the CLI mint
-    // a *new* id, so a tab carrying the id we resumed from would come back on
-    // the original conversation rather than the fork — the one failure this
-    // whole feature exists to avoid, and silent. Until a flag exists to name a
-    // fork's id, a forked tab is an untracked tab.
-    let intent = match fork {
-        Fork::Continue => SessionIntent::Tracked(session.id.to_string().into()),
-        Fork::New => SessionIntent::Untracked,
+    // `SessionOrigin::new` drops the title of a tab that is not tracked -- so a
+    // fork does not inherit the name of the conversation it branched from
+    // without a second branch here.
+    // Pinned to this very summary, not just its id: the caller has already
+    // looked the session up and checked it against what may be opened, and a
+    // second lookup by id can name a different copy of it.
+    let origin = crate::SessionOrigin::new(
+        intent_for_resume(session, fork),
+        Some(session.title.as_str()),
+    )
+    .anchored_on(session);
+    let workspace = workspace.downgrade();
+    window
+        .spawn(cx, async move |cx| {
+            if refusal.await.is_some() {
+                return;
+            }
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    AgentView::open_tracked(workspace, agent, origin, window, cx);
+                })
+                .log_err();
+        })
+        .detach();
+}
+
+/// What a confirmation adds when sessions it is about to take are running in
+/// open tabs.
+///
+/// A delete does not stop the agent writing. It may keep appending to a
+/// transcript after it has been moved, or write it again, and the tab reading it
+/// then goes quiet or the row comes back. Nothing here refuses: the person may
+/// well mean it, and closing the tab is theirs to decide.
+pub(crate) fn running_in_tabs_note(running: usize, total: usize) -> Option<String> {
+    let which = match (running, total) {
+        (0, _) => return None,
+        (_, 1) => "An open tab is running this session.".to_string(),
+        (1, _) => "1 of these sessions is running in an open tab.".to_string(),
+        (running, _) => format!("{running} of these sessions are running in open tabs."),
     };
-    // `Fork::New` is already `Untracked`, and `SessionOrigin::new` drops the
-    // title for an untracked tab -- so a fork does not inherit the name of the
-    // conversation it branched from without a second branch here.
-    let origin = crate::SessionOrigin::new(intent, Some(session.title.as_str()));
-    workspace.update(cx, |workspace, cx| {
-        AgentView::open_tracked(workspace, agent, origin, window, cx);
-    });
+    Some(format!(
+        "{which} The agent may keep writing to a transcript after it is moved, so a tab \
+         can stop reporting finished turns and the session can come back in this list. \
+         Close the tab first to avoid both."
+    ))
+}
+
+/// How many of `sessions` a tab whose agent is alive is running.
+pub(crate) fn running_in_tabs<'a>(
+    sessions: impl IntoIterator<Item = (AgentKind, &'a Arc<str>)>,
+    cx: &App,
+) -> usize {
+    let running = crate::agent_tabs::running_sessions(cx);
+    if running.is_empty() {
+        return 0;
+    }
+    sessions
+        .into_iter()
+        .filter(|(agent, id)| {
+            running.contains(&(
+                project::AgentId::new(agent.builtin_agent_id()),
+                gpui::SharedString::from(id.to_string()),
+            ))
+        })
+        .count()
+}
+
+/// `detail` with the note about open tabs added when there is one.
+fn with_running_note(detail: String, note: Option<String>) -> String {
+    match note {
+        Some(note) => format!("{detail}\n\n{note}"),
+        None => detail,
+    }
 }
 
 /// Moves a session's transcript to the trash, after asking.
@@ -143,15 +266,18 @@ fn delete_via_trash(
 ) {
     let fs = workspace.read(cx).project().read(cx).fs().clone();
 
-    let detail = format!(
-        "{}\n\n{} will move to the trash ({}).",
-        session.title,
-        paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        format_bytes(session.log_bytes)
+    let detail = with_running_note(
+        format!(
+            "{}\n\n{} will move to the trash ({}).",
+            session.title,
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            format_bytes(session.log_bytes)
+        ),
+        running_in_tabs_note(running_in_tabs([(session.agent, &session.id)], cx), 1),
     );
     let prompt = window.prompt(
         gpui::PromptLevel::Warning,
@@ -212,11 +338,14 @@ fn delete_via_command(
 ) {
     let agent = session.agent;
     let agent_label = agent.label();
-    let detail = format!(
-        "{}\n\n{agent_label}'s own store holds this session, not a file this editor \
-         can move to the trash. Deleting it asks {agent_label} to remove it there. \
-         This cannot be undone.",
-        session.title
+    let detail = with_running_note(
+        format!(
+            "{}\n\n{agent_label}'s own store holds this session, not a file this editor \
+             can move to the trash. Deleting it asks {agent_label} to remove it there. \
+             This cannot be undone.",
+            session.title
+        ),
+        running_in_tabs_note(running_in_tabs([(session.agent, &session.id)], cx), 1),
     );
     let prompt = window.prompt(
         gpui::PromptLevel::Warning,
@@ -905,7 +1034,7 @@ impl AgentHistoryPanel {
         // Revealed rather than opened as a project: this panel is scoped to the
         // project already open, and swapping that out from under the user because
         // they clicked a menu entry would be a surprise.
-        if cwd_exists(session) {
+        if self.cwd_alive(&session.cwd) {
             cx.reveal_path(&session.cwd);
         }
     }
@@ -1005,15 +1134,25 @@ impl AgentHistoryPanel {
         } else {
             &["Move to Trash", "Cancel"]
         };
-        let prompt = window.prompt(
-            gpui::PromptLevel::Warning,
-            "Delete all history for this project?",
-            Some(&delete_all_detail(
+        let detail = with_running_note(
+            delete_all_detail(
                 plan.trashed(),
                 plan.commanded(),
                 plan.total_bytes,
                 PROJECT_SCOPE,
-            )),
+            ),
+            running_in_tabs_note(
+                running_in_tabs(
+                    plan.targets.iter().map(|target| (target.agent, &target.id)),
+                    cx,
+                ),
+                plan.count(),
+            ),
+        );
+        let prompt = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Delete all history for this project?",
+            Some(&detail),
             buttons,
             cx,
         );
@@ -1089,6 +1228,75 @@ mod tests {
             log_path: None,
             log_bytes,
         }
+    }
+
+    fn session_of(agent: AgentKind, cwd: &Path) -> SessionSummary {
+        SessionSummary {
+            agent,
+            ..session("s", &cwd.to_string_lossy(), 0)
+        }
+    }
+
+    #[test]
+    fn continuing_tracks_the_session_and_forking_branches_off_it_without_tracking_it() {
+        let session = session_of(AgentKind::Claude, &std::env::temp_dir());
+        assert_eq!(
+            intent_for_resume(&session, Fork::Continue),
+            SessionIntent::Tracked("s".into())
+        );
+        assert_eq!(
+            intent_for_resume(&session, Fork::New),
+            SessionIntent::Fork("s".into())
+        );
+    }
+
+    #[test]
+    fn a_session_that_can_be_resumed_has_no_refusal() {
+        let here = std::env::temp_dir();
+        for fork in [Fork::Continue, Fork::New] {
+            assert_eq!(
+                resume_refusal(&session_of(AgentKind::Claude, &here), fork),
+                None,
+                "{fork:?}"
+            );
+        }
+        assert_eq!(
+            resume_refusal(&session_of(AgentKind::Codex, &here), Fork::Continue),
+            None
+        );
+    }
+
+    #[test]
+    fn an_agent_with_no_fork_refuses_one_even_where_its_directory_is_fine() {
+        let here = std::env::temp_dir();
+        for agent in [AgentKind::Codex, AgentKind::Copilot] {
+            assert_eq!(
+                resume_refusal(&session_of(agent, &here), Fork::New),
+                Some(ResumeRefusal::Unsupported),
+                "{agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_that_is_gone_or_is_not_a_local_path_refuses_the_resume() {
+        let gone = std::env::temp_dir().join("agent-ui-resume-refusal-no-such-directory");
+        for cwd in [gone.as_path(), Path::new("relative/dir"), Path::new("")] {
+            assert_eq!(
+                resume_refusal(&session_of(AgentKind::Claude, cwd), Fork::Continue),
+                Some(ResumeRefusal::CwdGone),
+                "{cwd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsupported_fork_is_reported_before_a_missing_directory() {
+        let gone = std::env::temp_dir().join("agent-ui-resume-refusal-no-such-directory");
+        assert_eq!(
+            resume_refusal(&session_of(AgentKind::Codex, &gone), Fork::New),
+            Some(ResumeRefusal::Unsupported)
+        );
     }
 
     fn selected(sessions: &[SessionSummary], roots: &[PathBuf]) -> Vec<String> {

@@ -70,6 +70,7 @@ mod tests {
             active_toolchain_button: true,
             vim_mode_button: true,
             image_info_button: true,
+            app_version_button: true,
         }
     }
 

@@ -8,18 +8,26 @@ use workspace::pane_group::SURFACE_ROUNDING;
 /// leading edge.
 pub const RAIL_WIDTH: Pixels = px(48.0);
 
-/// One knob for every glyph in the column, so they cannot drift apart.
+/// Every glyph in the column is drawn by this, so they cannot drift apart.
 ///
-/// Worth knowing if you tune it: `IconSize` is rems against the UI font size, not
-/// pixels -- `Small` is `rems_from_px(14.)`, which on the shipped 13px font draws
-/// about 11px, while the column's own 48px width does not move.
-pub(crate) const RAIL_ICON_SIZE: IconSize = IconSize::Small;
+/// `ButtonSize` and `IconSize` are rems against the UI font size, not pixels. On
+/// the shipped 15px font `Large` draws 30px and `Medium` 15px, just under the 32px
+/// project squares, while the column's own 48px width does not move.
+pub(crate) fn rail_button(id: impl Into<ElementId>, icon: IconName) -> IconButton {
+    IconButton::new(id, icon)
+        .size(ButtonSize::Large)
+        .icon_size(IconSize::Medium)
+}
 
-/// Absolute, not `gap_1`: spacing helpers are rems against the UI font, so on the
-/// shipped 13px font `gap_1` yields 3px, and 3px between 19.5px glyphs in a fixed
-/// 48px column reads as one run-on strip. The column's width does not shrink with
-/// the font, so neither should the air between its buttons.
-pub(crate) const RAIL_ICON_GAP: Pixels = px(10.0);
+/// Absolute, not a spacing helper: those are rems against the UI font, and the
+/// column's width does not shrink with the font, so neither should the air
+/// between its buttons. Small because a 30px button already pads its 15px glyph
+/// by 7.5px on each side; this is added on top of that.
+pub(crate) const RAIL_ICON_GAP: Pixels = px(4.0);
+
+/// Between a block's first or last glyph and the rule that separates it from
+/// the next block, wider than the gap between glyphs so a block reads as one.
+pub(crate) const RAIL_BLOCK_PADDING: Pixels = px(8.0);
 
 impl Sidebar {
     /// Whether the wide panel is showing. Owned by `MultiWorkspace` rather
@@ -170,7 +178,7 @@ impl Sidebar {
     fn render_rail_tools(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .flex_shrink_0()
-            .py(RAIL_ICON_GAP)
+            .py(RAIL_BLOCK_PADDING)
             .gap(RAIL_ICON_GAP)
             .items_center()
             .border_t_1()
@@ -192,7 +200,7 @@ impl Sidebar {
 
         v_flex()
             .flex_shrink_0()
-            .py(RAIL_ICON_GAP)
+            .py(RAIL_BLOCK_PADDING)
             .gap(RAIL_ICON_GAP)
             .items_center()
             .border_t_1()
@@ -203,8 +211,7 @@ impl Sidebar {
                 // in the same column reads as a duplicate. (The project panel
                 // used to put a third one here; it stands in its own dock's
                 // header now, under a folder.)
-                IconButton::new("project-rail-toggle-panel", IconName::Menu)
-                    .icon_size(RAIL_ICON_SIZE)
+                rail_button("project-rail-toggle-panel", IconName::Menu)
                     .toggle_state(panel_open)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action(
@@ -228,8 +235,7 @@ impl Sidebar {
                     }),
             )
             .child(
-                IconButton::new("project-rail-open-project", IconName::Plus)
-                    .icon_size(RAIL_ICON_SIZE)
+                rail_button("project-rail-open-project", IconName::Plus)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action("Open Project", &workspace::Open::DEFAULT, cx)
                     })
@@ -244,8 +250,7 @@ impl Sidebar {
                 // as a deprecated alias -- so that old spelling now resolves to
                 // the JSON file, and a keymap copied from anywhere older wires
                 // the wrong one of the two.
-                IconButton::new("project-rail-open-settings", IconName::Settings)
-                    .icon_size(RAIL_ICON_SIZE)
+                rail_button("project-rail-open-settings", IconName::Settings)
                     .tooltip(move |_window, cx| {
                         Tooltip::for_action("Open Settings", &zed_actions::OpenSettings, cx)
                     })
@@ -275,4 +280,45 @@ fn drop_indicator(colour: gpui::Hsla) -> AnyElement {
         .flex_shrink_0()
         .bg(colour)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rail_test_support::{TwoProjects, two_projects};
+    use gpui::TestAppContext;
+    use ui::ButtonSize;
+
+    /// Every glyph in the column is one size, whichever block draws it. A
+    /// button drawn by hand with its own `IconButton::new` would leave the
+    /// default 22px box among 32px ones, and nothing but a measurement notices.
+    #[gpui::test]
+    async fn every_rail_glyph_button_is_large(cx: &mut TestAppContext) {
+        let (TwoProjects { .. }, cx) = two_projects(cx).await;
+        let rem_size = cx.update(|window, _| window.rem_size());
+        let large = ButtonSize::Large.rems().to_pixels(rem_size);
+
+        for selector in [
+            "ICON-Menu",
+            "ICON-Plus",
+            "ICON-Settings",
+            "ICON-Database",
+            "ICON-Docker",
+            "ICON-AiClaude",
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} must be drawn on the rail"));
+            assert_eq!(bounds.size.height, large, "{selector} height");
+            assert_eq!(bounds.size.width, large, "{selector} width");
+        }
+    }
+
+    /// One glyph per meaning: the database tool is `Database` here and in every
+    /// other surface that names it, not the `DatabaseZap` variant.
+    #[gpui::test]
+    async fn the_database_button_wears_the_database_glyph(cx: &mut TestAppContext) {
+        let (TwoProjects { .. }, cx) = two_projects(cx).await;
+        assert!(cx.debug_bounds("ICON-Database").is_some());
+        assert!(cx.debug_bounds("ICON-DatabaseZap").is_none());
+    }
 }

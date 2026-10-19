@@ -19,9 +19,12 @@
 //! - `registry` says which drivers exist, shipped or from an extension.
 //! - `install` puts one on the machine: no driver is bundled, each arrives when
 //!   the engine it speaks for is first connected to.
+//! - `signature` is what makes the manifest that `install` reads believable: an
+//!   Ed25519 signature checked against a key built into the app.
 //!
-//! The last three sit behind the default `client` feature. A driver binary
-//! takes this crate with `default-features = false` and gets [`protocol`] and
+//! Everything below [`server`] sits behind the default `client` feature (the
+//! signature behind `signing`, which `client` brings in). A driver binary takes
+//! this crate with `default-features = false` and gets [`protocol`] and
 //! [`server`] alone -- otherwise building a driver would compile gpui.
 //!
 //! Read-only is not enforced here. It is the driver's job, done by opening a
@@ -37,6 +40,8 @@ pub mod client;
 pub mod install;
 #[cfg(feature = "client")]
 pub mod registry;
+#[cfg(feature = "signing")]
+pub mod signature;
 #[cfg(feature = "client")]
 pub mod transport;
 

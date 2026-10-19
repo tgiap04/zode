@@ -1,9 +1,9 @@
 //! The last gate before something is gone.
 //!
-//! Typing, not clicking, and for a reason that is not ceremony: typing the name
-//! is what makes somebody read *which* resource they are removing. A button
-//! labelled OK is pressed by the same reflex whether the row underneath it was
-//! read or not.
+//! The list of what will be lost is what informs; the name typed, or pasted,
+//! into the field is what says it was looked at. A button labelled OK is pressed
+//! by the same reflex whether the row underneath it was read or not, and Enter
+//! here goes through the same check as the Remove button.
 //!
 //! It takes a [`DestructivePlan`], which cannot be built without the list of
 //! what will be lost. So there is no way to open this dialog over a removal
@@ -13,7 +13,7 @@ use container::DestructivePlan;
 use gpui::{
     App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window,
 };
-use ui::prelude::*;
+use ui::{CopyButton, KeyBinding, Modal, ModalFooter, ModalHeader, Section, prelude::*};
 use ui_input::InputField;
 
 use crate::container_panel::ContainerPanel;
@@ -39,10 +39,11 @@ impl workspace::ModalView for ConfirmDestructive {
     }
 }
 
+/// The field, so that the dialog opens ready to be typed into, and Enter typed
+/// there reaches `menu::Confirm` below.
 impl Focusable for ConfirmDestructive {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        let _ = cx;
-        self.focus_handle.clone()
+        self.input.focus_handle(cx)
     }
 }
 
@@ -121,61 +122,122 @@ impl Render for ConfirmDestructive {
         let matches = self.matches(cx);
         let confirmation = self.plan.confirmation().to_string();
         let targets = self.plan.targets();
+        let focus_handle = self.focus_handle.clone();
 
-        v_flex()
+        div()
             .key_context("ConfirmDestructive")
             .track_focus(&self.focus_handle)
+            // Enter goes through `confirm`, so it meets the same check as the
+            // button: with the wrong text typed it does nothing.
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| this.confirm(window, cx)))
+            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.cancel(cx)))
             .elevation_3(cx)
-            .w(px(460.))
-            .p_4()
-            .gap_3()
-            .child(Label::new(format!("Remove {} item(s)", targets.len())).size(LabelSize::Large))
-            // The enumerated list, and it is the part that actually informs.
-            // Without it, typing a word is a ritual rather than a decision.
+            .occlude()
+            .debug_selector(|| "confirm-destructive".into())
+            .w(rems(28.))
+            .max_h(rems(40.))
             .child(
-                v_flex()
-                    .id("confirm-destructive-targets")
-                    .max_h(px(180.))
-                    .overflow_y_scroll()
-                    .gap_1()
-                    .children(targets.iter().map(|target| {
-                        Label::new(format!("{}  ({:?})", target.name, target.kind))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                    })),
-            )
-            .when_some(self.plan.warning(), |element, warning| {
-                element.child(
-                    Label::new(warning.to_string())
-                        .size(LabelSize::Small)
-                        .color(Color::Error),
-                )
-            })
-            .child(
-                Label::new(format!("Type \"{confirmation}\" to confirm"))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(self.input.clone())
-            .child(
-                h_flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("confirm-destructive-cancel", "Cancel").on_click(
-                            cx.listener(|this, _: &ClickEvent, _window, cx| this.cancel(cx)),
+                Modal::new("confirm-destructive", None)
+                    .header(
+                        ModalHeader::new().child(
+                            Headline::new(format!("Remove {} item(s)", targets.len()))
+                                .size(HeadlineSize::Small),
                         ),
                     )
-                    .child(
-                        Button::new("confirm-destructive-go", "Remove")
-                            .style(ButtonStyle::Tinted(ui::TintColor::Error))
-                            // Disabled until the text matches. Not the gate --
-                            // `confirm` checks again -- but the visible half of
-                            // it.
-                            .disabled(!matches)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.confirm(window, cx)
-                            })),
+                    .section(
+                        Section::new().child(
+                            v_flex()
+                                .w_full()
+                                .gap_3()
+                                // The enumerated list, and it is the part that
+                                // actually informs. Without it, typing a word is
+                                // a ritual rather than a decision.
+                                .child(
+                                    v_flex()
+                                        .id("confirm-destructive-targets")
+                                        .max_h(rems(11.25))
+                                        .overflow_y_scroll()
+                                        .gap_1()
+                                        .children(targets.iter().map(|target| {
+                                            Label::new(format!(
+                                                "{}  ({:?})",
+                                                target.name, target.kind
+                                            ))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                        })),
+                                )
+                                .when_some(self.plan.warning(), |element, warning| {
+                                    element.child(
+                                        Label::new(warning.to_string())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Error),
+                                    )
+                                })
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_1()
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new(format!(
+                                                        "Type \"{confirmation}\" to confirm"
+                                                    ))
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                                )
+                                                // Copying is offered because the name has
+                                                // to be read off the list above either way,
+                                                // and a long generated name retyped by hand
+                                                // only invites a typo that blocks a removal
+                                                // the person already decided on.
+                                                .child(
+                                                    CopyButton::new(
+                                                        "confirm-destructive-copy",
+                                                        confirmation,
+                                                    )
+                                                    .tooltip_label("Copy the text to type"),
+                                                ),
+                                        )
+                                        .child(self.input.clone()),
+                                ),
+                        ),
+                    )
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("confirm-destructive-cancel", "Cancel").on_click(
+                                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                            this.cancel(cx)
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    Button::new("confirm-destructive-go", "Remove")
+                                        .style(ButtonStyle::Tinted(ui::TintColor::Error))
+                                        // Disabled until the text matches. Not the gate
+                                        // -- `confirm` checks again -- but the visible
+                                        // half of it.
+                                        .disabled(!matches)
+                                        .key_binding(
+                                            KeyBinding::for_action_in(
+                                                &menu::Confirm,
+                                                &focus_handle,
+                                                cx,
+                                            )
+                                            .size(rems_from_px(12.)),
+                                        )
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.confirm(window, cx)
+                                            },
+                                        )),
+                                ),
+                        ),
                     ),
             )
     }
@@ -339,6 +401,107 @@ mod tests {
             1,
             "and the right text must let it through, once"
         );
+    }
+
+    /// Opens the dialog with Enter and Escape bound as the default keymap binds
+    /// them: `menu::*` everywhere, and Escape first offered to the field's
+    /// editor, which passes it on when it has nothing of its own to cancel.
+    fn open_with_keys(
+        fired: Rc<Cell<usize>>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<ConfirmDestructive>, &mut gpui::VisualTestContext) {
+        init(cx);
+        cx.update(|cx| {
+            cx.bind_keys([
+                gpui::KeyBinding::new("enter", menu::Confirm, None),
+                gpui::KeyBinding::new("escape", menu::Cancel, None),
+                gpui::KeyBinding::new("escape", editor::actions::Cancel, Some("Editor")),
+            ]);
+        });
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            ConfirmDestructive::new(
+                a_plan(),
+                move |_plan, _window, _cx| fired.set(fired.get() + 1),
+                window,
+                cx,
+            )
+        });
+        modal.update_in(cx, |modal, window, cx| {
+            let focus = modal.focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        (modal, cx)
+    }
+
+    #[gpui::test]
+    async fn enter_in_the_field_removes_only_once_the_text_matches(cx: &mut TestAppContext) {
+        let fired = Rc::new(Cell::new(0usize));
+        let (_modal, cx) = open_with_keys(fired.clone(), cx);
+
+        cx.simulate_input("zode-postgre");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(fired.get(), 0, "Enter with the wrong text must do nothing");
+
+        cx.simulate_input("s");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(fired.get(), 1, "Enter with the right text removes");
+    }
+
+    #[gpui::test]
+    async fn escape_closes_without_removing(cx: &mut TestAppContext) {
+        let fired = Rc::new(Cell::new(0usize));
+        let (modal, cx) = open_with_keys(fired.clone(), cx);
+        let dismissed = Rc::new(Cell::new(false));
+        let _subscription = cx.update(|_window, cx| {
+            let dismissed = dismissed.clone();
+            cx.subscribe(&modal, move |_, _: &DismissEvent, _| dismissed.set(true))
+        });
+
+        cx.simulate_input("zode-postgres");
+        cx.simulate_keystrokes("escape");
+        assert!(dismissed.get());
+        assert_eq!(fired.get(), 0);
+    }
+
+    /// The dialog is answered by typing, so it must open with the field ready.
+    #[gpui::test]
+    async fn the_dialog_opens_with_the_field_focused(cx: &mut TestAppContext) {
+        init(cx);
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            ConfirmDestructive::new(a_plan(), |_plan, _window, _cx| {}, window, cx)
+        });
+        modal.update_in(cx, |modal, window, cx| {
+            let focus = modal.focus_handle(cx);
+            window.focus(&focus, cx);
+            assert!(
+                modal
+                    .input
+                    .read(cx)
+                    .editor()
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "what the modal layer focuses is the field itself"
+            );
+        });
+    }
+
+    /// A confirmation is the small kind of modal, however long the name it
+    /// asks for.
+    #[gpui::test]
+    async fn the_dialog_is_a_small_modal(cx: &mut TestAppContext) {
+        init(cx);
+        let (_modal, cx) = cx.add_window_view(|window, cx| {
+            ConfirmDestructive::new(a_plan(), |_plan, _window, _cx| {}, window, cx)
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("confirm-destructive")
+            .expect("the dialog was not drawn");
+        let small = cx.update(|window, _| window.rem_size() * 28.);
+        assert_eq!(bounds.size.width, small);
     }
 
     /// Pressing it twice must not run twice: the callback is taken, not cloned.
