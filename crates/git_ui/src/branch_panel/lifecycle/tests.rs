@@ -149,6 +149,16 @@ async fn the_reload_spinner_settles_when_the_scan_finishes(cx: &mut TestAppConte
     });
 
     cx.run_until_parked();
+    panel.update(cx, |panel, _| {
+        assert!(
+            panel.reloading,
+            "a scan that finishes at once still leaves the spinner up long enough to be seen"
+        );
+    });
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
 
     panel.update(cx, |panel, _| {
         assert!(

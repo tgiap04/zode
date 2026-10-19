@@ -150,6 +150,8 @@ impl BranchPanel {
     /// newer one with the same key is already waiting -- so leaning on the button
     /// coalesces instead of queueing one scan per press.
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        const MIN_RELOAD_SPINNER: std::time::Duration = std::time::Duration::from_millis(500);
+
         // The agent rows come from the workspace, not from git, so they are refreshed by
         // the rebuild itself rather than by any scan.
         self.mark_stale(cx);
@@ -162,8 +164,11 @@ impl BranchPanel {
         });
 
         self.reloading = true;
+        let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
         self._reload_task = Some(cx.spawn(async move |panel, cx| {
-            scans.await;
+            // A clean repository rescans in milliseconds, so the spinner would vanish
+            // before it is ever drawn and the click would look like it did nothing.
+            futures::join!(scans, shown_for_at_least);
             panel
                 .update(cx, |panel, cx| {
                     panel.reloading = false;
