@@ -97,6 +97,29 @@ pub(crate) fn chosen_target(
     }
 }
 
+/// The worktree's own name, as `CreateWorktree::worktree_name` takes it.
+///
+/// On the Name tab the worktree is named after the new branch, as it always
+/// was. On the Branch tab the name is optional: left empty, the service picks
+/// one; typed, it is checked with the same rule the service applies, so an
+/// unusable name disables Create instead of failing after the click.
+pub(crate) fn chosen_worktree_name(
+    target: &NewWorktreeBranchTarget,
+    typed: &str,
+) -> Result<Option<String>, &'static str> {
+    match target {
+        NewWorktreeBranchTarget::NewBranch { name, .. } => Ok(Some(name.clone())),
+        _ => {
+            let name = typed.trim();
+            if name.is_empty() {
+                return Ok(None);
+            }
+            crate::worktree_names::validate_worktree_name(name)?;
+            Ok(Some(name.to_string()))
+        }
+    }
+}
+
 /// Where the form starts: the absolute directory `git.worktree_directory`
 /// currently points at.
 ///
@@ -128,6 +151,9 @@ pub(crate) struct CreateWorktreeModal {
     location: PathBuf,
     mode: NameMode,
     name_input: Entity<InputField>,
+    /// The worktree's name on the Branch tab, where the first field filters
+    /// branches. Empty means let the service pick one.
+    worktree_name_input: Entity<InputField>,
     /// Local branch names, for the Branch tab.
     branches: Vec<SharedString>,
     selected_branch: Option<SharedString>,
@@ -163,19 +189,29 @@ impl CreateWorktreeModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let name_input = cx.new(|cx| InputField::new(window, cx, NameMode::Name.placeholder()));
-        let editor = name_input.read(cx).editor().clone();
-        let this = cx.entity().downgrade();
-        // Whether Create is enabled, the collision warning and the branch
-        // matches all read what is typed, so each keystroke redraws the form.
-        let subscriptions = vec![editor.subscribe(
-            Box::new(move |event, _window, cx| {
-                if event == ErasedEditorEvent::BufferEdited {
-                    this.update(cx, |_, cx| cx.notify()).ok();
-                }
-            }),
-            window,
-            cx,
-        )];
+        let worktree_name_input = cx.new(|cx| {
+            InputField::new(window, cx, "Name the worktree (optional)")
+                .label("Worktree name")
+                .label_size(LabelSize::Small)
+        });
+        // Whether Create is enabled, the collision warning, the branch matches
+        // and the name check all read what is typed, so each keystroke redraws
+        // the form.
+        let subscriptions = [&name_input, &worktree_name_input]
+            .into_iter()
+            .map(|input| {
+                let this = cx.entity().downgrade();
+                input.read(cx).editor().clone().subscribe(
+                    Box::new(move |event, _window, cx| {
+                        if event == ErasedEditorEvent::BufferEdited {
+                            this.update(cx, |_, cx| cx.notify()).ok();
+                        }
+                    }),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -186,6 +222,7 @@ impl CreateWorktreeModal {
             location,
             mode: NameMode::Name,
             name_input,
+            worktree_name_input,
             branches,
             selected_branch: None,
             agent: None,
@@ -203,6 +240,15 @@ impl CreateWorktreeModal {
             &self.name_input.read(cx).text(cx),
             self.selected_branch.as_ref().map(|name| name.as_ref()),
         )
+    }
+
+    /// The worktree name the Create button would send, or why it cannot.
+    fn worktree_name(&self, cx: &App) -> Option<Result<Option<String>, &'static str>> {
+        let target = self.target(cx)?;
+        Some(chosen_worktree_name(
+            &target,
+            &self.worktree_name_input.read(cx).text(cx),
+        ))
     }
 
     /// Opens the system's folder chooser and takes what it returns.
@@ -279,11 +325,12 @@ impl CreateWorktreeModal {
         let Some(branch_target) = self.target(cx) else {
             return;
         };
-        let location = self.location.clone();
-        let worktree_name = match &branch_target {
-            NewWorktreeBranchTarget::NewBranch { name, .. } => Some(name.clone()),
-            _ => None,
+        let Ok(worktree_name) =
+            chosen_worktree_name(&branch_target, &self.worktree_name_input.read(cx).text(cx))
+        else {
+            return;
         };
+        let location = self.location.clone();
 
         // The agent rides on the action rather than being started here.
         // `worktree_service` runs it from the new workspace's own init hook, so
@@ -310,6 +357,8 @@ impl CreateWorktreeModal {
         if self.create_more {
             let editor = self.name_input.read(cx).editor().clone();
             editor.clear(window, cx);
+            let worktree_name_editor = self.worktree_name_input.read(cx).editor().clone();
+            worktree_name_editor.clear(window, cx);
             self.selected_branch = None;
             // The click that turned "Create more" on left focus on the modal's
             // root, where typed text goes nowhere.
@@ -327,7 +376,7 @@ impl CreateWorktreeModal {
 
 impl Render for CreateWorktreeModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_create = self.target(cx).is_some();
+        let can_create = matches!(self.worktree_name(cx), Some(Ok(_)));
         let focus_handle = self.focus_handle.clone();
 
         div()
@@ -341,7 +390,7 @@ impl Render for CreateWorktreeModal {
             .occlude()
             .debug_selector(|| "create-worktree-modal".into())
             .w(rems(40.))
-            .max_h(rems(40.))
+            .max_h(rems(44.))
             .child(
                 Modal::new("create-worktree", None)
                     .header(
@@ -551,6 +600,26 @@ impl CreateWorktreeModal {
             .when_some(self.colliding_branch(cx), |this, branch| {
                 this.child(self.render_branch_collision(branch, cx))
             })
+            .when(mode == NameMode::Branch, |this| {
+                let problem = match self.worktree_name(cx) {
+                    Some(Err(reason)) => Some(reason),
+                    _ => None,
+                };
+                this.child(
+                    v_flex()
+                        .gap_1()
+                        .pt_1()
+                        .debug_selector(|| "worktree-name".into())
+                        .child(self.worktree_name_input.clone())
+                        .when_some(problem, |this, reason| {
+                            this.child(
+                                Label::new(reason)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Error),
+                            )
+                        }),
+                )
+            })
     }
 
     /// Says the typed name is taken, and offers the tab that does what the
@@ -748,7 +817,7 @@ fn branch_colliding_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{NameMode, branch_colliding_with, chosen_target};
+    use super::{NameMode, branch_colliding_with, chosen_target, chosen_worktree_name};
     use gpui::SharedString;
 
     /// The case that sent a reader in circles: a branch exists, no worktree
@@ -798,6 +867,45 @@ mod tests {
 
     /// A worktree with a branch of its own is the point: a detached checkout
     /// has nowhere to commit, so parallel feature work cannot happen in one.
+    fn existing(name: &str) -> zed_actions::NewWorktreeBranchTarget {
+        zed_actions::NewWorktreeBranchTarget::ExistingBranch {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_worktree_made_from_a_branch_takes_the_name_typed_for_it() {
+        assert_eq!(
+            chosen_worktree_name(&existing("develop"), "  release-check  "),
+            Ok(Some("release-check".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_worktree_made_from_a_branch_with_no_name_typed_is_named_for_you() {
+        assert_eq!(chosen_worktree_name(&existing("develop"), ""), Ok(None));
+        assert_eq!(chosen_worktree_name(&existing("develop"), "   "), Ok(None));
+    }
+
+    #[test]
+    fn a_worktree_name_that_would_leave_its_directory_is_refused_before_create() {
+        for unusable in ["../outside", "/tmp/elsewhere", "a\\b"] {
+            assert!(
+                chosen_worktree_name(&existing("develop"), unusable).is_err(),
+                "{unusable:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_branch_still_names_its_worktree_after_itself() {
+        let target = chosen_target(NameMode::Name, "feat.parser", None).expect("a target");
+        assert_eq!(
+            chosen_worktree_name(&target, "ignored"),
+            Ok(Some("feat.parser".to_string()))
+        );
+    }
+
     #[test]
     fn a_typed_name_creates_a_branch() {
         assert_eq!(
