@@ -2773,3 +2773,233 @@ mod panel_chrome {
         );
     }
 }
+
+/// Re-reading the agent sessions on disk, asked for from one checkout's card.
+///
+/// Driven against a store installed over a provider this test controls, so a
+/// session can appear on "disk" after the first sweep -- the case the reload
+/// exists for: a session run from a terminal outside Zode.
+mod reload_sessions {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime};
+
+    use agent_sessions::{
+        AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+        SessionSummary,
+    };
+    use gpui::{TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use crate::branch_panel::panel::BranchPanel;
+
+    use super::panel;
+
+    const CHECKOUT: &str = "/repos/zode-wt-a";
+    const OTHER_CHECKOUT: &str = "/repos/zode-wt-b";
+
+    /// Lists whatever the test last put on its "disk".
+    struct DiskProvider(Arc<Mutex<Vec<SessionSummary>>>);
+
+    impl SessionProvider for DiskProvider {
+        fn agent(&self) -> AgentKind {
+            AgentKind::Claude
+        }
+        fn availability(&self) -> Availability {
+            Availability::Ready
+        }
+        fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
+            Ok(self
+                .0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .clone())
+        }
+        fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
+            Ok(None)
+        }
+        fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
+            None
+        }
+        fn counts(&self, _session: &SessionSummary) -> anyhow::Result<SessionCounts> {
+            Ok(SessionCounts::default())
+        }
+        fn resume_command(&self, _s: &SessionSummary, _f: Fork) -> Option<AgentCommand> {
+            None
+        }
+        fn deletion(&self, _session: &SessionSummary) -> Deletion {
+            Deletion::Nothing
+        }
+    }
+
+    fn session_in(id: &str, cwd: &str) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from(cwd),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: None,
+            log_bytes: 0,
+        }
+    }
+
+    /// A shown panel whose first sweep has already landed over an empty disk.
+    async fn panel_after_first_sweep(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        Arc<Mutex<Vec<SessionSummary>>>,
+        &mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel(cx).await;
+        let disk = Arc::new(Mutex::new(Vec::new()));
+        cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(
+                vec![Arc::new(DiskProvider(disk.clone()))],
+                cx,
+            );
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+        (panel, disk, cx)
+    }
+
+    fn indexed_ids(panel: &gpui::Entity<BranchPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+        panel.read_with(cx, |panel, cx| {
+            panel
+                .session_store
+                .as_ref()
+                .expect("the panel's store exists once it has been drawn")
+                .read(cx)
+                .index()
+                .sessions()
+                .iter()
+                .map(|session| session.id.to_string())
+                .collect()
+        })
+    }
+
+    /// The reload has to actually read the disk again: a session written after
+    /// the first sweep shows up, where before it waited for a restart.
+    #[gpui::test]
+    async fn a_session_written_after_the_first_sweep_appears(cx: &mut TestAppContext) {
+        let (panel, disk, cx) = panel_after_first_sweep(cx).await;
+        assert!(indexed_ids(&panel, cx).is_empty());
+
+        disk.lock()
+            .expect("not poisoned")
+            .push(session_in("from-a-terminal", CHECKOUT));
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(indexed_ids(&panel, cx), vec!["from-a-terminal"]);
+    }
+
+    /// The spinner belongs to the card that asked, stays up long enough to be
+    /// seen even though this sweep lands at once, and then comes down.
+    #[gpui::test]
+    async fn the_spinner_is_on_the_asking_card_and_settles(cx: &mut TestAppContext) {
+        let (panel, _disk, cx) = panel_after_first_sweep(cx).await;
+
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx);
+            assert!(panel.is_reloading_sessions(Path::new(CHECKOUT)));
+            assert!(
+                !panel.is_reloading_sessions(Path::new(OTHER_CHECKOUT)),
+                "a card that did not ask must not spin"
+            );
+        });
+
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "a sweep that lands at once still leaves the spinner up long enough to be seen"
+            );
+        });
+
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                !panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "the spinner must come down once the sweep is in"
+            );
+        });
+    }
+
+    /// The floor passing is not enough: while a sweep is still reading, the
+    /// spinner stays, and it is the sweep landing that takes it down.
+    ///
+    /// Driven by hand rather than by the clock, because under the test
+    /// executor a sweep always lands before any timer fires.
+    #[gpui::test]
+    async fn the_spinner_waits_for_a_sweep_still_in_flight(cx: &mut TestAppContext) {
+        let (panel, _disk, cx) = panel_after_first_sweep(cx).await;
+
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx);
+            if let Some(reload) = panel.session_reload.as_mut() {
+                reload.shown_long_enough = true;
+            }
+            panel.settle_session_reload(cx);
+            assert!(
+                panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "the floor has passed but the sweep has not landed"
+            );
+        });
+
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                !panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "the sweep landing must take the spinner down by itself"
+            );
+        });
+    }
+
+    /// Asking again from another card moves the spinner there rather than
+    /// leaving both spinning over one shared sweep.
+    #[gpui::test]
+    async fn asking_from_another_card_moves_the_spinner(cx: &mut TestAppContext) {
+        let (panel, _disk, cx) = panel_after_first_sweep(cx).await;
+
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx);
+            panel.reload_sessions(PathBuf::from(OTHER_CHECKOUT), cx);
+            assert!(!panel.is_reloading_sessions(Path::new(CHECKOUT)));
+            assert!(panel.is_reloading_sessions(Path::new(OTHER_CHECKOUT)));
+        });
+
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.session_reload.is_none());
+        });
+    }
+
+    /// The header's reload re-reads the sessions too, not only git: it is the
+    /// panel-wide reload, and the sessions are half of what the panel shows.
+    #[gpui::test]
+    async fn the_header_reload_rereads_the_sessions(cx: &mut TestAppContext) {
+        let (panel, disk, cx) = panel_after_first_sweep(cx).await;
+
+        disk.lock()
+            .expect("not poisoned")
+            .push(session_in("from-a-terminal", CHECKOUT));
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(indexed_ids(&panel, cx), vec!["from-a-terminal"]);
+    }
+}
