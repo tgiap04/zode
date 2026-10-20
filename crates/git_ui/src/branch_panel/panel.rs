@@ -64,6 +64,8 @@ pub struct BranchPanel {
     pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
     /// Dropped with the panel, so the store never notifies a dead handle.
     pub(crate) _session_subscription: Option<Subscription>,
+    /// Same lifetime and reason as `_session_subscription`, for the names.
+    pub(crate) _session_names_subscription: Option<Subscription>,
     /// One per open agent tab, so a rename redraws the row that names it.
     ///
     /// Rebuilt whenever the panel rebuilds, which is exactly when the set of

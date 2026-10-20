@@ -163,6 +163,7 @@ impl SessionStore {
         self.index = Arc::new(self.index.without(id));
         self.generation += 1;
         cx.notify();
+        forget_names([Arc::from(id)], cx);
     }
 
     /// Drops a whole set of sessions that have already been removed from disk.
@@ -185,6 +186,7 @@ impl SessionStore {
         self.index = Arc::new(self.index.without_all(ids));
         self.generation += 1;
         cx.notify();
+        forget_names(ids.iter().cloned(), cx);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -197,6 +199,12 @@ impl SessionStore {
         self.generation += 1;
         cx.notify();
     }
+}
+
+/// A deleted session takes the name it was given with it. Only ever reached
+/// after the transcript is gone, which is the one thing `forget` is told.
+fn forget_names(ids: impl IntoIterator<Item = Arc<str>>, cx: &mut App) {
+    crate::SessionNames::global(cx).update(cx, |names, cx| names.forget_deleted(ids, cx));
 }
 
 #[cfg(test)]

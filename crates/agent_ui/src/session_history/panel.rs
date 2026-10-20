@@ -95,6 +95,7 @@ pub struct AgentHistoryPanel {
 impl AgentHistoryPanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = crate::SessionStore::global(cx);
+        let names = crate::SessionNames::global(cx);
         let filter_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Search sessions", window, cx);
@@ -117,6 +118,8 @@ impl AgentHistoryPanel {
             // forgotten session too, and one landing mid-sweep that cleared
             // `loading` would re-enable Delete-all over an index the sweep is
             // about to replace.
+            // A session renamed in a tab is listed under that name here.
+            cx.observe(&names, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, store, cx| {
                 if !store.read(cx).is_scanning() {
                     this.loading = false;

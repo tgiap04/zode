@@ -29,6 +29,7 @@ use workspace::{Pane, Workspace};
 use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
 use std::process::ExitStatus;
+use std::sync::Arc;
 use util::ResultExt as _;
 
 /// Whether that many writes inside [`RESPONDING_WINDOW`] means an answer is
@@ -643,11 +644,12 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let custom_name = stored_session_name(&origin, cx);
         let mut view = Self {
             origin,
             display_name: display_name(&agent),
             agent,
-            custom_name: None,
+            custom_name,
             bypassed: false,
             requested_prompts: prompts,
             rename_editor: None,
@@ -772,11 +774,12 @@ impl AgentView {
         cx: &mut Context<Self>,
     ) -> Self {
         agent_tabs::register(cx.weak_entity(), cx);
+        let custom_name = stored_session_name(&origin, cx);
         Self {
             origin,
             display_name: display_name(&agent),
             agent,
-            custom_name: None,
+            custom_name,
             bypassed: false,
             requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
@@ -1405,6 +1408,14 @@ impl AgentView {
         );
         self.turn_silence = SilenceWatch::default();
         self.origin.follow(session);
+        // A tab wearing a name carries it to the session it now shows, or
+        // reopening that session would lose it. A tab with none takes whatever
+        // that session was already called, rather than writing "no name" over it.
+        if self.custom_name.is_some() {
+            self.remember_session_name(cx);
+        } else {
+            self.custom_name = stored_session_name(&self.origin, cx);
+        }
         cx.emit(AgentViewEvent::UpdateTab);
     }
 
@@ -1508,10 +1519,24 @@ impl AgentView {
             // to the agent's name when it has none.
             self.custom_name = (!typed.is_empty() && typed != self.inherited_label().as_ref())
                 .then(|| SharedString::from(typed));
+            self.remember_session_name(cx);
             cx.emit(AgentViewEvent::UpdateTab);
         }
         cx.notify();
         self.focus_handle.focus(window, cx);
+    }
+
+    /// Writes this tab's name down against its session, which outlives the tab.
+    ///
+    /// Nothing for an untracked tab: with no id there is no session to find it
+    /// under later.
+    fn remember_session_name(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.session_id() else {
+            return;
+        };
+        let id: Arc<str> = Arc::from(id);
+        let name = self.custom_name.clone();
+        crate::SessionNames::global(cx).update(cx, |names, cx| names.set(id, name, cx));
     }
 
     /// Moves this view to the other mode, restarting the agent.
@@ -2085,6 +2110,18 @@ fn intent_from_stored(session_id: Option<&str>) -> SessionIntent {
             log::warn!("ignoring a stored agent session id that is not a UUID: {error}");
             SessionIntent::Untracked
         }
+    }
+}
+
+/// The name a session was given in a tab that may since have closed, so it comes
+/// back under that name from whichever list it is reopened from.
+///
+/// Not for a fork: a branch is a new conversation, and wearing its source's name
+/// would say otherwise.
+fn stored_session_name(origin: &SessionOrigin, cx: &mut App) -> Option<SharedString> {
+    match &origin.intent {
+        SessionIntent::Tracked(id) => crate::SessionNames::global(cx).read(cx).name(id).cloned(),
+        SessionIntent::Untracked | SessionIntent::Fork(_) => None,
     }
 }
 
@@ -2729,7 +2766,13 @@ impl workspace::item::SerializableItem for AgentView {
                     // Set directly rather than through `restore_custom_name`,
                     // which notifies: nothing is watching a view that is still
                     // being constructed.
-                    view.custom_name = row.name.map(SharedString::from);
+                    // The row speaks for this tab. A name it holds that the
+                    // session record lacks was given before that record
+                    // existed, and is copied across so it survives the tab.
+                    if let Some(name) = row.name {
+                        view.custom_name = Some(SharedString::from(name));
+                        view.remember_session_name(cx);
+                    }
                     view
                 }))
             })?
@@ -5101,6 +5144,189 @@ mod tests {
         });
     }
 
+    /// A name outlives the tab it was typed into: the session reopened in a new
+    /// tab -- from the history or the worktrees list, after the first tab
+    /// closed -- comes back under it, and the record is on disk for the next
+    /// launch.
+    #[gpui::test]
+    async fn a_rename_outlives_its_tab(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let origin = SessionOrigin::new(
+            SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+            Some("implement phase 3"),
+        );
+
+        let first = resumed_tab(&workspace, &project, origin.clone(), cx);
+        rename_to(&first, "review", cx);
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let first_id = first.entity_id();
+        drop(first);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(first_id, false, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let reopened = resumed_tab(&workspace, &project, origin, cx);
+        reopened.read_with(cx, |view, _| {
+            assert_eq!(view.tab_label(), "review");
+            assert_eq!(
+                view.custom_name.as_ref().map(|name| name.as_ref()),
+                Some("review"),
+                "a name, not an inherited title -- or clearing it could not reveal the title"
+            );
+        });
+
+        let stored = names_on_disk(cx).await;
+        assert_eq!(
+            stored,
+            vec![(
+                "0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01".to_string(),
+                "review".to_string()
+            )],
+            "and it is on disk, where the next launch reads it from"
+        );
+    }
+
+    /// Clearing a name clears it for the session too, so the next tab onto it
+    /// comes back under the transcript's own title.
+    #[gpui::test]
+    async fn clearing_a_rename_forgets_it_for_the_session(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let origin = SessionOrigin::new(
+            SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+            Some("implement phase 3"),
+        );
+
+        let first = resumed_tab(&workspace, &project, origin.clone(), cx);
+        rename_to(&first, "review", cx);
+        rename_to(&first, "", cx);
+
+        let reopened = resumed_tab(&workspace, &project, origin, cx);
+        reopened.read_with(cx, |view, _| {
+            assert_eq!(view.tab_label(), "implement phase 3");
+        });
+        assert!(
+            names_on_disk(cx).await.is_empty(),
+            "the row written by the rename must be gone, not merely never written"
+        );
+    }
+
+    /// What the next launch would read, once every write queued before it has
+    /// landed.
+    ///
+    /// The writes go to the database's writer thread, which parking the
+    /// executor does not wait for. One more write is queued behind them and
+    /// awaited: the queue runs in order, so once it lands the others have.
+    async fn names_on_disk(cx: &mut gpui::VisualTestContext) -> Vec<(String, String)> {
+        let db = cx.update(|_, cx| persistence::AgentViewDb::global(cx));
+        db.save_session_name("written-last".to_string(), None)
+            .await
+            .expect("the sentinel write lands");
+        db.session_names().expect("the names table reads")
+    }
+
+    /// A tab with no name of its own that follows the CLI into a session the
+    /// user named takes that name, rather than writing "no name" over it.
+    #[gpui::test]
+    async fn following_into_a_named_session_keeps_its_name(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        cx.update(|_, cx| {
+            crate::SessionNames::global(cx).update(cx, |names, cx| {
+                names.set(Arc::from("destination"), Some("review".into()), cx)
+            });
+        });
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("source".into()), None),
+            cx,
+        );
+
+        view.update(cx, |view, cx| {
+            view.follow_session(summary(AgentKind::Claude, "destination"), cx)
+        });
+
+        view.read_with(cx, |view, _| assert_eq!(view.tab_label(), "review"));
+        assert_eq!(
+            names_on_disk(cx).await,
+            vec![("destination".to_string(), "review".to_string())]
+        );
+    }
+
+    /// A named tab that follows the CLI into a new session carries its name
+    /// there, so reopening the session it now shows finds it.
+    #[gpui::test]
+    async fn a_named_tab_carries_its_name_to_the_session_it_follows(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("source".into()), None),
+            cx,
+        );
+        rename_to(&view, "review", cx);
+
+        view.update(cx, |view, cx| {
+            view.follow_session(summary(AgentKind::Claude, "destination"), cx)
+        });
+
+        let names = cx.update(|_, cx| crate::SessionNames::global(cx));
+        names.read_with(cx, |names, _| {
+            assert_eq!(
+                names.name("destination").map(|name| name.as_ref()),
+                Some("review")
+            );
+        });
+    }
+
+    /// Deleting a session takes its name with it.
+    #[gpui::test]
+    async fn a_deleted_session_leaves_no_name_behind(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("doomed".into()), None),
+            cx,
+        );
+        rename_to(&view, "review", cx);
+
+        let store = cx.update(|_, cx| crate::SessionStore::install_global_for_test(Vec::new(), cx));
+        store.update(cx, |store, cx| store.forget("doomed", cx));
+        cx.run_until_parked();
+
+        assert!(
+            names_on_disk(cx).await.is_empty(),
+            "a deleted session's label must not stay in the table"
+        );
+    }
+
+    /// A fork is a new conversation and does not take its source's name.
+    #[gpui::test]
+    async fn a_fork_does_not_take_its_sources_name(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let id = SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01");
+
+        let source = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(
+                SessionIntent::Tracked(id.clone()),
+                Some("implement phase 3"),
+            ),
+            cx,
+        );
+        rename_to(&source, "review", cx);
+
+        let fork = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Fork(id), Some("implement phase 3")),
+            cx,
+        );
+        fork.read_with(cx, |view, _| assert!(view.custom_name.is_none()));
+    }
+
     /// Typing what the tab already says is not a rename.
     ///
     /// The old rule compared the typed text against `display_name`, which was the
@@ -6731,7 +6957,7 @@ mod tests {
     }
 }
 
-mod persistence {
+pub(crate) mod persistence {
     use anyhow::Context as _;
     use db::{
         sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
@@ -6838,6 +7064,19 @@ mod persistence {
             sql!(
                 ALTER TABLE agent_views ADD COLUMN session_title TEXT;
             ),
+            // The name the user gave a session, keyed by the session rather than
+            // by the tab showing it.
+            //
+            // `agent_views.name` goes when its tab closes, so a session renamed,
+            // closed and reopened from a list came back under its transcript's
+            // title. Without a workspace for the same reason: the session is the
+            // same conversation whichever window reopens it.
+            sql!(
+                CREATE TABLE agent_session_names(
+                    session_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL
+                ) STRICT;
+            ),
         ];
     }
 
@@ -6941,6 +7180,43 @@ mod persistence {
                 session_id: row.3,
                 session_title: row.4,
             })
+        }
+
+        /// Every session the user has named.
+        pub fn session_names(&self) -> anyhow::Result<Vec<(String, String)>> {
+            self.select::<(String, String)>(sql!(
+                SELECT session_id, name FROM agent_session_names
+            ))?()
+        }
+
+        /// Names a session, or forgets its name when `name` is `None`.
+        pub async fn save_session_name(
+            &self,
+            session_id: String,
+            name: Option<String>,
+        ) -> anyhow::Result<()> {
+            self.write(move |connection| match name {
+                Some(name) => {
+                    let sql_stmt = sql!(
+                        INSERT OR REPLACE INTO agent_session_names(session_id, name) VALUES (?, ?)
+                    );
+                    connection.exec_bound::<(String, String)>(sql_stmt)?((session_id, name))
+                        .context(format!(
+                            "exec_bound failed to execute or parse for: {}",
+                            sql_stmt
+                        ))
+                }
+                None => {
+                    let sql_stmt = sql!(
+                        DELETE FROM agent_session_names WHERE session_id = ?
+                    );
+                    connection.exec_bound::<String>(sql_stmt)?(session_id).context(format!(
+                        "exec_bound failed to execute or parse for: {}",
+                        sql_stmt
+                    ))
+                }
+            })
+            .await
         }
 
         /// Drops the rows of tabs the workspace did not bring back.

@@ -117,6 +117,9 @@ pub(crate) fn render_session(
     let can_fork = panel.can_fork(session);
     let roots = panel.project_roots(cx);
     let menu_handle = panel.menu_handle(&session.id);
+    let title = crate::SessionNames::try_global(cx)
+        .and_then(|names| names.read(cx).name(&session.id).cloned())
+        .unwrap_or_else(|| session.title.clone().into());
 
     v_flex()
         .id(("agent-history-session", ix))
@@ -144,11 +147,10 @@ pub(crate) fn render_session(
                     ),
                 )
                 .child(
-                    div().flex_1().overflow_hidden().child(
-                        Label::new(session.title.clone())
-                            .single_line()
-                            .color(Color::Default),
-                    ),
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(Label::new(title).single_line().color(Color::Default)),
                 )
                 .child(render_controls(
                     ix,

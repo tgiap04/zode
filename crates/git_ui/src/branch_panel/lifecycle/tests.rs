@@ -2180,6 +2180,39 @@ mod single_delete {
         (panel, store, session, real_log, cx)
     }
 
+    /// A finished session is listed under the name it was given in a tab, and
+    /// naming it redraws the list without waiting for a sweep.
+    #[gpui::test]
+    async fn a_finished_session_is_listed_under_its_name(cx: &mut TestAppContext) {
+        let (panel, _store, session, _log, cx) =
+            panel_listing_one_session(cx, "renamed-session").await;
+
+        cx.update(|_, cx| {
+            agent_ui::SessionNames::global(cx).update(cx, |names, cx| {
+                names.set(session.id.clone(), Some("review".into()), cx)
+            });
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        let labels: Vec<String> = panel.read_with(cx, |panel, _| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+                .filter_map(|entry| match entry {
+                    AgentEntry::Past { label, .. } => Some(label.to_string()),
+                    AgentEntry::Open { .. } => None,
+                })
+                .collect()
+        });
+        assert_eq!(labels, vec!["review".to_string()]);
+    }
+
     fn start_delete(
         panel: &gpui::Entity<BranchPanel>,
         session: &SessionSummary,

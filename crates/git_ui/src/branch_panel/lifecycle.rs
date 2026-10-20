@@ -70,6 +70,7 @@ impl BranchPanel {
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
+                _session_names_subscription: None,
                 session_reload: None,
                 _agent_tab_names: Vec::new(),
                 row_kinds: Vec::new(),
@@ -658,6 +659,11 @@ impl BranchPanel {
             panel.mark_stale(cx);
             panel.settle_session_reload(cx);
         }));
+        // A finished session is listed under the name it was given, so naming
+        // one has to redraw the list as much as a sweep does.
+        let names = agent_ui::SessionNames::global(cx);
+        self._session_names_subscription =
+            Some(cx.observe(&names, |panel, _, cx| panel.mark_stale(cx)));
         store.update(cx, |store, cx| store.refresh(cx));
         self.session_store = Some(store);
     }
