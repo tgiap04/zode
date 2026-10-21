@@ -1,0 +1,52 @@
+syntax = "proto3";
+package zed.messages;
+
+// A pty on the machine running the remote server, driven by the client that
+// has no way to run a local process attached to it (the connection is not a
+// shell command, so there is nothing to spawn on the client side).
+message CreateTerminal {
+  uint64 project_id = 1;
+  // Chosen by the client, unique among its live terminals.
+  uint64 terminal_id = 2;
+  // Absent means the host's login shell.
+  optional string program = 3;
+  repeated string args = 4;
+  map<string, string> env = 5;
+  optional string cwd = 6;
+  uint32 columns = 7;
+  uint32 rows = 8;
+}
+
+// Raw bytes the process wrote, in order. A request so the server sends the
+// next batch only once this one was taken, which bounds what is in flight.
+message TerminalOutput {
+  uint64 project_id = 1;
+  uint64 terminal_id = 2;
+  bytes data = 3;
+}
+
+message TerminalInput {
+  uint64 project_id = 1;
+  uint64 terminal_id = 2;
+  bytes data = 3;
+}
+
+message ResizeTerminal {
+  uint64 project_id = 1;
+  uint64 terminal_id = 2;
+  uint32 columns = 3;
+  uint32 rows = 4;
+}
+
+// Sent once, after every byte the process wrote has been delivered. Absent
+// exit_code means it was killed by a signal.
+message TerminalExited {
+  uint64 project_id = 1;
+  uint64 terminal_id = 2;
+  optional int32 exit_code = 3;
+}
+
+message CloseTerminal {
+  uint64 project_id = 1;
+  uint64 terminal_id = 2;
+}

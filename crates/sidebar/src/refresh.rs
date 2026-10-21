@@ -16,6 +16,10 @@ impl Sidebar {
             return;
         }
         self.resync_project_activity_subscriptions(&multi_workspace, cx);
+        // Past the early return above on purpose: while multi-workspace is off
+        // nothing is pruned, which is bounded by the tabs that exist and
+        // resynced in full the next time it is enabled.
+        self.resync_agent_attention_subscriptions(&multi_workspace, cx);
 
         let scroll_position = self.list_state.logical_scroll_top();
         let query = self.filter_editor.read(cx).text(cx);

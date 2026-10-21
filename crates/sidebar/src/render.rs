@@ -1,6 +1,6 @@
 use crate::Sidebar;
 use gpui::{Context, IntoElement, Render, Window};
-use ui::prelude::*;
+use ui::{Tab, prelude::*};
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -46,8 +46,14 @@ impl Sidebar {
             .h_full()
             .child(
                 h_flex()
-                    .p_2()
-                    .gap_2()
+                    .debug_selector(|| "project-list-header".into())
+                    .flex_none()
+                    .w_full()
+                    .h(Tab::container_height(cx))
+                    .px_2()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
                     .child(self.render_filter_input(cx))
                     .child(self.render_recent_projects_button(cx)),
             )
@@ -65,5 +71,103 @@ impl Sidebar {
                 .size_full()
                 .into_any_element()
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Sidebar;
+    use crate::sidebar_tests::init_test;
+    use fs::FakeFs;
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use project::Project;
+    use ui::Tab;
+    use workspace::MultiWorkspace;
+
+    async fn open_panel(cx: &mut TestAppContext) -> (Entity<Sidebar>, &mut VisualTestContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let sidebar = multi_workspace.update_in(cx, |mw, window, cx| {
+            let mw_entity = cx.entity();
+            let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+            mw.register_sidebar(sidebar.clone(), cx);
+            sidebar
+        });
+        multi_workspace.update(cx, |mw, cx| mw.open_sidebar(cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        (sidebar, cx)
+    }
+
+    fn type_into_filter(sidebar: &Entity<Sidebar>, text: &str, cx: &mut VisualTestContext) {
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar
+                .filter_editor
+                .update(cx, |editor, cx| editor.set_text(text, window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    /// The row of panel headers beside it -- the editor's tab bar, the dock
+    /// sections -- is `Tab::container_height`, so the filter row is too.
+    #[gpui::test]
+    async fn the_filter_row_is_as_tall_as_a_panel_header(cx: &mut TestAppContext) {
+        let (_sidebar, cx) = open_panel(cx).await;
+        let header = cx
+            .debug_bounds("project-list-header")
+            .expect("the panel must draw its header");
+        let expected = cx.update(|_, cx| Tab::container_height(cx));
+        assert_eq!(header.size.height, expected);
+    }
+
+    /// The clear button is in the row it clears. Stacked under the field it
+    /// would be cut off by a header of fixed height.
+    #[gpui::test]
+    async fn the_clear_button_stays_inside_the_header(cx: &mut TestAppContext) {
+        let (sidebar, cx) = open_panel(cx).await;
+        assert!(
+            cx.debug_bounds("ICON-Close").is_none(),
+            "nothing to clear before anything is typed"
+        );
+
+        type_into_filter(&sidebar, "no project is called this", cx);
+
+        let header = cx
+            .debug_bounds("project-list-header")
+            .expect("the panel must draw its header");
+        let clear = cx
+            .debug_bounds("ICON-Close")
+            .expect("a filter with text must offer to clear it");
+        assert!(
+            header.contains(&clear.origin) && header.contains(&clear.bottom_right()),
+            "clear {clear:?} must sit inside the header {header:?}"
+        );
+    }
+
+    /// With nothing matching, the panel says so below the header rather than
+    /// instead of it, and the header keeps its height.
+    #[gpui::test]
+    async fn no_results_draws_under_an_intact_header(cx: &mut TestAppContext) {
+        let (sidebar, cx) = open_panel(cx).await;
+        type_into_filter(&sidebar, "no project is called this", cx);
+
+        let header = cx
+            .debug_bounds("project-list-header")
+            .expect("the panel must draw its header");
+        let empty = cx
+            .debug_bounds("project-list-empty")
+            .expect("a filter that matches nothing must say so");
+        assert!(
+            empty.origin.y >= header.bottom(),
+            "the empty state {empty:?} starts below the header {header:?}"
+        );
+        let expected = cx.update(|_, cx| Tab::container_height(cx));
+        assert_eq!(header.size.height, expected);
     }
 }

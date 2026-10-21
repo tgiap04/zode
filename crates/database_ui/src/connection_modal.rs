@@ -16,13 +16,13 @@ use crate::session::driver_capabilities;
 use database::install::InstallProgress;
 use database::protocol::{ConnectionField, ConnectionForm};
 use database::registry::DriverDescriptor;
-use editor::Editor;
 use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Task,
-    WeakEntity, Window,
+    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, SharedString, Subscription,
+    Task, WeakEntity, Window,
 };
 use settings::Settings as _;
 use ui::prelude::*;
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::{ModalView, Workspace};
 
 /// What a driver that declares nothing is asked for.
@@ -58,6 +58,8 @@ fn imported_entry() -> CatalogueEntry {
         description: SharedString::new_static("From a URL"),
         group: SharedString::new_static("Relational"),
         installed: true,
+        downloaded: false,
+        hand_placed: false,
     }
 }
 
@@ -79,8 +81,8 @@ pub(crate) enum Step {
     Filling {
         engine: CatalogueEntry,
         form: ConnectionForm,
-        /// One editor per field, in the driver's order.
-        inputs: Vec<Entity<Editor>>,
+        /// One input per field, in the driver's order.
+        inputs: Vec<Entity<InputField>>,
     },
     /// The driver could not be started, or would not answer.
     Unreachable {
@@ -107,15 +109,16 @@ pub(crate) struct ConnectionModal {
     /// selects rather than commits -- an engine chosen by a stray click is one
     /// nobody meant to choose.
     pub(crate) selected: usize,
-    pub(crate) search_editor: Entity<Editor>,
+    pub(crate) search_editor: Entity<InputField>,
     pub(crate) step: Step,
     /// What the connection is called. Separate from the driver's fields because
     /// it is Zode's, not the engine's: it is how a project pins a connection.
-    pub(crate) name_editor: Entity<Editor>,
+    pub(crate) name_editor: Entity<InputField>,
     pub(crate) test: TestState,
     pub(crate) error: Option<SharedString>,
     _task: Option<Task<()>>,
     _test_task: Option<Task<()>>,
+    _search_edited: Subscription,
 }
 
 impl ConnectionModal {
@@ -124,23 +127,20 @@ impl ConnectionModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Connection name", window, cx);
-            editor
-        });
-        let search_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Search", window, cx);
-            editor
-        });
+        let name_editor = cx.new(|cx| InputField::new(window, cx, "Connection name"));
+        let search_editor = cx
+            .new(|cx| InputField::new(window, cx, "Search").start_icon(IconName::MagnifyingGlass));
         // Redrawn on every keystroke so the list narrows as it is typed.
-        cx.subscribe(&search_editor, |_this, _editor, event, cx| {
-            if matches!(event, editor::EditorEvent::BufferEdited) {
-                cx.notify();
-            }
-        })
-        .detach();
+        let this = cx.weak_entity();
+        let search_edited = search_editor.read(cx).editor().clone().subscribe(
+            Box::new(move |event, _window, cx| {
+                if event == ErasedEditorEvent::BufferEdited {
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                }
+            }),
+            window,
+            cx,
+        );
 
         let engines = sorted_catalogue(cx);
 
@@ -156,6 +156,7 @@ impl ConnectionModal {
             error: None,
             _task: None,
             _test_task: None,
+            _search_edited: search_edited,
         }
     }
 
@@ -366,21 +367,22 @@ impl ConnectionModal {
         field: &ConnectionField,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<Editor> {
-        let field = field.clone();
-        cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
+    ) -> Entity<InputField> {
+        let placeholder = field.placeholder.as_deref().unwrap_or_default();
+        let input = cx.new(|cx| {
+            let input = InputField::new(window, cx, placeholder);
+            // Only a secret gets the masking control: `masked(false)` still
+            // draws the show/hide button, on a field with nothing to hide.
             if field.secret {
-                editor.set_masked(true, cx);
+                input.masked(true)
+            } else {
+                input
             }
-            if let Some(placeholder) = &field.placeholder {
-                editor.set_placeholder_text(placeholder.as_str(), window, cx);
-            }
-            if let Some(default) = &field.default {
-                editor.set_text(default.as_str(), window, cx);
-            }
-            editor
-        })
+        });
+        if let Some(default) = &field.default {
+            input.update(cx, |input, cx| input.set_text(default, window, cx));
+        }
+        input
     }
 
     /// Reads the form, and says what is missing rather than saving half of it.
@@ -675,7 +677,11 @@ impl Focusable for ConnectionModal {
 mod tests {
     use super::*;
     use crate::database_panel_tests::modal_for_test;
-    use database::install::test_support::{driver_archive, manifest_for, sha256_of};
+    use database::install::test_support::{
+        archive_asset_for, driver_archive, manifest_for, plant_driver, sha256_of,
+        signed_manifest_for,
+    };
+    use database::signature::SIGNED_MANIFEST_ASSET;
     use http_client::{FakeHttpClient, HttpClient};
     use tempfile::TempDir;
 
@@ -686,6 +692,8 @@ mod tests {
             description: "An engine".into(),
             group: "Relational".into(),
             installed,
+            downloaded: false,
+            hand_placed: false,
         }
     }
 
@@ -841,18 +849,28 @@ mod tests {
 
     // ---- Downloading a driver ---------------------------------------------
 
-    const TEST_VERSION: &str = "0.0.0";
+    /// The version the fake server's manifest names, which is the one its archive
+    /// is then fetched under.
+    const PUBLISHED_VERSION: &str = "0.0.0";
 
-    /// A release serving one driver, and nothing else.
-    fn release_serving(manifest: Vec<u8>, archive: Vec<u8>) -> std::sync::Arc<dyn HttpClient> {
+    /// A release serving one driver, and nothing else: the manifest `latest`
+    /// serves, the signed one beside it, and the archive.
+    fn release_serving(
+        manifest: Vec<u8>,
+        signed_manifest: Vec<u8>,
+        archive: Vec<u8>,
+    ) -> std::sync::Arc<dyn HttpClient> {
         FakeHttpClient::create(move |request| {
             let manifest = manifest.clone();
+            let signed_manifest = signed_manifest.clone();
             let archive = archive.clone();
             async move {
                 let path = request.uri().path().to_string();
                 let body = if path.ends_with("zode-db-drivers-manifest.json") {
                     manifest
-                } else if path.ends_with("zode-db-postgres.tar.gz") {
+                } else if path.ends_with(SIGNED_MANIFEST_ASSET) {
+                    signed_manifest
+                } else if path.ends_with(&archive_asset_for("postgres")) {
                     archive
                 } else {
                     return Ok(http_client::Response::builder()
@@ -874,12 +892,67 @@ mod tests {
             Checksum::Correct => sha256_of(&archive),
             Checksum::Wrong => "a".repeat(64),
         };
-        let manifest = manifest_for("postgres", &archive, published, TEST_VERSION);
+        let manifest = manifest_for("postgres", &archive, published.clone(), PUBLISHED_VERSION);
+        let signed_manifest =
+            signed_manifest_for("postgres", &archive, published, PUBLISHED_VERSION);
         cx.update(|_window, cx| {
-            cx.set_http_client(release_serving(manifest, archive));
-            driver_registry::set_installer_for_test(store.path().to_path_buf(), TEST_VERSION, cx);
+            cx.set_http_client(release_serving(manifest, signed_manifest, archive));
+            driver_registry::set_installer_for_test(store.path().to_path_buf(), cx);
         });
         store
+    }
+
+    /// An archive that never arrives: the connection is up and nothing comes.
+    struct NeverArrives;
+
+    impl futures::AsyncRead for NeverArrives {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buffer: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// Like [`release_with`], but the archive never finishes arriving, so a
+    /// download started against it stays in flight for as long as a test wants.
+    async fn stalled_release(cx: &mut gpui::VisualTestContext) -> TempDir {
+        let store = tempfile::tempdir().expect("a temporary directory");
+        let archive = driver_archive("postgres").await;
+        let checksum = sha256_of(&archive);
+        let manifest = manifest_for("postgres", &archive, checksum.clone(), PUBLISHED_VERSION);
+        let signed_manifest =
+            signed_manifest_for("postgres", &archive, checksum, PUBLISHED_VERSION);
+        let http = FakeHttpClient::create(move |request| {
+            let manifest = manifest.clone();
+            let signed_manifest = signed_manifest.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                let body: http_client::AsyncBody =
+                    if path.ends_with("zode-db-drivers-manifest.json") {
+                        manifest.into()
+                    } else if path.ends_with(SIGNED_MANIFEST_ASSET) {
+                        signed_manifest.into()
+                    } else if path.ends_with(&archive_asset_for("postgres")) {
+                        http_client::AsyncBody::from_reader(NeverArrives)
+                    } else {
+                        return Ok(http_client::Response::builder()
+                            .status(404)
+                            .body(Default::default())?);
+                    };
+                Ok(http_client::Response::builder().status(200).body(body)?)
+            }
+        });
+        cx.update(|_window, cx| {
+            cx.set_http_client(http);
+            driver_registry::set_installer_for_test(store.path().to_path_buf(), cx);
+        });
+        store
+    }
+
+    fn waiting_for_postgres(cx: &mut gpui::VisualTestContext) -> usize {
+        cx.update(|_window, cx| driver_registry::installer(cx).waiters("postgres"))
     }
 
     /// Waits for the download to finish, whichever way it ends.
@@ -919,6 +992,80 @@ mod tests {
             .position(|engine| engine.driver == driver)
             .unwrap_or_else(|| panic!("`{driver}` must be listed"));
         modal.select(index, cx);
+    }
+
+    fn postgres_entry(
+        modal: &Entity<ConnectionModal>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> CatalogueEntry {
+        modal.read_with(cx, |modal, _| {
+            modal
+                .engines
+                .iter()
+                .find(|engine| engine.driver == "postgres")
+                .cloned()
+                .expect("postgres is listed")
+        })
+    }
+
+    fn postgres_installed(cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|_window, cx| {
+            driver_registry::global(cx)
+                .read(cx)
+                .get("postgres")
+                .is_some_and(|driver| driver.is_installed())
+        })
+    }
+
+    /// A downloaded driver can be removed, only once the person says so, and
+    /// every way the dialog reads it agrees that it is gone.
+    #[gpui::test]
+    async fn a_downloaded_driver_is_removed_only_when_confirmed(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let store = release_with(cx, Checksum::Correct).await;
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+        });
+        until_the_download_ends(&modal, cx).await;
+        modal.update(cx, |modal, cx| modal.reload_engines(cx));
+        let engine = postgres_entry(&modal, cx);
+        assert!(
+            engine.downloaded,
+            "a driver Zode fetched is one it may remove"
+        );
+        let on_disk = store.path().join("postgres");
+        assert!(on_disk.exists());
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(on_disk.exists(), "cancelling must leave the driver alone");
+        assert!(postgres_installed(cx));
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine, window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Remove");
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if !postgres_installed(cx) {
+                break;
+            }
+            cx.executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(!on_disk.exists(), "every downloaded version is deleted");
+        assert!(!postgres_installed(cx), "the registry no longer offers it");
+        let engine = postgres_entry(&modal, cx);
+        assert!(!engine.installed && !engine.downloaded);
+        modal.read_with(cx, |modal, _| assert_eq!(modal.error, None));
     }
 
     /// The defect this whole path exists for: Zode bundles no drivers, so the
@@ -1016,10 +1163,167 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(
-            database::install::store::installed_path_in(store.path(), "postgres", TEST_VERSION),
+            database::install::store::installed_path_in(store.path(), "postgres"),
             None,
             "giving up must leave the store as it was"
         );
+    }
+
+    /// Esc, a click outside, and the window closing all drop the task that waits
+    /// without going through Cancel. The installer stops a download only when
+    /// the last caller waiting has left, so a place left behind by one of those
+    /// would make a Cancel pressed later cancel nothing.
+    #[gpui::test]
+    async fn dismissing_the_dialog_gives_up_its_place_in_the_download(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let _store = stalled_release(cx).await;
+
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+        });
+        assert_eq!(waiting_for_postgres(cx), 1);
+
+        modal.update(cx, |modal, _| modal.set_task(None));
+        cx.run_until_parked();
+
+        assert_eq!(
+            waiting_for_postgres(cx),
+            0,
+            "a dialog that was dismissed is not still waiting"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_cancel_after_an_earlier_dismissal_still_cancels(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let store = stalled_release(cx).await;
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+        });
+        modal.update(cx, |modal, _| modal.set_task(None));
+        cx.run_until_parked();
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.step = Step::PickEngine;
+            select_engine(modal, "postgres", cx);
+            modal.advance(window, cx);
+        });
+        assert_eq!(
+            waiting_for_postgres(cx),
+            1,
+            "the second download is a new one, with one caller waiting"
+        );
+        modal.update(cx, |modal, cx| modal.cancel_download(cx));
+        cx.run_until_parked();
+
+        assert_eq!(waiting_for_postgres(cx), 0, "Cancel must have cancelled it");
+        assert!(
+            !store.path().join("postgres").exists()
+                || std::fs::read_dir(store.path().join("postgres"))
+                    .map(|entries| entries.count() == 0)
+                    .unwrap_or(true),
+            "a cancelled download must not leave its partial file behind"
+        );
+    }
+
+    /// Drivers downloaded by earlier versions of Zode have no marker, so they read
+    /// as hand-placed: the trash icon has to stay, and what it asks has to name
+    /// what is about to be deleted and say it may not come back.
+    #[gpui::test]
+    async fn a_driver_with_no_marker_is_removed_after_a_confirmation_that_names_the_path(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let store = tempfile::tempdir().expect("a temporary directory");
+        plant_driver(store.path(), "postgres", "0.1.4", false);
+        cx.update(|_window, cx| {
+            driver_registry::set_installer_for_test(store.path().to_path_buf(), cx);
+            driver_registry::refresh("postgres", cx);
+        });
+        modal.update(cx, |modal, cx| modal.reload_engines(cx));
+        let engine = postgres_entry(&modal, cx);
+        assert!(
+            engine.downloaded && engine.hand_placed,
+            "the trash icon is offered, as for one that may be hand-placed: {engine:?}"
+        );
+        let directory = store.path().join("postgres");
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        let (question, detail) = cx.pending_prompt().expect("it must ask first");
+        let shown = directory.display().to_string();
+        assert!(question.contains(&shown), "{question}");
+        assert!(detail.contains(&shown), "{detail}");
+        assert!(detail.contains("cannot be downloaded again"), "{detail}");
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(directory.exists(), "cancelling must leave the driver alone");
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine, window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Remove");
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if !postgres_installed(cx) {
+                break;
+            }
+            cx.executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(!directory.exists());
+        assert!(!postgres_installed(cx));
+        modal.read_with(cx, |modal, _| assert_eq!(modal.error, None));
+    }
+
+    /// The protocol-mismatch message tells someone to remove the driver and
+    /// download it again, so removing must be possible for every driver that
+    /// message can be shown for -- including one with nothing saying who
+    /// installed it, and one stray unmarked version beside the rest.
+    #[gpui::test]
+    async fn a_stray_unmarked_version_does_not_make_a_driver_impossible_to_remove(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (modal, cx) = modal_for_test(cx, &[]).await;
+        let store = tempfile::tempdir().expect("a temporary directory");
+        plant_driver(store.path(), "postgres", "0.1.4", true);
+        plant_driver(store.path(), "postgres", "0.1.3", false);
+        cx.update(|_window, cx| {
+            driver_registry::set_installer_for_test(store.path().to_path_buf(), cx);
+            driver_registry::refresh("postgres", cx);
+        });
+        modal.update(cx, |modal, cx| modal.reload_engines(cx));
+        let engine = postgres_entry(&modal, cx);
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.remove_driver(engine, window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Remove");
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if !postgres_installed(cx) {
+                break;
+            }
+            cx.executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+
+        assert!(!store.path().join("postgres").exists());
+        modal.read_with(cx, |modal, _| assert_eq!(modal.error, None));
     }
 
     /// Oracle and SQL Server share a wire protocol with nothing Zode ships, so

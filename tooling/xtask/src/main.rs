@@ -16,6 +16,8 @@ enum CliCommand {
     /// Runs `cargo clippy`.
     Clippy(tasks::clippy::ClippyArgs),
     Compliance(tasks::compliance::ComplianceArgs),
+    /// Signs the database driver manifest, and generates the key to sign it with.
+    DriverManifest(tasks::driver_manifest::DriverManifestArgs),
     Licenses(tasks::licenses::LicensesArgs),
     /// Checks that packages conform to a set of standards.
     PackageConformity(tasks::package_conformity::PackageConformityArgs),
@@ -33,6 +35,7 @@ fn main() -> Result<()> {
     match args.command {
         CliCommand::Clippy(args) => tasks::clippy::run_clippy(args),
         CliCommand::Compliance(args) => tasks::compliance::check_compliance(args),
+        CliCommand::DriverManifest(args) => tasks::driver_manifest::run_driver_manifest(args),
         CliCommand::Licenses(args) => tasks::licenses::run_licenses(args),
         CliCommand::PackageConformity(args) => {
             tasks::package_conformity::run_package_conformity(args)

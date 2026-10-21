@@ -1,5 +1,7 @@
 use crate::RenameAgent;
+use crate::agent_attention::AgentAttention;
 use crate::agent_icon;
+use crate::agent_tabs;
 use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
 use gpui::{
@@ -11,8 +13,14 @@ use project::agent_server_store::AgentServerStore;
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 
 use crate::permission_bypass::PermissionBypassStore;
-use crate::subagents::{SubagentTracker, provider_for_agent};
-use agent_sessions::SubagentSummary;
+use crate::subagents::{
+    ScanRequest, SubagentPass, SubagentTracker, SuccessorSearch, provider_for_agent,
+};
+use crate::turn_tracker::{
+    SilenceWatch, TurnEvent, TurnPass, TurnTracker, approval_is_quiet, approval_next,
+    screen_asks_for_approval,
+};
+use agent_sessions::{SessionSummary, SubagentSummary};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal::Terminal;
 use terminal_view::TerminalView;
@@ -104,6 +112,22 @@ const RESPONDING_DEBOUNCE_TICKS: u32 =
 /// not a four-times-a-second event. One second still lands well inside the
 /// two-second debounce above, so nothing it reports is late to the mark.
 const SUBAGENT_SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The window the pty is counted over to decide it has gone quiet enough, with
+/// a tool call outstanding, for the screen to be read for a permission dialog.
+///
+/// Three seconds because a dialog is not silent: measured against a real
+/// `claude` waiting on a Bash approval and on a file-create approval, it
+/// repaints about 1.7 times a second, steady for twenty-five seconds. How many
+/// writes in this window count as quiet is [`approval_is_quiet`]'s to say.
+const APPROVAL_QUIET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often the screen is read for a dialog at most. Reading it copies the
+/// terminal's content, which is worth doing once a second and not four times.
+const APPROVAL_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+const APPROVAL_READ_TICKS: u32 =
+    (APPROVAL_READ_INTERVAL.as_millis() / ACTIVITY_TICK.as_millis()) as u32;
 
 /// Whether the mark should change, given what the terminal says on this tick.
 ///
@@ -204,6 +228,34 @@ pub struct AgentView {
     /// This session's subagents, and which of them are still working. Followed
     /// by the same tick, at a slower cadence — see [`SUBAGENT_SCAN_EVERY`].
     subagents: SubagentTracker,
+    /// Where this session's turn stands, folded from the transcript and the
+    /// screen. Only fed when [`Self::reports_turns`]; untouched by
+    /// `is_answering`, which other readers depend on keeping its meaning.
+    turns: TurnTracker,
+    /// Notices a transcript that never produces a turn mark. See
+    /// [`SilenceWatch`].
+    turn_silence: SilenceWatch,
+    /// Ticks since the screen was last read for a permission dialog.
+    ticks_since_screen_read: u32,
+    /// Whether a finished turn is waiting for the user to look. Only fed when
+    /// [`Self::reports_turns`]: for every other tab the pty write rate cannot
+    /// tell an answer from a user typing, and a badge must not light from a
+    /// guess.
+    attention: AgentAttention,
+    /// Whether keyboard focus is inside this tab while its window is active.
+    in_view: bool,
+    /// Set when the tick finds the CLI no longer running, cleared when the
+    /// tab's state is reset for a new one. The transcript pass can still
+    /// deliver an `Ended` after that, and an unread flag set then would have
+    /// no tick left to retract it.
+    cli_gone: bool,
+    /// Stands in for a live pty task, which a test has no process to provide.
+    #[cfg(any(test, feature = "test-support"))]
+    cli_alive_for_tests: bool,
+    /// What [`AgentViewEvent::Attention`] last reported, so it fires on a
+    /// change and not on every pass that re-derives the same answer.
+    attention_shown: bool,
+    _attention_watch: Vec<Subscription>,
 }
 
 enum State {
@@ -212,24 +264,31 @@ enum State {
     /// The agent's own CLI is not on this machine. Carries what the install
     /// screen needs, so the view never has to ask which agent it is showing for.
     MissingBinary(AgentBinaryMissing),
-    /// This tab owns a session id, the agent's store no longer holds it, and this
-    /// agent cannot be told to start one under that id.
+    /// What the tab was opened onto is not there to open, and nothing honest
+    /// can stand in for it. Two ways in:
     ///
-    /// Reachable for Codex and Copilot only. Claude's `--session-id` means
-    /// `new_session_command` always answers, so the branch that leads here is
-    /// unreachable for it — deliberately left as a real state rather than an
-    /// assertion, so the day Claude drops that flag this simply starts working.
+    /// - A tab that owns a session id, whose store no longer holds it, for an
+    ///   agent that cannot be told to start one under that id. That is Codex and
+    ///   Copilot only: Claude's `--session-id` means `new_session_command` always
+    ///   answers, so this branch is unreachable for a Claude tab — deliberately
+    ///   left as a real state rather than an assertion, so the day Claude drops
+    ///   that flag this simply starts working.
+    /// - A fork whose source is gone from the store or cannot be read from it.
+    ///   Any agent that can fork gets here, Claude included, because a fork has
+    ///   no id of its own to start fresh under.
     ///
     /// Silently opening a blank session instead would be worse: a tab that looks
-    /// like a continuation and has none of the context is the failure this whole
-    /// feature exists to prevent.
+    /// like a continuation or a branch and has none of the context is the failure
+    /// this whole feature exists to prevent.
     SessionGone,
     Failed(SharedString),
     /// The agent's CLI ended and the tab handed back a shell in its folder.
     ///
-    /// Still this agent's tab: the name, the icon and the session id are all
-    /// untouched, so the existing restart puts the agent back on the same
-    /// conversation. The only thing that changed is what the pty holds.
+    /// Still this agent's tab: the name, the icon and the session origin are all
+    /// untouched, so the existing restart runs the same launch again. For a
+    /// tracked tab that is the same conversation; for a fork it is a new branch
+    /// off the same source, since the branch the CLI minted was never recorded.
+    /// The only thing that changed is what the pty holds.
     Shell(Entity<TerminalView>),
 }
 
@@ -243,6 +302,16 @@ pub enum AgentViewEvent {
     /// agent drawing breath does not. `should_serialize` is where that split
     /// is spent — see its doc.
     Activity,
+    /// The turn started or ended, or a permission dialog appeared or went
+    /// away. Only raised for a tab that [reports turns](AgentView::reports_turns).
+    ///
+    /// Worth nothing in the persisted row and nothing to the pane, so neither
+    /// `should_serialize` nor `to_item_events` has anything to do with it.
+    Turn(TurnEvent),
+    /// [`AgentView::needs_attention`] changed. Raised on the change only.
+    ///
+    /// Like `Turn`, worth nothing in the persisted row and nothing to the pane.
+    Attention,
     /// The shell this tab handed back has exited, so the tab goes with it.
     Close,
 }
@@ -286,7 +355,7 @@ impl AgentView {
     /// transcript this editor cannot name, so nothing can be matched to it.
     pub fn session_id(&self) -> Option<&str> {
         match &self.origin.intent {
-            SessionIntent::Untracked => None,
+            SessionIntent::Untracked | SessionIntent::Fork(_) => None,
             SessionIntent::Tracked(id) => Some(id),
         }
     }
@@ -575,11 +644,12 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let custom_name = stored_session_name(&origin, cx);
         let mut view = Self {
             origin,
             display_name: display_name(&agent),
             agent,
-            custom_name: None,
+            custom_name,
             bypassed: false,
             requested_prompts: prompts,
             rename_editor: None,
@@ -597,7 +667,19 @@ impl AgentView {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         };
+        agent_tabs::register(cx.weak_entity(), cx);
+        view.watch_attention(window, cx);
         view.start(window, cx);
         view
     }
@@ -619,12 +701,30 @@ impl AgentView {
         cx: &mut Context<Workspace>,
     ) {
         let agent_id = AgentId::new(agent.to_string());
+        // Claimed here, before the tab is deferred, and not by the deferred
+        // closure: a second request for the same session can land before that
+        // closure runs, find no tab, and open another -- two CLIs appending to
+        // one transcript. A fork has no id of its own to claim.
+        let claim = match &origin.intent {
+            SessionIntent::Tracked(id) => Some(id.clone()),
+            SessionIntent::Untracked | SessionIntent::Fork(_) => None,
+        };
+        if let Some(id) = &claim
+            && !agent_tabs::begin_opening(&agent_id, id, cx)
+        {
+            return;
+        }
         let project = workspace.project().clone();
         let weak_workspace = workspace.weak_handle();
+        // Held for the claim, whose release must not depend on the window still
+        // being there: a window closed before the deferred task runs would
+        // otherwise leave the session unopenable for the rest of the process.
+        let app = cx.to_async();
         // Deferred for the reason `open_inner` is: this runs under a handler that
         // holds the workspace leased, and reaching back through the handle while
         // it is leased aborts the process.
         cx.spawn_in(window, async move |workspace, cx| {
+            let claimed_by = agent_id.clone();
             workspace
                 .update_in(cx, |workspace, window, cx| {
                     let view = cx.new(|cx| {
@@ -642,6 +742,11 @@ impl AgentView {
                     workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
                 })
                 .log_err();
+            // Whether or not a tab came of it: the claim is for the gap before
+            // the tab exists, and a tab that exists holds the session itself.
+            if let Some(id) = claim {
+                app.update(|cx| agent_tabs::finish_opening(&claimed_by, &id, cx));
+            }
         })
         .detach();
     }
@@ -659,8 +764,8 @@ impl AgentView {
     /// label says, what gets written down — build the view this way and never
     /// touch a process. Tests whose claim is about the open path itself still go
     /// through `AgentView::open`.
-    #[cfg(test)]
-    pub(crate) fn test_new(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_new(
         agent: AgentId,
         mode: AgentViewMode,
         project: Entity<Project>,
@@ -668,11 +773,13 @@ impl AgentView {
         origin: SessionOrigin,
         cx: &mut Context<Self>,
     ) -> Self {
+        agent_tabs::register(cx.weak_entity(), cx);
+        let custom_name = stored_session_name(&origin, cx);
         Self {
             origin,
             display_name: display_name(&agent),
             agent,
-            custom_name: None,
+            custom_name,
             bypassed: false,
             requested_prompts: PermissionPrompts::AsConfigured,
             rename_editor: None,
@@ -690,6 +797,16 @@ impl AgentView {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         }
     }
 
@@ -720,6 +837,11 @@ impl AgentView {
         }
     }
 
+    /// Whether the tab has not got as far as running its CLI, or giving up on it.
+    pub(crate) fn is_starting(&self) -> bool {
+        matches!(self.state, State::Starting)
+    }
+
     /// Whether this agent's CLI is still running.
     ///
     /// Not "is the tab open": `agent_task` sets `HideStrategy::Never`, so a tab
@@ -731,6 +853,10 @@ impl AgentView {
     /// working -- the same call `keep_awake` makes, for the same reason: a
     /// status nobody will ever update must not be treated as activity.
     pub fn is_working(&self, cx: &App) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.cli_alive_for_tests {
+            return true;
+        }
         self.terminal().is_some_and(|terminal_view| {
             terminal_view
                 .read(cx)
@@ -778,6 +904,7 @@ impl AgentView {
     /// length of a conversation would be paying that for the three hundred and
     /// ninety-six ticks out of four hundred where nothing changed.
     fn track_responding(&mut self, cx: &mut Context<Self>) {
+        let follows_transcript = self.follows_transcript();
         self._activity_tick = Some(cx.spawn(async move |this, cx| {
             let mut pending: Option<(bool, u32)> = None;
 
@@ -809,6 +936,14 @@ impl AgentView {
                         this.responding = settled;
                         cx.emit(AgentViewEvent::Activity);
                     }
+                    if !working {
+                        this.on_cli_exited(cx);
+                    }
+                    if follows_transcript {
+                        this.check_for_approval(working, cx);
+                        let writing = working && this.is_responding(cx);
+                        this.observe_transcript_silence(writing, ACTIVITY_TICK, cx);
+                    }
                     working
                 }) else {
                     return;
@@ -822,6 +957,275 @@ impl AgentView {
                 }
             }
         }));
+    }
+
+    /// Whether a permission dialog is on screen, reported on the change.
+    ///
+    /// A dialog is *noticed* only when the transcript says a tool call is
+    /// outstanding and the terminal has gone quiet: it is the one thing that
+    /// makes an agent hold a call open and stop writing, so a long build or a
+    /// reply being streamed never reaches the read. Once noticed it is *kept*
+    /// for as long as it is on screen however the writes wobble, because a
+    /// dialog repaints and a rate that straddles the threshold would otherwise
+    /// withdraw and re-announce it.
+    ///
+    /// Only the screen's visible rows are searched, and at most once a second.
+    fn check_for_approval(&mut self, working: bool, cx: &mut Context<Self>) {
+        self.ticks_since_screen_read = self.ticks_since_screen_read.saturating_add(1);
+        let tool_pending = working && self.turns.tool_pending();
+        let was_asking = self.turns.awaiting_approval();
+        let asking = match self.terminal() {
+            Some(terminal_view) if tool_pending => {
+                let terminal = terminal_view.read(cx).terminal().read(cx);
+                let quiet = approval_is_quiet(terminal.pty_writes_within(APPROVAL_QUIET));
+                if !(was_asking || quiet) {
+                    false
+                } else if self.ticks_since_screen_read < APPROVAL_READ_TICKS {
+                    // Nothing to learn that the last read did not say.
+                    return;
+                } else {
+                    self.ticks_since_screen_read = 0;
+                    let rows: Vec<String> = terminal
+                        .visible_content()
+                        .lines()
+                        .map(str::to_owned)
+                        .collect();
+                    approval_next(was_asking, true, quiet, screen_asks_for_approval(&rows))
+                }
+            }
+            _ => false,
+        };
+        self.set_approval(asking, cx);
+    }
+
+    /// Records whether a permission dialog is on screen and says so on the
+    /// change.
+    fn set_approval(&mut self, asking: bool, cx: &mut Context<Self>) {
+        if let Some(event) = self.turns.set_awaiting_approval(asking) {
+            cx.emit(AgentViewEvent::Turn(event));
+            self.refresh_attention(cx);
+        }
+    }
+
+    /// Hands out a pass's turn events and folds them into the attention flag
+    /// before judging it once, so an `Ended` and the `Interrupted` that
+    /// follows it in the same pass never flash a badge.
+    fn publish_turn_events(&mut self, events: Vec<TurnEvent>, cx: &mut Context<Self>) {
+        for event in events {
+            if !self.cli_gone {
+                self.attention.on_turn(event, self.in_view);
+            }
+            cx.emit(AgentViewEvent::Turn(event));
+        }
+        self.refresh_attention(cx);
+    }
+
+    /// The transcript began again from its start, so the turns folded so far
+    /// belong to a conversation that is gone, unread end included.
+    fn on_transcript_restarted(&mut self, cx: &mut Context<Self>) {
+        self.set_approval(false, cx);
+        self.turns = TurnTracker::default();
+        self.attention.clear();
+        self.refresh_attention(cx);
+    }
+
+    /// The tick found the agent's CLI no longer running.
+    fn on_cli_exited(&mut self, cx: &mut Context<Self>) {
+        self.cli_gone = true;
+        self.on_cli_ended(cx);
+    }
+
+    /// The agent's CLI is no longer running: nothing it left unread or
+    /// pending can still be acted on.
+    fn on_cli_ended(&mut self, cx: &mut Context<Self>) {
+        self.attention.clear();
+        self.refresh_attention(cx);
+    }
+
+    /// Whether a permission dialog is on this tab's screen right now.
+    ///
+    /// Public for the remote-control host, which reports it so that a device
+    /// watching from afar can tell a stalled agent from a working one.
+    pub fn awaiting_approval(&self) -> bool {
+        self.turns.awaiting_approval()
+    }
+
+    /// Whether this tab holds something the user has to come back for: a
+    /// permission dialog on screen, or a finished turn not yet looked at.
+    ///
+    /// Always false for a tab that does not [report turns](Self::reports_turns).
+    /// An approval counts for as long as the dialog is up, in view or not,
+    /// because looking at it does not answer it.
+    pub fn needs_attention(&self) -> bool {
+        self.reports_turns() && (self.attention.unread() || self.turns.awaiting_approval())
+    }
+
+    fn refresh_attention(&mut self, cx: &mut Context<Self>) {
+        let needs = self.needs_attention();
+        if needs != self.attention_shown {
+            self.attention_shown = needs;
+            cx.emit(AgentViewEvent::Attention);
+        }
+    }
+
+    /// Keeps `in_view` true exactly while keyboard focus is inside this tab and
+    /// its window is the active one, and takes an unread end back whenever that
+    /// becomes true.
+    pub(crate) fn watch_attention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.focus_handle.clone();
+        self._attention_watch = vec![
+            cx.on_focus_in(&handle, window, |this, window, cx| {
+                this.in_view = window.is_window_active();
+                this.look_if_in_view(cx);
+            }),
+            cx.on_focus_out(&handle, window, |this, _, _, _| {
+                this.in_view = false;
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.in_view =
+                    window.is_window_active() && this.focus_handle.contains_focused(window, cx);
+                this.look_if_in_view(cx);
+            }),
+        ];
+    }
+
+    /// For a view built with [`Self::test_new`], which has no window to watch
+    /// until a test puts it in one.
+    #[cfg(feature = "test-support")]
+    pub fn watch_attention_for_tests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.watch_attention(window, cx);
+    }
+
+    fn look_if_in_view(&mut self, cx: &mut Context<Self>) {
+        if self.in_view {
+            self.attention.clear();
+            self.refresh_attention(cx);
+        }
+    }
+
+    /// Stands in for the transcript pass: the same fold the tick runs, minus
+    /// the files it reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_turn_events(&mut self, events: &[TurnEvent], cx: &mut Context<Self>) {
+        self.publish_turn_events(events.to_vec(), cx);
+    }
+
+    /// Stands in for the screen read finding, or losing, a permission dialog.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_approval(&mut self, asking: bool, cx: &mut Context<Self>) {
+        self.set_approval(asking, cx);
+    }
+
+    /// Stands in for the agent's CLI being alive, which needs a pty a test does
+    /// not have.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_cli_alive(&mut self, alive: bool, cx: &mut Context<Self>) {
+        self.cli_alive_for_tests = alive;
+        cx.notify();
+    }
+
+    /// Stands in for a subagent scan: the listed subagents, and the ones whose
+    /// latest run the transcript has since reported ended.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_subagent_pass(
+        &mut self,
+        listed: Vec<SubagentSummary>,
+        stopped: &[std::sync::Arc<str>],
+        cx: &mut Context<Self>,
+    ) {
+        self.subagents
+            .apply(crate::subagents::SubagentPass::simulated(listed, stopped));
+        cx.notify();
+    }
+
+    /// Stands in for the tick noticing the agent's CLI is gone.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_cli_ended(&mut self, cx: &mut Context<Self>) {
+        self.on_cli_exited(cx);
+    }
+
+    /// Stands in for a scan finding that the CLI moved to another transcript.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_followed_session(&mut self, session: SessionSummary, cx: &mut Context<Self>) {
+        self.fold_subagent_pass(SubagentPass::simulated_follow(session), true, cx);
+    }
+
+    /// Stands in for a minute of the CLI writing output to a transcript that
+    /// never produced a turn mark.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_transcript_silence(&mut self, cx: &mut Context<Self>) {
+        self.observe_transcript_silence(true, std::time::Duration::from_secs(60), cx);
+    }
+
+    /// Stands in for the first turn marks arriving from the transcript.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_turn_marks(&mut self, cx: &mut Context<Self>) {
+        self.note_turn_marks(cx);
+    }
+
+    /// Stands in for a scan that read the transcript up to byte `scanned_to` and
+    /// found `marks` in it. A pass with no marks at byte zero is a transcript
+    /// that does not exist yet.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_transcript_pass(
+        &mut self,
+        marks: Vec<agent_sessions::TurnMark>,
+        scanned_to: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.fold_subagent_pass(SubagentPass::simulated_marks(marks, scanned_to), true, cx);
+    }
+
+    /// Whether this tab's turns come from the transcript.
+    ///
+    /// The agent is fixed when the tab opens, but whether it owns a session is
+    /// not: "Start a New Session" drops the identity, and the tab then falls
+    /// back to the pty heuristic, so callers read this per event. A tab that
+    /// does not qualify keeps the heuristic, including before its transcript
+    /// exists -- typing the first prompt is exactly the write burst the
+    /// heuristic mistakes for an answer.
+    ///
+    /// Not while the transcript has proven silent: a tab whose transcript never
+    /// produced a mark although its CLI wrote for a minute is one whose turns
+    /// this editor cannot read -- a config directory it does not look in, a
+    /// format that changed -- and treating it as reporting would mean no finished
+    /// notification, ever. It takes the pty heuristic's, which is what every tab
+    /// had before transcripts were read, and goes back the moment a mark does
+    /// arrive.
+    pub fn reports_turns(&self) -> bool {
+        self.follows_transcript() && !self.turn_silence.never_marked()
+    }
+
+    /// Whether this tab's turns are *meant* to come from its transcript: tracked,
+    /// and an agent whose store reports turns. The loops that feed the transcript
+    /// to the turn state run on this, never on [`Self::reports_turns`] -- a tab
+    /// that has fallen back still has to look, to notice when marks appear.
+    fn follows_transcript(&self) -> bool {
+        matches!(self.origin.intent, SessionIntent::Tracked(_))
+            && provider_for_agent(&self.agent).is_some_and(|provider| provider.reports_turns())
+    }
+
+    /// Accounts for `elapsed` of the CLI writing or not, and says so, once, when a
+    /// transcript that has never produced a mark has been written around for a
+    /// minute.
+    fn observe_transcript_silence(
+        &mut self,
+        writing: bool,
+        elapsed: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.turn_silence.observe(writing, elapsed) {
+            return;
+        }
+        log::warn!(
+            "a tab that reports turns has seen no turn marks in its transcript while \
+             the agent wrote output for a minute; it falls back to judging turns by \
+             terminal output. The transcript may be somewhere this editor does not \
+             look (CLAUDE_CONFIG_DIR), or its format may have changed"
+        );
+        // `needs_attention` reads `reports_turns`, which just changed.
+        self.refresh_attention(cx);
+        cx.notify();
     }
 
     /// Reads this session's subagents for as long as its agent runs.
@@ -843,15 +1247,24 @@ impl AgentView {
         // no sidecar to find and no subagent it could name -- stated here by
         // not starting the loop at all, rather than discovered once a second as
         // an empty list.
-        let SessionIntent::Tracked(session_id) = &self.origin.intent else {
+        if !matches!(self.origin.intent, SessionIntent::Tracked(_)) {
             return;
-        };
-        let session_id = session_id.clone();
+        }
+        let follows_transcript = self.follows_transcript();
+        // Nothing written before this belongs to the CLI this loop reads.
+        let started_at = std::time::SystemTime::now();
+        // Fresh for every start: what a previous process left in the tracker
+        // describes a transcript this one has not read.
+        self.subagents = self.origin.subagent_tracker();
 
         self._subagent_tick = Some(cx.spawn(async move |this, cx| {
             loop {
-                let Ok((session, from)) = this.read_with(cx, |this, _| this.subagents.cursor())
-                else {
+                let Ok(request) = this.update(cx, |this, cx| {
+                    this.next_subagent_request(follows_transcript, started_at, cx)
+                }) else {
+                    return;
+                };
+                let Some(request) = request else {
                     return;
                 };
                 // Off the UI thread: this opens files, and one of them is a
@@ -859,17 +1272,12 @@ impl AgentView {
                 let pass = cx
                     .background_spawn({
                         let provider = provider.clone();
-                        let session_id = session_id.clone();
-                        async move { SubagentTracker::scan(&provider, session, session_id, from) }
+                        async move { SubagentTracker::scan(&provider, request) }
                     })
                     .await;
 
                 let Ok(still_running) = this.update(cx, |this, cx| {
-                    this.subagents.apply(pass);
-                    // The panel draws a row per subagent off this, and the tab's
-                    // own mark follows `any_running` on its next tick.
-                    cx.notify();
-                    this.is_working(cx)
+                    this.fold_subagent_pass(pass, follows_transcript, cx)
                 }) else {
                     return;
                 };
@@ -882,18 +1290,145 @@ impl AgentView {
         }));
     }
 
-    /// This session's subagents, newest first.
-    ///
-    /// Empty until the first scan lands, and empty for good on an untracked tab
-    /// or an agent whose store this editor cannot read — only Claude keeps a
-    /// sidecar naming them.
-    pub fn subagents(&self) -> &Arc<[SubagentSummary]> {
-        self.subagents.subagents()
+    /// Folds one pass over the store into the tab, and says whether the CLI is
+    /// still running.
+    fn fold_subagent_pass(
+        &mut self,
+        pass: SubagentPass,
+        follows_transcript: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut pass = pass;
+        // Decided here, in the same update that follows it, and not when the
+        // search was started: two tabs stalled in the same second can find the
+        // same transcript, and a list taken at the start of the search cannot
+        // see the other tab take it. Updates of tabs do not interleave, so
+        // whichever folds second finds the first one already on it.
+        if let Some(id) = pass.followed_id()
+            && agent_tabs::followed_session_ids(cx.entity_id(), cx)
+                .iter()
+                .any(|followed| &**followed == id)
+        {
+            log::info!(
+                "session {id} is already followed by another tab; this one stays where it is"
+            );
+            pass.forgo_follow();
+        }
+        let turn_input = self.subagents.apply(pass);
+        if follows_transcript {
+            // The marks that bring a silent transcript back are everything it
+            // holds, which includes every turn the pty heuristic has already
+            // announced. They are the past: only what is written after them is
+            // news.
+            let recovered = !turn_input.marks.is_empty() && self.note_turn_marks(cx);
+            if turn_input.restarted {
+                self.on_transcript_restarted(cx);
+            }
+            if let Some(session) = turn_input.followed {
+                self.follow_session(session, cx);
+            }
+            let events = self.turns.apply(TurnPass {
+                marks: &turn_input.marks,
+                finished: &turn_input.finished,
+                live: turn_input.live && !recovered,
+                background_quiet_for: turn_input.background_quiet_for,
+            });
+            self.publish_turn_events(events, cx);
+        }
+        // The panel draws a row per subagent off this, and the tab's own mark
+        // follows `any_running` on its next tick.
+        cx.notify();
+        self.is_working(cx)
     }
 
-    /// Whether this subagent is still working.
-    pub fn subagent_is_running(&self, subagent: &SubagentSummary) -> bool {
-        self.subagents.is_running(subagent)
+    /// What the next scan should read, from what only the UI thread knows.
+    ///
+    /// `None` once the tab no longer owns a session, which ends the loop.
+    fn next_subagent_request(
+        &mut self,
+        follows_transcript: bool,
+        started_at: std::time::SystemTime,
+        cx: &mut Context<Self>,
+    ) -> Option<ScanRequest> {
+        let SessionIntent::Tracked(session_id) = &self.origin.intent else {
+            return None;
+        };
+        let session_id = session_id.clone();
+        // The transcript went quiet while the CLI kept writing: the cue to look
+        // for the one it moved to. Only for a tab whose turns come from the
+        // transcript, which is the only one that notices the marks stopping.
+        //
+        // And only between turns. A conversation is cleared at an idle prompt,
+        // so a tab in the middle of a turn that has gone quiet is a long build,
+        // not a cleared conversation -- and looking then is how it comes to take
+        // a transcript some other session, in another tab or run by hand in the
+        // same directory, has just opened on a clear.
+        let stalled = follows_transcript
+            && self.is_working(cx)
+            && self.turns.is_closed()
+            && self.turn_silence.marks_stopped();
+        let search = self
+            .subagents
+            .ready_to_search(stalled)
+            .then(|| SuccessorSearch {
+                since: started_at,
+                claimed: agent_tabs::followed_session_ids(cx.entity_id(), cx),
+            });
+        Some(self.subagents.next_request(
+            session_id,
+            follows_transcript && self.turns.call_open(),
+            follows_transcript && self.turns.is_held(),
+            search,
+        ))
+    }
+
+    /// Turn marks arrived, so the transcript works. Takes back a tab that had
+    /// fallen back to the heuristic for want of them, and says whether it did.
+    fn note_turn_marks(&mut self, cx: &mut Context<Self>) -> bool {
+        let was_silent = self.turn_silence.never_marked();
+        self.turn_silence.saw_marks();
+        if was_silent {
+            self.refresh_attention(cx);
+        }
+        was_silent
+    }
+
+    /// The CLI moved to another transcript while this tab was running -- what
+    /// clearing a conversation does -- so the tab follows it, under its id.
+    ///
+    /// The id is what a restart resumes and what a remote device asks about, and
+    /// both mean the conversation on screen, not the one cleared from it. The
+    /// reset of what was folded from the old transcript is the restart path's,
+    /// which the same pass has already taken.
+    fn follow_session(&mut self, session: SessionSummary, cx: &mut Context<Self>) {
+        log::info!(
+            "the agent moved from session {} to {}; following it",
+            self.session_id().unwrap_or_default(),
+            session.id
+        );
+        self.turn_silence = SilenceWatch::default();
+        self.origin.follow(session);
+        // A tab wearing a name carries it to the session it now shows, or
+        // reopening that session would lose it. A tab with none takes whatever
+        // that session was already called, rather than writing "no name" over it.
+        if self.custom_name.is_some() {
+            self.remember_session_name(cx);
+        } else {
+            self.custom_name = stored_session_name(&self.origin, cx);
+        }
+        cx.emit(AgentViewEvent::UpdateTab);
+    }
+
+    /// The subagents running right now, newest first.
+    ///
+    /// Empty unless the CLI is alive: a record left open by a process that died
+    /// never completes, and would otherwise be drawn as running for good.
+    pub fn running_subagents<'a>(
+        &'a self,
+        cx: &App,
+    ) -> impl Iterator<Item = &'a SubagentSummary> + use<'a> {
+        let working = self.is_working(cx);
+        self.subagents.running().filter(move |_| working)
     }
 
     /// Whether any of them is.
@@ -984,10 +1519,24 @@ impl AgentView {
             // to the agent's name when it has none.
             self.custom_name = (!typed.is_empty() && typed != self.inherited_label().as_ref())
                 .then(|| SharedString::from(typed));
+            self.remember_session_name(cx);
             cx.emit(AgentViewEvent::UpdateTab);
         }
         cx.notify();
         self.focus_handle.focus(window, cx);
+    }
+
+    /// Writes this tab's name down against its session, which outlives the tab.
+    ///
+    /// Nothing for an untracked tab: with no id there is no session to find it
+    /// under later.
+    fn remember_session_name(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.session_id() else {
+            return;
+        };
+        let id: Arc<str> = Arc::from(id);
+        let name = self.custom_name.clone();
+        crate::SessionNames::global(cx).update(cx, |names, cx| names.set(id, name, cx));
     }
 
     /// Moves this view to the other mode, restarting the agent.
@@ -1032,6 +1581,30 @@ impl AgentView {
         cx.notify();
     }
 
+    /// Abandons the session this tab named and starts a fresh, untracked one.
+    ///
+    /// The whole origin goes, not just the id, so the tab stops reporting turns
+    /// from a transcript it no longer owns and falls back to the pty heuristic.
+    pub fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Before the origin goes: once it is untracked the notifier stops
+        // listening for turns, and the approval it holds would never be cleared.
+        self.reset_turn_state(cx);
+        self._subagent_tick = None;
+        // The old tick would read the new session's empty `Starting` state as
+        // an exited CLI and mark it gone before it has started.
+        self._activity_tick = None;
+        self.origin = SessionOrigin::default();
+        // The name the user gave the session goes with it: the tab is a new
+        // conversation, and wearing the old one's name is what the button's own
+        // comment says it must not do. `SessionOrigin::default` only drops the
+        // title the tab inherited, which is a different field.
+        self.custom_name = None;
+        self.state = State::Starting;
+        self.start(window, cx);
+        cx.emit(AgentViewEvent::UpdateTab);
+        cx.notify();
+    }
+
     /// Drops whatever the view was showing, and with it the process behind it.
     ///
     /// Separate from `restart` so a test can reach the teardown without also
@@ -1049,9 +1622,29 @@ impl AgentView {
         self._activity_tick = None;
         self._subagent_tick = None;
         self.responding = false;
+        self.reset_turn_state(cx);
         let previous = std::mem::replace(&mut self.state, State::Starting);
         Self::warn_if_retained(&previous, cx);
         drop(previous);
+    }
+
+    /// Forgets everything derived from the session or terminal being replaced,
+    /// so a restart or a change of origin starts clean. A wait that was
+    /// announced is withdrawn first: nothing is left to clear it.
+    fn reset_turn_state(&mut self, cx: &mut Context<Self>) {
+        if let Some(event) = self.turns.set_awaiting_approval(false) {
+            cx.emit(AgentViewEvent::Turn(event));
+        }
+        self.turns = TurnTracker::default();
+        // The subagents too. Left behind, the tracker keeps `baselined` set from
+        // the process being replaced, so the next one's first read is taken for
+        // news and never settles a subagent the old process left running -- which
+        // then pins `is_answering`, and with it `keep_awake`.
+        self.subagents = SubagentTracker::default();
+        self.turn_silence = SilenceWatch::default();
+        self.ticks_since_screen_read = 0;
+        self.cli_gone = false;
+        self.on_cli_ended(cx);
     }
 
     /// Reports a mode that outlived the switch away from it.
@@ -1197,6 +1790,7 @@ impl AgentView {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
         let intent = self.origin.intent.clone();
+        let anchor = self.origin.anchor.clone();
         let prompts = self.requested_prompts;
         let project = self.project.clone();
         let workspace = self.workspace.clone();
@@ -1245,19 +1839,20 @@ impl AgentView {
             // the task that was already awaiting the binary, rather than at
             // construction, because a tab has to be able to exist before it knows
             // whether its session is still on disk.
-            let session = match resolve_session(&agent, &intent, default_cwd.clone(), cx).await {
-                SessionStart::Fresh => None,
-                SessionStart::Command(command) => Some(command),
-                SessionStart::Gone => {
-                    this.update(cx, |this, cx| {
-                        this.state = State::SessionGone;
-                        cx.emit(AgentViewEvent::UpdateTab);
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-            };
+            let session =
+                match resolve_session(&agent, &intent, anchor, default_cwd.clone(), cx).await {
+                    SessionStart::Fresh => None,
+                    SessionStart::Command(command) => Some(command),
+                    SessionStart::Gone => {
+                        this.update(cx, |this, cx| {
+                            this.state = State::SessionGone;
+                            cx.emit(AgentViewEvent::UpdateTab);
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                };
 
             // The directory the agent will actually run in. A resumed session
             // runs where it ran before, not where this window happens to be
@@ -1411,6 +2006,11 @@ pub enum SessionIntent {
     /// assigned to a tab nobody has typed in yet has no session on disk, and that
     /// is a normal state rather than an error.
     Tracked(SharedString),
+    /// A new conversation branched off the session with this id, which is the
+    /// source and not something this tab owns: the CLI mints an id of its own
+    /// for the branch and never says what it is, so the tab is untracked from
+    /// the moment it runs. The source is only read to build the launch command.
+    Fork(SharedString),
 }
 
 /// What a tab knows about the session it is opening onto.
@@ -1430,6 +2030,15 @@ pub struct SessionOrigin {
     /// grows, and a tab that re-titled itself under the reader would move the
     /// label they were aiming at.
     title: Option<SharedString>,
+    /// The session itself, when whoever opened the tab already looked it up and
+    /// vetted it: the directory it ran in and the transcript it is in.
+    ///
+    /// An id is not enough to name a session. The same id can sit in two project
+    /// directories -- a transcript copied, a worktree duplicated -- and a lookup
+    /// by id answers with whichever the directory listing reaches first, which
+    /// is not necessarily the one that was vetted. The tab runs this one and
+    /// reads this one's transcript.
+    anchor: Option<SessionSummary>,
 }
 
 impl SessionOrigin {
@@ -1441,7 +2050,7 @@ impl SessionOrigin {
     /// title straight past the filter and onto a tab.
     pub fn new(intent: SessionIntent, title: Option<&str>) -> Self {
         let title = match &intent {
-            SessionIntent::Untracked => None,
+            SessionIntent::Untracked | SessionIntent::Fork(_) => None,
             SessionIntent::Tracked(_) => title
                 .map(str::trim)
                 .filter(|title| !title.is_empty())
@@ -1450,7 +2059,36 @@ impl SessionOrigin {
                 // allocation is required rather than careless.
                 .map(|title| SharedString::from(title.to_string())),
         };
-        Self { intent, title }
+        Self {
+            intent,
+            title,
+            anchor: None,
+        }
+    }
+
+    /// Pins the origin to the very session `session` is, for a tab that
+    /// continues it or branches off it. Ignored for a tab that owns no session:
+    /// there is nothing for it to be pinned to.
+    pub(crate) fn anchored_on(mut self, session: &SessionSummary) -> Self {
+        if !matches!(self.intent, SessionIntent::Untracked) {
+            self.anchor = Some(session.clone());
+        }
+        self
+    }
+
+    /// Moves to the session the CLI wrote next. The title stays the one the tab
+    /// opened with: it is what the user was aiming at.
+    fn follow(&mut self, session: SessionSummary) {
+        self.intent = SessionIntent::Tracked(session.id.to_string().into());
+        self.anchor = Some(session);
+    }
+
+    /// A tracker that reads the anchor's transcript from the start, or one that
+    /// looks the session up by id when there is none.
+    fn subagent_tracker(&self) -> SubagentTracker {
+        self.anchor
+            .clone()
+            .map_or_else(SubagentTracker::default, SubagentTracker::following)
     }
 }
 
@@ -1472,6 +2110,18 @@ fn intent_from_stored(session_id: Option<&str>) -> SessionIntent {
             log::warn!("ignoring a stored agent session id that is not a UUID: {error}");
             SessionIntent::Untracked
         }
+    }
+}
+
+/// The name a session was given in a tab that may since have closed, so it comes
+/// back under that name from whichever list it is reopened from.
+///
+/// Not for a fork: a branch is a new conversation, and wearing its source's name
+/// would say otherwise.
+fn stored_session_name(origin: &SessionOrigin, cx: &mut App) -> Option<SharedString> {
+    match &origin.intent {
+        SessionIntent::Tracked(id) => crate::SessionNames::global(cx).read(cx).name(id).cloned(),
+        SessionIntent::Untracked | SessionIntent::Fork(_) => None,
     }
 }
 
@@ -1511,19 +2161,23 @@ fn intent_for_new_tab(agent: &AgentId) -> SessionIntent {
 /// asks the agent's own store: a session that is there is resumed, and one that
 /// is not is started fresh **under the same id**, which is what keeps a tab that
 /// was opened and never typed in from coming back broken — Claude writes its
-/// transcript only after the first message.
+/// transcript only after the first message. A `Fork` one asks the store for its
+/// source and branches off it.
 ///
-/// Every failure lands on `None`, which spawns the agent with no session
-/// arguments. That is the same thing every tab did before this feature existed,
-/// so the worst case is the old behaviour rather than a dead tab.
+/// A store that cannot be read lands a `Tracked` tab on `Fresh`, which spawns the
+/// agent with no session arguments: the same thing every tab did before this
+/// feature existed, so the worst case is the old behaviour rather than a dead
+/// tab. A `Fork` has nothing to fall back to, so it lands on `Gone`.
 async fn resolve_session(
     agent: &AgentId,
     intent: &SessionIntent,
+    anchor: Option<SessionSummary>,
     default_cwd: Option<std::path::PathBuf>,
     cx: &mut gpui::AsyncApp,
 ) -> SessionStart {
-    let SessionIntent::Tracked(id) = intent else {
-        return SessionStart::Fresh;
+    let id = match intent {
+        SessionIntent::Untracked => return SessionStart::Fresh,
+        SessionIntent::Tracked(id) | SessionIntent::Fork(id) => id.to_string(),
     };
     let Some(kind) = AgentKind::from_builtin_agent_id(agent.as_ref()) else {
         // A user-configured agent: this editor reads three stores and has no
@@ -1531,20 +2185,109 @@ async fn resolve_session(
         return SessionStart::Fresh;
     };
     let provider = agent_sessions::provider_for(kind);
-    let id = id.to_string();
+    let intent = intent.clone();
     cx.background_spawn(async move {
-        match provider.find(&id) {
-            Ok(found) => session_start(provider.as_ref(), &id, default_cwd, found),
-            // An unreadable store is not the same as a deleted session, and
-            // refusing to start on a transient failure would strand the tab. Fall
-            // back to the behaviour every tab had before this feature existed.
-            Err(error) => {
-                log::warn!("looking up session {id}: {error}");
-                SessionStart::Fresh
-            }
-        }
+        let lookup = lookup_session(provider.as_ref(), &id, anchor);
+        start_after_lookup(provider.as_ref(), &intent, default_cwd, &id, lookup)
     })
     .await
+}
+
+/// The session a tab starts from: the store's answer for the id, unless the tab
+/// was pinned to a particular copy of it.
+///
+/// Asked for an id that two transcripts carry, the store answers with whichever
+/// it reaches first, and the tab would then run the CLI in *that* one's
+/// directory -- possibly outside every folder the person who vetted the other
+/// copy checked. So when the answer is not the pinned copy, the pinned copy wins,
+/// provided its transcript is still on disk: one deleted since is a session that
+/// is gone, and answering with another copy in its place would be the same
+/// substitution.
+///
+/// The store still gets the first word on whether the session exists at all. A
+/// store that keeps sessions as rows, whose transcript can be missing while the
+/// session is not, is not second-guessed by a file check.
+fn lookup_session(
+    provider: &dyn agent_sessions::SessionProvider,
+    id: &str,
+    anchor: Option<SessionSummary>,
+) -> anyhow::Result<Option<SessionSummary>> {
+    match (anchor, provider.find(id)?) {
+        (None, found) => Ok(found),
+        // Nothing holds the id any more, whichever copy was pinned.
+        (Some(_), None) => Ok(None),
+        (Some(anchor), Some(found)) => {
+            if found.cwd == anchor.cwd && found.log_path == anchor.log_path {
+                return Ok(Some(found));
+            }
+            let still_there = anchor.log_path.as_ref().is_none_or(|path| path.is_file());
+            Ok(still_there.then_some(anchor))
+        }
+    }
+}
+
+/// What `intent` comes to once the store has been asked for the session it names
+/// -- including when the store could not answer.
+fn start_after_lookup(
+    provider: &dyn agent_sessions::SessionProvider,
+    intent: &SessionIntent,
+    default_cwd: Option<std::path::PathBuf>,
+    id: &str,
+    lookup: anyhow::Result<Option<agent_sessions::SessionSummary>>,
+) -> SessionStart {
+    match lookup {
+        Ok(found) => start_for_intent(provider, intent, default_cwd, found),
+        Err(error) => {
+            log::warn!("looking up session {id}: {error}");
+            match intent {
+                // An unreadable store is not the same as a deleted session, and
+                // refusing to start on a transient failure would strand a tab
+                // that owns its id. Fall back to the behaviour every tab had
+                // before this feature existed.
+                SessionIntent::Untracked | SessionIntent::Tracked(_) => SessionStart::Fresh,
+                // A fork has no id of its own to keep, only a source to branch
+                // off. Without the source a blank session would sit under a
+                // label that says it is a branch of something, and "Start a New
+                // Session" is the honest way to ask for one.
+                SessionIntent::Fork(_) => SessionStart::Gone,
+            }
+        }
+    }
+}
+
+/// What `intent` comes to once the store has answered for the session it names.
+fn start_for_intent(
+    provider: &dyn agent_sessions::SessionProvider,
+    intent: &SessionIntent,
+    default_cwd: Option<std::path::PathBuf>,
+    found: Option<agent_sessions::SessionSummary>,
+) -> SessionStart {
+    match intent {
+        SessionIntent::Untracked => SessionStart::Fresh,
+        SessionIntent::Tracked(id) => session_start(provider, id, default_cwd, found),
+        SessionIntent::Fork(_) => fork_start(provider, found),
+    }
+}
+
+/// The command that branches a new session off `found`.
+///
+/// A source the store no longer holds is not replaced by a blank session: a tab
+/// that presents itself as a branch and has none of the conversation is the
+/// failure [`State::SessionGone`] exists to name.
+fn fork_start(
+    provider: &dyn agent_sessions::SessionProvider,
+    found: Option<agent_sessions::SessionSummary>,
+) -> SessionStart {
+    let Some(session) = found else {
+        return SessionStart::Gone;
+    };
+    provider
+        .resume_command(&session, Fork::New)
+        .map(SessionStart::Command)
+        // An agent with no fork cannot be asked for one. The callers that offer
+        // a fork check that first, so this is not a state a person reaches;
+        // starting fresh beats refusing to start.
+        .unwrap_or(SessionStart::Fresh)
 }
 
 /// The decision, once the store has answered.
@@ -1602,7 +2345,8 @@ enum SessionStart {
     /// the tab.
     Fresh,
     Command(AgentCommand),
-    /// Tracked, gone, and unrecoverable for this agent. See [`State::SessionGone`].
+    /// Tracked, gone, and unrecoverable for this agent; or a fork whose source
+    /// is gone or cannot be read. See [`State::SessionGone`].
     Gone,
 }
 
@@ -1729,7 +2473,7 @@ fn no_mapping_refusal(name: &str, prompts: PermissionPrompts) -> SharedString {
 /// What a verified, absent or unprobeable flag means for the launch.
 ///
 /// Split from the I/O that feeds it so the decision can be tested without a
-/// window, a store, or the agent's CLI installed -- the same reason phase 01's
+/// window, a store, or the agent's CLI installed -- the same reason the flag
 /// parser is a free function. Every arm that is not `Present` refuses, and each
 /// says which of the two it was, because "the flag is gone" and "nobody could
 /// tell" call for different next moves from the reader.
@@ -1811,6 +2555,7 @@ impl workspace::item::Item for AgentView {
                 f(workspace::item::ItemEvent::UpdateTab)
             }
             AgentViewEvent::Close => f(workspace::item::ItemEvent::CloseItem),
+            AgentViewEvent::Turn(_) | AgentViewEvent::Attention => {}
         }
     }
 
@@ -1870,7 +2615,7 @@ impl workspace::item::Item for AgentView {
                     // of them.
                     .with_keyed_rotate_animation(
                         ("agent-tab-spinner", self.self_handle.entity_id()),
-                        1,
+                        2,
                     )
             }))
             .children(self.runs_without_prompts().then(|| {
@@ -2021,7 +2766,13 @@ impl workspace::item::SerializableItem for AgentView {
                     // Set directly rather than through `restore_custom_name`,
                     // which notifies: nothing is watching a view that is still
                     // being constructed.
-                    view.custom_name = row.name.map(SharedString::from);
+                    // The row speaks for this tab. A name it holds that the
+                    // session record lacks was given before that record
+                    // existed, and is copied across so it survives the tab.
+                    if let Some(name) = row.name {
+                        view.custom_name = Some(SharedString::from(name));
+                        view.remember_session_name(cx);
+                    }
                     view
                 }))
             })?
@@ -2042,7 +2793,7 @@ impl workspace::item::SerializableItem for AgentView {
             mode: mode_name(self.mode).to_string(),
             name: self.custom_name.as_ref().map(|name| name.to_string()),
             session_id: match &self.origin.intent {
-                SessionIntent::Untracked => None,
+                SessionIntent::Untracked | SessionIntent::Fork(_) => None,
                 SessionIntent::Tracked(id) => Some(id.to_string()),
             },
             session_title: self.origin.title.as_ref().map(|title| title.to_string()),
@@ -2059,12 +2810,12 @@ impl workspace::item::SerializableItem for AgentView {
     /// pass ever wrote the row, and a rename does not trigger that pass. A rename
     /// and a mode switch both arrive as `UpdateTab`, and both belong in the row.
     ///
-    /// `Activity` does not. Nothing it reports appears in the row, and an agent
+    /// `Activity` and `Turn` do not. Nothing either reports appears in the row, and an agent
     /// pauses to read a file or wait on a model several times inside one answer
     /// — so answering `true` here would put a database write behind every one of
     /// those, for a row that comes back byte for byte the same.
     fn should_serialize(&self, event: &Self::Event) -> bool {
-        !matches!(event, AgentViewEvent::Activity)
+        matches!(event, AgentViewEvent::UpdateTab | AgentViewEvent::Close)
     }
 }
 
@@ -2076,70 +2827,76 @@ impl Render for AgentView {
             State::Terminal(terminal) | State::Shell(terminal) => {
                 terminal.clone().into_any_element()
             }
-            State::Starting => centered_message(
-                IconName::ArrowCircle,
-                format!("Starting {}…", self.display_name).into(),
-                None,
-                cx,
-            ),
+            State::Starting => pane_state(
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::Medium)
+                    .color(Color::Muted)
+                    // Keyed by the tab: two agent tabs can be starting side by
+                    // side, and one id for both is one animation state for both.
+                    .with_keyed_rotate_animation(("agent-starting-spinner", cx.entity_id()), 2),
+                format!("Starting {}…", self.display_name),
+                Color::Muted,
+            )
+            .into_any_element(),
             State::MissingBinary(missing) => {
                 crate::missing_binary::render(&cx.entity(), &self.display_name, missing, cx)
             }
-            State::SessionGone => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(Icon::new(IconName::HistoryRerun).color(Color::Muted))
-                .child(
-                    Label::new(format!(
-                        "This {} session is no longer on this machine.",
-                        self.display_name
-                    ))
+            State::SessionGone => pane_state(
+                Icon::new(IconName::HistoryRerun)
+                    .size(IconSize::Medium)
                     .color(Color::Muted),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("start-a-new-session", "Start a New Session").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    // Drops the id rather than keeping it: the
-                                    // session it named is gone and this agent
-                                    // cannot recreate it, so holding the id would
-                                    // only put the tab back here on the next
-                                    // restart.
-                                    // The whole origin, not just the id: the name
-                                    // belonged to the session that is gone, and a
-                                    // fresh conversation must not wear it.
-                                    this.origin = SessionOrigin::default();
-                                    this.state = State::Starting;
-                                    this.start(window, cx);
-                                    cx.emit(AgentViewEvent::UpdateTab);
-                                    cx.notify();
-                                }),
-                            ),
-                        )
-                        .child(
-                            Button::new("close-this-tab", "Close Tab")
-                                .style(ButtonStyle::Subtle)
-                                // Dispatched rather than reaching for the pane:
-                                // which pane holds this tab is the workspace's
-                                // business, and this action already resolves it
-                                // through the focused item.
-                                .on_click(cx.listener(|_, _, window, cx| {
-                                    window.dispatch_action(
-                                        Box::new(workspace::CloseActiveItem {
-                                            save_intent: None,
-                                            close_pinned: true,
-                                        }),
-                                        cx,
-                                    );
-                                })),
-                        ),
-                )
-                .into_any_element(),
-            State::Failed(error) => centered_message(IconName::Warning, error.clone(), None, cx),
+                format!(
+                    "This {} session is not available on this machine.",
+                    self.display_name
+                ),
+                Color::Muted,
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("start-a-new-session", "Start a New Session")
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                // Drops the id rather than keeping it: the
+                                // session it named is gone and this agent
+                                // cannot recreate it, so holding the id would
+                                // only put the tab back here on the next
+                                // restart.
+                                // The whole origin, not just the id: the name
+                                // belonged to the session that is gone, and a
+                                // fresh conversation must not wear it.
+                                this.start_new_session(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("close-this-tab", "Close Tab")
+                            .style(ButtonStyle::Subtle)
+                            // Dispatched rather than reaching for the pane:
+                            // which pane holds this tab is the workspace's
+                            // business, and this action already resolves it
+                            // through the focused item.
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(workspace::CloseActiveItem {
+                                        save_intent: None,
+                                        close_pinned: true,
+                                    }),
+                                    cx,
+                                );
+                            })),
+                    ),
+            )
+            .into_any_element(),
+            State::Failed(error) => pane_state(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::Medium)
+                    .color(Color::Muted),
+                format!("Could not start {}", self.display_name),
+                Color::Muted,
+            )
+            .child(Label::new(error.clone()).color(Color::Muted))
+            .into_any_element(),
         };
         let colors = cx.theme().colors();
 
@@ -2171,28 +2928,31 @@ impl Render for AgentView {
     }
 }
 
-fn centered_message(
-    icon: IconName,
-    message: SharedString,
-    detail: Option<SharedString>,
-    cx: &App,
-) -> AnyElement {
+/// The frame every full-pane state of an agent tab shares: centred, an icon, and
+/// a title. What goes under the title — a sentence, the buttons that answer it —
+/// is the caller's, so the states differ in content and in nothing else.
+///
+/// `title_color` is the caller's: a missing binary is the one state with
+/// something to act on, so its title is full strength while the others stay
+/// muted, and the layout is not the place to decide that.
+pub(crate) fn pane_state(
+    icon: impl IntoElement,
+    title: impl Into<SharedString>,
+    title_color: Color,
+) -> Div {
     v_flex()
+        .debug_selector(|| "agent-pane-state".into())
         .size_full()
         .items_center()
         .justify_center()
-        .gap_2()
-        .child(Icon::new(icon).color(Color::Muted))
-        .child(Label::new(message).color(Color::Muted))
-        .children(detail.map(|detail| {
-            div()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .bg(cx.theme().colors().element_background)
-                .child(Label::new(detail).size(LabelSize::Small).buffer_font(cx))
-        }))
-        .into_any_element()
+        .p_8()
+        .gap_3()
+        .child(icon)
+        .child(
+            Headline::new(title)
+                .size(HeadlineSize::Small)
+                .color(title_color),
+        )
 }
 
 #[cfg(test)]
@@ -2292,6 +3052,65 @@ mod tests {
             })
         });
         (view, cx)
+    }
+
+    /// Every full-pane state of a tab is drawn in the one shared frame, so the
+    /// states differ in what they say and in nothing else.
+    ///
+    /// Drawn for real, in a pane: three of the four build their icon or their
+    /// buttons from the view's own handle, and only a frame can show that a
+    /// state still renders after that is rearranged.
+    #[gpui::test]
+    async fn every_full_pane_state_draws_in_the_shared_frame(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let handle = workspace.weak_handle();
+            let view = cx.new(|cx| {
+                AgentView::test_new(
+                    agent.clone(),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::default(),
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            view
+        });
+
+        let states = [
+            ("starting", State::Starting),
+            ("session gone", State::SessionGone),
+            (
+                "failed",
+                State::Failed("the process could not be started".into()),
+            ),
+            (
+                "missing binary",
+                State::MissingBinary(AgentBinaryMissing {
+                    agent: agent.clone(),
+                    binary: "claude",
+                    install_command: "curl -fsSL https://claude.ai/install.sh | bash",
+                    docs_url: "https://docs.claude.com",
+                }),
+            ),
+        ];
+        for (name, state) in states {
+            view.update(cx, |view, cx| {
+                view.state = state;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+
+            assert!(
+                cx.debug_bounds("agent-pane-state").is_some(),
+                "the {name} state must be drawn in the shared pane frame"
+            );
+        }
     }
 
     /// The safe default, and the half a constant cannot satisfy.
@@ -2407,9 +3226,159 @@ mod tests {
         });
     }
 
+    /// Positive, not "everything but `Activity`": a turn ends once per answer,
+    /// and a variant added later must not silently become a database write.
+    /// `Close` is pinned too, since the rewrite had to keep what it answered.
+    #[gpui::test]
+    async fn only_a_rename_or_a_close_is_worth_writing_down(cx: &mut TestAppContext) {
+        use workspace::item::SerializableItem as _;
+
+        let (view, cx) = bypass_view(cx).await;
+
+        view.read_with(cx, |view, _| {
+            for event in [
+                TurnEvent::Started,
+                TurnEvent::Ended,
+                TurnEvent::Interrupted,
+                TurnEvent::ApprovalNeeded,
+                TurnEvent::ApprovalCleared,
+            ] {
+                assert!(!view.should_serialize(&AgentViewEvent::Turn(event)));
+            }
+            assert!(view.should_serialize(&AgentViewEvent::UpdateTab));
+            assert!(view.should_serialize(&AgentViewEvent::Close));
+            assert!(!view.should_serialize(&AgentViewEvent::Activity));
+        });
+    }
+
+    /// Transcript turns need both a store that records them and a session id
+    /// the tab owns; either missing leaves the tab on the pty heuristic.
+    #[gpui::test]
+    async fn only_a_tracked_claude_tab_reports_turns(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let build = |agent: &str, intent: SessionIntent, cx: &mut gpui::VisualTestContext| {
+            let agent = AgentId::new(agent.to_string());
+            let project = project.clone();
+            workspace.update_in(cx, |workspace, _window, cx| {
+                let handle = workspace.weak_handle();
+                cx.new(|cx| {
+                    AgentView::test_new(
+                        agent,
+                        AgentViewMode::Terminal,
+                        project,
+                        handle,
+                        SessionOrigin::new(intent, None),
+                        cx,
+                    )
+                })
+            })
+        };
+        let tracked = || SessionIntent::Tracked("session-one".into());
+
+        let claude_untracked = build(project::CLAUDE_CODE_AGENT_ID, SessionIntent::Untracked, cx);
+        let codex_tracked = build(project::CODEX_AGENT_ID, tracked(), cx);
+        let claude_tracked = build(project::CLAUDE_CODE_AGENT_ID, tracked(), cx);
+
+        claude_untracked.read_with(cx, |view, _| assert!(!view.reports_turns()));
+        codex_tracked.read_with(cx, |view, _| assert!(!view.reports_turns()));
+        claude_tracked.read_with(cx, |view, _| assert!(view.reports_turns()));
+    }
+
+    /// A restart or a change of origin starts from a clean slate: an announced
+    /// wait is withdrawn, since nothing is left to clear it, and the turn the
+    /// old terminal was in does not carry over to the new one.
+    #[gpui::test]
+    async fn replacing_the_terminal_withdraws_a_wait_and_forgets_the_turn(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::new(SessionIntent::Tracked("session-one".into()), None),
+                    cx,
+                )
+            })
+        });
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _subscription = cx.update(|_, cx| {
+            let seen = seen.clone();
+            cx.subscribe(&view, move |_, event: &AgentViewEvent, _| {
+                if let AgentViewEvent::Turn(turn) = event {
+                    seen.borrow_mut().push(*turn);
+                }
+            })
+        });
+        view.update(cx, |view, _| {
+            view.turns.apply(TurnPass {
+                marks: &[
+                    agent_sessions::TurnMark::Prompt,
+                    agent_sessions::TurnMark::ToolCall("toolu_one".into()),
+                ],
+                finished: &[],
+                live: true,
+                background_quiet_for: None,
+            });
+            view.turns.set_awaiting_approval(true);
+            view.ticks_since_screen_read = 3;
+        });
+
+        view.update(cx, |view, cx| view.end_previous_mode(cx));
+
+        assert_eq!(*seen.borrow(), [TurnEvent::ApprovalCleared]);
+        view.read_with(cx, |view, _| {
+            assert!(!view.turns.awaiting_approval());
+            assert!(!view.turns.tool_pending());
+            assert_eq!(view.ticks_since_screen_read, 0);
+        });
+    }
+
+    /// A restart re-runs the launch, so a fork tab branches off its source
+    /// again rather than coming back as a blank untracked tab. The branch the CLI
+    /// minted the first time was never recorded, so the source is the only
+    /// thing there is to start from -- this pins that as the choice it is.
+    #[gpui::test]
+    async fn restarting_a_fork_tab_forks_from_its_source_again(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let source = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    SessionOrigin::new(SessionIntent::Fork(source.into()), Some("a name")),
+                    cx,
+                )
+            })
+        });
+
+        view.update_in(cx, |view, window, cx| view.restart(window, cx));
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.origin.intent, SessionIntent::Fork(source.into()));
+            assert_eq!(view.session_id(), None, "a fork still owns no session");
+            let provider = agent_sessions::provider_for(AgentKind::Claude);
+            let SessionStart::Command(command) = start_for_intent(
+                provider.as_ref(),
+                &view.origin.intent,
+                None,
+                Some(summary(AgentKind::Claude, source)),
+            ) else {
+                panic!("the intent a restart starts from must still be a fork");
+            };
+            assert_eq!(command.args, ["--resume", source, "--fork-session"]);
+        });
+    }
+
     /// The precedence the cwd hoist could have inverted: a resumed session's own
     /// directory wins over the window's worktree, and a fresh session falls back
-    /// to it. Held here because the rule left `agent_task` in phase 03 and would
+    /// to it. Held here because the rule moved out of `agent_task` and would
     /// otherwise be tested by nothing.
     #[test]
     fn a_resumed_session_runs_where_it_ran_before() {
@@ -2861,6 +3830,51 @@ mod tests {
         });
     }
 
+    /// In production the tab's focus handle is its terminal's, not the root
+    /// one, so the attention watch has to see focus land there.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn focus_inside_the_terminal_counts_as_looking_at_the_tab(cx: &mut TestAppContext) {
+        tolerate_the_pty_reader(cx);
+        let (agent_view, cx) = an_agent_showing_a_terminal(cx).await;
+        agent_view.update_in(cx, |view, window, cx| {
+            view.origin = SessionOrigin::new(SessionIntent::Tracked("session-one".into()), None);
+            view.watch_attention(window, cx);
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        agent_view.update_in(cx, |view, window, cx| {
+            let terminal_handle = view.focus_handle(cx);
+            assert_ne!(
+                terminal_handle, view.focus_handle,
+                "this only means something when the tab hands out the terminal's handle"
+            );
+            window.focus(&terminal_handle, cx);
+        });
+        cx.run_until_parked();
+        assert!(agent_view.read_with(cx, |view, _| view.in_view));
+
+        agent_view.update(cx, |view, cx| {
+            view.simulate_turn_events(&[TurnEvent::Ended], cx)
+        });
+        assert!(
+            !agent_view.read_with(cx, |view, _| view.needs_attention()),
+            "a turn ending under the terminal the user is typing in is not unread"
+        );
+
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        assert!(!agent_view.read_with(cx, |view, _| view.in_view));
+
+        agent_view.update(cx, |view, cx| {
+            view.simulate_turn_events(&[TurnEvent::Started, TurnEvent::Ended], cx)
+        });
+        assert!(
+            agent_view.read_with(cx, |view, _| view.needs_attention()),
+            "a turn ending with focus elsewhere is unread"
+        );
+    }
+
     /// An agent tab showing a terminal, with no agent process behind it.
     ///
     /// Display-only: what these tests drive is the exit path, and a real CLI
@@ -2913,6 +3927,16 @@ mod tests {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         });
 
         let terminal_view = cx.new_window_entity(|window, cx| {
@@ -2953,8 +3977,8 @@ mod tests {
     /// this is where a wrong `cwd` would send the CLI at the wrong tree.
     ///
     /// No project and no filesystem any more: `agent_task` stopped reading the
-    /// project when phase 03 hoisted the cwd out of it, so a `FakeFs` here would
-    /// say this needs one when it does not.
+    /// project once the cwd was hoisted out of it, so a `FakeFs` here would say
+    /// this needs one when it does not.
     #[test]
     fn a_resumed_session_runs_its_own_arguments_in_its_own_directory() {
         let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
@@ -3049,9 +4073,9 @@ mod tests {
         }
     }
 
-    /// The reachability claim on `State::SessionGone`, asserted rather than left
-    /// as prose: Claude can always start under its own id, so the branch that
-    /// leads to that state never fires for it.
+    /// The reachability claim on `State::SessionGone` for a tracked tab, asserted
+    /// rather than left as prose: Claude can always start under its own id, so
+    /// that branch never fires for it.
     #[test]
     fn a_claude_session_that_vanished_starts_fresh_under_the_same_id() {
         let provider = agent_sessions::provider_for(AgentKind::Claude);
@@ -3116,6 +4140,145 @@ mod tests {
             std::path::PathBuf::from("/w/one"),
             "the directory comes back with the session, not from this window"
         );
+    }
+
+    /// The bug this asserts against: a fork opened as an untracked tab started
+    /// the CLI with no arguments, so nothing was forked and the tab held an
+    /// unrelated empty conversation.
+    #[test]
+    fn a_fork_is_launched_with_the_agents_own_fork_arguments_in_the_sources_directory() {
+        let id = "88888888-8888-8888-8888-888888888888";
+        for (kind, expected) in [
+            (
+                AgentKind::Claude,
+                ["--resume", id, "--fork-session"].as_slice(),
+            ),
+            (AgentKind::OpenCode, ["-s", id, "--fork"].as_slice()),
+        ] {
+            let provider = agent_sessions::provider_for(kind);
+            let SessionStart::Command(command) = start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Fork(id.into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                Some(summary(kind, id)),
+            ) else {
+                panic!("{} can fork, so a fork has a command", kind.label());
+            };
+            assert_eq!(command.args, expected, "{}", kind.label());
+            assert_eq!(
+                command.cwd,
+                std::path::PathBuf::from("/w/one"),
+                "a fork runs where its source ran, not where this window is pointed"
+            );
+        }
+    }
+
+    #[test]
+    fn continuing_a_session_never_carries_a_fork_argument() {
+        let id = "99999999-9999-9999-9999-999999999999";
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let SessionStart::Command(command) = start_for_intent(
+            provider.as_ref(),
+            &SessionIntent::Tracked(id.into()),
+            None,
+            Some(summary(AgentKind::Claude, id)),
+        ) else {
+            panic!("a session the store holds is resumed");
+        };
+        assert_eq!(command.args, ["--resume", id]);
+    }
+
+    #[test]
+    fn a_fork_whose_source_has_vanished_is_gone_rather_than_a_blank_session() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        assert!(matches!(
+            start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Fork("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                None,
+            ),
+            SessionStart::Gone
+        ));
+    }
+
+    /// The bug this asserts against: a fork whose source could not even be
+    /// looked up fell through to a blank session, which is the tab that presents
+    /// itself as a branch and holds none of the conversation.
+    #[test]
+    fn a_fork_whose_source_cannot_be_looked_up_is_gone_rather_than_a_blank_session() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        assert!(matches!(
+            start_after_lookup(
+                provider.as_ref(),
+                &SessionIntent::Fork(id.into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                id,
+                Err(anyhow::anyhow!("the store is unreadable")),
+            ),
+            SessionStart::Gone
+        ));
+    }
+
+    /// The other half of the same decision: a tracked tab owns its id, so a store
+    /// that cannot answer must not strand it -- it opens as every tab did before
+    /// sessions were tracked.
+    #[test]
+    fn a_tracked_tab_whose_lookup_fails_still_opens() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        let id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        assert!(matches!(
+            start_after_lookup(
+                provider.as_ref(),
+                &SessionIntent::Tracked(id.into()),
+                Some(std::path::PathBuf::from("/w/here")),
+                id,
+                Err(anyhow::anyhow!("the store is unreadable")),
+            ),
+            SessionStart::Fresh
+        ));
+    }
+
+    #[test]
+    fn an_agent_that_cannot_fork_starts_fresh_rather_than_refusing_to_start() {
+        let id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let provider = agent_sessions::provider_for(AgentKind::Codex);
+        assert!(matches!(
+            start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Fork(id.into()),
+                None,
+                Some(summary(AgentKind::Codex, id)),
+            ),
+            SessionStart::Fresh
+        ));
+    }
+
+    #[test]
+    fn a_tab_with_no_session_is_never_looked_up() {
+        let provider = agent_sessions::provider_for(AgentKind::Claude);
+        assert!(matches!(
+            start_for_intent(
+                provider.as_ref(),
+                &SessionIntent::Untracked,
+                Some(std::path::PathBuf::from("/w/here")),
+                Some(summary(
+                    AgentKind::Claude,
+                    "cccccccc-cccc-cccc-cccc-cccccccccccc"
+                )),
+            ),
+            SessionStart::Fresh
+        ));
+    }
+
+    /// A fork's source is a launch input, not an identity: writing it down as
+    /// the tab's session would bring the tab back on the original conversation.
+    #[test]
+    fn a_fork_owns_no_session_and_inherits_no_name() {
+        let origin = SessionOrigin::new(SessionIntent::Fork("source".into()), Some("a name"));
+        assert_eq!(origin.title, None);
+        assert_eq!(origin.intent, SessionIntent::Fork("source".into()));
     }
 
     /// **The commission.** Two tabs of one agent, two conversations, and each has
@@ -3360,6 +4523,16 @@ mod tests {
             _activity_tick: None,
             _subagent_tick: None,
             subagents: SubagentTracker::default(),
+            turns: TurnTracker::default(),
+            turn_silence: SilenceWatch::default(),
+            ticks_since_screen_read: 0,
+            attention: AgentAttention::default(),
+            in_view: false,
+            cli_gone: false,
+            #[cfg(any(test, feature = "test-support"))]
+            cli_alive_for_tests: false,
+            attention_shown: false,
+            _attention_watch: Vec::new(),
         });
 
         let left_behind = terminal_view.downgrade();
@@ -3971,6 +5144,189 @@ mod tests {
         });
     }
 
+    /// A name outlives the tab it was typed into: the session reopened in a new
+    /// tab -- from the history or the worktrees list, after the first tab
+    /// closed -- comes back under it, and the record is on disk for the next
+    /// launch.
+    #[gpui::test]
+    async fn a_rename_outlives_its_tab(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let origin = SessionOrigin::new(
+            SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+            Some("implement phase 3"),
+        );
+
+        let first = resumed_tab(&workspace, &project, origin.clone(), cx);
+        rename_to(&first, "review", cx);
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let first_id = first.entity_id();
+        drop(first);
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(first_id, false, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let reopened = resumed_tab(&workspace, &project, origin, cx);
+        reopened.read_with(cx, |view, _| {
+            assert_eq!(view.tab_label(), "review");
+            assert_eq!(
+                view.custom_name.as_ref().map(|name| name.as_ref()),
+                Some("review"),
+                "a name, not an inherited title -- or clearing it could not reveal the title"
+            );
+        });
+
+        let stored = names_on_disk(cx).await;
+        assert_eq!(
+            stored,
+            vec![(
+                "0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01".to_string(),
+                "review".to_string()
+            )],
+            "and it is on disk, where the next launch reads it from"
+        );
+    }
+
+    /// Clearing a name clears it for the session too, so the next tab onto it
+    /// comes back under the transcript's own title.
+    #[gpui::test]
+    async fn clearing_a_rename_forgets_it_for_the_session(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let origin = SessionOrigin::new(
+            SessionIntent::Tracked(SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01")),
+            Some("implement phase 3"),
+        );
+
+        let first = resumed_tab(&workspace, &project, origin.clone(), cx);
+        rename_to(&first, "review", cx);
+        rename_to(&first, "", cx);
+
+        let reopened = resumed_tab(&workspace, &project, origin, cx);
+        reopened.read_with(cx, |view, _| {
+            assert_eq!(view.tab_label(), "implement phase 3");
+        });
+        assert!(
+            names_on_disk(cx).await.is_empty(),
+            "the row written by the rename must be gone, not merely never written"
+        );
+    }
+
+    /// What the next launch would read, once every write queued before it has
+    /// landed.
+    ///
+    /// The writes go to the database's writer thread, which parking the
+    /// executor does not wait for. One more write is queued behind them and
+    /// awaited: the queue runs in order, so once it lands the others have.
+    async fn names_on_disk(cx: &mut gpui::VisualTestContext) -> Vec<(String, String)> {
+        let db = cx.update(|_, cx| persistence::AgentViewDb::global(cx));
+        db.save_session_name("written-last".to_string(), None)
+            .await
+            .expect("the sentinel write lands");
+        db.session_names().expect("the names table reads")
+    }
+
+    /// A tab with no name of its own that follows the CLI into a session the
+    /// user named takes that name, rather than writing "no name" over it.
+    #[gpui::test]
+    async fn following_into_a_named_session_keeps_its_name(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        cx.update(|_, cx| {
+            crate::SessionNames::global(cx).update(cx, |names, cx| {
+                names.set(Arc::from("destination"), Some("review".into()), cx)
+            });
+        });
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("source".into()), None),
+            cx,
+        );
+
+        view.update(cx, |view, cx| {
+            view.follow_session(summary(AgentKind::Claude, "destination"), cx)
+        });
+
+        view.read_with(cx, |view, _| assert_eq!(view.tab_label(), "review"));
+        assert_eq!(
+            names_on_disk(cx).await,
+            vec![("destination".to_string(), "review".to_string())]
+        );
+    }
+
+    /// A named tab that follows the CLI into a new session carries its name
+    /// there, so reopening the session it now shows finds it.
+    #[gpui::test]
+    async fn a_named_tab_carries_its_name_to_the_session_it_follows(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("source".into()), None),
+            cx,
+        );
+        rename_to(&view, "review", cx);
+
+        view.update(cx, |view, cx| {
+            view.follow_session(summary(AgentKind::Claude, "destination"), cx)
+        });
+
+        let names = cx.update(|_, cx| crate::SessionNames::global(cx));
+        names.read_with(cx, |names, _| {
+            assert_eq!(
+                names.name("destination").map(|name| name.as_ref()),
+                Some("review")
+            );
+        });
+    }
+
+    /// Deleting a session takes its name with it.
+    #[gpui::test]
+    async fn a_deleted_session_leaves_no_name_behind(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("doomed".into()), None),
+            cx,
+        );
+        rename_to(&view, "review", cx);
+
+        let store = cx.update(|_, cx| crate::SessionStore::install_global_for_test(Vec::new(), cx));
+        store.update(cx, |store, cx| store.forget("doomed", cx));
+        cx.run_until_parked();
+
+        assert!(
+            names_on_disk(cx).await.is_empty(),
+            "a deleted session's label must not stay in the table"
+        );
+    }
+
+    /// A fork is a new conversation and does not take its source's name.
+    #[gpui::test]
+    async fn a_fork_does_not_take_its_sources_name(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let id = SharedString::from("0b1e7f6a-3c4d-4f2a-9b8e-5d6c7a8b9c01");
+
+        let source = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(
+                SessionIntent::Tracked(id.clone()),
+                Some("implement phase 3"),
+            ),
+            cx,
+        );
+        rename_to(&source, "review", cx);
+
+        let fork = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Fork(id), Some("implement phase 3")),
+            cx,
+        );
+        fork.read_with(cx, |view, _| assert!(view.custom_name.is_none()));
+    }
+
     /// Typing what the tab already says is not a rename.
     ///
     /// The old rule compared the typed text against `display_name`, which was the
@@ -4040,21 +5396,7 @@ mod tests {
         assert_ne!(claude, agent_icon("something-else"));
     }
 
-    /// A workspace with `crate::init` already run, so the rail's actions are
-    /// registered on it and a dispatch reaches the real handler.
-    ///
-    /// Dispatching rather than calling the handler body is not thoroughness for
-    /// its own sake: `register_action` hands the handler a leased `Workspace`, and
-    /// a body that reaches back through a workspace handle aborts the process
-    /// under that lease while behaving perfectly when called directly. Only a
-    /// dispatch proves the real path.
-    async fn workspace_with_agents(
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<Workspace>,
-        Entity<project::Project>,
-        &mut gpui::VisualTestContext,
-    ) {
+    fn init_agents_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
@@ -4071,6 +5413,24 @@ mod tests {
             // asserted at all.
             workspace::register_project_item::<Editor>(cx);
         });
+    }
+
+    /// A workspace with `crate::init` already run, so the rail's actions are
+    /// registered on it and a dispatch reaches the real handler.
+    ///
+    /// Dispatching rather than calling the handler body is not thoroughness for
+    /// its own sake: `register_action` hands the handler a leased `Workspace`, and
+    /// a body that reaches back through a workspace handle aborts the process
+    /// under that lease while behaving perfectly when called directly. Only a
+    /// dispatch proves the real path.
+    async fn workspace_with_agents(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<project::Project>,
+        &mut gpui::VisualTestContext,
+    ) {
+        init_agents_test(cx);
 
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(path!("/test"), json!({ "a.rs": "fn a() {}" }))
@@ -4577,9 +5937,1027 @@ mod tests {
             "and stays in front, rather than leaving an empty pane behind"
         );
     }
+
+    /// What a sidebar counting waiting tabs relies on: `needs_attention` moves
+    /// with the user's eyes and the turn, and says so exactly once per move.
+    mod attention {
+        use super::*;
+        use agent_sessions::TurnMark;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use workspace::SerializableItem as _;
+
+        fn tab(
+            agent: &str,
+            intent: SessionIntent,
+            workspace: &Entity<Workspace>,
+            project: &Entity<project::Project>,
+            focus: bool,
+            cx: &mut gpui::VisualTestContext,
+        ) -> Entity<AgentView> {
+            let agent = AgentId::new(agent.to_string());
+            let project = project.clone();
+            workspace.update_in(cx, |workspace, window, cx| {
+                let handle = workspace.weak_handle();
+                let view = cx.new(|cx| {
+                    AgentView::test_new(
+                        agent,
+                        AgentViewMode::Terminal,
+                        project,
+                        handle,
+                        SessionOrigin::new(intent, None),
+                        cx,
+                    )
+                });
+                view.update(cx, |view, cx| view.watch_attention(window, cx));
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, focus, window, cx);
+                view
+            })
+        }
+
+        fn claude(
+            workspace: &Entity<Workspace>,
+            project: &Entity<project::Project>,
+            focus: bool,
+            cx: &mut gpui::VisualTestContext,
+        ) -> Entity<AgentView> {
+            let intent = SessionIntent::Tracked("session-one".into());
+            let view = tab(
+                project::CLAUDE_CODE_AGENT_ID,
+                intent,
+                workspace,
+                project,
+                focus,
+                cx,
+            );
+            cx.run_until_parked();
+            view
+        }
+
+        fn count_attention(
+            view: &Entity<AgentView>,
+            cx: &mut gpui::VisualTestContext,
+        ) -> (Rc<RefCell<usize>>, gpui::Subscription) {
+            let count = Rc::new(RefCell::new(0));
+            let subscription = cx.update(|_, cx| {
+                let count = count.clone();
+                cx.subscribe(view, move |_, event: &AgentViewEvent, _| {
+                    if matches!(event, AgentViewEvent::Attention) {
+                        *count.borrow_mut() += 1;
+                    }
+                })
+            });
+            (count, subscription)
+        }
+
+        fn needs(view: &Entity<AgentView>, cx: &mut gpui::VisualTestContext) -> bool {
+            view.read_with(cx, |view, _| view.needs_attention())
+        }
+
+        fn focus(view: &Entity<AgentView>, cx: &mut gpui::VisualTestContext) {
+            view.update_in(cx, |view, window, cx| {
+                let handle = view.focus_handle.clone();
+                window.focus(&handle, cx);
+            });
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        async fn attention_is_raised_once_per_change(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                cx.emit(AgentViewEvent::Activity);
+                cx.emit(AgentViewEvent::Activity);
+            });
+            assert!(needs(&view, cx));
+            assert_eq!(*count.borrow(), 1, "a repeated end is not a change");
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Started], cx);
+            });
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 2);
+
+            let before = *count.borrow();
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended, TurnEvent::Interrupted], cx);
+            });
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), before, "an end cut short never flashes");
+        }
+
+        #[gpui::test]
+        async fn an_attention_event_costs_no_database_write(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            view.read_with(cx, |view, _| {
+                assert!(!view.should_serialize(&AgentViewEvent::Attention));
+            });
+            let mut forwarded = 0;
+            <AgentView as workspace::item::Item>::to_item_events(
+                &AgentViewEvent::Attention,
+                &mut |_| {
+                    forwarded += 1;
+                },
+            );
+            assert_eq!(forwarded, 0);
+        }
+
+        #[gpui::test]
+        async fn a_pending_approval_counts_even_while_the_tab_is_focused(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| view.simulate_approval(true, cx));
+            assert!(needs(&view, cx));
+            assert_eq!(*count.borrow(), 1);
+
+            focus(&view, cx);
+            assert!(needs(&view, cx), "looking at a dialog does not answer it");
+
+            view.update(cx, |view, cx| view.simulate_approval(false, cx));
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 2);
+        }
+
+        #[gpui::test]
+        async fn focusing_the_tab_clears_an_unread_end(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx));
+
+            focus(&view, cx);
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 2);
+        }
+
+        #[gpui::test]
+        async fn a_turn_ending_under_the_users_eyes_is_never_unread(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+
+            assert!(!needs(&view, cx));
+            assert_eq!(*count.borrow(), 0);
+        }
+
+        #[gpui::test]
+        async fn a_blurred_window_counts_as_not_looking_until_it_returns(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+
+            cx.deactivate_window();
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx), "the window was not looking at it");
+
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            assert!(
+                !needs(&view, cx),
+                "back in an active window with the keyboard still inside the tab"
+            );
+        }
+
+        /// Focus-out must reach a tab whose workspace stops being the active
+        /// one. Otherwise `in_view` stays true and a turn ending in the
+        /// background is taken for one the user watched.
+        #[gpui::test]
+        async fn a_tab_in_a_workspace_that_was_switched_away_from_is_not_in_view(
+            cx: &mut TestAppContext,
+        ) {
+            init_agents_test(cx);
+            let fs = FakeFs::new(cx.executor());
+            fs.insert_tree(path!("/test"), json!({})).await;
+            fs.insert_tree(path!("/other"), json!({})).await;
+            let project = project::Project::test(fs.clone(), [path!("/test").as_ref()], cx).await;
+            let other = project::Project::test(fs, [path!("/other").as_ref()], cx).await;
+            let (multi, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi.read_with(cx, |multi, _| multi.workspace().clone());
+            let view = claude(&workspace, &project, true, cx);
+            focus(&view, cx);
+            assert!(view.read_with(cx, |view, _| view.in_view));
+
+            multi.update_in(cx, |multi, window, cx| {
+                multi.test_enable_background_retention(cx);
+                multi.test_add_workspace(other, window, cx);
+            });
+            cx.run_until_parked();
+            assert!(
+                multi.read_with(cx, |multi, _| multi.workspace() != &workspace),
+                "the first workspace must have been swapped out for this to mean anything"
+            );
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(
+                needs(&view, cx),
+                "a turn ending in a workspace nobody is looking at is unread"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_dead_cli_or_a_reset_clears_everything(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                view.simulate_approval(true, cx);
+            });
+            assert!(needs(&view, cx));
+
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+            assert!(
+                needs(&view, cx),
+                "the approval belongs to the turn tracker, which a dead CLI does not reset"
+            );
+            view.update(cx, |view, cx| view.end_previous_mode(cx));
+            assert!(!needs(&view, cx));
+            view.read_with(cx, |view, _| assert!(!view.turns.awaiting_approval()));
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx));
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+            assert!(!needs(&view, cx));
+        }
+
+        #[gpui::test]
+        async fn a_restarted_transcript_drops_the_unread_end(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            let (count, _subscription) = count_attention(&view, cx);
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx));
+
+            view.update(cx, |view, cx| view.on_transcript_restarted(cx));
+
+            assert!(
+                !needs(&view, cx),
+                "the end belonged to a conversation that is gone"
+            );
+            assert_eq!(*count.borrow(), 2);
+        }
+
+        #[gpui::test]
+        async fn an_end_arriving_after_the_cli_exited_is_not_unread(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(
+                !needs(&view, cx),
+                "no tick is left to retract a flag set on a dead CLI"
+            );
+
+            view.update(cx, |view, cx| view.end_previous_mode(cx));
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx)
+            });
+            assert!(needs(&view, cx), "a fresh start listens again");
+        }
+
+        #[gpui::test]
+        async fn a_resumed_sessions_past_turns_are_not_news(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = claude(&workspace, &project, false, cx);
+
+            view.update(cx, |view, cx| {
+                let events = view.turns.apply(TurnPass {
+                    marks: &[
+                        TurnMark::Prompt,
+                        TurnMark::EndTurn {
+                            message_id: Some("m1".into()),
+                        },
+                        TurnMark::TurnDuration {
+                            background_pending: false,
+                        },
+                    ],
+                    finished: &[],
+                    live: false,
+                    background_quiet_for: None,
+                });
+                view.simulate_turn_events(&events, cx);
+            });
+
+            assert!(!needs(&view, cx));
+        }
+
+        #[gpui::test]
+        async fn a_tab_that_does_not_report_turns_never_needs_attention(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let tracked = || SessionIntent::Tracked("session-one".into());
+            let codex = tab(
+                project::CODEX_AGENT_ID,
+                tracked(),
+                &workspace,
+                &project,
+                false,
+                cx,
+            );
+            let untracked = tab(
+                project::CLAUDE_CODE_AGENT_ID,
+                SessionIntent::Untracked,
+                &workspace,
+                &project,
+                false,
+                cx,
+            );
+            cx.run_until_parked();
+
+            for view in [&codex, &untracked] {
+                let (count, _subscription) = count_attention(view, cx);
+                view.update(cx, |view, cx| {
+                    view.simulate_turn_events(&[TurnEvent::Ended], cx);
+                    view.simulate_approval(true, cx);
+                });
+                assert!(!needs(view, cx));
+                assert_eq!(*count.borrow(), 0);
+            }
+        }
+    }
+
+    /// A tab that keeps up with the session it runs: through a conversation
+    /// cleared under it, onto the very copy that was vetted, and out of a wait
+    /// that never ends.
+    mod following {
+        use super::*;
+        use agent_sessions::SessionProvider;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use workspace::SerializableItem as _;
+
+        const ONE: &str = "00000000-0000-4000-8000-000000000001";
+        const TWO: &str = "00000000-0000-4000-8000-000000000002";
+
+        fn tracked(id: &str) -> SessionOrigin {
+            SessionOrigin::new(
+                SessionIntent::Tracked(id.to_string().into()),
+                Some("a title"),
+            )
+        }
+
+        fn count_events(
+            view: &Entity<AgentView>,
+            cx: &mut gpui::VisualTestContext,
+            matching: fn(&AgentViewEvent) -> bool,
+        ) -> (Rc<RefCell<usize>>, gpui::Subscription) {
+            let count = Rc::new(RefCell::new(0));
+            let subscription = cx.update(|_, cx| {
+                let count = count.clone();
+                cx.subscribe(view, move |_, event: &AgentViewEvent, _| {
+                    if matching(event) {
+                        *count.borrow_mut() += 1;
+                    }
+                })
+            });
+            (count, subscription)
+        }
+
+        #[gpui::test]
+        async fn a_cleared_conversation_is_followed_under_its_new_id(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            let (updates, _subscription) = count_events(&view, cx, |event| {
+                matches!(event, AgentViewEvent::UpdateTab)
+            });
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+            });
+            assert!(view.read_with(cx, |view, _| view.needs_attention()));
+
+            view.update(cx, |view, cx| {
+                view.simulate_followed_session(summary(AgentKind::Claude, TWO), cx);
+            });
+
+            view.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.session_id(),
+                    Some(TWO),
+                    "a restart and a remote device both mean the conversation on screen"
+                );
+                assert!(
+                    !view.needs_attention(),
+                    "the unread end belonged to the conversation that was cleared"
+                );
+                assert_eq!(
+                    view.origin.title.as_ref().map(|title| title.as_ref()),
+                    Some("a title"),
+                    "the label the person was aiming at does not move"
+                );
+                assert_eq!(
+                    view.origin.anchor.as_ref().map(|session| &*session.id),
+                    Some(TWO)
+                );
+                assert!(view.should_serialize(&AgentViewEvent::UpdateTab));
+            });
+            assert_eq!(*updates.borrow(), 1, "the new id is worth writing down");
+        }
+
+        /// What the notifier reads after a clear: turn marks from the new
+        /// transcript, not silence from the old one.
+        #[gpui::test]
+        async fn after_following_a_session_the_silence_starts_over(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+            assert!(view.read_with(cx, |view, _| !view.reports_turns()));
+
+            view.update(cx, |view, cx| {
+                view.simulate_followed_session(summary(AgentKind::Claude, TWO), cx);
+            });
+
+            assert!(
+                view.read_with(cx, |view, _| view.reports_turns()),
+                "a transcript that was never read has not yet proved silent"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_transcript_that_never_marks_hands_the_tab_back_to_the_heuristic(
+            cx: &mut TestAppContext,
+        ) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            let (attention, _subscription) = count_events(&view, cx, |event| {
+                matches!(event, AgentViewEvent::Attention)
+            });
+            view.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+            });
+            assert!(view.read_with(cx, |view, _| view.reports_turns() && view.needs_attention()));
+            assert_eq!(*attention.borrow(), 1);
+
+            view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+
+            view.read_with(cx, |view, _| {
+                assert!(
+                    !view.reports_turns(),
+                    "the notifier reads this per event, so the pty edges count again"
+                );
+                assert!(
+                    !view.needs_attention(),
+                    "a badge must not stay lit off a transcript that is not being read"
+                );
+            });
+            assert_eq!(*attention.borrow(), 2, "the badge going out is announced");
+
+            view.update(cx, |view, cx| view.simulate_turn_marks(cx));
+            assert!(
+                view.read_with(cx, |view, _| view.reports_turns()),
+                "marks arriving late prove the transcript works"
+            );
+            assert!(view.read_with(cx, |view, _| view.needs_attention()));
+        }
+
+        #[gpui::test]
+        async fn a_tab_that_marks_normally_never_falls_back(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            view.update(cx, |view, cx| view.simulate_turn_marks(cx));
+            view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+            assert!(
+                view.read_with(cx, |view, _| view.reports_turns()),
+                "a tab that has produced marks is not one whose transcript is unreadable"
+            );
+        }
+
+        #[gpui::test]
+        async fn restarting_forgets_the_subagents_of_the_process_being_replaced(
+            cx: &mut TestAppContext,
+        ) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            let running = agent_sessions::SubagentSummary {
+                id: "agent-bg".into(),
+                kind: "reviewer".into(),
+                description: "Review".into(),
+                tool_use_id: "toolu_bg".into(),
+                background: true,
+                spawned_at: std::time::UNIX_EPOCH,
+            };
+            view.update(cx, |view, cx| {
+                view.simulate_subagent_pass(vec![running], &[], cx);
+            });
+            view.update(cx, |view, cx| view.simulate_cli_ended(cx));
+            assert!(
+                view.read_with(cx, |view, _| view.any_subagent_running()),
+                "the record outlives the process that left it open"
+            );
+
+            view.update(cx, |view, cx| view.end_previous_mode(cx));
+
+            view.read_with(cx, |view, _| {
+                assert!(!view.any_subagent_running());
+                assert!(view.subagents.subagents().is_empty());
+            });
+        }
+
+        #[gpui::test]
+        async fn a_new_session_does_not_wear_the_old_ones_name(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            rename_to(&view, "my own name", cx);
+            assert_eq!(
+                view.read_with(cx, |view, _| view.tab_label()),
+                SharedString::from("my own name")
+            );
+
+            view.update_in(cx, |view, window, cx| view.start_new_session(window, cx));
+
+            view.read_with(cx, |view, _| {
+                assert!(view.custom_name.is_none());
+                assert!(view.session_id().is_none());
+                assert_eq!(
+                    view.tab_label(),
+                    SharedString::from("Claude Code"),
+                    "the tab is called after its agent again"
+                );
+            });
+        }
+
+        /// Clearing the conversation happens at an idle prompt. A tab in the middle
+        /// of a turn that has gone quiet is a long build, and looking for a
+        /// successor then is how it comes to take another session's transcript.
+        #[gpui::test]
+        async fn a_tab_in_the_middle_of_a_turn_does_not_look_for_a_successor(
+            cx: &mut TestAppContext,
+        ) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            view.update(cx, |view, cx| {
+                view.simulate_cli_alive(true, cx);
+                // Marks came, then stopped while the CLI kept writing.
+                view.turn_silence.saw_marks();
+                view.turn_silence
+                    .observe(true, std::time::Duration::from_secs(30));
+            });
+            let search_skips = |view: &Entity<AgentView>, cx: &mut gpui::VisualTestContext| {
+                view.update(cx, |view, cx| {
+                    view.next_subagent_request(true, std::time::SystemTime::now(), cx)
+                        .map(|request| request.search_skips().is_some())
+                })
+            };
+
+            view.update(cx, |view, _| {
+                view.turns.apply(TurnPass {
+                    marks: &[agent_sessions::TurnMark::Prompt],
+                    finished: &[],
+                    live: true,
+                    background_quiet_for: None,
+                });
+            });
+            assert_eq!(
+                search_skips(&view, cx),
+                Some(false),
+                "a turn is running, so nothing was cleared"
+            );
+
+            view.update(cx, |view, _| {
+                view.turns.apply(TurnPass {
+                    marks: &[
+                        agent_sessions::TurnMark::EndTurn { message_id: None },
+                        agent_sessions::TurnMark::TurnDuration {
+                            background_pending: false,
+                        },
+                    ],
+                    finished: &[],
+                    live: true,
+                    background_quiet_for: None,
+                });
+            });
+            assert_eq!(
+                search_skips(&view, cx),
+                Some(true),
+                "between turns, a transcript that stopped growing may have been left"
+            );
+        }
+
+        /// Two tabs stalled in the same second find the same transcript, each
+        /// with a list of what the other follows taken before the other moved.
+        #[gpui::test]
+        async fn two_tabs_never_follow_the_same_session(cx: &mut TestAppContext) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let first = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            let second = resumed_tab(&workspace, &project, tracked(TWO), cx);
+            let (second_updates, _subscription) = count_events(&second, cx, |event| {
+                matches!(event, AgentViewEvent::UpdateTab)
+            });
+            second.update(cx, |view, cx| {
+                view.simulate_turn_events(&[TurnEvent::Ended], cx);
+            });
+            let third = "00000000-0000-4000-8000-000000000003";
+
+            first.update(cx, |view, cx| {
+                view.simulate_followed_session(summary(AgentKind::Claude, third), cx);
+            });
+            second.update(cx, |view, cx| {
+                view.simulate_followed_session(summary(AgentKind::Claude, third), cx);
+            });
+
+            assert_eq!(
+                first.read_with(cx, |view, _| view.session_id().map(str::to_owned)),
+                Some(third.into())
+            );
+            second.read_with(cx, |view, _| {
+                assert_eq!(
+                    view.session_id(),
+                    Some(TWO),
+                    "the first tab got there first"
+                );
+                assert!(
+                    view.needs_attention(),
+                    "and nothing of this tab was reset for a move it did not make"
+                );
+            });
+            assert_eq!(*second_updates.borrow(), 0);
+        }
+
+        /// The marks that bring a silent transcript back hold every turn it has
+        /// had, the ones the pty heuristic announced among them. Taken as news
+        /// they would announce the same turn a second time.
+        #[gpui::test]
+        async fn the_marks_that_end_a_fallback_are_the_past(cx: &mut TestAppContext) {
+            use agent_sessions::TurnMark;
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            let (turns, _subscription) =
+                count_events(&view, cx, |event| matches!(event, AgentViewEvent::Turn(_)));
+            let a_turn = |reply: &str| {
+                vec![
+                    TurnMark::Prompt,
+                    TurnMark::EndTurn {
+                        message_id: Some(reply.into()),
+                    },
+                    TurnMark::TurnDuration {
+                        background_pending: false,
+                    },
+                ]
+            };
+
+            // The transcript does not exist when the tab opens, so everything
+            // written to it later is news -- until the tab has given up on it.
+            view.update(cx, |view, cx| {
+                view.simulate_transcript_pass(Vec::new(), 0, cx)
+            });
+            view.update(cx, |view, cx| view.simulate_transcript_silence(cx));
+            assert!(view.read_with(cx, |view, _| !view.reports_turns()));
+
+            view.update(cx, |view, cx| {
+                view.simulate_transcript_pass(a_turn("m1"), 100, cx)
+            });
+            assert!(view.read_with(cx, |view, _| view.reports_turns()));
+            assert_eq!(
+                *turns.borrow(),
+                0,
+                "what was already there is not announced"
+            );
+            assert!(view.read_with(cx, |view, _| !view.needs_attention()));
+
+            view.update(cx, |view, cx| {
+                view.simulate_transcript_pass(a_turn("m2"), 200, cx)
+            });
+            assert_eq!(
+                *turns.borrow(),
+                2,
+                "a turn written after that is a start and an end, as ever"
+            );
+            assert!(view.read_with(cx, |view, _| view.needs_attention()));
+        }
+
+        /// A provider that, asked for the id, answers with a copy other than the
+        /// one the caller vetted.
+        struct AnswersWithAnotherCopy(Option<agent_sessions::SessionSummary>);
+
+        impl SessionProvider for AnswersWithAnotherCopy {
+            fn agent(&self) -> AgentKind {
+                AgentKind::Claude
+            }
+            fn availability(&self) -> agent_sessions::Availability {
+                agent_sessions::Availability::Ready
+            }
+            fn list(&self) -> anyhow::Result<Vec<agent_sessions::SessionSummary>> {
+                Ok(self.0.iter().cloned().collect())
+            }
+            fn find(&self, _id: &str) -> anyhow::Result<Option<agent_sessions::SessionSummary>> {
+                Ok(self.0.clone())
+            }
+            fn new_session_command(
+                &self,
+                _id: &str,
+                _cwd: &std::path::Path,
+            ) -> Option<AgentCommand> {
+                None
+            }
+            fn counts(
+                &self,
+                _session: &agent_sessions::SessionSummary,
+            ) -> anyhow::Result<agent_sessions::SessionCounts> {
+                Ok(agent_sessions::SessionCounts::default())
+            }
+            fn resume_command(
+                &self,
+                session: &agent_sessions::SessionSummary,
+                _fork: Fork,
+            ) -> Option<AgentCommand> {
+                Some(AgentCommand {
+                    program: "claude".into(),
+                    args: vec!["--resume".into(), session.id.to_string()],
+                    cwd: session.cwd.clone(),
+                })
+            }
+            fn deletion(
+                &self,
+                _session: &agent_sessions::SessionSummary,
+            ) -> agent_sessions::Deletion {
+                agent_sessions::Deletion::Nothing
+            }
+        }
+
+        fn copy(cwd: &str, log: Option<PathBuf>) -> agent_sessions::SessionSummary {
+            agent_sessions::SessionSummary {
+                cwd: PathBuf::from(cwd),
+                log_path: log,
+                ..summary(AgentKind::Claude, ONE)
+            }
+        }
+
+        /// The same id under two project directories: the host vetted one, and
+        /// the store, asked by id, answers with the other.
+        #[test]
+        fn a_tab_runs_the_copy_that_was_vetted_and_not_the_one_a_lookup_finds_first() {
+            let directory = tempfile::tempdir().unwrap();
+            let vetted_log = directory.path().join("vetted.jsonl");
+            std::fs::write(&vetted_log, "{}\n").unwrap();
+            let vetted = copy("/inside/an/open/folder", Some(vetted_log));
+            let other = copy("/outside/every/open/folder", None);
+            let provider = AnswersWithAnotherCopy(Some(other.clone()));
+
+            assert_eq!(
+                lookup_session(&provider, ONE, None).unwrap(),
+                Some(other),
+                "with nothing pinned the store's answer stands"
+            );
+
+            let found = lookup_session(&provider, ONE, Some(vetted.clone())).unwrap();
+            assert_eq!(found, Some(vetted));
+
+            let SessionStart::Command(command) =
+                session_start(&provider, ONE, Some(PathBuf::from("/default")), found)
+            else {
+                panic!("a session the store holds is resumed");
+            };
+            assert_eq!(
+                command.cwd,
+                PathBuf::from("/inside/an/open/folder"),
+                "the CLI runs where the vetted copy ran"
+            );
+        }
+
+        #[test]
+        fn a_vetted_copy_whose_transcript_has_gone_is_not_replaced_by_another() {
+            let directory = tempfile::tempdir().unwrap();
+            let vetted = copy("/inside", Some(directory.path().join("deleted.jsonl")));
+            let provider = AnswersWithAnotherCopy(Some(copy("/outside", None)));
+
+            assert_eq!(
+                lookup_session(&provider, ONE, Some(vetted)).unwrap(),
+                None,
+                "a copy nobody vetted is not what the host agreed to start"
+            );
+        }
+
+        /// A store whose sessions are rows can have a session with no transcript
+        /// on disk, and its own answer is the one that counts.
+        #[test]
+        fn a_vetted_session_with_no_transcript_file_of_its_own_still_stands() {
+            let vetted = copy("/inside", None);
+            let provider = AnswersWithAnotherCopy(Some(copy("/outside", None)));
+            assert_eq!(
+                lookup_session(&provider, ONE, Some(vetted.clone())).unwrap(),
+                Some(vetted),
+            );
+        }
+
+        #[test]
+        fn a_vetted_copy_the_store_agrees_on_is_the_stores_own_summary() {
+            let vetted = copy("/inside", Some(PathBuf::from("/nowhere/at/all.jsonl")));
+            let fresher = agent_sessions::SessionSummary {
+                title: "retitled since".into(),
+                ..vetted.clone()
+            };
+            let provider = AnswersWithAnotherCopy(Some(fresher.clone()));
+            assert_eq!(
+                lookup_session(&provider, ONE, Some(vetted)).unwrap(),
+                Some(fresher),
+                "the same copy, so the store's word on it stands, even with its file out of sight"
+            );
+        }
+
+        #[test]
+        fn a_session_the_store_no_longer_holds_is_gone_whatever_was_vetted() {
+            let provider = AnswersWithAnotherCopy(None);
+            assert_eq!(
+                lookup_session(&provider, ONE, Some(copy("/inside", None))).unwrap(),
+                None
+            );
+        }
+
+        #[gpui::test]
+        async fn resuming_a_session_pins_the_tab_to_the_summary_it_was_given(
+            cx: &mut TestAppContext,
+        ) {
+            let (workspace, _project, cx) = workspace_with_agents(cx).await;
+            let session = agent_sessions::SessionSummary {
+                cwd: std::env::temp_dir(),
+                title: "vetted".into(),
+                ..summary(AgentKind::Claude, ONE)
+            };
+
+            cx.update(|window, cx| {
+                crate::resume_session(&workspace, &session, Fork::Continue, window, cx);
+            });
+            cx.run_until_parked();
+
+            let anchor = workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .items_of_type::<AgentView>(cx)
+                    .next()
+                    .expect("the tab opened")
+                    .read(cx)
+                    .origin
+                    .anchor
+                    .clone()
+            });
+            assert_eq!(anchor, Some(session));
+        }
+
+        /// The check stats the session's folder, which is as slow as a stalled mount
+        /// is. A task that is not ready until the executor runs it is one the
+        /// foreground did not do.
+        #[gpui::test]
+        async fn whether_a_session_may_be_resumed_is_decided_off_the_foreground(
+            cx: &mut TestAppContext,
+        ) {
+            let (_workspace, _project, cx) = workspace_with_agents(cx).await;
+            let session = agent_sessions::SessionSummary {
+                cwd: std::env::temp_dir(),
+                ..summary(AgentKind::Claude, ONE)
+            };
+
+            let refusal = cx
+                .update(|_, cx| crate::resume_refusal_in_background(&session, Fork::Continue, cx));
+            assert!(!refusal.is_ready(), "nothing was stat-ed on this thread");
+            assert_eq!(refusal.await, None);
+        }
+
+        #[gpui::test]
+        async fn resuming_a_session_whose_folder_is_gone_opens_nothing(cx: &mut TestAppContext) {
+            let (workspace, _project, cx) = workspace_with_agents(cx).await;
+            let session = agent_sessions::SessionSummary {
+                cwd: std::env::temp_dir().join("agent-ui-resume-no-such-folder"),
+                ..summary(AgentKind::Claude, ONE)
+            };
+
+            cx.update(|window, cx| {
+                crate::resume_session(&workspace, &session, Fork::Continue, window, cx);
+            });
+            cx.run_until_parked();
+
+            assert_eq!(agent_tabs(&workspace, cx), 0);
+        }
+
+        #[gpui::test]
+        async fn two_requests_for_one_session_before_its_tab_exists_open_one_tab(
+            cx: &mut TestAppContext,
+        ) {
+            let (workspace, _project, cx) = workspace_with_agents(cx).await;
+            let open = |cx: &mut gpui::VisualTestContext| {
+                workspace.update_in(cx, |workspace, window, cx| {
+                    AgentView::open_tracked(
+                        workspace,
+                        project::CLAUDE_CODE_AGENT_ID,
+                        tracked(ONE),
+                        window,
+                        cx,
+                    );
+                });
+            };
+
+            open(cx);
+            open(cx);
+            cx.run_until_parked();
+
+            assert_eq!(
+                agent_tabs(&workspace, cx),
+                1,
+                "a relay retry or a double tap must not put two CLIs on one transcript"
+            );
+
+            workspace.update_in(cx, |workspace, window, cx| {
+                AgentView::open_tracked(
+                    workspace,
+                    project::CLAUDE_CODE_AGENT_ID,
+                    tracked(TWO),
+                    window,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                agent_tabs(&workspace, cx),
+                2,
+                "another session is another tab"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_session_is_claimed_the_moment_it_is_asked_for_and_released_once_its_tab_exists(
+            cx: &mut TestAppContext,
+        ) {
+            let (workspace, _project, cx) = workspace_with_agents(cx).await;
+            workspace.update_in(cx, |workspace, window, cx| {
+                AgentView::open_tracked(
+                    workspace,
+                    project::CLAUDE_CODE_AGENT_ID,
+                    tracked(ONE),
+                    window,
+                    cx,
+                );
+            });
+            assert_eq!(
+                cx.update(|_, cx| agent_tabs::claims_outstanding(cx)),
+                1,
+                "recorded before the deferred task runs, which is the whole point"
+            );
+
+            cx.run_until_parked();
+
+            assert_eq!(
+                cx.update(|_, cx| agent_tabs::claims_outstanding(cx)),
+                0,
+                "the tab itself answers for the session from here"
+            );
+        }
+
+        /// The claim is for the gap before the tab exists, and a request whose
+        /// window is closed in that gap never builds one. Left in place it would
+        /// refuse every later request for the session until the process ended.
+        #[gpui::test]
+        async fn a_request_that_opens_nothing_still_releases_its_claim(cx: &mut TestAppContext) {
+            let (workspace, _project, cx) = workspace_with_agents(cx).await;
+            workspace.update_in(cx, |workspace, window, cx| {
+                AgentView::open_tracked(
+                    workspace,
+                    project::CLAUDE_CODE_AGENT_ID,
+                    tracked(ONE),
+                    window,
+                    cx,
+                );
+            });
+            assert_eq!(cx.update(|_, cx| agent_tabs::claims_outstanding(cx)), 1);
+
+            cx.update(|window, _| window.remove_window());
+            cx.run_until_parked();
+
+            assert_eq!(
+                cx.cx.update(|cx| agent_tabs::claims_outstanding(cx)),
+                0,
+                "no tab came of it, and nothing may keep the session claimed"
+            );
+        }
+    }
 }
 
-mod persistence {
+pub(crate) mod persistence {
     use anyhow::Context as _;
     use db::{
         sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
@@ -4686,6 +7064,19 @@ mod persistence {
             sql!(
                 ALTER TABLE agent_views ADD COLUMN session_title TEXT;
             ),
+            // The name the user gave a session, keyed by the session rather than
+            // by the tab showing it.
+            //
+            // `agent_views.name` goes when its tab closes, so a session renamed,
+            // closed and reopened from a list came back under its transcript's
+            // title. Without a workspace for the same reason: the session is the
+            // same conversation whichever window reopens it.
+            sql!(
+                CREATE TABLE agent_session_names(
+                    session_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL
+                ) STRICT;
+            ),
         ];
     }
 
@@ -4789,6 +7180,43 @@ mod persistence {
                 session_id: row.3,
                 session_title: row.4,
             })
+        }
+
+        /// Every session the user has named.
+        pub fn session_names(&self) -> anyhow::Result<Vec<(String, String)>> {
+            self.select::<(String, String)>(sql!(
+                SELECT session_id, name FROM agent_session_names
+            ))?()
+        }
+
+        /// Names a session, or forgets its name when `name` is `None`.
+        pub async fn save_session_name(
+            &self,
+            session_id: String,
+            name: Option<String>,
+        ) -> anyhow::Result<()> {
+            self.write(move |connection| match name {
+                Some(name) => {
+                    let sql_stmt = sql!(
+                        INSERT OR REPLACE INTO agent_session_names(session_id, name) VALUES (?, ?)
+                    );
+                    connection.exec_bound::<(String, String)>(sql_stmt)?((session_id, name))
+                        .context(format!(
+                            "exec_bound failed to execute or parse for: {}",
+                            sql_stmt
+                        ))
+                }
+                None => {
+                    let sql_stmt = sql!(
+                        DELETE FROM agent_session_names WHERE session_id = ?
+                    );
+                    connection.exec_bound::<String>(sql_stmt)?(session_id).context(format!(
+                        "exec_bound failed to execute or parse for: {}",
+                        sql_stmt
+                    ))
+                }
+            })
+            .await
         }
 
         /// Drops the rows of tabs the workspace did not bring back.

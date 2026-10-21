@@ -6,7 +6,7 @@ use agent_sessions::{AgentKind, SessionSummary};
 use collections::HashSet;
 use gpui::{Context, Window};
 use std::path::{Path, PathBuf};
-use ui::{Divider, DividerColor, ScrollAxes, Scrollbars, Tooltip, WithScrollbar as _, prelude::*};
+use ui::{ScrollAxes, Scrollbars, Tab, Tooltip, WithScrollbar as _, prelude::*};
 
 /// One line of the list. Three levels, outermost first.
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +54,7 @@ pub(crate) enum Row {
 /// window, which is the only way to test them honestly.
 pub(crate) fn rows(
     sessions: &[SessionSummary],
+    names: Option<&crate::SessionNames>,
     roots: &[PathBuf],
     query: &str,
     collapsed_agents: &HashSet<AgentKind>,
@@ -66,7 +67,8 @@ pub(crate) fn rows(
     // and a map would throw that away and need it sorted back.
     let mut agents: Vec<(AgentKind, Vec<(PathBuf, Vec<SessionSummary>)>)> = Vec::new();
     for session in sessions {
-        if !session.is_within(roots) || !matches(session, &query) {
+        let name = names.and_then(|names| names.name(&session.id));
+        if !session.is_within(roots) || !matches(session, name, &query) {
             continue;
         }
         let index = match agents.iter().position(|(agent, _)| *agent == session.agent) {
@@ -115,8 +117,11 @@ pub(crate) fn rows(
 ///
 /// Not fuzzy: the list is short and a fuzzy match that quietly reorders results
 /// makes "why is that one still here" a harder question than it needs to be.
-fn matches(session: &SessionSummary, query: &str) -> bool {
+fn matches(session: &SessionSummary, name: Option<&SharedString>, query: &str) -> bool {
     if query.is_empty() {
+        return true;
+    }
+    if name.is_some_and(|name| name.to_lowercase().contains(query)) {
         return true;
     }
     let haystacks = [
@@ -172,8 +177,10 @@ impl Render for AgentHistoryPanel {
                 .next()
                 .is_some();
         let query = self.query(cx);
+        let names = crate::SessionNames::try_global(cx);
         let rows = rows(
             self.sessions(cx),
+            names.as_ref().map(|names| names.read(cx)),
             &roots,
             &query,
             &self.collapsed_agents,
@@ -190,7 +197,6 @@ impl Render for AgentHistoryPanel {
             .size_full()
             .bg(background)
             .child(self.render_search(has_project_sessions, cx))
-            .child(Divider::horizontal().color(DividerColor::Border))
             .child(if rows.is_empty() {
                 self.render_empty(&roots, &query, cx).into_any_element()
             } else {
@@ -224,49 +230,53 @@ impl AgentHistoryPanel {
         h_flex()
             .flex_none()
             .w_full()
+            .h(Tab::container_height(cx))
             .px_2()
-            .py_1p5()
-            .gap_1p5()
+            .gap_1()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(colors.panel_background)
             .child(
                 Icon::new(IconName::MagnifyingGlass)
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
             .child(div().flex_1().child(self.filter_editor.clone()))
-            .children(self.loading.then(|| {
-                Label::new("Reading…")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
-            }))
-            .children((!self.loading).then(|| {
-                IconButton::new("agent-history-refresh", IconName::ArrowCircle)
-                    .icon_size(IconSize::Small)
-                    .tooltip(|_window, cx| Tooltip::simple("Refresh", cx))
-                    .on_click(cx.listener(|this, _, _window, cx| this.refresh(cx)))
-            }))
             .child(
-                // Wrapped because `IconButton` carries no `debug_selector` of
-                // its own, and a control that deletes everything should be
-                // reachable from a test.
-                div()
-                    .debug_selector(|| "agent-history-delete-all".into())
+                h_flex()
+                    .gap_0p5()
                     .child(
-                        IconButton::new("agent-history-delete-all", IconName::Trash)
+                        IconButton::new("agent-history-refresh", IconName::RotateCw)
                             .icon_size(IconSize::Small)
-                            // Disabled rather than hidden: a control that
-                            // vanishes sends people hunting for a feature they
-                            // used yesterday.
-                            .disabled(self.loading || self.deleting || !has_project_sessions)
-                            .loading(self.deleting)
-                            .tooltip(|_window, cx| {
-                                Tooltip::simple("Delete all sessions for this project", cx)
-                            })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.delete_all(window, cx)),
+                            .loading(self.loading)
+                            .tooltip(|_window, cx| Tooltip::simple("Refresh", cx))
+                            .on_click(cx.listener(|this, _, _window, cx| this.refresh(cx))),
+                    )
+                    .child(
+                        // Wrapped because `IconButton` carries no
+                        // `debug_selector` of its own, and a control that
+                        // deletes everything should be reachable from a test.
+                        div()
+                            .debug_selector(|| "agent-history-delete-all".into())
+                            .child(
+                                IconButton::new("agent-history-delete-all", IconName::Trash)
+                                    .icon_size(IconSize::Small)
+                                    // Disabled rather than hidden: a control
+                                    // that vanishes sends people hunting for a
+                                    // feature they used yesterday.
+                                    .disabled(
+                                        self.loading || self.deleting || !has_project_sessions,
+                                    )
+                                    .loading(self.deleting)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::simple("Delete all sessions for this project", cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.delete_all(window, cx)
+                                    })),
                             ),
                     ),
             )
-            .bg(colors.panel_background)
     }
 
     fn render_empty(
@@ -291,7 +301,8 @@ impl AgentHistoryPanel {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_2()
+            .p_4()
+            .gap_1()
             .child(
                 Icon::new(IconName::Astroid)
                     .size(IconSize::XLarge)
@@ -407,7 +418,14 @@ mod tests {
     #[test]
     fn only_sessions_of_the_open_project_are_listed() {
         let roots = vec![PathBuf::from("/w/zode")];
-        let listed = rows(&all(), &roots, "", &HashSet::default(), &HashSet::default());
+        let listed = rows(
+            &all(),
+            None,
+            &roots,
+            "",
+            &HashSet::default(),
+            &HashSet::default(),
+        );
         let sessions: Vec<&str> = listed
             .iter()
             .filter_map(|row| match row {
@@ -426,6 +444,7 @@ mod tests {
         // what makes switching project switch the list.
         let other = rows(
             &all(),
+            None,
             &[PathBuf::from("/w/other")],
             "",
             &HashSet::default(),
@@ -443,13 +462,30 @@ mod tests {
 
     #[test]
     fn with_no_project_open_nothing_is_listed() {
-        assert!(rows(&all(), &[], "", &HashSet::default(), &HashSet::default()).is_empty());
+        assert!(
+            rows(
+                &all(),
+                None,
+                &[],
+                "",
+                &HashSet::default(),
+                &HashSet::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn groups_carry_a_label_and_a_count() {
         let roots = vec![PathBuf::from("/w/zode")];
-        let rows = rows(&all(), &roots, "", &HashSet::default(), &HashSet::default());
+        let rows = rows(
+            &all(),
+            None,
+            &roots,
+            "",
+            &HashSet::default(),
+            &HashSet::default(),
+        );
         let groups: Vec<(String, usize)> = rows
             .iter()
             .filter_map(|row| match row {
@@ -469,7 +505,7 @@ mod tests {
         let roots = vec![PathBuf::from("/w/zode")];
         let mut collapsed = HashSet::default();
         collapsed.insert((AgentKind::Claude, PathBuf::from("/w/zode")));
-        let rows = rows(&all(), &roots, "", &HashSet::default(), &collapsed);
+        let rows = rows(&all(), None, &roots, "", &HashSet::default(), &collapsed);
         assert_eq!(
             rows.len(),
             4,
@@ -498,6 +534,7 @@ mod tests {
         ];
         let listed = rows(
             &sessions,
+            None,
             &roots,
             "",
             &HashSet::default(),
@@ -539,7 +576,7 @@ mod tests {
         let mut collapsed = HashSet::default();
         collapsed.insert((AgentKind::Claude, PathBuf::from("/w/zode")));
 
-        let listed = rows(&sessions, &roots, "", &HashSet::default(), &collapsed);
+        let listed = rows(&sessions, None, &roots, "", &HashSet::default(), &collapsed);
         let shown: Vec<&str> = listed
             .iter()
             .filter_map(|row| match row {
@@ -572,7 +609,7 @@ mod tests {
         let mut agents = HashSet::default();
         agents.insert(AgentKind::Claude);
 
-        let listed = rows(&sessions, &roots, "", &agents, &HashSet::default());
+        let listed = rows(&sessions, None, &roots, "", &agents, &HashSet::default());
         assert!(matches!(
             &listed[0],
             Row::AgentGroup {
@@ -613,6 +650,7 @@ mod tests {
         ];
         let listed = rows(
             &sessions,
+            None,
             &roots,
             "findable",
             &HashSet::default(),
@@ -634,6 +672,7 @@ mod tests {
         let hits = |query: &str| {
             rows(
                 &all(),
+                None,
                 &roots,
                 query,
                 &HashSet::default(),
@@ -649,5 +688,30 @@ mod tests {
         assert_eq!(hits("opus"), 3, "model");
         assert_eq!(hits("claude"), 3, "agent name");
         assert_eq!(hits("nothing at all"), 0);
+    }
+
+    /// A session renamed in a tab is found by that name, as well as by
+    /// everything it was findable by before.
+    #[test]
+    fn the_query_matches_the_name_a_session_was_given() {
+        let roots = vec![PathBuf::from("/w/zode")];
+        let sessions = all();
+        let id = sessions[0].id.to_string();
+        let names = crate::SessionNames::for_test(&[(id.as_str(), "Release Checklist")]);
+        let hits = |query: &str| {
+            rows(
+                &sessions,
+                Some(&names),
+                &roots,
+                query,
+                &HashSet::default(),
+                &HashSet::default(),
+            )
+            .iter()
+            .filter(|row| matches!(row, Row::Session(_)))
+            .count()
+        };
+        assert_eq!(hits("release checklist"), 1);
+        assert_eq!(hits("newest"), 1, "the transcript title still finds it");
     }
 }

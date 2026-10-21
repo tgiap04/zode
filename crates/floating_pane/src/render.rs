@@ -6,43 +6,40 @@
 //! positioned by hand.
 //!
 //! Everything here is "how the floating window draws itself". `Entry`,
-//! `entry_items` and the tab-bar/title-bar `+` menus that read it live in
-//! `entries.rs` instead -- the seam this file's own note once named for a later
-//! change, cut once the list of things a window can hold grew past the three it
-//! started with. What stayed is the window chrome: the title bar, the grips, the
-//! two drags, and the Split menu, which has no other natural home.
+//! `entry_items` and the tab-bar `+` menu that reads it live in `entries.rs`
+//! instead -- the seam this file's own note once named for a later change, cut
+//! once the list of things a window can hold grew past the three it started
+//! with. What stayed is the window chrome: the title bar, the grips, the two
+//! drags, and the Split menu, which has no other natural home.
 
 use gpui::{
     Anchor, Bounds, ClickEvent, DragMoveEvent, MouseButton, MouseDownEvent, Pixels, Point, Size,
     WeakEntity, px,
 };
 use ui::prelude::*;
-use ui::{ContextMenu, ContextMenuEntry, PopoverMenu, Tooltip};
+use ui::{ContextMenu, ContextMenuEntry, ListItem, ListItemSpacing, PopoverMenu, Tab, Tooltip};
 use workspace::{
     ActivatePaneDown, ActivatePaneLeft, ActivatePaneRight, ActivatePaneUp, ActivePaneDecorator,
     MovePaneDown, MovePaneLeft, MovePaneRight, MovePaneUp, SplitDirection, SwapPaneDown,
     SwapPaneLeft, SwapPaneRight, SwapPaneUp,
 };
 
-use crate::entries::{Entry, entry_items};
+use crate::entries::Entry;
 use crate::host::{DraggedFloatingPane, Dragging, FloatingPane, Grab, Grip};
-
-/// The grab strip along the top of the window, and the corner handles.
-const TITLE_BAR_HEIGHT: Pixels = px(34.);
 
 /// The four directions a pane can be split, paired with a label and an icon.
 ///
 /// One list, read by the tab bar's Split button and the `+` menu's Split
 /// submenu, so the two can never offer a different set of directions.
-/// `ui::IconName` has no per-direction split icon -- only `Split` and
-/// `SplitAlt` exist, confirmed before writing this -- so `Split` stands for
-/// the horizontal pair and `SplitAlt` for the vertical one rather than
-/// inventing a new asset.
-const SPLIT_DIRECTIONS: [(SplitDirection, &str, IconName); 4] = [
-    (SplitDirection::Right, "Split Right", IconName::Split),
-    (SplitDirection::Left, "Split Left", IconName::Split),
+/// `ui::IconName` has no per-direction split icon. The panel glyphs shade the
+/// side they name, which is what tells Left from Right and Down at a glance;
+/// nothing shades the top, so Up keeps `SplitAlt` rather than inventing a new
+/// asset.
+pub(crate) const SPLIT_DIRECTIONS: [(SplitDirection, &str, IconName); 4] = [
+    (SplitDirection::Right, "Split Right", IconName::PanelRight),
+    (SplitDirection::Left, "Split Left", IconName::PanelLeft),
     (SplitDirection::Up, "Split Up", IconName::SplitAlt),
-    (SplitDirection::Down, "Split Down", IconName::SplitAlt),
+    (SplitDirection::Down, "Split Down", IconName::PanelBottom),
 ];
 
 /// `SPLIT_DIRECTIONS`, as menu entries against one window.
@@ -352,15 +349,17 @@ impl FloatingPane {
             .into_any_element()
     }
 
-    /// The strip that moves the window, with the menu and the minimise button.
+    /// The strip that moves the window, with its minimise and close buttons, and
+    /// the `+` menu when the tab bar has none.
     fn render_title_bar(&self, placement: Bounds<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        // An empty window shows the same list as its body, and has no tab bar.
+        let needs_plus = !workspace::tab_bar_buttons_shown(cx) && !self.is_empty(cx);
         h_flex()
             .id("floating-pane-title")
-            .h(TITLE_BAR_HEIGHT)
-            .flex_shrink_0()
-            .px_1()
-            .gap_1()
-            .justify_between()
+            .h(Tab::container_height(cx))
+            .flex_none()
+            .px_2()
+            .justify_end()
             .border_b_1()
             .border_color(cx.theme().colors().border)
             .cursor(gpui::CursorStyle::OpenHand)
@@ -373,10 +372,12 @@ impl FloatingPane {
             .on_drag(DraggedFloatingPane, |_, _, _, cx| {
                 cx.new(|_| DraggedFloatingPane)
             })
-            .child(self.render_menu(cx))
             .child(
                 h_flex()
                     .gap_0p5()
+                    .when(needs_plus, |buttons| {
+                        buttons.child(crate::entries::title_bar_menu(cx.weak_entity()))
+                    })
                     // Two buttons, and the difference between them is the whole
                     // reason the second exists: one hides the window and leaves
                     // everything running, the other ends it.
@@ -409,28 +410,6 @@ impl FloatingPane {
                             })),
                     ),
             )
-            .into_any_element()
-    }
-
-    /// The `+` menu, for when the window already has tabs in it.
-    fn render_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let this = cx.entity().downgrade();
-        PopoverMenu::new("floating-pane-menu")
-            .trigger_with_tooltip(
-                IconButton::new("floating-pane-add", IconName::Plus).icon_size(IconSize::Small),
-                Tooltip::text("New\u{2026}"),
-            )
-            .anchor(Anchor::TopLeft)
-            .menu(move |window, cx| {
-                let this = this.clone();
-                Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                    let menu = entry_items(menu, &this);
-                    // Takes `this` outright: nothing after it needs a handle.
-                    menu.separator().entry("Minimise", None, move |window, cx| {
-                        this.update(cx, |this, cx| this.toggle(window, cx)).ok();
-                    })
-                }))
-            })
             .into_any_element()
     }
 
@@ -478,8 +457,8 @@ impl FloatingPane {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.grab(Grab::Resize(grip), event, placement);
-                    // The title bar is 34pt tall and the north grip sits inside
-                    // its first 6, so both listeners contain the press. GPUI
+                    // The north grip sits inside the title bar's first 6
+                    // points, so both listeners contain the press. GPUI
                     // dispatches the bubble phase in *reverse* registration
                     // order, which means these grips -- painted after the title
                     // bar -- run first and the title bar ran last and overwrote
@@ -510,29 +489,33 @@ impl FloatingPane {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_px()
             .p_4()
             .debug_selector(|| "floating-pane-empty".into())
-            .children(Entry::all().into_iter().map(|entry| {
-                h_flex()
-                    .id(entry.id())
-                    .w(px(300.))
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|row| row.bg(cx.theme().colors().element_hover))
-                    .child(
-                        Icon::new(entry.icon())
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(Label::new(entry.label()).size(LabelSize::Small))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        entry.run(this, window, cx)
-                    }))
-            }))
+            .child(
+                v_flex()
+                    .w(rems(20.))
+                    .children(Entry::all().iter().map(|entry| {
+                        let entry = *entry;
+                        div()
+                            .debug_selector(move || format!("floating-pane-entry-{}", entry.id()))
+                            .child(
+                                ListItem::new(entry.id())
+                                    .inset(true)
+                                    .spacing(ListItemSpacing::Dense)
+                                    .start_slot(
+                                        Icon::new(entry.icon())
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Label::new(entry.label()).truncate())
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            entry.run(this, window, cx)
+                                        },
+                                    )),
+                            )
+                    })),
+            )
             .into_any_element()
     }
 
@@ -588,7 +571,7 @@ impl FloatingPane {
             .border_color(colors.border)
             .shadow_md()
             .child(
-                IconButton::new("floating-pane-launcher", IconName::Screen)
+                IconButton::new("floating-pane-launcher", IconName::OpenNewWindow)
                     .icon_size(IconSize::Small)
                     .shape(ui::IconButtonShape::Square)
                     .toggle_state(open)
@@ -597,7 +580,7 @@ impl FloatingPane {
                             if open {
                                 "Put the floating window away"
                             } else {
-                                "Open a floating window"
+                                "Open a Floating Window"
                             },
                             &zed_actions::floating_pane::ToggleFloatingPane,
                             cx,

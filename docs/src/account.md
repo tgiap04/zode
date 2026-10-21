@@ -61,7 +61,8 @@ On a second machine, sign in and choose **Account → Enter Recovery Key…**.
 ### When both sides have changed
 
 Pulling never overwrites your file silently. Zode shows the difference and
-three choices: keep this machine's copy, take the server's copy, or cancel.
+three choices: **Keep This Machine's Copy**, **Take the Server's Copy**, or
+**Cancel**.
 Whichever you pick, the file being replaced is copied to `settings_backup.json`
 (or `keymap_backup.json`) first.
 

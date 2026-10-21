@@ -1,5 +1,5 @@
 use crate::Sidebar;
-use crate::rail::RAIL_ICON_SIZE;
+use crate::rail::rail_button;
 use container_ui::ContainerPanel;
 use gpui::{AnyElement, App, Context, Window};
 use ui::{Tooltip, prelude::*};
@@ -39,8 +39,7 @@ impl Sidebar {
     ) -> AnyElement {
         let is_open = self.container_tab_open(cx);
 
-        IconButton::new("project-rail-container", IconName::Docker)
-            .icon_size(RAIL_ICON_SIZE)
+        rail_button("project-rail-container", IconName::Docker)
             .toggle_state(is_open)
             // A right-click is the only way to go straight to a tab, and a
             // gesture with nothing naming it is a gesture nobody finds -- so the

@@ -268,13 +268,17 @@ impl BranchPanel {
             return finish(by_path);
         };
 
+        let names = agent_ui::SessionNames::try_global(cx);
+        let names = names.as_ref().map(|names| names.read(cx));
         for worktree in worktrees {
             let path: Arc<Path> = Arc::from(worktree.path.as_path());
             let past = index
                 .sessions_for(&path)
                 .filter(|session| !open_sessions.contains(session.id.as_ref()))
                 .map(|session| AgentEntry::Past {
-                    label: session.title.clone().into(),
+                    label: names
+                        .and_then(|names| names.name(&session.id).cloned())
+                        .unwrap_or_else(|| session.title.clone().into()),
                     agent: session.agent.builtin_agent_id().into(),
                     id: session.id.clone(),
                     updated_at: session.updated_at,

@@ -165,6 +165,19 @@ impl RenderOnce for Tab {
                 TabPosition::Middle(Ordering::Greater) => this.border_r_1().pl_px().border_b_1(),
             })
             .cursor_pointer()
+            .when(self.selected, |this| {
+                // Absolutely positioned so the indicator overlays the content instead of
+                // shrinking it, which keeps every tab the same height whether selected or not.
+                this.relative().child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(2.))
+                        .bg(cx.theme().colors().tab_active_indicator),
+                )
+            })
             .child(
                 h_flex()
                     .group("")

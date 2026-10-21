@@ -149,6 +149,16 @@ async fn the_reload_spinner_settles_when_the_scan_finishes(cx: &mut TestAppConte
     });
 
     cx.run_until_parked();
+    panel.update(cx, |panel, _| {
+        assert!(
+            panel.reloading,
+            "a scan that finishes at once still leaves the spinner up long enough to be seen"
+        );
+    });
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
 
     panel.update(cx, |panel, _| {
         assert!(
@@ -2043,5 +2053,986 @@ mod confirm_delete_checkout {
                 "a removal git refused must not close any agent tab either"
             );
         });
+    }
+}
+
+/// A single "Delete Session…" from the branch panel: the row has to leave the
+/// panel with no manual refresh.
+///
+/// `agent_ui::delete_session` checks `path.exists()` on the host's real disk
+/// before it asks the injected `Fs` to trash anything, so each fixture is a
+/// real file under the temp directory that is also registered with the fake
+/// filesystem.
+mod single_delete {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use agent_sessions::{AgentKind, SessionSummary};
+    use gpui::{TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use crate::branch_panel::panel::BranchPanel;
+    use crate::branch_panel::tree::{AgentEntry, TreeRow};
+
+    use super::panel_over_a_repo;
+
+    const CHECKOUT: &str = "/repos/zode";
+
+    struct RealLog(PathBuf);
+
+    impl Drop for RealLog {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).ok();
+        }
+    }
+
+    fn session_with_log(id: &str, log_path: PathBuf) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from(CHECKOUT),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: Some(log_path),
+            log_bytes: 16,
+        }
+    }
+
+    fn listed_ids(panel: &BranchPanel) -> Vec<String> {
+        panel
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                _ => None,
+            })
+            .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+            .filter_map(|entry| match entry {
+                AgentEntry::Past { id, .. } => Some(id.to_string()),
+                AgentEntry::Open { .. } => None,
+            })
+            .collect()
+    }
+
+    /// An active panel with its store swept once and settled, and one stocked
+    /// session whose transcript exists on both disks.
+    async fn panel_listing_one_session<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        gpui::Entity<agent_ui::SessionStore>,
+        SessionSummary,
+        RealLog,
+        &'a mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+
+        let log_path = std::env::temp_dir().join(format!(
+            "zode-single-delete-{}-{name}.jsonl",
+            std::process::id()
+        ));
+        std::fs::write(&log_path, "{}").expect("writing the real fixture must succeed");
+        let real_log = RealLog(log_path.clone());
+
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let fake_fs = workspace.read_with(cx, |workspace, cx| {
+            workspace.project().read(cx).fs().clone()
+        });
+        let fake = fake_fs.as_fake();
+        if let Some(parent) = log_path.parent() {
+            fake.insert_tree(parent, serde_json::json!({})).await;
+        }
+        fake.insert_file(&log_path, b"{}".to_vec()).await;
+
+        let session = session_with_log(name, log_path);
+        let store = panel
+            .read_with(cx, |panel, _| panel.session_store.clone())
+            .expect("ensure_session_store just ran");
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(vec![session.clone()], cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                listed_ids(panel),
+                vec![name.to_string()],
+                "the fixture must start out listed"
+            );
+        });
+        (panel, store, session, real_log, cx)
+    }
+
+    /// A finished session is listed under the name it was given in a tab, and
+    /// naming it redraws the list without waiting for a sweep.
+    #[gpui::test]
+    async fn a_finished_session_is_listed_under_its_name(cx: &mut TestAppContext) {
+        let (panel, _store, session, _log, cx) =
+            panel_listing_one_session(cx, "renamed-session").await;
+
+        cx.update(|_, cx| {
+            agent_ui::SessionNames::global(cx).update(cx, |names, cx| {
+                names.set(session.id.clone(), Some("review".into()), cx)
+            });
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        let labels: Vec<String> = panel.read_with(cx, |panel, _| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+                .filter_map(|entry| match entry {
+                    AgentEntry::Past { label, .. } => Some(label.to_string()),
+                    AgentEntry::Open { .. } => None,
+                })
+                .collect()
+        });
+        assert_eq!(labels, vec!["review".to_string()]);
+    }
+
+    fn start_delete(
+        panel: &gpui::Entity<BranchPanel>,
+        session: &SessionSummary,
+        cx: &mut VisualTestContext,
+    ) {
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let session = session.clone();
+        panel.update_in(cx, |_, window, cx| {
+            agent_ui::delete_session(&workspace, &session, window, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Move to Trash");
+        cx.run_until_parked();
+    }
+
+    /// Prompt answered, store idle.
+    #[gpui::test]
+    async fn the_row_leaves_the_panel_when_the_store_is_idle(cx: &mut TestAppContext) {
+        let (panel, _store, session, _log, cx) = panel_listing_one_session(cx, "h1").await;
+
+        start_delete(&panel, &session, cx);
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "the deleted session must leave the branch panel with no refresh"
+            );
+        });
+    }
+
+    /// A sweep is in flight at the moment of the delete, so the store
+    /// is scanning when the panel rebuilds. The held list for the checkout must
+    /// not hand the deleted row back.
+    #[gpui::test]
+    async fn the_row_does_not_come_back_from_the_hold_while_a_sweep_runs(cx: &mut TestAppContext) {
+        let (panel, store, _session, _log, cx) = panel_listing_one_session(cx, "h3").await;
+
+        store.update(cx, |store, cx| {
+            store.refresh(cx);
+            store.forget("h3", cx);
+        });
+        assert!(store.read_with(cx, |store, _| store.is_scanning()));
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "a forgotten session must not be held over while a sweep runs"
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    /// The panel is hidden when the delete lands; rows must be right
+    /// the moment it is shown again.
+    #[gpui::test]
+    async fn a_hidden_panel_shows_the_right_rows_once_active_again(cx: &mut TestAppContext) {
+        let (panel, _store, session, _log, cx) = panel_listing_one_session(cx, "h4").await;
+
+        panel.update_in(cx, |panel, window, cx| panel.set_active(false, window, cx));
+        start_delete(&panel, &session, cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.refresh_if_stale(cx);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "a delete made while the panel was hidden must not be listed on return"
+            );
+        });
+    }
+
+    /// A tab that is still open stays listed through the workspace's
+    /// tab source, whatever the index says. Expected, not a bug: the tab is
+    /// genuinely open.
+    #[gpui::test]
+    async fn an_open_tab_stays_listed_after_its_session_leaves_the_index(cx: &mut TestAppContext) {
+        let (panel, store, _session, _log, cx) = panel_listing_one_session(cx, "h5").await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        store.update(cx, |store, cx| store.forget("h5", cx));
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+
+        panel.read_with(cx, |panel, _| {
+            let open_tabs = panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+                .filter(|entry| matches!(entry, AgentEntry::Open { .. }))
+                .count();
+            assert_eq!(
+                open_tabs, 1,
+                "the open tab is listed independently of the index"
+            );
+            assert!(listed_ids(panel).is_empty());
+        });
+    }
+
+    /// A refresh that arrives during a sweep is coalesced into a second sweep
+    /// that starts with an empty record of what was forgotten. The deleted row
+    /// must already be gone from the hold by then.
+    #[gpui::test]
+    async fn the_row_does_not_come_back_while_a_coalesced_second_sweep_runs(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, store, _session, _log, cx) = panel_listing_one_session(cx, "rescan").await;
+
+        store.update(cx, |store, cx| {
+            store.refresh(cx);
+            store.refresh(cx);
+            store.forget("rescan", cx);
+        });
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+
+        let generation_after_forget = store.read_with(cx, |store, _| store.generation());
+        for _ in 0..1000 {
+            if store.read_with(cx, |store, _| store.generation()) != generation_after_forget {
+                break;
+            }
+            cx.executor().tick();
+        }
+        assert!(
+            store.read_with(cx, |store, _| store.generation() != generation_after_forget
+                && store.is_scanning()),
+            "the first sweep must have landed with the second still running"
+        );
+
+        panel.update_in(cx, |panel, _, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                listed_ids(panel).is_empty(),
+                "a deleted row must not be redrawn from the hold while the second sweep runs"
+            );
+        });
+        cx.run_until_parked();
+    }
+}
+
+/// What the branch panel draws under an agent row: the subagents running right
+/// now, and nothing else.
+mod running_subagents {
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use agent_sessions::SubagentSummary;
+    use gpui::{TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use super::{BranchPanel, panel_over_a_repo};
+    use crate::branch_panel::tree::{AgentEntry, RowKey};
+
+    fn background(id: &str) -> SubagentSummary {
+        SubagentSummary {
+            id: Arc::from(id),
+            kind: Arc::from("reviewer"),
+            description: Arc::from("Reads the diff"),
+            tool_use_id: Arc::from(format!("toolu_{id}")),
+            background: true,
+            spawned_at: SystemTime::now(),
+        }
+    }
+
+    /// A panel docked in a real window with one Claude tab open and the
+    /// checkout's agent list expanded, so the card draws its agent row.
+    pub(super) async fn panel_showing_an_agent(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        gpui::Entity<agent_ui::AgentView>,
+        &mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<BranchPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        let key = panel.read_with(cx, |panel, _| {
+            let repo = &panel.repos[0];
+            RowKey::WorktreeAgents(repo.id, Arc::from(repo.worktrees[0].path.as_path()))
+        });
+        panel.update(cx, |panel, cx| panel.toggle_row(key, cx));
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        let view = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .next()
+                .expect("the agent tab just opened")
+        });
+        view.update(cx, |view, cx| view.simulate_cli_alive(true, cx));
+        cx.run_until_parked();
+        (panel, view, cx)
+    }
+
+    /// Lets the window draw and publish the frame, which is what fills in
+    /// `debug_bounds`: parking alone leaves it empty.
+    pub(super) fn draw(cx: &mut VisualTestContext) {
+        cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_running_background_subagent_gets_one_row_with_a_spinner(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(vec![background("agent-a")], &[], cx)
+        });
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+        assert!(
+            cx.debug_bounds("subagent-spinner:agent-a").is_some(),
+            "a running subagent spins"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_subagent_that_stops_loses_its_row(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+        let listed = vec![background("agent-a")];
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed.clone(), &[], cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed, &[Arc::from("agent-a")], cx)
+        });
+        // No resize this time: the panel has to notice by itself, on its own
+        // activity tick, which is what happens when a subagent stops in a
+        // window nobody is touching. The resize above is only the first frame.
+        cx.executor()
+            .advance_clock(crate::branch_panel::lifecycle::ACTIVITY_TICK);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("subagent-row:agent-a").is_none(),
+            "a finished subagent draws nothing"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_tab_whose_cli_is_gone_draws_no_subagent_rows(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(vec![background("agent-a")], &[], cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+
+        view.update(cx, |view, cx| view.simulate_cli_alive(false, cx));
+        cx.run_until_parked();
+        draw(cx);
+
+        assert!(
+            view.read_with(cx, |view, cx| view.running_subagents(cx).next().is_none()),
+            "the tracker still lists it as running; the tab's own state is what hides it"
+        );
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_none());
+    }
+
+    #[gpui::test]
+    async fn a_past_entry_in_the_panel_draws_no_subagent_rows(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<BranchPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        // A session on disk and no tab open on it: the panel lists it as past.
+        let store = panel
+            .read_with(cx, |panel, _| panel.session_store.clone())
+            .expect("the store was just created");
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(
+                vec![agent_sessions::SessionSummary {
+                    id: Arc::from("old-session"),
+                    agent: agent_sessions::AgentKind::Claude,
+                    title: "an old session".into(),
+                    preview: String::new(),
+                    preview_speaker: None,
+                    cwd: std::path::PathBuf::from("/repos/zode"),
+                    branch: None,
+                    model: None,
+                    updated_at: SystemTime::now(),
+                    log_path: None,
+                    log_bytes: 0,
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let key = panel.read_with(cx, |panel, _| {
+            let repo = &panel.repos[0];
+            RowKey::WorktreeAgents(repo.id, Arc::from(repo.worktrees[0].path.as_path()))
+        });
+        panel.update(cx, |panel, cx| panel.toggle_row(key, cx));
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        draw(cx);
+
+        panel.read_with(cx, |panel, _| {
+            let shown = panel.rows.iter().any(|row| match row {
+                crate::branch_panel::tree::TreeRow::Worktree {
+                    agents, expanded, ..
+                } => *expanded && agents.iter().any(|agent| !agent.is_open()),
+                _ => false,
+            });
+            assert!(
+                shown,
+                "the past session is on screen, or this proves nothing"
+            );
+        });
+        assert!(
+            cx.debug_bounds("subagent-row:agent-a").is_none()
+                && cx.debug_bounds("subagent-spinner:agent-a").is_none()
+        );
+    }
+
+    #[gpui::test]
+    async fn the_others_stay_when_one_of_two_stops(cx: &mut TestAppContext) {
+        let (_panel, view, cx) = panel_showing_an_agent(cx).await;
+        let listed = vec![background("agent-a"), background("agent-b")];
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed.clone(), &[], cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
+        assert!(cx.debug_bounds("subagent-row:agent-b").is_some());
+
+        view.update(cx, |view, cx| {
+            view.simulate_subagent_pass(listed, &[Arc::from("agent-a")], cx)
+        });
+        draw(cx);
+
+        assert!(cx.debug_bounds("subagent-row:agent-a").is_none());
+        assert!(cx.debug_bounds("subagent-row:agent-b").is_some());
+    }
+
+    #[gpui::test]
+    async fn a_session_without_a_tab_shows_no_subagents(cx: &mut TestAppContext) {
+        let (_panel, _view, cx) = panel_showing_an_agent(cx).await;
+        let past = AgentEntry::Past {
+            label: "an old session".into(),
+            agent: project::CLAUDE_CODE_AGENT_ID.into(),
+            id: Arc::from("old-session"),
+            updated_at: SystemTime::now(),
+        };
+
+        cx.update(|_, cx| {
+            assert!(
+                past.running_subagents(cx).is_empty(),
+                "a finished session has no running subagents to show"
+            );
+        });
+    }
+}
+
+/// How the panel is drawn around its rows: the header, the repository heading,
+/// the empty state, and the toggle on a checkout's agents.
+///
+/// Drawn in a real window because the claims are about geometry and about which
+/// element a click lands on, and neither exists until `Render` has run.
+mod panel_chrome {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use super::running_subagents::{draw, panel_showing_an_agent};
+    use super::{BranchPanel, panel, panel_over_a_repo};
+    use crate::branch_panel::tree::RowKey;
+
+    /// Docks the panel, makes it the active one and draws a frame.
+    fn dock(panel: &Entity<BranchPanel>, cx: &mut VisualTestContext) {
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<BranchPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| panel.set_active(true, window, cx));
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not drawn, so it cannot be clicked"));
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    fn row_is_open(panel: &Entity<BranchPanel>, key: &RowKey, cx: &mut VisualTestContext) -> bool {
+        panel.read_with(cx, |panel, cx| panel.row_is_open(key, cx))
+    }
+
+    #[gpui::test]
+    async fn the_header_is_as_tall_as_every_other_panel_header(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        dock(&panel, cx);
+
+        let header = cx
+            .debug_bounds("worktrees-header")
+            .expect("the header was not drawn");
+        let expected = cx.update(|_, cx| ui::Tab::container_height(cx));
+        assert_eq!(
+            header.size.height, expected,
+            "a panel header is one tab bar tall, in every panel"
+        );
+    }
+
+    /// The chevron and the row both toggle, so a click that reached both would
+    /// open the repository and shut it again in one gesture.
+    #[gpui::test]
+    async fn clicking_the_disclosure_toggles_the_repository_once(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        dock(&panel, cx);
+        let key = panel.read_with(cx, |panel, _| RowKey::Repo(panel.repos[0].id));
+
+        assert!(row_is_open(&panel, &key, cx));
+        click("repo-disclosure", cx);
+        assert!(
+            !row_is_open(&panel, &key, cx),
+            "one click on the chevron closes the repository"
+        );
+        click("repo-disclosure", cx);
+        assert!(
+            row_is_open(&panel, &key, cx),
+            "and the next one opens it again"
+        );
+    }
+
+    #[gpui::test]
+    async fn clicking_the_repository_row_toggles_it_too(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        dock(&panel, cx);
+        let key = panel.read_with(cx, |panel, _| RowKey::Repo(panel.repos[0].id));
+
+        click("repo-row", cx);
+        assert!(
+            !row_is_open(&panel, &key, cx),
+            "the whole heading is the target, not only the chevron"
+        );
+    }
+
+    /// Opening a list is not asking to switch to the checkout it sits in.
+    #[gpui::test]
+    async fn the_agents_disclosure_opens_the_list_without_switching_checkout(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, _view, cx) = panel_showing_an_agent(cx).await;
+        draw(cx);
+        let switched = Rc::new(Cell::new(0usize));
+        cx.update(|_, cx| {
+            let switched = switched.clone();
+            cx.on_action(move |_: &zed_actions::SwitchWorktree, _| {
+                switched.set(switched.get() + 1)
+            });
+        });
+        let key = panel.read_with(cx, |panel, _| {
+            let repo = &panel.repos[0];
+            RowKey::WorktreeAgents(repo.id, Arc::from(repo.worktrees[0].path.as_path()))
+        });
+
+        assert!(row_is_open(&panel, &key, cx));
+        click("branch-agents-disclosure", cx);
+        assert!(
+            !row_is_open(&panel, &key, cx),
+            "one click on the chevron closes the list"
+        );
+        click("branch-agents-disclosure", cx);
+        assert!(row_is_open(&panel, &key, cx));
+        assert_eq!(
+            switched.get(),
+            0,
+            "the click must not fall through to the card and check the branch out"
+        );
+    }
+
+    /// One glyph per meaning: worktrees are `GitWorktree` here, in the title bar
+    /// and everywhere else they are drawn.
+    #[gpui::test]
+    async fn the_panel_is_registered_under_the_worktree_glyph(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+
+        let icon = cx.update(|window, cx| panel.read(cx).icon(window, cx));
+
+        assert_eq!(icon, Some(ui::IconName::GitWorktree));
+    }
+
+    /// A project with no repository has nothing to list, and says so in the
+    /// middle of the panel rather than in its corner.
+    #[gpui::test]
+    async fn an_empty_panel_centres_its_message(cx: &mut TestAppContext) {
+        let (panel, cx) = panel(cx).await;
+        dock(&panel, cx);
+
+        let area = cx
+            .debug_bounds("worktrees-empty")
+            .expect("the empty state was not drawn");
+        let message = cx
+            .debug_bounds("worktrees-empty-message")
+            .expect("the empty message was not drawn");
+        assert!(
+            (area.center().x - message.center().x).abs() < gpui::px(1.),
+            "centred across the panel"
+        );
+        assert!(
+            (area.center().y - message.center().y).abs() < gpui::px(1.),
+            "and down it"
+        );
+    }
+}
+
+/// Re-reading the agent sessions on disk, asked for from one checkout's card.
+///
+/// Driven against a store installed over a provider this test controls, so a
+/// session can appear on "disk" after the first sweep -- the case the reload
+/// exists for: a session run from a terminal outside Zode.
+mod reload_sessions {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime};
+
+    use agent_sessions::{
+        AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+        SessionSummary,
+    };
+    use gpui::{TestAppContext, VisualTestContext};
+    use workspace::dock::Panel as _;
+
+    use crate::branch_panel::panel::BranchPanel;
+
+    use super::panel;
+
+    const CHECKOUT: &str = "/repos/zode-wt-a";
+    const OTHER_CHECKOUT: &str = "/repos/zode-wt-b";
+
+    /// Lists whatever the test last put on its "disk".
+    struct DiskProvider(Arc<Mutex<Vec<SessionSummary>>>);
+
+    impl SessionProvider for DiskProvider {
+        fn agent(&self) -> AgentKind {
+            AgentKind::Claude
+        }
+        fn availability(&self) -> Availability {
+            Availability::Ready
+        }
+        fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
+            Ok(self
+                .0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .clone())
+        }
+        fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
+            Ok(None)
+        }
+        fn new_session_command(&self, _id: &str, _cwd: &Path) -> Option<AgentCommand> {
+            None
+        }
+        fn counts(&self, _session: &SessionSummary) -> anyhow::Result<SessionCounts> {
+            Ok(SessionCounts::default())
+        }
+        fn resume_command(&self, _s: &SessionSummary, _f: Fork) -> Option<AgentCommand> {
+            None
+        }
+        fn deletion(&self, _session: &SessionSummary) -> Deletion {
+            Deletion::Nothing
+        }
+    }
+
+    fn session_in(id: &str, cwd: &str) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from(cwd),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: None,
+            log_bytes: 0,
+        }
+    }
+
+    /// A shown panel whose first sweep has already landed over an empty disk.
+    async fn panel_after_first_sweep(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::Entity<BranchPanel>,
+        Arc<Mutex<Vec<SessionSummary>>>,
+        &mut VisualTestContext,
+    ) {
+        let (panel, cx) = panel(cx).await;
+        let disk = Arc::new(Mutex::new(Vec::new()));
+        cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(
+                vec![Arc::new(DiskProvider(disk.clone()))],
+                cx,
+            );
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        cx.run_until_parked();
+        (panel, disk, cx)
+    }
+
+    fn indexed_ids(panel: &gpui::Entity<BranchPanel>, cx: &mut VisualTestContext) -> Vec<String> {
+        panel.read_with(cx, |panel, cx| {
+            panel
+                .session_store
+                .as_ref()
+                .expect("the panel's store exists once it has been drawn")
+                .read(cx)
+                .index()
+                .sessions()
+                .iter()
+                .map(|session| session.id.to_string())
+                .collect()
+        })
+    }
+
+    /// The reload has to actually read the disk again: a session written after
+    /// the first sweep shows up, where before it waited for a restart.
+    #[gpui::test]
+    async fn a_session_written_after_the_first_sweep_appears(cx: &mut TestAppContext) {
+        let (panel, disk, cx) = panel_after_first_sweep(cx).await;
+        assert!(indexed_ids(&panel, cx).is_empty());
+
+        disk.lock()
+            .expect("not poisoned")
+            .push(session_in("from-a-terminal", CHECKOUT));
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(indexed_ids(&panel, cx), vec!["from-a-terminal"]);
+    }
+
+    /// The spinner belongs to the card that asked, stays up long enough to be
+    /// seen even though this sweep lands at once, and then comes down.
+    #[gpui::test]
+    async fn the_spinner_is_on_the_asking_card_and_settles(cx: &mut TestAppContext) {
+        let (panel, _disk, cx) = panel_after_first_sweep(cx).await;
+
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx);
+            assert!(panel.is_reloading_sessions(Path::new(CHECKOUT)));
+            assert!(
+                !panel.is_reloading_sessions(Path::new(OTHER_CHECKOUT)),
+                "a card that did not ask must not spin"
+            );
+        });
+
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "a sweep that lands at once still leaves the spinner up long enough to be seen"
+            );
+        });
+
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                !panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "the spinner must come down once the sweep is in"
+            );
+        });
+    }
+
+    /// The floor passing is not enough: while a sweep is still reading, the
+    /// spinner stays, and it is the sweep landing that takes it down.
+    ///
+    /// Driven by hand rather than by the clock, because under the test
+    /// executor a sweep always lands before any timer fires.
+    #[gpui::test]
+    async fn the_spinner_waits_for_a_sweep_still_in_flight(cx: &mut TestAppContext) {
+        let (panel, _disk, cx) = panel_after_first_sweep(cx).await;
+
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx);
+            if let Some(reload) = panel.session_reload.as_mut() {
+                reload.shown_long_enough = true;
+            }
+            panel.settle_session_reload(cx);
+            assert!(
+                panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "the floor has passed but the sweep has not landed"
+            );
+        });
+
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                !panel.is_reloading_sessions(Path::new(CHECKOUT)),
+                "the sweep landing must take the spinner down by itself"
+            );
+        });
+    }
+
+    /// Asking again from another card moves the spinner there rather than
+    /// leaving both spinning over one shared sweep.
+    #[gpui::test]
+    async fn asking_from_another_card_moves_the_spinner(cx: &mut TestAppContext) {
+        let (panel, _disk, cx) = panel_after_first_sweep(cx).await;
+
+        panel.update(cx, |panel, cx| {
+            panel.reload_sessions(PathBuf::from(CHECKOUT), cx);
+            panel.reload_sessions(PathBuf::from(OTHER_CHECKOUT), cx);
+            assert!(!panel.is_reloading_sessions(Path::new(CHECKOUT)));
+            assert!(panel.is_reloading_sessions(Path::new(OTHER_CHECKOUT)));
+        });
+
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.session_reload.is_none());
+        });
+    }
+
+    /// The header's reload re-reads the sessions too, not only git: it is the
+    /// panel-wide reload, and the sessions are half of what the panel shows.
+    #[gpui::test]
+    async fn the_header_reload_rereads_the_sessions(cx: &mut TestAppContext) {
+        let (panel, disk, cx) = panel_after_first_sweep(cx).await;
+
+        disk.lock()
+            .expect("not poisoned")
+            .push(session_in("from-a-terminal", CHECKOUT));
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(indexed_ids(&panel, cx), vec!["from-a-terminal"]);
     }
 }

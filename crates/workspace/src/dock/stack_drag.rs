@@ -23,7 +23,7 @@ use gpui::{
     SharedString, Stateful, Styled, Window, px,
 };
 use std::sync::Arc;
-use ui::{IconButton, IconName, Tooltip, prelude::*};
+use ui::{IconButton, IconName, Tab, Tooltip, prelude::*};
 
 /// A section header in flight.
 ///
@@ -99,8 +99,8 @@ impl Dock {
             .relative()
             .flex_none()
             .w_full()
+            .h(Tab::container_height(cx))
             .px_2()
-            .py_1()
             .justify_between()
             .border_b_1()
             .border_color(colors.border)
@@ -142,7 +142,7 @@ impl Dock {
 
     /// Makes a whole section a drop target, not just its header.
     ///
-    /// The header is a ~24px strip on a section hundreds of pixels tall, so
+    /// The header is one tab bar tall on a section hundreds of pixels tall, so
     /// "drop it between those two" lands on a panel's content far more often
     /// than on a header. Accepting the drop only where the drag STARTS is the
     /// mistake that made the gesture do nothing at all for the user who

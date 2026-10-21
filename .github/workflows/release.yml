@@ -143,7 +143,32 @@ jobs:
           exit 1
         fi
     timeout-minutes: 360
+  check_driver_signing_key:
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
+    steps:
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+    - name: steps::cache_rust_dependencies_namespace
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+    - name: release::build_xtask
+      run: cargo build --package xtask --locked
+    - name: release::check_driver_signing_key
+      run: target/debug/xtask driver-manifest check-key
+      env:
+        ZODE_DRIVER_SIGNING_KEY: ${{ secrets.ZODE_DRIVER_SIGNING_KEY }}
+    timeout-minutes: 360
   create_draft_release:
+    needs:
+    - check_driver_signing_key
     if: (github.repository_owner == 'tgiap04')
     runs-on: ubuntu-24.04
     permissions:
@@ -164,7 +189,7 @@ jobs:
         if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
             echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
         else
-            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml says ${manifest_version}; the binary reports the tag, so consider bumping the manifest to match"
+            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
         fi
     - name: mkdir -p target/
       run: mkdir -p target/
@@ -188,6 +213,37 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 360
+  bump_manifest_on_develop:
+    needs:
+    - create_draft_release
+    - run_tests_linux
+    - clippy_linux
+    - check_scripts
+    - check_driver_signing_key
+    if: (github.repository_owner == 'tgiap04')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+        ref: develop
+        token: ${{ secrets.RELEASE_TAG_TOKEN || secrets.GITHUB_TOKEN }}
+    - id: sync
+      name: release::bump_manifest_on_develop::sync_manifest_to_tag
+      run: script/sync-zode-manifest-to-release-tag "$GITHUB_REF_NAME"
+    - name: release::bump_manifest_on_develop::commit_and_push
+      if: steps.sync.outputs.changed == 'true'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -m "chore: bump zode to $VERSION" -- crates/zed/Cargo.toml Cargo.lock
+        git push origin HEAD:refs/heads/develop
+      env:
+        VERSION: ${{ steps.sync.outputs.version }}
+    timeout-minutes: 10
   bundle_linux_aarch64:
     runs-on: ubuntu-24.04-arm
     env:
@@ -496,6 +552,7 @@ jobs:
     - run_tests_linux
     - clippy_linux
     - check_scripts
+    - check_driver_signing_key
     - bundle_linux_aarch64
     - bundle_linux_x86_64
     - bundle_mac_aarch64
@@ -510,6 +567,16 @@ jobs:
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       with:
         clean: false
+    - name: steps::cache_rust_dependencies_namespace
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: |-
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+    - name: release::build_xtask
+      run: cargo build --package xtask --locked
     - name: release::download_workflow_artifacts
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
       with:
@@ -534,8 +601,8 @@ jobs:
         mv ./artifacts/database-drivers-x86_64-pc-windows-msvc/* driver-artifacts/
     - name: release::build_driver_manifest
       run: script/build-driver-manifest driver-artifacts "${GITHUB_REF_NAME#v}"
-    - name: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
-      run: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" release-artifacts/*
+    - name: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" --clobber release-artifacts/*
+      run: gh release upload "$GITHUB_REF_NAME" --repo="$GITHUB_REPOSITORY" --clobber release-artifacts/*
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: release::publish_drivers_to_web
@@ -543,6 +610,8 @@ jobs:
       env:
         ZODE_DRIVER_UPLOAD_TOKEN: ${{ secrets.ZODE_DRIVER_UPLOAD_TOKEN }}
         ZODE_DRIVER_UPLOAD_URL: ${{ vars.ZODE_DRIVER_UPLOAD_URL }}
+        ZODE_DRIVER_SIGNING_KEY: ${{ secrets.ZODE_DRIVER_SIGNING_KEY }}
+        ZODE_XTASK_BIN: target/debug/xtask
   validate_release_assets:
     needs:
     - upload_release_assets

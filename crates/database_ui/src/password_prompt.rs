@@ -5,13 +5,14 @@
 //! a field in the tree because a password typed into a row is a password on
 //! screen, and because this is answered once and then not again.
 
+use crate::connection_modal_render::inline_error;
 use crate::connection_store::{delete_secret, write_secret};
-use editor::Editor;
 use gpui::{
     App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
     Subscription, Task, Window,
 };
-use ui::prelude::*;
+use ui::{KeyBinding, Modal, ModalFooter, ModalHeader, Section, prelude::*};
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::ModalView;
 
 /// What the caller wants done once a password is known.
@@ -27,7 +28,7 @@ pub(crate) struct PasswordPrompt {
     /// Written beside the password so the keychain's own UI can identify the
     /// entry. Never read back -- the URL already says who to connect as.
     username: String,
-    password_editor: Entity<Editor>,
+    password_editor: Entity<InputField>,
     /// Run after a successful write, which is how the panel retries the
     /// connection that sent the user here.
     on_saved: Option<OnSaved>,
@@ -47,22 +48,22 @@ impl PasswordPrompt {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let password_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            // Not a courtesy: this is typed in front of whoever is looking at
-            // the screen, and in front of whatever is recording it.
-            editor.set_masked(true, cx);
-            editor.set_placeholder_text("Password", window, cx);
-            editor
-        });
+        // Not a courtesy: this is typed in front of whoever is looking at the
+        // screen, and in front of whatever is recording it.
+        let password_editor = cx.new(|cx| InputField::new(window, cx, "Password").masked(true));
 
         // Dismissed on blur, as every other modal here is: a password box left
         // behind a window is one someone types into later without looking.
-        let subscription = cx.subscribe(&password_editor, |_this, _editor, event, cx| {
-            if matches!(event, editor::EditorEvent::Blurred) {
-                cx.emit(DismissEvent);
-            }
-        });
+        let this = cx.weak_entity();
+        let subscription = password_editor.read(cx).editor().clone().subscribe(
+            Box::new(move |event, _window, cx| {
+                if event == ErasedEditorEvent::Blurred {
+                    this.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+                }
+            }),
+            window,
+            cx,
+        );
 
         Self {
             connection,
@@ -129,38 +130,65 @@ impl Focusable for PasswordPrompt {
 
 impl Render for PasswordPrompt {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        div()
             .key_context("DatabasePasswordPrompt")
             .elevation_3(cx)
-            .w(px(440.))
-            .p_3()
-            .gap_2()
+            .occlude()
+            .w(rems(28.))
+            .max_h(rems(40.))
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| this.confirm(window, cx)))
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.cancel(cx)))
-            .child(Label::new(format!("Password for {}", self.connection)))
             .child(
-                Label::new("Stored in the system keychain, never in your settings.")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .bg(cx.theme().colors().editor_background)
-                    .child(self.password_editor.clone()),
-            )
-            .when_some(self.error.clone(), |element, error| {
-                element.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
-            })
-            .child(
-                Label::new("Leave it empty to forget the stored password.")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                Modal::new("database-password", None)
+                    .header(
+                        ModalHeader::new()
+                            .child(
+                                Headline::new(format!("Password for {}", self.connection))
+                                    .size(HeadlineSize::Small),
+                            )
+                            .description("Stored in the system keychain, never in your settings."),
+                    )
+                    .section(
+                        Section::new()
+                            .child(
+                                div()
+                                    .debug_selector(|| "database-password-field".into())
+                                    .child(self.password_editor.clone()),
+                            )
+                            .when_some(self.error.clone(), |section, error| {
+                                section.child(inline_error(error))
+                            })
+                            .child(
+                                Label::new("Leave it empty to forget the stored password.")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .footer(
+                        ModalFooter::new().end_slot(
+                            h_flex()
+                                .gap_1()
+                                .debug_selector(|| "database-modal-actions".into())
+                                .child(Button::new("database-password-cancel", "Cancel").on_click(
+                                    cx.listener(|this, _event, _window, cx| this.cancel(cx)),
+                                ))
+                                .child(
+                                    Button::new("database-password-connect", "Connect")
+                                        .style(ButtonStyle::Filled)
+                                        .key_binding(
+                                            KeyBinding::for_action_in(
+                                                &menu::Confirm,
+                                                &self.password_editor.focus_handle(cx),
+                                                cx,
+                                            )
+                                            .size(rems_from_px(12.)),
+                                        )
+                                        .on_click(cx.listener(|this, _event, window, cx| {
+                                            this.confirm(window, cx)
+                                        })),
+                                ),
+                        ),
+                    ),
             )
     }
 }

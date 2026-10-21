@@ -515,6 +515,10 @@ pub struct StatusBarSettingsContent {
     ///
     /// Default: true
     pub image_info_button: Option<bool>,
+    /// Whether to show Zode's version in the status bar.
+    ///
+    /// Default: true
+    pub app_version_button: Option<bool>,
 }
 
 /// How much of an agent's quota the status bar shows.

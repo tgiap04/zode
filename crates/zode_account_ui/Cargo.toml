@@ -15,17 +15,19 @@ doctest = false
 [dependencies]
 # No `telemetry` and no `client`, and `script/check-account-no-telemetry`
 # asserts the first of those against the dependency graph on every run.
-editor.workspace = true
 extension_host.workspace = true
 gpui.workspace = true
 menu.workspace = true
 ui.workspace = true
+ui_input.workspace = true
+util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 zode_account.workspace = true
 zode_sync.workspace = true
 
 [dev-dependencies]
+editor.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 theme.workspace = true

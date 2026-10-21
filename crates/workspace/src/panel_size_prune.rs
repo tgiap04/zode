@@ -198,6 +198,7 @@ mod tests {
             is_dir: true,
             len: 0,
             is_fifo: false,
+            is_regular_file: false,
             is_executable: false,
         };
 

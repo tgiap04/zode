@@ -13,7 +13,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use crate::branch_panel::checkout_state::CheckoutViewState;
 use crate::branch_panel::settings::BranchPanelSettings;
 use crate::branch_panel::state::BRANCH_PANEL_KEY;
-use crate::branch_panel::tree::{AgentEntry, RepoData, SubagentKey, TreeRow};
+use crate::branch_panel::tree::{AgentEntry, RepoData, TreeRow};
 
 actions!(
     branch_panel,
@@ -64,6 +64,8 @@ pub struct BranchPanel {
     pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
     /// Dropped with the panel, so the store never notifies a dead handle.
     pub(crate) _session_subscription: Option<Subscription>,
+    /// Same lifetime and reason as `_session_subscription`, for the names.
+    pub(crate) _session_names_subscription: Option<Subscription>,
     /// One per open agent tab, so a rename redraws the row that names it.
     ///
     /// Rebuilt whenever the panel rebuilds, which is exactly when the set of
@@ -105,33 +107,6 @@ pub struct BranchPanel {
     /// is never written to disk.
     pub(crate) last_known_agents: HashMap<Arc<Path>, Arc<[AgentEntry]>>,
     pub(crate) rows: Vec<TreeRow>,
-    /// Which agent rows have their subagent list open.
-    ///
-    /// In memory rather than in `checkout_state`, unlike every other disclosure
-    /// here. The others are a shape you arrange once and expect back tomorrow;
-    /// this is a look inside one session's work while you are watching it, and
-    /// persisting it would put a row in the store for every session anyone ever
-    /// opened. Closed by default for the same reason a list is worth having at
-    /// all: one session here had spawned twenty-five subagents, and twenty-five
-    /// rows under each of several sessions is a panel nobody can read.
-    pub(crate) expanded_subagents: HashSet<SubagentKey>,
-    /// Subagents of sessions with no tab open on them. An open tab keeps its own
-    /// tracker and is never in here.
-    ///
-    /// Filled once per time the session is drawn as finished, because the read
-    /// touches disk and a row redraws sixty times a second. Dropped when the
-    /// session stops being drawn that way -- including when it is resumed into
-    /// a tab, which is what stops the subagents it gains while open from being
-    /// missed after it closes again.
-    pub(crate) past_subagents: HashMap<Arc<str>, agent_ui::SubagentTracker>,
-    /// The reads in flight, one per session, held so they stop with the panel.
-    ///
-    /// Trimmed to the sessions currently drawn on every rebuild, along with the
-    /// two maps above -- see `follow_listed_subagents`, which is also where a
-    /// resumed session gets its stale entry dropped. Nothing here removes an
-    /// entry from inside the task that is running it, which is the hazard that
-    /// shape would otherwise invite.
-    pub(crate) _subagent_reads: HashMap<Arc<str>, Task<()>>,
     /// Network operations currently in flight, one slot per kind. Leaning on
     /// the fetch button must not spawn a queue of git processes.
     pub(crate) running_remote_ops: HashSet<crate::branch_panel::remote::RemoteOp>,
@@ -141,6 +116,9 @@ pub struct BranchPanel {
     /// Held so the reload stops when the panel is dropped, and so a second press replaces
     /// the first wait rather than stacking another one behind it.
     pub(crate) _reload_task: Option<Task<()>>,
+    /// The checkout whose card asked for the agent sessions to be re-read, until that
+    /// sweep lands -- which is what puts the spinner on that card and no other.
+    pub(crate) session_reload: Option<SessionReload>,
     /// The open right-click menu, its anchor, and the subscription that clears
     /// it on dismiss. Dropping the tuple drops all three together.
     pub(crate) context_menu: Option<(Entity<ui::ContextMenu>, gpui::Point<Pixels>, Subscription)>,
@@ -195,7 +173,7 @@ impl Panel for BranchPanel {
     }
 
     fn icon(&self, _: &Window, cx: &App) -> Option<ui::IconName> {
-        Some(ui::IconName::LayoutGrid).filter(|_| BranchPanelSettings::get_global(cx).button)
+        Some(ui::IconName::GitWorktree).filter(|_| BranchPanelSettings::get_global(cx).button)
     }
 
     fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {
@@ -230,4 +208,16 @@ impl Panel for BranchPanel {
     fn activation_priority(&self) -> u32 {
         3
     }
+}
+
+/// A sweep of the agent sessions that one checkout's card asked for.
+///
+/// The sweep reads every transcript on disk whichever card asked, so this only
+/// decides where the spinner is drawn, not what gets read.
+pub(crate) struct SessionReload {
+    pub(crate) checkout: std::path::PathBuf,
+    /// A sweep over a handful of transcripts lands in milliseconds, and a spinner that
+    /// never gets drawn makes the click look ignored.
+    pub(crate) shown_long_enough: bool,
+    pub(crate) _min_spinner: Task<()>,
 }

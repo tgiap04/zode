@@ -1865,6 +1865,39 @@ impl GitStore {
         self.refresh_all_repositories_and_wait(cx).detach();
     }
 
+    /// Drops every repository whose working directory is `removed` or inside
+    /// it, for a checkout that no longer exists on disk.
+    pub fn forget_repositories_under(&mut self, removed: &Path, cx: &mut Context<Self>) {
+        let gone: Vec<RepositoryId> = self
+            .repositories
+            .iter()
+            .filter(|(_, repository)| {
+                repository
+                    .read(cx)
+                    .work_directory_abs_path
+                    .starts_with(removed)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in gone {
+            self.repositories.remove(&id);
+            self.worktree_ids.remove(&id);
+            if let Some((client, project_id)) = self.downstream_client() {
+                client
+                    .send(proto::RemoveRepository {
+                        project_id: project_id.to_proto(),
+                        id: id.to_proto(),
+                    })
+                    .log_err();
+            }
+            if self.active_repo_id == Some(id) {
+                self.active_repo_id = None;
+                cx.emit(GitStoreEvent::ActiveRepositoryChanged(None));
+            }
+            cx.emit(GitStoreEvent::RepositoryRemoved(id));
+        }
+    }
+
     /// [`Self::refresh_all_repositories`], but resolves once every scan it started has
     /// finished -- for a caller that shows the user something spinning and has to know when
     /// to stop.
@@ -5604,14 +5637,7 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<anyhow::Result<()>> {
         let id = self.id;
-        let updates_tx = self
-            .git_store()
-            .and_then(|git_store| match &git_store.read(cx).state {
-                GitStoreState::Local { downstream, .. } => downstream
-                    .as_ref()
-                    .map(|downstream| downstream.updates_tx.clone()),
-                _ => None,
-            });
+        let updates_tx = self.downstream_updates(cx);
         let this = cx.weak_entity();
         self.send_job(None, move |git_repo, mut cx| async move {
             match git_repo {
@@ -6515,10 +6541,12 @@ impl Repository {
     /// dirty one. That is the safe default for anything user-initiated.
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let this = self.this.clone();
+        let git_store = self.git_store.clone();
         let original_repo_abs_path = self.snapshot.original_repo_abs_path.clone();
         self.send_job(
             Some(format!("git worktree remove: {}", path.display()).into()),
-            move |repo, cx| async move {
+            move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, fs, .. }) => {
                         // When forcing, delete the worktree directory ourselves before
@@ -6569,6 +6597,21 @@ impl Repository {
                             )
                             .await;
                         }
+
+                        // Nothing else re-reads the worktree list, so without this the
+                        // removed worktree stays listed until some unrelated scan.
+                        this.update(&mut cx, |repository, cx| {
+                            drop(repository.schedule_scan(None, cx));
+                        })
+                        .ok();
+                        // A file or terminal opened in the removed checkout gave the
+                        // project a repository of its own for it, and that one can
+                        // never be scanned again: its directory is gone.
+                        git_store
+                            .update(&mut cx, |store, cx| {
+                                store.forget_repositories_under(&path, cx)
+                            })
+                            .ok();
 
                         Ok(())
                     }
@@ -7109,6 +7152,8 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<()>> {
         let this = cx.weak_entity();
+        let git_store = self.git_store.clone();
+        let work_directory_abs_path = self.work_directory_abs_path.clone();
         self.send_keyed_job(
             Some(GitJobKey::ReloadGitState),
             None,
@@ -7118,10 +7163,31 @@ impl Repository {
                 let Some(this) = this.upgrade() else {
                     return Ok(());
                 };
-                let RepositoryState::Local(LocalRepositoryState { backend, .. }) = state else {
+                let RepositoryState::Local(LocalRepositoryState { backend, fs, .. }) = state else {
                     bail!("not a local repository")
                 };
-                let snapshot = compute_snapshot(this.clone(), backend.clone(), &mut cx).await?;
+                let snapshot = match compute_snapshot(this.clone(), backend.clone(), &mut cx).await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        // A checkout deleted from under the project fails every scan from
+                        // then on, so its last snapshot -- still listing it -- would be
+                        // shown for good. Only a directory that is really gone counts:
+                        // any other failure may pass.
+                        if !fs.is_dir(&work_directory_abs_path).await {
+                            log::info!(
+                                "forgetting the repository at {}: its directory is gone",
+                                work_directory_abs_path.display()
+                            );
+                            git_store
+                                .update(&mut cx, |store, cx| {
+                                    store.forget_repositories_under(&work_directory_abs_path, cx)
+                                })
+                                .ok();
+                        }
+                        return Err(error);
+                    }
+                };
                 this.update(&mut cx, |this, cx| {
                     this.clear_pending_ops(cx);
                 });
@@ -7133,6 +7199,53 @@ impl Repository {
                 Ok(())
             },
         )
+    }
+
+    /// Re-reads the repository from git -- branches, head, worktrees, status --
+    /// resolving once that read is done, for a caller that shows it spinning.
+    ///
+    /// The same keyed scan a file event schedules, so pressing a reload button
+    /// while one is queued coalesces into it instead of queueing another.
+    ///
+    /// Only a local repository can be read from here; on a guest or a remote
+    /// project this resolves at once and reads nothing, see [`Self::can_rescan`].
+    pub fn rescan_and_wait(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if !self.can_rescan(cx) {
+            return Task::ready(());
+        }
+        // Passed on rather than `None`: the queue keeps only the newest scan for a
+        // key, so this one can replace a queued scan that was going to tell guests
+        // of a shared project what changed.
+        let updates_tx = self.downstream_updates(cx);
+        let scan = self.schedule_scan(updates_tx, cx);
+        cx.background_spawn(async move {
+            match scan.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("git repository scan failed: {error:#}"),
+                // Superseded by a newer scan of the same repository, which is still
+                // queued and brings the same state in.
+                Err(oneshot::Canceled) => {}
+            }
+        })
+    }
+
+    /// Whether this repository is read from git on this machine, which is what
+    /// [`Self::rescan_and_wait`] needs. A guest's or a remote project's copy is
+    /// brought in by its host instead.
+    pub fn can_rescan(&self, cx: &App) -> bool {
+        self.git_store()
+            .is_some_and(|git_store| git_store.read(cx).is_local())
+    }
+
+    /// Where to send what a scan finds, when this project is shared with guests.
+    fn downstream_updates(&self, cx: &App) -> Option<mpsc::UnboundedSender<DownstreamUpdate>> {
+        self.git_store()
+            .and_then(|git_store| match &git_store.read(cx).state {
+                GitStoreState::Local { downstream, .. } => downstream
+                    .as_ref()
+                    .map(|downstream| downstream.updates_tx.clone()),
+                _ => None,
+            })
     }
 
     fn spawn_local_git_worker(

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::sync::Arc;
 use ui::{
-    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
+    ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tab, Tooltip, prelude::*,
     right_click_menu,
 };
 use util::ResultExt as _;
@@ -2044,8 +2044,8 @@ impl Dock {
                 .debug_selector(|| "dock-header".into())
                 .flex_none()
                 .w_full()
+                .h(Tab::container_height(cx))
                 .px_1()
-                .py_0p5()
                 .gap_1()
                 // A dock narrower than its own buttons clips them rather than
                 // pushing the panel below out of the card.

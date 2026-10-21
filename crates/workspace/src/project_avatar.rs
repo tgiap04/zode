@@ -20,6 +20,12 @@ use std::sync::Arc;
 use gpui::{Hsla, StyledImage, img};
 use ui::prelude::*;
 
+/// The edge of a project's square, wherever the project is drawn as one: the
+/// rail, the avatar's own default, and the ghost that follows the pointer while
+/// a project is dragged. One constant, because a ghost a pixel off the square it
+/// left reads as a different object.
+pub const PROJECT_SQUARE_SIZE: Pixels = px(32.);
+
 /// The debug selector on the element drawn when a logo is present, whether or
 /// not it decodes.
 pub const LOGO_DEBUG_SELECTOR: &str = "PROJECT_AVATAR_LOGO";
@@ -48,7 +54,7 @@ impl ProjectAvatar {
             initials: initials.into(),
             colour,
             logo,
-            size: px(32.),
+            size: PROJECT_SQUARE_SIZE,
             background: gpui::transparent_black(),
             muted_initials: false,
         }

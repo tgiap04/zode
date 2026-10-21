@@ -373,6 +373,18 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         agent_notify::init(cx);
     }
 
+    // Gated the way the status-bar indicator is: where the OS will not hold
+    // the display, the always-on action would be a palette entry that can
+    // never do anything.
+    if cx.can_keep_display_awake() {
+        keep_awake::init(cx);
+    }
+
+    // Switched off by default, and built to do nothing while it is: no
+    // connection is opened and no terminal is watched until the
+    // `remote_control` setting is on and an account is signed in.
+    remote_control::init(cx);
+
     let mut _on_close_subscription = bind_on_window_closed(cx);
     cx.observe_global::<SettingsStore>(move |cx| {
         // A 1.92 regression causes unused-assignment to trigger on this variable.
@@ -1162,7 +1174,10 @@ fn open_about_window(cx: &mut App) {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            // The app version, not `CARGO_PKG_VERSION`: a release reports its tag,
+            // and a manifest that was not bumped for it would put an older number
+            // in the headline than in the line underneath.
+            let version = AppVersion::display(cx);
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
@@ -5121,6 +5136,7 @@ mod tests {
                 "highlights_tree_view",
                 "image_viewer",
                 "journal",
+                "keep_awake",
                 "keymap_editor",
                 "keystroke_input",
                 "language_selector",
@@ -5142,6 +5158,7 @@ mod tests {
                 "project_symbols",
                 "projects",
                 "recent_projects",
+                "remote_control",
                 "remote_debug",
                 "repl",
                 "search",

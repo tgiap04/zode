@@ -1,4 +1,5 @@
 mod headless_project;
+mod headless_terminals;
 
 #[cfg(test)]
 mod remote_editing_tests;
@@ -7,6 +8,7 @@ mod remote_editing_tests;
 pub mod windows;
 
 pub use headless_project::{HeadlessAppState, HeadlessProject};
+pub use headless_terminals::MAX_TERMINALS_PER_CLIENT;
 
 use anyhow::{Context as _, Result, anyhow};
 use clap::Subcommand;
@@ -430,6 +432,156 @@ fn start_server(
     RemoteClient::proto_client_from_channels(incoming_rx, outgoing_tx, cx, "server", is_wsl_interop)
 }
 
+/// Writes into the pipe that [`termination_requests`] reads; a signal handler
+/// may only do what is async-signal-safe, and `write` is.
+#[cfg(unix)]
+static TERMINATION_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[cfg(unix)]
+extern "C" fn on_termination_signal(_signal: libc::c_int) {
+    let descriptor = TERMINATION_PIPE.load(std::sync::atomic::Ordering::Relaxed);
+    if descriptor >= 0 {
+        let byte = 1u8;
+        // SAFETY: `write` is async-signal-safe and `byte` outlives the call. A
+        // full pipe or an error only means the request was already made.
+        unsafe { libc::write(descriptor, (&raw const byte).cast(), 1) };
+    }
+}
+
+/// A message for every `SIGTERM` the server receives.
+#[cfg(unix)]
+fn termination_requests() -> Result<smol::channel::Receiver<()>> {
+    use std::io::Read as _;
+    use std::os::fd::FromRawFd as _;
+
+    let mut descriptors = [0 as libc::c_int; 2];
+    // SAFETY: `pipe` fills the two-element array it is given.
+    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("creating the signal pipe");
+    }
+    let [read_end, write_end] = descriptors;
+    for descriptor in descriptors {
+        // SAFETY: both descriptors were just created and are open.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        // SAFETY: as above; this only adds close-on-exec so children of the
+        // terminals do not inherit the pipe.
+        unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    }
+    // The write end is never closed: the handler may run at any time.
+    TERMINATION_PIPE.store(write_end, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the handler only calls `write`; the struct is zeroed and then the
+    // fields that matter are set.
+    let installed = unsafe {
+        let mut action: libc::sigaction = mem::zeroed();
+        action.sa_sigaction = on_termination_signal as *const () as usize;
+        libc::sigemptyset(&mut action.sa_mask);
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut())
+    };
+    if installed != 0 {
+        return Err(std::io::Error::last_os_error()).context("handling SIGTERM");
+    }
+
+    let (sender, receiver) = smol::channel::unbounded();
+    // SAFETY: `read_end` is open and owned by nothing else.
+    let mut pipe = unsafe { std::fs::File::from_raw_fd(read_end) };
+    std::thread::Builder::new()
+        .name("termination signal".into())
+        .spawn(move || {
+            let mut byte = [0u8; 1];
+            while matches!(pipe.read(&mut byte), Ok(1)) {
+                if sender.send_blocking(()).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("starting the signal thread")?;
+    Ok(receiver)
+}
+
+/// On `SIGTERM`, ends the terminals' processes the way closing them does (hang
+/// up, then kill whatever lingers) and only then quits. Without this the
+/// signal ends the server at once, and with it the chance to stop the children
+/// that outlive a hang-up.
+#[cfg(unix)]
+fn stop_terminals_on_termination(project: gpui::WeakEntity<HeadlessProject>, cx: &mut App) {
+    let requests = match termination_requests() {
+        Ok(requests) => requests,
+        Err(error) => {
+            log::error!("terminals will not be stopped on SIGTERM: {error:#}");
+            return;
+        }
+    };
+    cx.spawn(async move |cx| {
+        if requests.recv().await.is_err() {
+            return;
+        }
+        log::info!("SIGTERM received. stopping terminals and quitting");
+        stop_terminals_and_quit(project, cx).await;
+    })
+    .detach();
+}
+
+/// The file whose appearance beside the pid file asks the server to stop. The
+/// host that started the server writes it where there is no signal to ask with.
+const STOP_REQUEST_FILE: &str = "server.stop";
+
+/// How often the server looks for a request to stop.
+const STOP_REQUEST_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Resolves when a request to stop has been made: the file appears.
+async fn stop_requested(request_file: &Path, executor: &gpui::BackgroundExecutor) {
+    while !request_file.exists() {
+        executor.timer(STOP_REQUEST_POLL).await;
+    }
+}
+
+/// Stops the terminals and quits when asked to by the file [`STOP_REQUEST_FILE`]
+/// beside the pid file, the way `SIGTERM` does where that signal exists.
+fn stop_terminals_when_asked(
+    project: gpui::WeakEntity<HeadlessProject>,
+    pid_file: &Path,
+    cx: &mut App,
+) {
+    // Not cleared first: the pid file that tells the host where to ask was
+    // written before this runs, so the host may already have asked. Each launch
+    // has a state folder of its own, which the host removes when it is done.
+    let request_file = pid_file.with_file_name(STOP_REQUEST_FILE);
+    cx.spawn(async move |cx| {
+        stop_requested(&request_file, cx.background_executor()).await;
+        log::info!("a stop was requested. stopping terminals and quitting");
+        stop_terminals_and_quit(project, cx).await;
+    })
+    .detach();
+}
+
+/// Ends every terminal's process the way closing it does, waits for the
+/// children to be collected, and then quits.
+async fn stop_terminals_and_quit(
+    project: gpui::WeakEntity<HeadlessProject>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let reaped = project
+        .update(cx, |project, _| project.close_all_terminals())
+        .log_err()
+        .unwrap_or_default();
+    let deadline =
+        Instant::now() + headless_terminals::REAP_GRACE + std::time::Duration::from_secs(2);
+    while Instant::now() < deadline
+        && !reaped
+            .iter()
+            .all(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(25))
+            .await;
+    }
+    cx.update(|cx| {
+        cx.shutdown();
+        cx.quit();
+    });
+}
+
 fn init_paths() -> anyhow::Result<()> {
     for path in [
         paths::config_dir(),
@@ -582,6 +734,12 @@ pub fn execute_run(
             cleanup_old_binaries()
         })
         .detach();
+
+        #[cfg(unix)]
+        stop_terminals_on_termination(project.downgrade(), cx);
+        if cfg!(not(unix)) {
+            stop_terminals_when_asked(project.downgrade(), &pid_file, cx);
+        }
 
         mem::forget(project);
     };
@@ -1200,4 +1358,94 @@ fn is_file_in_use(file_name: &OsStr) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    /// A folder under the system's temporary one, removed when this is dropped.
+    struct ScratchDirectory(PathBuf);
+
+    impl ScratchDirectory {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("zode-stop-request-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("a directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDirectory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).log_err();
+        }
+    }
+
+    #[gpui::test]
+    async fn a_request_to_stop_is_noticed_once_its_file_appears(cx: &mut TestAppContext) {
+        let directory = ScratchDirectory::new();
+        let request_file = directory.0.join(STOP_REQUEST_FILE);
+        let noticed = Arc::new(AtomicBool::new(false));
+        let executor = cx.executor();
+        let watching = executor.spawn({
+            let (request_file, noticed, executor) =
+                (request_file.clone(), noticed.clone(), executor.clone());
+            async move {
+                stop_requested(&request_file, &executor).await;
+                noticed.store(true, Ordering::SeqCst);
+            }
+        });
+
+        executor.advance_clock(STOP_REQUEST_POLL * 4);
+        cx.run_until_parked();
+        assert!(!noticed.load(Ordering::SeqCst), "nothing was asked");
+
+        std::fs::write(&request_file, b"").expect("writes");
+        executor.advance_clock(STOP_REQUEST_POLL);
+        cx.run_until_parked();
+        assert!(noticed.load(Ordering::SeqCst), "the file is the request");
+        drop(watching);
+    }
+
+    /// The host writes the request as soon as the pid file appears, which is
+    /// before the server starts looking.
+    #[gpui::test]
+    fn a_request_made_before_the_server_started_looking_is_not_thrown_away(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = ScratchDirectory::new();
+        let pid_file = directory.0.join("server.pid");
+        let request_file = directory.0.join(STOP_REQUEST_FILE);
+        std::fs::write(&request_file, b"").expect("writes");
+
+        cx.update(|cx| {
+            stop_terminals_when_asked(gpui::WeakEntity::new_invalid(), &pid_file, cx);
+        });
+
+        assert!(request_file.exists(), "the request was cleared");
+    }
+
+    #[gpui::test]
+    async fn a_request_that_is_already_there_is_noticed_at_once(cx: &mut TestAppContext) {
+        let directory = ScratchDirectory::new();
+        let request_file = directory.0.join(STOP_REQUEST_FILE);
+        std::fs::write(&request_file, b"").expect("writes");
+        // Resolves without the clock moving: with nothing to wait for it would
+        // never return.
+        stop_requested(&request_file, &cx.executor()).await;
+    }
+
+    #[test]
+    fn the_request_file_sits_beside_the_pid_file() {
+        let pid_file = Path::new("/state/relay-1/server.pid");
+        assert_eq!(
+            pid_file.with_file_name(STOP_REQUEST_FILE),
+            Path::new("/state/relay-1/server.stop")
+        );
+    }
 }

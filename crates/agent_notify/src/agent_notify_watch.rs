@@ -31,13 +31,24 @@ pub(crate) struct Watched {
     /// never re-arm for it. See `needs_reread`.
     pub(crate) terminal: Option<EntityId>,
     /// Whether the "finished answering" notification has already fired for
-    /// the answer currently in progress. Cleared on the next rising edge, so
-    /// one answer produces at most one notification and two answers produce
-    /// two.
+    /// the answer currently in progress. Cleared on the next rising edge (or
+    /// a transcript `Started`/`Interrupted`), so one answer produces at most
+    /// one notification and two answers produce two.
     pub(crate) notified: bool,
     /// The one-shot timer armed on the falling edge. Dropping it cancels it --
-    /// that is the whole cancellation mechanism, not a flag beside it.
+    /// that is the whole cancellation mechanism, not a flag beside it. Besides
+    /// the rising edge and the exit, a transcript `Started` or `Interrupted`
+    /// drops it too.
     pub(crate) quiet: Option<Task<()>>,
+    /// Whether the awaited terminal has exited. Set by `fire_exit`, cleared
+    /// when `reread` arms a waiter for a new terminal. While set, transcript
+    /// events that would announce something are dropped, since they can only
+    /// be late deliveries.
+    pub(crate) exited: bool,
+    /// Whether the approval notification has fired for the approval
+    /// currently pending. Cleared when the approval is answered, so one
+    /// pending episode produces one notification.
+    pub(crate) approval_notified: bool,
     /// Awaits this tab's CLI exiting.
     pub(crate) exit: Option<Task<()>>,
     _activity: Subscription,
@@ -92,14 +103,21 @@ impl AgentNotifier {
             return;
         }
 
-        let activity = cx.subscribe(&view, move |this, view, event, cx| {
-            if !matches!(event, AgentViewEvent::Activity) {
-                return;
+        let activity = cx.subscribe(&view, move |this, view, event, cx| match event {
+            AgentViewEvent::Activity => {
+                let agent_view = view.read(cx);
+                let answering = agent_view.is_answering();
+                let transcript_turns = agent_view.reports_turns();
+                let title = agent_view.tab_label();
+                this.on_activity(id, answering, transcript_turns, title, cx);
             }
-            let agent_view = view.read(cx);
-            let answering = agent_view.is_answering();
-            let title = agent_view.tab_label();
-            this.on_activity(id, answering, title, cx);
+            AgentViewEvent::Turn(turn) => {
+                let agent_view = view.read(cx);
+                let transcript_turns = agent_view.reports_turns();
+                let title = agent_view.tab_label();
+                this.on_turn(id, *turn, transcript_turns, title, cx);
+            }
+            _ => {}
         });
         let identity = cx.observe(&view, |this, view, cx| this.reread(view, cx));
         // `observe`/`subscribe` stop delivering once the entity is gone, but
@@ -117,6 +135,8 @@ impl AgentNotifier {
                 terminal: None,
                 notified: false,
                 quiet: None,
+                exited: false,
+                approval_notified: false,
                 exit: None,
                 _activity: activity,
                 _identity: identity,
@@ -167,6 +187,9 @@ impl AgentNotifier {
             // terminal that has just been replaced or removed.
             watched.exit = None;
             watched.terminal = terminal_id;
+            if terminal_id.is_some() {
+                watched.exited = false;
+            }
         }
 
         let Some(terminal) = terminal else {

@@ -17,7 +17,11 @@ use gpui::{
 };
 use project::git_store::RepositoryId;
 use settings::Settings as _;
-use ui::{Chip, Divider, KeyBinding, Tooltip, prelude::*};
+use ui::{
+    Chip, KeyBinding, Modal, ModalFooter, ModalHeader, Section, SwitchField, ToggleButtonGroup,
+    ToggleButtonWithIcon, ToggleState, Tooltip, prelude::*,
+};
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::{ModalView, Workspace};
 use zed_actions::NewWorktreeBranchTarget;
 
@@ -55,6 +59,13 @@ impl NameMode {
             NameMode::Branch => "Filter existing branches",
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            NameMode::Name => 0,
+            NameMode::Branch => 1,
+        }
+    }
 }
 
 /// The form's one decision, as a pure function of what the reader has filled
@@ -83,6 +94,29 @@ pub(crate) fn chosen_target(
         NameMode::Branch => selected_branch.map(|name| NewWorktreeBranchTarget::ExistingBranch {
             name: name.to_string(),
         }),
+    }
+}
+
+/// The worktree's own name, as `CreateWorktree::worktree_name` takes it.
+///
+/// On the Name tab the worktree is named after the new branch, as it always
+/// was. On the Branch tab the name is optional: left empty, the service picks
+/// one; typed, it is checked with the same rule the service applies, so an
+/// unusable name disables Create instead of failing after the click.
+pub(crate) fn chosen_worktree_name(
+    target: &NewWorktreeBranchTarget,
+    typed: &str,
+) -> Result<Option<String>, &'static str> {
+    match target {
+        NewWorktreeBranchTarget::NewBranch { name, .. } => Ok(Some(name.clone())),
+        _ => {
+            let name = typed.trim();
+            if name.is_empty() {
+                return Ok(None);
+            }
+            crate::worktree_names::validate_worktree_name(name)?;
+            Ok(Some(name.to_string()))
+        }
     }
 }
 
@@ -116,7 +150,10 @@ pub(crate) struct CreateWorktreeModal {
     /// every other entry point has.
     location: PathBuf,
     mode: NameMode,
-    name_editor: Entity<editor::Editor>,
+    name_input: Entity<InputField>,
+    /// The worktree's name on the Branch tab, where the first field filters
+    /// branches. Empty means let the service pick one.
+    worktree_name_input: Entity<InputField>,
     /// Local branch names, for the Branch tab.
     branches: Vec<SharedString>,
     selected_branch: Option<SharedString>,
@@ -132,9 +169,11 @@ pub(crate) struct CreateWorktreeModal {
 impl EventEmitter<DismissEvent> for CreateWorktreeModal {}
 impl ModalView for CreateWorktreeModal {}
 
+/// The name field, so that the form opens ready to be typed into: it is the
+/// one thing in it that takes text.
 impl Focusable for CreateWorktreeModal {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.name_input.focus_handle(cx)
     }
 }
 
@@ -149,17 +188,30 @@ impl CreateWorktreeModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name_editor = cx.new(|cx| {
-            let mut editor = editor::Editor::single_line(window, cx);
-            editor.set_placeholder_text(NameMode::Name.placeholder(), window, cx);
-            editor
+        let name_input = cx.new(|cx| InputField::new(window, cx, NameMode::Name.placeholder()));
+        let worktree_name_input = cx.new(|cx| {
+            InputField::new(window, cx, "Name the worktree (optional)")
+                .label("Worktree name")
+                .label_size(LabelSize::Small)
         });
-        let subscriptions =
-            vec![
-                cx.subscribe(&name_editor, |_, _, _: &editor::EditorEvent, cx| {
-                    cx.notify();
-                }),
-            ];
+        // Whether Create is enabled, the collision warning, the branch matches
+        // and the name check all read what is typed, so each keystroke redraws
+        // the form.
+        let subscriptions = [&name_input, &worktree_name_input]
+            .into_iter()
+            .map(|input| {
+                let this = cx.entity().downgrade();
+                input.read(cx).editor().clone().subscribe(
+                    Box::new(move |event, _window, cx| {
+                        if event == ErasedEditorEvent::BufferEdited {
+                            this.update(cx, |_, cx| cx.notify()).ok();
+                        }
+                    }),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -169,7 +221,8 @@ impl CreateWorktreeModal {
             run_on_path,
             location,
             mode: NameMode::Name,
-            name_editor,
+            name_input,
+            worktree_name_input,
             branches,
             selected_branch: None,
             agent: None,
@@ -184,9 +237,18 @@ impl CreateWorktreeModal {
     fn target(&self, cx: &App) -> Option<NewWorktreeBranchTarget> {
         chosen_target(
             self.mode,
-            &self.name_editor.read(cx).text(cx),
+            &self.name_input.read(cx).text(cx),
             self.selected_branch.as_ref().map(|name| name.as_ref()),
         )
+    }
+
+    /// The worktree name the Create button would send, or why it cannot.
+    fn worktree_name(&self, cx: &App) -> Option<Result<Option<String>, &'static str>> {
+        let target = self.target(cx)?;
+        Some(chosen_worktree_name(
+            &target,
+            &self.worktree_name_input.read(cx).text(cx),
+        ))
     }
 
     /// Opens the system's folder chooser and takes what it returns.
@@ -223,10 +285,9 @@ impl CreateWorktreeModal {
         }
         self.mode = mode;
         self.selected_branch = None;
-        self.name_editor.update(cx, |editor, cx| {
-            editor.set_placeholder_text(mode.placeholder(), window, cx);
-            editor.clear(window, cx);
-        });
+        let editor = self.name_input.read(cx).editor().clone();
+        editor.set_placeholder_text(mode.placeholder(), window, cx);
+        editor.clear(window, cx);
         cx.notify();
     }
 
@@ -244,14 +305,14 @@ impl CreateWorktreeModal {
     fn colliding_branch(&self, cx: &App) -> Option<SharedString> {
         branch_colliding_with(
             self.mode,
-            &self.name_editor.read(cx).text(cx),
+            &self.name_input.read(cx).text(cx),
             &self.branches,
         )
     }
 
     /// Branches matching what has been typed, for the Branch tab.
     fn matching_branches(&self, cx: &App) -> Vec<SharedString> {
-        let query = self.name_editor.read(cx).text(cx).trim().to_lowercase();
+        let query = self.name_input.read(cx).text(cx).trim().to_lowercase();
         self.branches
             .iter()
             .filter(|name| query.is_empty() || name.to_lowercase().contains(&query))
@@ -264,11 +325,12 @@ impl CreateWorktreeModal {
         let Some(branch_target) = self.target(cx) else {
             return;
         };
-        let location = self.location.clone();
-        let worktree_name = match &branch_target {
-            NewWorktreeBranchTarget::NewBranch { name, .. } => Some(name.clone()),
-            _ => None,
+        let Ok(worktree_name) =
+            chosen_worktree_name(&branch_target, &self.worktree_name_input.read(cx).text(cx))
+        else {
+            return;
         };
+        let location = self.location.clone();
 
         // The agent rides on the action rather than being started here.
         // `worktree_service` runs it from the new workspace's own init hook, so
@@ -293,9 +355,14 @@ impl CreateWorktreeModal {
             .ok();
 
         if self.create_more {
-            self.name_editor
-                .update(cx, |editor, cx| editor.clear(window, cx));
+            let editor = self.name_input.read(cx).editor().clone();
+            editor.clear(window, cx);
+            let worktree_name_editor = self.worktree_name_input.read(cx).editor().clone();
+            worktree_name_editor.clear(window, cx);
             self.selected_branch = None;
+            // The click that turned "Create more" on left focus on the modal's
+            // root, where typed text goes nowhere.
+            window.focus(&self.name_input.focus_handle(cx), cx);
             cx.notify();
         } else {
             cx.emit(DismissEvent);
@@ -308,11 +375,11 @@ impl CreateWorktreeModal {
 }
 
 impl Render for CreateWorktreeModal {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let can_create = self.target(cx).is_some();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let can_create = matches!(self.worktree_name(cx), Some(Ok(_)));
         let focus_handle = self.focus_handle.clone();
 
-        v_flex()
+        div()
             .key_context("CreateWorktreeModal")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::cancel))
@@ -320,63 +387,82 @@ impl Render for CreateWorktreeModal {
                 cx.listener(|modal, _: &menu::Confirm, window, cx| modal.confirm(window, cx)),
             )
             .elevation_3(cx)
-            .w(px(440.))
-            .p_4()
-            .gap_3()
+            .occlude()
+            .debug_selector(|| "create-worktree-modal".into())
+            .w(rems(40.))
+            .max_h(rems(44.))
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .child(Label::new("Create worktree").size(LabelSize::Large))
-                    .child(
-                        IconButton::new("close", IconName::Close)
-                            .icon_size(IconSize::Small)
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
-                    ),
-            )
-            .child(self.render_readonly_field("Project", &self.project_name, None, cx))
-            .child(self.render_readonly_field(
-                "Run on",
-                &self.run_on,
-                Some(self.run_on_path.clone()),
-                cx,
-            ))
-            .child(self.render_location_section(cx))
-            .child(self.render_name_section(window, cx))
-            .child(self.render_agent_section(cx))
-            .child(Divider::horizontal())
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .id("create-more")
-                            .gap_1p5()
-                            .child(
-                                ui::Switch::new("create-more-switch", self.create_more.into())
-                                    .on_click(cx.listener(|modal, state, _, cx| {
-                                        modal.create_more = *state == ui::ToggleState::Selected;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Label::new("Create more")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .tooltip(|_, cx| Tooltip::simple("Keep this open after creating", cx)),
+                Modal::new("create-worktree", None)
+                    .header(
+                        ModalHeader::new()
+                            .show_dismiss_button(true)
+                            .child(Headline::new("Create Worktree").size(HeadlineSize::Small)),
                     )
-                    .child(
-                        Button::new("create", "Create worktree")
-                            .style(ButtonStyle::Brand)
-                            .disabled(!can_create)
-                            .key_binding(
-                                KeyBinding::for_action_in(&menu::Confirm, &focus_handle, cx)
-                                    .map(|binding| binding.size(rems_from_px(12.))),
+                    .section(
+                        Section::new().child(
+                            v_flex()
+                                .w_full()
+                                .gap_3()
+                                .child(self.render_readonly_field(
+                                    "Project",
+                                    &self.project_name,
+                                    None,
+                                    cx,
+                                ))
+                                .child(self.render_readonly_field(
+                                    "Run on",
+                                    &self.run_on,
+                                    Some(self.run_on_path.clone()),
+                                    cx,
+                                ))
+                                .child(self.render_location_section(cx))
+                                .child(self.render_name_section(cx))
+                                .child(self.render_agent_section(cx)),
+                        ),
+                    )
+                    .footer(
+                        ModalFooter::new()
+                            .start_slot(
+                                div()
+                                    .id("create-more")
+                                    .debug_selector(|| "create-more".into())
+                                    .tooltip(Tooltip::text("Keep this open after creating"))
+                                    .child(SwitchField::new(
+                                        "create-more-switch",
+                                        Some("Create more"),
+                                        None,
+                                        self.create_more,
+                                        cx.listener(|modal, state: &ToggleState, _, cx| {
+                                            modal.create_more = *state == ToggleState::Selected;
+                                            cx.notify();
+                                        }),
+                                    )),
                             )
-                            .on_click(
-                                cx.listener(|modal, _, window, cx| modal.confirm(window, cx)),
+                            .end_slot(
+                                h_flex()
+                                    .debug_selector(|| "create-worktree-actions".into())
+                                    .gap_1()
+                                    .child(
+                                        Button::new("cancel", "Cancel").on_click(
+                                            cx.listener(|_, _, _, cx| cx.emit(DismissEvent)),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new("create", "Create Worktree")
+                                            .style(ButtonStyle::Filled)
+                                            .disabled(!can_create)
+                                            .key_binding(
+                                                KeyBinding::for_action_in(
+                                                    &menu::Confirm,
+                                                    &focus_handle,
+                                                    cx,
+                                                )
+                                                .size(rems_from_px(12.)),
+                                            )
+                                            .on_click(cx.listener(|modal, _, window, cx| {
+                                                modal.confirm(window, cx)
+                                            })),
+                                    ),
                             ),
                     ),
             )
@@ -404,6 +490,7 @@ impl CreateWorktreeModal {
             .child(
                 h_flex()
                     .w_full()
+                    .min_h_8()
                     .px_2()
                     .py_1p5()
                     .gap_1p5()
@@ -442,6 +529,7 @@ impl CreateWorktreeModal {
             .child(
                 h_flex()
                     .w_full()
+                    .min_h_8()
                     .px_2()
                     .py_1p5()
                     .gap_1p5()
@@ -460,7 +548,6 @@ impl CreateWorktreeModal {
                     .child(
                         Button::new("choose-location", "Choose\u{2026}")
                             .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::Small)
                             .on_click(cx.listener(|modal, _, window, cx| {
                                 modal.choose_location(window, cx)
                             })),
@@ -476,11 +563,7 @@ impl CreateWorktreeModal {
             )
     }
 
-    fn render_name_section(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_name_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.mode;
         let matches = (mode == NameMode::Branch).then(|| self.matching_branches(cx));
 
@@ -492,51 +575,50 @@ impl CreateWorktreeModal {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
-            .child(h_flex().gap_3().children(NameMode::ALL.map(|candidate| {
-                let selected = candidate == mode;
-                h_flex()
-                    .id(candidate.label())
-                    .gap_1()
-                    .pb_0p5()
-                    .when(selected, |this| {
-                        this.border_b_2().border_color(cx.theme().colors().text)
-                    })
-                    .child(
-                        Icon::new(candidate.icon())
-                            .size(IconSize::XSmall)
-                            .color(if selected {
-                                Color::Default
-                            } else {
-                                Color::Muted
-                            }),
-                    )
-                    .child(Label::new(candidate.label()).size(LabelSize::Small).color(
-                        if selected {
-                            Color::Default
-                        } else {
-                            Color::Muted
-                        },
-                    ))
-                    .on_click(cx.listener(move |modal, _, window, cx| {
-                        modal.set_mode(candidate, window, cx)
-                    }))
-            })))
             .child(
-                h_flex()
-                    .w_full()
-                    .px_2()
-                    .py_1p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(cx.theme().colors().border_focused)
-                    .bg(cx.theme().colors().editor_background)
-                    .child(self.name_editor.clone()),
+                div().debug_selector(|| "name-mode".into()).child(
+                    ToggleButtonGroup::single_row(
+                        "name-mode",
+                        NameMode::ALL.map(|candidate| {
+                            ToggleButtonWithIcon::new(
+                                candidate.label(),
+                                candidate.icon(),
+                                cx.listener(move |modal, _, window, cx| {
+                                    modal.set_mode(candidate, window, cx)
+                                }),
+                            )
+                        }),
+                    )
+                    .selected_index(mode.index())
+                    .label_size(LabelSize::Default),
+                ),
             )
+            .child(self.name_input.clone())
             .when_some(matches, |this, matches| {
                 this.child(self.render_branch_matches(matches, cx))
             })
             .when_some(self.colliding_branch(cx), |this, branch| {
                 this.child(self.render_branch_collision(branch, cx))
+            })
+            .when(mode == NameMode::Branch, |this| {
+                let problem = match self.worktree_name(cx) {
+                    Some(Err(reason)) => Some(reason),
+                    _ => None,
+                };
+                this.child(
+                    v_flex()
+                        .gap_1()
+                        .pt_1()
+                        .debug_selector(|| "worktree-name".into())
+                        .child(self.worktree_name_input.clone())
+                        .when_some(problem, |this, reason| {
+                            this.child(
+                                Label::new(reason)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Error),
+                            )
+                        }),
+                )
             })
     }
 
@@ -582,7 +664,7 @@ impl CreateWorktreeModal {
         v_flex()
             .id("branch-matches")
             .w_full()
-            .max_h(px(160.))
+            .max_h(rems(10.5))
             .overflow_y_scroll()
             .children(matches.into_iter().map(|name| {
                 let selected = self.selected_branch.as_ref() == Some(&name);
@@ -590,6 +672,7 @@ impl CreateWorktreeModal {
                 h_flex()
                     .id(SharedString::from(format!("branch-{name}")))
                     .w_full()
+                    .gap_1p5()
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -602,11 +685,7 @@ impl CreateWorktreeModal {
                             .size(IconSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .child(
-                        div()
-                            .pl_1p5()
-                            .child(Label::new(name).size(LabelSize::Small)),
-                    )
+                    .child(Label::new(name).size(LabelSize::Small))
                     .on_click(cx.listener(move |modal, _, _, cx| {
                         modal.selected_branch = Some(chosen.clone());
                         cx.notify();
@@ -738,7 +817,7 @@ fn branch_colliding_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{NameMode, branch_colliding_with, chosen_target};
+    use super::{NameMode, branch_colliding_with, chosen_target, chosen_worktree_name};
     use gpui::SharedString;
 
     /// The case that sent a reader in circles: a branch exists, no worktree
@@ -788,6 +867,45 @@ mod tests {
 
     /// A worktree with a branch of its own is the point: a detached checkout
     /// has nowhere to commit, so parallel feature work cannot happen in one.
+    fn existing(name: &str) -> zed_actions::NewWorktreeBranchTarget {
+        zed_actions::NewWorktreeBranchTarget::ExistingBranch {
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_worktree_made_from_a_branch_takes_the_name_typed_for_it() {
+        assert_eq!(
+            chosen_worktree_name(&existing("develop"), "  release-check  "),
+            Ok(Some("release-check".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_worktree_made_from_a_branch_with_no_name_typed_is_named_for_you() {
+        assert_eq!(chosen_worktree_name(&existing("develop"), ""), Ok(None));
+        assert_eq!(chosen_worktree_name(&existing("develop"), "   "), Ok(None));
+    }
+
+    #[test]
+    fn a_worktree_name_that_would_leave_its_directory_is_refused_before_create() {
+        for unusable in ["../outside", "/tmp/elsewhere", "a\\b"] {
+            assert!(
+                chosen_worktree_name(&existing("develop"), unusable).is_err(),
+                "{unusable:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_branch_still_names_its_worktree_after_itself() {
+        let target = chosen_target(NameMode::Name, "feat.parser", None).expect("a target");
+        assert_eq!(
+            chosen_worktree_name(&target, "ignored"),
+            Ok(Some("feat.parser".to_string()))
+        );
+    }
+
     #[test]
     fn a_typed_name_creates_a_branch() {
         assert_eq!(
@@ -894,5 +1012,215 @@ mod location {
                 "{unusable:?} is refused by the setting's own validator"
             );
         }
+    }
+}
+
+/// The form as a person meets it: opened, clicked and confirmed.
+///
+/// There is no workspace behind these. `confirm` hands the action to the
+/// workspace and carries on if it is gone, so what is asserted is everything
+/// that happens around that hand-off.
+#[cfg(test)]
+mod form {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = settings::SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+    }
+
+    fn open_with(
+        branches: Vec<SharedString>,
+        cx: &mut TestAppContext,
+    ) -> (Entity<CreateWorktreeModal>, &mut VisualTestContext) {
+        init(cx);
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            CreateWorktreeModal::new(
+                gpui::WeakEntity::new_invalid(),
+                "zode".into(),
+                "This machine".into(),
+                "/repos/zode".into(),
+                PathBuf::from("/repos/worktrees/zode"),
+                branches,
+                window,
+                cx,
+            )
+        });
+        // What the modal layer does the moment it shows a modal.
+        modal.update_in(cx, |modal, window, cx| {
+            let focus = modal.focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        cx.simulate_resize(gpui::size(gpui::px(1000.), gpui::px(800.)));
+        cx.run_until_parked();
+        (modal, cx)
+    }
+
+    fn open(cx: &mut TestAppContext) -> (Entity<CreateWorktreeModal>, &mut VisualTestContext) {
+        open_with(vec!["develop".into(), "main".into()], cx)
+    }
+
+    fn type_name(modal: &Entity<CreateWorktreeModal>, text: &str, cx: &mut VisualTestContext) {
+        let editor = modal.read_with(cx, |modal, cx| modal.name_input.read(cx).editor().clone());
+        cx.update(|window, cx| editor.set_text(text, window, cx));
+        cx.run_until_parked();
+    }
+
+    fn typed(modal: &Entity<CreateWorktreeModal>, cx: &mut VisualTestContext) -> String {
+        modal.read_with(cx, |modal, cx| modal.name_input.read(cx).text(cx))
+    }
+
+    /// Clicks `selector` a `fraction` of the way along it, so one wrapper can
+    /// stand for either half of a segmented control.
+    fn click_along(selector: &'static str, fraction: f32, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not drawn, so it cannot be clicked"));
+        let position = gpui::point(
+            bounds.origin.x + bounds.size.width * fraction,
+            bounds.center().y,
+        );
+        cx.simulate_click(position, Modifiers::default());
+        cx.run_until_parked();
+    }
+
+    fn watch_dismissal(
+        modal: &Entity<CreateWorktreeModal>,
+        cx: &mut VisualTestContext,
+    ) -> (Rc<Cell<bool>>, gpui::Subscription) {
+        let dismissed = Rc::new(Cell::new(false));
+        let subscription = cx.update(|_, cx| {
+            let dismissed = dismissed.clone();
+            cx.subscribe(modal, move |_, _: &DismissEvent, _| dismissed.set(true))
+        });
+        (dismissed, subscription)
+    }
+
+    /// The form's one text field is what the reader types into, so it has to
+    /// be what the modal layer focuses.
+    #[gpui::test]
+    async fn the_form_opens_ready_to_be_typed_into(cx: &mut TestAppContext) {
+        let (modal, cx) = open(cx);
+        modal.update_in(cx, |modal, window, cx| {
+            assert!(
+                modal
+                    .name_input
+                    .read(cx)
+                    .editor()
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "what the modal layer focuses is the name field itself"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn create_more_keeps_the_form_open_and_empties_the_name(cx: &mut TestAppContext) {
+        let (modal, cx) = open(cx);
+        let (dismissed, _subscription) = watch_dismissal(&modal, cx);
+
+        type_name(&modal, "feat.parser", cx);
+        click_along("create-more", 0.5, cx);
+        assert!(
+            modal.read_with(cx, |modal, _| modal.create_more),
+            "a click on the switch turns it on"
+        );
+
+        modal.update_in(cx, |modal, window, cx| modal.confirm(window, cx));
+        cx.run_until_parked();
+
+        assert!(!dismissed.get(), "the form stays for the next worktree");
+        assert_eq!(typed(&modal, cx), "", "and is ready for its name");
+        modal.update_in(cx, |modal, window, cx| {
+            assert!(
+                modal
+                    .name_input
+                    .read(cx)
+                    .editor()
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "clicking the switch moved focus off the name field, so typing the next name \
+                 needs it handed back"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn without_create_more_a_create_closes_the_form(cx: &mut TestAppContext) {
+        let (modal, cx) = open(cx);
+        let (dismissed, _subscription) = watch_dismissal(&modal, cx);
+
+        type_name(&modal, "feat.parser", cx);
+        modal.update_in(cx, |modal, window, cx| modal.confirm(window, cx));
+        cx.run_until_parked();
+
+        assert!(dismissed.get());
+    }
+
+    #[gpui::test]
+    async fn nothing_typed_means_nothing_to_confirm(cx: &mut TestAppContext) {
+        let (modal, cx) = open(cx);
+        let (dismissed, _subscription) = watch_dismissal(&modal, cx);
+
+        modal.update_in(cx, |modal, window, cx| modal.confirm(window, cx));
+        cx.run_until_parked();
+
+        assert!(!dismissed.get(), "an empty name cannot create anything");
+    }
+
+    #[gpui::test]
+    async fn choosing_branch_swaps_the_name_for_a_pick(cx: &mut TestAppContext) {
+        let (modal, cx) = open(cx);
+        type_name(&modal, "feat", cx);
+        assert!(modal.read_with(cx, |modal, _| modal.mode == NameMode::Name));
+
+        click_along("name-mode", 0.75, cx);
+
+        assert!(
+            modal.read_with(cx, |modal, _| modal.mode == NameMode::Branch),
+            "the second segment is the Branch tab"
+        );
+        assert_eq!(
+            typed(&modal, cx),
+            "",
+            "a name typed for a new branch is not a filter for existing ones"
+        );
+
+        click_along("name-mode", 0.25, cx);
+        assert!(modal.read_with(cx, |modal, _| modal.mode == NameMode::Name));
+    }
+
+    /// The dialog is as tall as it is allowed to be at its fullest -- the
+    /// Branch tab with a long list -- and everything in it is still inside.
+    #[gpui::test]
+    async fn the_form_fits_inside_its_maximum_height(cx: &mut TestAppContext) {
+        let branches = (0..12)
+            .map(|index| SharedString::from(format!("feature-{index}")))
+            .collect();
+        let (modal, cx) = open_with(branches, cx);
+        modal.update_in(cx, |modal, window, cx| {
+            modal.set_mode(NameMode::Branch, window, cx)
+        });
+        cx.run_until_parked();
+
+        let shell = cx
+            .debug_bounds("create-worktree-modal")
+            .expect("the form was not drawn");
+        let actions = cx
+            .debug_bounds("create-worktree-actions")
+            .expect("the footer buttons were not drawn");
+        assert!(
+            actions.bottom() <= shell.bottom(),
+            "the footer ends at {:?} but the form ends at {:?}",
+            actions.bottom(),
+            shell.bottom()
+        );
     }
 }

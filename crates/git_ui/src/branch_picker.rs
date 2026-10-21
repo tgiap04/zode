@@ -30,7 +30,9 @@ actions!(
         /// Deletes the selected git branch or remote.
         DeleteBranch,
         /// Filter the list of remotes
-        FilterRemotes
+        FilterRemotes,
+        /// Re-read the branches from git
+        ReloadBranches
     ]
 );
 
@@ -271,6 +273,16 @@ impl BranchList {
         })
     }
 
+    pub fn handle_reload(
+        &mut self,
+        _: &branch_picker::ReloadBranches,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker
+            .update(cx, |picker, cx| picker.delegate.reload(cx));
+    }
+
     pub fn handle_filter(
         &mut self,
         _: &branch_picker::FilterRemotes,
@@ -302,6 +314,7 @@ impl Render for BranchList {
             .on_modifiers_changed(cx.listener(Self::handle_modifiers_changed))
             .on_action(cx.listener(Self::handle_delete))
             .on_action(cx.listener(Self::handle_filter))
+            .on_action(cx.listener(Self::handle_reload))
             .child(self.picker.clone())
             .when(!self.embedded, |this| {
                 this.on_mouse_down_out({
@@ -393,6 +406,11 @@ pub struct BranchListDelegate {
     focus_handle: FocusHandle,
     restore_selected_branch: Option<SharedString>,
     show_footer: bool,
+    /// Whether a reload someone asked for is still running, which is what turns
+    /// the reload icon into a spinner.
+    reloading: bool,
+    /// Held so a second press replaces the first wait rather than stacking one.
+    _reload_task: Option<Task<()>>,
 }
 
 #[derive(Debug)]
@@ -429,7 +447,39 @@ impl BranchListDelegate {
             focus_handle: cx.focus_handle(),
             restore_selected_branch: None,
             show_footer: false,
+            reloading: false,
+            _reload_task: None,
         }
+    }
+
+    /// Re-reads the branches from git, for a branch created or fetched outside
+    /// the editor that no file event has brought in yet.
+    ///
+    /// The list itself is refilled by the `BranchListChanged` subscription in
+    /// `BranchList::new_inner`; this only starts the read and owns the spinner,
+    /// which a read that changes nothing would otherwise never take down.
+    fn reload(&mut self, cx: &mut Context<Picker<Self>>) {
+        // A repository with no changes rescans in milliseconds, and a spinner that
+        // never gets drawn makes the press look ignored.
+        const MIN_RELOAD_SPINNER: std::time::Duration = std::time::Duration::from_millis(500);
+
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        let scan = repo.update(cx, |repo, cx| repo.rescan_and_wait(cx));
+        let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
+        self.reloading = true;
+        self._reload_task = Some(cx.spawn(async move |picker, cx| {
+            futures::join!(scan, shown_for_at_least);
+            picker
+                .update(cx, |picker, cx| {
+                    picker.delegate.reloading = false;
+                    cx.notify();
+                })
+                // A failed update means the picker is gone, and so is this task.
+                .ok();
+        }));
+        cx.notify();
     }
 
     fn create_branch(
@@ -589,10 +639,16 @@ impl PickerDelegate for BranchListDelegate {
         &self,
         editor: &Arc<dyn ErasedEditor>,
         _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
+        cx: &mut Context<Picker<Self>>,
     ) -> Div {
         let focus_handle = self.focus_handle.clone();
         let editor = editor.as_any().downcast_ref::<Entity<Editor>>().unwrap();
+        // A guest's or a remote project's branches come from its host, and a
+        // button that cannot read them would spin over nothing.
+        let can_reload = self
+            .repo
+            .as_ref()
+            .is_some_and(|repo| repo.read(cx).can_rescan(cx));
 
         v_flex()
             .when(
@@ -605,34 +661,69 @@ impl PickerDelegate for BranchListDelegate {
                     .flex_none()
                     .h_9()
                     .px_2p5()
+                    .gap_1()
+                    .justify_between()
                     .child(editor.clone())
-                    .when(
-                        self.editor_position() == PickerEditorPosition::End,
-                        |this| {
-                            let tooltip_label = match self.branch_filter {
-                                BranchFilter::All => "Filter Remote Branches",
-                                BranchFilter::Remote => "Show All Branches",
-                            };
-
-                            this.gap_1().justify_between().child({
-                                IconButton::new("filter-remotes", IconName::Filter)
-                                    .toggle_state(self.branch_filter == BranchFilter::Remote)
-                                    .tooltip(move |_, cx| {
-                                        Tooltip::for_action_in(
-                                            tooltip_label,
-                                            &branch_picker::FilterRemotes,
-                                            &focus_handle,
-                                            cx,
-                                        )
-                                    })
-                                    .on_click(|_click, window, cx| {
-                                        window.dispatch_action(
-                                            branch_picker::FilterRemotes.boxed_clone(),
-                                            cx,
-                                        );
-                                    })
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_0p5()
+                            .when(can_reload, |this| {
+                                let reload_focus_handle = focus_handle.clone();
+                                let reloading = self.reloading;
+                                this.child(
+                                    IconButton::new("reload-branches", IconName::RotateCw)
+                                        .loading(reloading)
+                                        .tooltip(move |_, cx| {
+                                            Tooltip::for_action_in(
+                                                if reloading {
+                                                    "Reloading Branches…"
+                                                } else {
+                                                    "Reload Branches"
+                                                },
+                                                &branch_picker::ReloadBranches,
+                                                &reload_focus_handle,
+                                                cx,
+                                            )
+                                        })
+                                        .on_click(|_click, window, cx| {
+                                            window.dispatch_action(
+                                                branch_picker::ReloadBranches.boxed_clone(),
+                                                cx,
+                                            );
+                                        }),
+                                )
                             })
-                        },
+                            // The modal style has the filter in its footer instead.
+                            .when(
+                                self.editor_position() == PickerEditorPosition::End,
+                                |this| {
+                                    let tooltip_label = match self.branch_filter {
+                                        BranchFilter::All => "Filter Remote Branches",
+                                        BranchFilter::Remote => "Show All Branches",
+                                    };
+                                    this.child(
+                                        IconButton::new("filter-remotes", IconName::Filter)
+                                            .toggle_state(
+                                                self.branch_filter == BranchFilter::Remote,
+                                            )
+                                            .tooltip(move |_, cx| {
+                                                Tooltip::for_action_in(
+                                                    tooltip_label,
+                                                    &branch_picker::FilterRemotes,
+                                                    &focus_handle,
+                                                    cx,
+                                                )
+                                            })
+                                            .on_click(|_click, window, cx| {
+                                                window.dispatch_action(
+                                                    branch_picker::FilterRemotes.boxed_clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                    )
+                                },
+                            ),
                     ),
             )
             .when(
@@ -1469,6 +1560,96 @@ mod tests {
         let repository = cx.read(|cx| project.read(cx).active_repository(cx));
 
         (project, repository.unwrap())
+    }
+
+    /// A branch made outside the editor that no file event announced shows up
+    /// once reload is pressed, and the spinner comes down on its own.
+    #[gpui::test]
+    async fn test_reload_picks_up_a_branch_made_outside_the_editor(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (project, repository) = init_fake_repository(cx).await;
+        let fs = project.read_with(cx, |project, _| project.fs().clone());
+        fs.as_fake()
+            .insert_branches(path!("/dir/.git").as_ref(), &["main"]);
+        cx.run_until_parked();
+
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let branch_list = window_handle
+            .update(cx, |_, window, cx| {
+                cx.new(|cx| {
+                    BranchList::new_inner(
+                        workspace.downgrade(),
+                        Some(repository),
+                        BranchListStyle::Popover,
+                        rems(34.),
+                        false,
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap();
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.run_until_parked();
+
+        let listed = |branch_list: &Entity<BranchList>, cx: &mut VisualTestContext| {
+            branch_list.read_with(cx, |branch_list, cx| {
+                branch_list
+                    .picker
+                    .read(cx)
+                    .delegate
+                    .all_branches
+                    .iter()
+                    .map(|branch| branch.name().to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let picker_reloading = |branch_list: &Entity<BranchList>, cx: &mut VisualTestContext| {
+            branch_list.read_with(cx, |branch_list, cx| {
+                branch_list.picker.read(cx).delegate.reloading
+            })
+        };
+        assert!(listed(&branch_list, &mut cx).contains(&"main".to_string()));
+
+        // Written with the event withheld: what a `git branch` run in a terminal
+        // looks like when the watcher has not caught it.
+        fs.as_fake()
+            .with_git_state(path!("/dir/.git").as_ref(), false, |state| {
+                state.branches.insert("made-in-a-terminal".to_string());
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            !listed(&branch_list, &mut cx).contains(&"made-in-a-terminal".to_string()),
+            "nothing has read git since, so the branch is not listed yet"
+        );
+
+        branch_list.update_in(&mut cx, |branch_list, window, cx| {
+            branch_list.handle_reload(&branch_picker::ReloadBranches, window, cx);
+        });
+        assert!(
+            picker_reloading(&branch_list, &mut cx),
+            "the icon spins at once"
+        );
+
+        cx.run_until_parked();
+        assert!(
+            listed(&branch_list, &mut cx).contains(&"made-in-a-terminal".to_string()),
+            "reload must re-read the branches from git"
+        );
+        assert!(
+            picker_reloading(&branch_list, &mut cx),
+            "a read that lands at once still leaves the spinner up long enough to be seen"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(!picker_reloading(&branch_list, &mut cx));
     }
 
     #[gpui::test]

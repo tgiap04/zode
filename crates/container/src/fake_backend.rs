@@ -73,6 +73,12 @@ impl FakeBackend {
         }
     }
 
+    /// The same fake, answering with `resources` instead of what it held.
+    pub fn holding(mut self, resources: Vec<Resource>) -> Self {
+        self.resources = resources;
+        self
+    }
+
     pub fn misbehaving(mut self, misbehaviour: Misbehaviour) -> Self {
         self.misbehaviour = misbehaviour;
         self

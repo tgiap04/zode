@@ -10,6 +10,7 @@ mod confirm_modal;
 mod container_panel;
 mod detail;
 mod render;
+mod search;
 mod standalone;
 mod terminal;
 

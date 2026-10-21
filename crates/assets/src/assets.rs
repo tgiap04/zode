@@ -105,4 +105,16 @@ mod tests {
             );
         }
     }
+
+    // The welcome and onboarding screens draw the logo by path. A rename or a
+    // missing file leaves an empty space where it was, with no error anywhere.
+    #[test]
+    fn the_app_logo_is_embedded() {
+        let bytes = Assets
+            .load("images/zode_app_icon.png")
+            .ok()
+            .flatten()
+            .expect("images/zode_app_icon.png is not embedded");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+    }
 }

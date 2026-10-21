@@ -41,6 +41,12 @@ pub struct SessionStore {
     /// Bumped on every completed sweep. Consumers that cache anything derived
     /// from the index compare this instead of comparing the index itself.
     generation: u64,
+    /// Ids forgotten while a sweep was in flight. That sweep may have read the
+    /// disk before the trash, so its listing can still name them; they are
+    /// filtered out of it before it is installed. Emptied when the sweep
+    /// lands -- a later sweep reads the disk after the delete -- so it holds at
+    /// most one sweep's worth of deletes.
+    forgotten_during_sweep: HashSet<Arc<str>>,
 }
 
 impl SessionStore {
@@ -53,6 +59,18 @@ impl SessionStore {
             return global.0.clone();
         }
         let store = cx.new(|_| Self::new(agent_sessions::default_providers()));
+        cx.set_global(GlobalSessionStore(store.clone()));
+        store
+    }
+
+    /// Installs a store that sweeps `providers` instead of the real ones, which
+    /// read the developer's home directory.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_global_for_test(
+        providers: Vec<Arc<dyn SessionProvider>>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let store = cx.new(|_| Self::new(providers));
         cx.set_global(GlobalSessionStore(store.clone()));
         store
     }
@@ -71,6 +89,7 @@ impl SessionStore {
             scanning: None,
             rescan_requested: false,
             generation: 0,
+            forgotten_during_sweep: HashSet::default(),
         }
     }
 
@@ -84,6 +103,12 @@ impl SessionStore {
 
     pub fn is_scanning(&self) -> bool {
         self.scanning.is_some()
+    }
+
+    /// Whether `id` was deleted while the sweep now in flight was running, so
+    /// anything that remembers it from before the delete must let it go.
+    pub fn was_forgotten_during_sweep(&self, id: &str) -> bool {
+        self.forgotten_during_sweep.contains(id)
     }
 
     /// Sweeps the stores on the background executor.
@@ -104,6 +129,15 @@ impl SessionStore {
                 .await;
 
             this.update(cx, |this, cx| {
+                let forgotten = std::mem::take(&mut this.forgotten_during_sweep);
+                let sessions = if forgotten.is_empty() {
+                    sessions
+                } else {
+                    sessions
+                        .into_iter()
+                        .filter(|session| !forgotten.contains(&session.id))
+                        .collect()
+                };
                 this.index = Arc::new(SessionIndex::new(sessions));
                 this.generation += 1;
                 this.scanning = None;
@@ -123,9 +157,13 @@ impl SessionStore {
     /// it deleted, and a sweep would read every other transcript to learn one
     /// fact it was already told.
     pub fn forget(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.scanning.is_some() {
+            self.forgotten_during_sweep.insert(Arc::from(id));
+        }
         self.index = Arc::new(self.index.without(id));
         self.generation += 1;
         cx.notify();
+        forget_names([Arc::from(id)], cx);
     }
 
     /// Drops a whole set of sessions that have already been removed from disk.
@@ -142,9 +180,13 @@ impl SessionStore {
         if ids.is_empty() {
             return;
         }
+        if self.scanning.is_some() {
+            self.forgotten_during_sweep.extend(ids.iter().cloned());
+        }
         self.index = Arc::new(self.index.without_all(ids));
         self.generation += 1;
         cx.notify();
+        forget_names(ids.iter().cloned(), cx);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -157,6 +199,12 @@ impl SessionStore {
         self.generation += 1;
         cx.notify();
     }
+}
+
+/// A deleted session takes the name it was given with it. Only ever reached
+/// after the transcript is gone, which is the one thing `forget` is told.
+fn forget_names(ids: impl IntoIterator<Item = Arc<str>>, cx: &mut App) {
+    crate::SessionNames::global(cx).update(cx, |names, cx| names.forget_deleted(ids, cx));
 }
 
 #[cfg(test)]
@@ -333,6 +381,65 @@ mod tests {
         });
     }
 
+    /// A sweep that read the disk before a delete finishes after it. Its listing
+    /// still names the deleted session, and installing it as-is would put the
+    /// row back until the next manual refresh.
+    #[gpui::test]
+    async fn a_sweep_in_flight_during_a_delete_does_not_bring_the_row_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (store, _) = store(cx);
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(
+                vec![session("a", "/repo/main"), session("b", "/repo/feature")],
+                cx,
+            );
+            store.refresh(cx);
+            store.forget("a", cx);
+        });
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            let ids: Vec<&str> = store
+                .index()
+                .sessions()
+                .iter()
+                .map(|session| session.id.as_ref())
+                .collect();
+            assert_eq!(
+                ids,
+                vec!["b"],
+                "a sweep that started before the delete must not resurrect the session"
+            );
+        });
+    }
+
+    /// The bulk drop has the same race as the single one.
+    #[gpui::test]
+    async fn a_sweep_in_flight_during_a_bulk_delete_does_not_bring_the_rows_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (store, _) = store(cx);
+        store.update(cx, |store, cx| {
+            store.set_index_for_test(
+                vec![session("a", "/repo/main"), session("b", "/repo/feature")],
+                cx,
+            );
+            store.refresh(cx);
+            let ids: HashSet<Arc<str>> = ["a", "b"].into_iter().map(Arc::from).collect();
+            store.forget_many(&ids, cx);
+        });
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.index().len(), 0);
+            assert!(
+                !store.was_forgotten_during_sweep("a"),
+                "the record covers one sweep and must be empty once it lands"
+            );
+        });
+    }
+
     /// A delete that trashed nothing is not a change. Bumping the generation
     /// for it would redraw every surface reading the store for no reason.
     #[gpui::test]
@@ -369,6 +476,32 @@ mod tests {
             0,
             "an empty forget must not notify"
         );
+    }
+
+    /// A test that needs the global must be able to give it providers of its own:
+    /// the real ones read the developer's home directory.
+    #[gpui::test]
+    async fn an_installed_store_sweeps_only_the_providers_it_was_given(cx: &mut TestAppContext) {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(CountingProvider {
+            list_calls: list_calls.clone(),
+            sessions: vec![session("only", "/repo/main")],
+        });
+        let installed = cx.update(|cx| SessionStore::install_global_for_test(vec![provider], cx));
+
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_eq!(global.entity_id(), installed.entity_id());
+        assert_eq!(installed.read_with(cx, |store, _| store.generation()), 0);
+
+        installed.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+
+        assert_eq!(list_calls.load(Ordering::SeqCst), 1);
+        installed.read_with(cx, |store, _| {
+            assert_eq!(store.generation(), 1);
+            assert_eq!(store.index().len(), 1);
+            assert!(store.index().find("only").is_some());
+        });
     }
 
     /// The store outlives every panel that reads it. If it ever holds one, the

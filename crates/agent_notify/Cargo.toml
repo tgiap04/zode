@@ -29,6 +29,11 @@ util.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+# For the `simulate_*` hooks that stand in for a transcript, which needs a CLI
+# writing one.
+agent_ui = { workspace = true, features = ["test-support"] }
+# For the turn marks those hooks are handed.
+agent_sessions.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 # For `SettingsStore::test` and `update_user_settings`: the setting is a
 # user-facing switch, so the tests read it through a real store rather than

@@ -9,17 +9,15 @@ use std::sync::Arc;
 use collections::{HashMap, HashSet};
 use gpui::{
     App, AppContext as _, AsyncWindowContext, Context, Entity, ListAlignment, ListState,
-    SharedString, WeakEntity, Window, px,
+    WeakEntity, Window, px,
 };
 use project::git_store::RepositoryId;
 use workspace::Workspace;
 
 use crate::branch_panel::checkout_state::CheckoutViewState;
-use crate::branch_panel::panel::BranchPanel;
+use crate::branch_panel::panel::{BranchPanel, SessionReload};
 use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
-use crate::branch_panel::tree::{
-    AgentActivity, AgentEntry, RowKey, SubagentKey, TreeRow, build_rows,
-};
+use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey, TreeRow, build_rows};
 
 /// How often the panel redraws while an agent is live.
 ///
@@ -27,6 +25,13 @@ use crate::branch_panel::tree::{
 /// slow enough that it is a rounding error next to drawing the frame it asks
 /// for.
 const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a reload's spinner stays up even when the work under it is done sooner.
+///
+/// A clean repository rescans in milliseconds, and so does a sweep over a few
+/// transcripts, so without a floor the spinner would vanish before it is ever drawn and
+/// the click would look like it did nothing.
+const MIN_RELOAD_SPINNER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl BranchPanel {
     pub fn new(
@@ -65,6 +70,8 @@ impl BranchPanel {
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
+                _session_names_subscription: None,
+                session_reload: None,
                 _agent_tab_names: Vec::new(),
                 row_kinds: Vec::new(),
                 is_active: false,
@@ -72,9 +79,6 @@ impl BranchPanel {
                 rebuild_count: 0,
                 repos: Vec::new(),
                 last_known_agents: HashMap::default(),
-                expanded_subagents: HashSet::default(),
-                past_subagents: HashMap::default(),
-                _subagent_reads: HashMap::default(),
                 rows: Vec::new(),
                 running_remote_ops: collections::HashSet::default(),
                 reloading: false,
@@ -155,9 +159,14 @@ impl BranchPanel {
     /// newer one with the same key is already waiting -- so leaning on the button
     /// coalesces instead of queueing one scan per press.
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
-        // The agent rows come from the workspace, not from git, so they are refreshed by
-        // the rebuild itself rather than by any scan.
+        // Open agent tabs come from the workspace and are picked up by the rebuild itself.
+        // Finished sessions come from the transcripts on disk, which nothing re-reads on
+        // its own once the first sweep is done -- a session run from a terminal outside
+        // Zode would otherwise never appear.
         self.mark_stale(cx);
+        if let Some(store) = self.session_store.clone() {
+            store.update(cx, |store, cx| store.refresh(cx));
+        }
 
         let Some(git_store) = self.git_store(cx) else {
             return;
@@ -167,8 +176,9 @@ impl BranchPanel {
         });
 
         self.reloading = true;
+        let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
         self._reload_task = Some(cx.spawn(async move |panel, cx| {
-            scans.await;
+            futures::join!(scans, shown_for_at_least);
             panel
                 .update(cx, |panel, cx| {
                     panel.reloading = false;
@@ -180,6 +190,68 @@ impl BranchPanel {
                 // A failed update means the panel is gone, and so is this task.
                 .ok();
         }));
+    }
+
+    /// Re-reads the agent sessions on disk, with the spinner on `checkout`'s card.
+    ///
+    /// The sweep is shared and covers every checkout -- the session stores are not
+    /// indexed by directory, so there is no cheaper read for one of them -- but it is
+    /// asked for from one card, and that card is where the answer is awaited.
+    pub(crate) fn reload_sessions(&mut self, checkout: PathBuf, cx: &mut Context<Self>) {
+        // The store exists once the panel has drawn, which it has if a card was clicked.
+        // Creating it here would start its first sweep and then chain a second one for
+        // this same click.
+        let Some(store) = self.session_store.clone() else {
+            return;
+        };
+        store.update(cx, |store, cx| store.refresh(cx));
+
+        let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
+        let min_spinner = cx.spawn(async move |panel, cx| {
+            shown_for_at_least.await;
+            panel
+                .update(cx, |panel, cx| {
+                    if let Some(reload) = panel.session_reload.as_mut() {
+                        reload.shown_long_enough = true;
+                    }
+                    panel.settle_session_reload(cx);
+                })
+                // A failed update means the panel is gone, and so is this task.
+                .ok();
+        });
+        // Replacing an earlier reload restarts the floor rather than stacking a second
+        // wait behind it: the old task is dropped with the value it lived in.
+        self.session_reload = Some(SessionReload {
+            checkout,
+            shown_long_enough: false,
+            _min_spinner: min_spinner,
+        });
+        cx.notify();
+    }
+
+    /// Takes the spinner down once both the floor has passed and the sweep has landed,
+    /// whichever comes second -- so this runs from both of them.
+    ///
+    /// Asking `is_scanning` rather than counting notifications: a refresh that arrives
+    /// mid-sweep chains one more sweep (`SessionStore::refresh`), and the store
+    /// notifies between the two, so a notification alone does not mean the answer
+    /// this card asked for is in.
+    pub(crate) fn settle_session_reload(&mut self, cx: &mut Context<Self>) {
+        let Some(reload) = &self.session_reload else {
+            return;
+        };
+        if !reload.shown_long_enough || self.index_is_settling(cx) {
+            return;
+        }
+        self.session_reload = None;
+        cx.notify();
+    }
+
+    /// Whether `checkout`'s card is waiting on a sweep it asked for.
+    pub(crate) fn is_reloading_sessions(&self, checkout: &Path) -> bool {
+        self.session_reload
+            .as_ref()
+            .is_some_and(|reload| reload.checkout == checkout)
     }
 
     /// Marks the tree for a rebuild. Rebuilding happens in `render`, so a burst
@@ -237,62 +309,6 @@ impl BranchPanel {
         self.rows = rows;
         self.sync_list_state();
         self.track_agent_tab_names(cx);
-        self.follow_listed_subagents(cx);
-    }
-
-    /// Keeps the subagent caches to exactly what this panel is drawing.
-    ///
-    /// Reads run from here rather than from the click that opens a disclosure,
-    /// because that disclosure cannot be drawn until the read has landed: it
-    /// says how many subagents there are, and until something has counted them
-    /// the honest answer is to draw nothing. An open tab is skipped — it
-    /// follows its own session already, and asking twice reads one transcript
-    /// twice.
-    ///
-    /// The three maps are then trimmed back to what is listed, which is what
-    /// keeps them from growing for the life of a window that has browsed a lot
-    /// of checkouts. Trimming also does the invalidating: resuming a past
-    /// session turns its row into an open one, which drops the cached read, so
-    /// when the tab closes and the row goes back to being past it is read
-    /// again — the subagents it gained while it was open are in that answer,
-    /// where a cache kept on "have we ever read this id" would have missed them
-    /// forever.
-    fn follow_listed_subagents(&mut self, cx: &mut Context<Self>) {
-        let drawn: Vec<&AgentEntry> = self
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                TreeRow::Worktree {
-                    agents, expanded, ..
-                } if *expanded => Some(agents),
-                _ => None,
-            })
-            .flat_map(|agents| agents.iter())
-            .collect();
-
-        let open_keys: HashSet<SubagentKey> = drawn
-            .iter()
-            .filter_map(|entry| entry.subagent_key())
-            .collect();
-        let past: Vec<(SharedString, Arc<str>)> = drawn
-            .iter()
-            .filter_map(|entry| match entry {
-                AgentEntry::Past { agent, id, .. } => Some((agent.clone(), id.clone())),
-                AgentEntry::Open { .. } => None,
-            })
-            .collect();
-        let past_ids: HashSet<Arc<str>> = past.iter().map(|(_, id)| id.clone()).collect();
-
-        // Dropping a read that is still running cancels it, which is the right
-        // answer for a session nothing is drawing any more.
-        self.past_subagents.retain(|id, _| past_ids.contains(id));
-        self._subagent_reads.retain(|id, _| past_ids.contains(id));
-        self.expanded_subagents
-            .retain(|key| open_keys.contains(key));
-
-        for (agent, id) in past {
-            self.read_past_subagents(&agent, &id, cx);
-        }
     }
 
     /// Whether the disk index cannot yet be trusted to speak for a checkout it
@@ -327,6 +343,7 @@ impl BranchPanel {
     /// to write a hold as it goes.
     pub(crate) fn hold_known_agents(&mut self, cx: &App) {
         let settling = self.index_is_settling(cx);
+        let store = self.session_store.as_ref().map(|store| store.read(cx));
 
         for repo in self.repos.iter_mut() {
             for worktree in repo.worktrees.iter() {
@@ -342,8 +359,36 @@ impl BranchPanel {
                     // Empty, and the index cannot yet be believed: hand back
                     // what this checkout last showed, if anything did.
                     _ if settling => {
-                        if let Some(held) = self.last_known_agents.get(&path) {
-                            repo.agents.insert(path, held.clone());
+                        if let Some(held) = self.last_known_agents.get(&path).cloned() {
+                            // A session deleted while this sweep runs is gone
+                            // for good; the sweep just has not caught up, and
+                            // holding it would draw a deleted row until it does.
+                            let kept: Arc<[AgentEntry]> = match store {
+                                Some(store) => held
+                                    .iter()
+                                    .filter(|entry| match entry {
+                                        AgentEntry::Past { id, .. } => {
+                                            !store.was_forgotten_during_sweep(id)
+                                        }
+                                        AgentEntry::Open { .. } => true,
+                                    })
+                                    .cloned()
+                                    .collect(),
+                                None => held.clone(),
+                            };
+                            // Written back so the hold itself forgets the row: the
+                            // store's record only lasts one sweep, and a later one
+                            // would otherwise find the deleted entry still held.
+                            if kept.len() != held.len() {
+                                if kept.is_empty() {
+                                    self.last_known_agents.remove(&path);
+                                } else {
+                                    self.last_known_agents.insert(path.clone(), kept.clone());
+                                }
+                            }
+                            if !kept.is_empty() {
+                                repo.agents.insert(path, kept);
+                            }
                         }
                     }
                     // Empty, and nothing is in flight to excuse it: the
@@ -490,10 +535,11 @@ impl BranchPanel {
     /// user back to the top -- the row they just clicked scrolled out of sight,
     /// which reads as the toggle having done nothing at all.
     ///
-    /// A row's measured height depends only on its variant (a branch card is
-    /// two lines, a section header one), never on its contents, so comparing
-    /// variants is enough to find the slice that actually moved. `splice`
-    /// re-anchors the scroll offset around it.
+    /// Comparing variants finds the slice whose rows were added or removed, and
+    /// `splice` re-anchors the scroll offset around it. It does not see a card
+    /// whose height changed in place -- one gaining or losing subagent rows
+    /// under its agent -- and does not need to: the list remeasures the rows
+    /// that are on screen each frame.
     fn sync_list_state(&mut self) {
         let new_kinds: Vec<_> = self.rows.iter().map(std::mem::discriminant).collect();
 
@@ -611,7 +657,13 @@ impl BranchPanel {
         // the panel and fires into a dropped handle.
         self._session_subscription = Some(cx.observe(&store, |panel, _, cx| {
             panel.mark_stale(cx);
+            panel.settle_session_reload(cx);
         }));
+        // A finished session is listed under the name it was given, so naming
+        // one has to redraw the list as much as a sweep does.
+        let names = agent_ui::SessionNames::global(cx);
+        self._session_names_subscription =
+            Some(cx.observe(&names, |panel, _, cx| panel.mark_stale(cx)));
         store.update(cx, |store, cx| store.refresh(cx));
         self.session_store = Some(store);
     }

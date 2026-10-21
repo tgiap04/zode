@@ -208,7 +208,7 @@ impl StatusBar {
     }
 
     /// Opens the show/hide menu at the pointer. Anchored `BottomLeft` because the
-    /// bar sits at the bottom of the window, so a menu with fifteen rows and two
+    /// bar sits at the bottom of the window, so a menu with sixteen rows and two
     /// headers has to open upward rather than rely on
     /// `snap_to_window_with_margin` shoving it back on screen.
     fn deploy_toggle_menu(

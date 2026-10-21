@@ -23,6 +23,19 @@ const ALLOWED_TO_DIFFER: &[(&str, &str)] = &[
         "agent_notify",
         "initialised inside `initialize_workspace`, which main.rs calls",
     ),
+    // Initialised one level below the flat startup list, like `agent_notify`.
+    // Once switched on and signed in it opens a connection and watches
+    // terminals, which a test must not do behind its own back.
+    (
+        "remote_control",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
+    // Initialised one level below the flat startup list, like `agent_notify`,
+    // and gated the same way: on the platform being able to hold the display.
+    (
+        "keep_awake",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
     // The harness builds its own `AppState` and drives windows itself, so the
     // app's startup-only wiring has no counterpart in it.
     (

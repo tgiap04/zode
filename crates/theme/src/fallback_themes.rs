@@ -155,6 +155,7 @@ pub(crate) fn zed_default_dark() -> Theme {
                 tab_bar_background: bg,
                 tab_inactive_background: bg,
                 tab_active_background: editor,
+                tab_active_indicator: hsla(23. / 360., 93. / 100., 53. / 100., 1.0),
                 search_match_background: bg,
                 search_active_match_background: bg,
 

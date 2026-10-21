@@ -175,6 +175,11 @@ async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestA
     let ellipsis = cx
         .debug_bounds("agent-history-menu:2")
         .expect("the session row's ellipsis must be drawn");
+    // The trigger is only painted while the pointer is over its row, so a click
+    // that did not first arrive there would reach nothing -- as it would for a
+    // person. The move is the arrival.
+    cx.simulate_mouse_move(ellipsis.center(), None, gpui::Modifiers::default());
+    cx.run_until_parked();
     cx.simulate_click(ellipsis.center(), gpui::Modifiers::default());
     cx.run_until_parked();
 
@@ -188,6 +193,80 @@ async fn the_ellipsis_opens_its_menu_instead_of_expanding_the_row(cx: &mut TestA
         panel.read_with(cx, |panel, _| panel.expanded_rows.is_empty()),
         "and must not fall through to the row, which would expand it instead"
     );
+    // Opening the menu takes the pointer off the row, which hides the trigger
+    // unless the row knows its menu is open. That knowledge is the handle.
+    assert!(
+        panel.update(cx, |panel, _| panel
+            .menu_handle(&Arc::from("one"))
+            .is_deployed()),
+        "the row must know its menu is open, or its trigger vanishes under it"
+    );
+}
+
+/// A row's menu handle lives in the panel and stores the closure that builds
+/// the menu, so anything that closure captures strongly -- including the panel
+/// itself -- is kept alive by the panel for as long as the panel lives.
+///
+/// The menu is opened here as well as drawn: the built `ContextMenu` is a second
+/// owner of the entry handlers, and the handle holds it too. The panel is taken
+/// out of the workspace rather than the window closed, because the dock outlives
+/// its window in this harness and would hold the panel regardless.
+#[gpui::test]
+async fn a_panel_with_an_open_row_menu_is_released_when_removed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let panel: Entity<AgentHistoryPanel> = workspace.update_in(cx, |workspace, window, cx| {
+        cx.new(|cx| AgentHistoryPanel::new(workspace, window, cx))
+    });
+    panel.update(cx, |panel, _| panel.providers.clear());
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+        workspace.toggle_panel_focus::<AgentHistoryPanel>(window, cx);
+    });
+    cx.run_until_parked();
+    panel.update(cx, |panel, cx| {
+        let sessions = vec![session("one", "/root", "Newest here", 300)];
+        panel
+            .store
+            .update(cx, |store, cx| store.set_index_for_test(sessions, cx));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let ellipsis = cx
+        .debug_bounds("agent-history-menu:2")
+        .expect("the session row's ellipsis must be drawn");
+    cx.simulate_mouse_move(ellipsis.center(), None, gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_click(ellipsis.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("MENU_ITEM-Delete").is_some(),
+        "the menu must be open, or this test says nothing about what it holds"
+    );
+
+    let weak_panel = panel.downgrade();
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.remove_panel(&panel, window, cx);
+    });
+    drop(panel);
+    cx.run_until_parked();
+    // One more effect cycle: a dropped entity's resources are kept until the end
+    // of the cycle it was dropped in.
+    cx.update(|_, _| {});
+
+    weak_panel.assert_released();
 }
 
 /// The other half of the scoping claim: with nothing open, nothing is listed.
@@ -543,6 +622,41 @@ async fn deleting_all_takes_this_projects_sessions_and_no_others(cx: &mut TestAp
     );
 }
 
+/// A Claude session only has a sidecar directory when it ran subagents, yet
+/// its deletion always lists one. A path that is already absent counts as
+/// gone, so the session must not stay listed.
+#[gpui::test]
+async fn deleting_all_forgets_a_session_whose_sidecar_directory_never_existed(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "one.jsonl": "" })).await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![session("one", "/root", "First", 300)],
+        vec![(
+            "one",
+            vec![PathBuf::from("/logs/one.jsonl"), PathBuf::from("/logs/one")],
+        )],
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    click_delete_all(&mut cx);
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert_eq!(trashed_names(&fs), vec!["one.jsonl".to_string()]);
+    assert!(
+        remaining_ids(&panel, &mut cx).is_empty(),
+        "an absent sidecar directory must not keep the row listed"
+    );
+}
+
 /// The second scope test: a filter narrows the list, never the delete.
 #[gpui::test]
 async fn the_search_filter_does_not_narrow_the_delete(cx: &mut TestAppContext) {
@@ -786,7 +900,8 @@ async fn a_session_with_nothing_on_disk_offers_to_drop_the_row(cx: &mut TestAppC
     );
 }
 
-/// The partial-failure rule. `FakeFs::trash` errors on a path it never held, so
+/// The partial-failure rule. `FakeFs::trash` errors on a path whose parent
+/// directory it never held, even when a missing path is otherwise tolerated, so
 /// the second session fails without any injection machinery.
 #[gpui::test]
 async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContext) {
@@ -803,7 +918,7 @@ async fn a_session_whose_files_fail_to_trash_stays_listed(cx: &mut TestAppContex
         ],
         vec![
             ("good", vec![PathBuf::from("/logs/good.jsonl")]),
-            ("bad", vec![PathBuf::from("/logs/missing.jsonl")]),
+            ("bad", vec![PathBuf::from("/unmounted/missing.jsonl")]),
         ],
         fs.clone(),
         cx,
@@ -871,6 +986,61 @@ async fn a_single_delete_whose_trash_fails_keeps_the_row(cx: &mut TestAppContext
         remaining_ids(&panel, &mut cx),
         vec!["bad".to_string()],
         "a failed trash must keep the row (H7), matching delete_all's own discipline"
+    );
+}
+
+/// The single delete's happy path with the store idle: the row leaves the
+/// panel with no manual refresh.
+///
+/// The transcript is a real file (see the comment on
+/// `a_single_delete_whose_trash_fails_keeps_the_row`) that is also registered
+/// with `FakeFs`, so the trash call itself succeeds.
+#[gpui::test]
+async fn a_single_delete_that_trashes_cleanly_drops_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+
+    let real_log =
+        std::env::temp_dir().join(format!("zode-single-ok-{}.jsonl", std::process::id()));
+    std::fs::write(&real_log, "").expect("writing the real fixture file must succeed");
+    if let Some(parent) = real_log.parent() {
+        fs.insert_tree(parent, json!({})).await;
+    }
+    fs.insert_file(&real_log, Vec::new()).await;
+
+    let target = SessionSummary {
+        log_path: Some(real_log.clone()),
+        log_bytes: 10,
+        ..session("gone", "/root", "Trashes cleanly", 300)
+    };
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![target.clone(), session("kept", "/root", "Still here", 200)],
+        Vec::new(),
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&target, window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    std::fs::remove_file(&real_log).ok();
+
+    assert_eq!(
+        trashed_names(&fs).len(),
+        1,
+        "the transcript must reach the trash"
+    );
+    assert_eq!(
+        remaining_ids(&panel, &mut cx),
+        vec!["kept".to_string()],
+        "a clean single delete must drop the row without a refresh"
     );
 }
 
@@ -971,4 +1141,238 @@ async fn a_mixed_bulk_plan_warns_it_is_not_fully_recoverable(cx: &mut TestAppCon
         "the irreversible session, whose CLI is not installed under test, must \
          stay listed rather than vanish while still in its own store"
     );
+}
+
+/// A tab running `id`, alive or not, in the same app as the panel.
+fn tab_running(
+    id: &str,
+    alive: bool,
+    panel: &Entity<AgentHistoryPanel>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::AgentView> {
+    let project = panel.read_with(cx, |panel, cx| {
+        panel
+            .workspace()
+            .upgrade()
+            .expect("the panel's workspace is open")
+            .read(cx)
+            .project()
+            .clone()
+    });
+    let id = id.to_string();
+    let view = cx.new(|cx| {
+        crate::AgentView::test_new(
+            project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+            zed_actions::agent::AgentViewMode::Terminal,
+            project,
+            gpui::WeakEntity::new_invalid(),
+            crate::SessionOrigin::new(crate::agent_view::SessionIntent::Tracked(id.into()), None),
+            cx,
+        )
+    });
+    view.update(cx, |view, cx| view.simulate_cli_alive(alive, cx));
+    view
+}
+
+fn open_session(id: &str) -> SessionSummary {
+    SessionSummary {
+        log_path: Some(PathBuf::from(format!("/logs/{id}.jsonl"))),
+        ..session(id, "/root", "A conversation", 300)
+    }
+}
+
+/// The store notifies for a forgotten session as well as for a finished sweep.
+/// A delete landing in the middle of a sweep must not read as the sweep being
+/// over: Delete-all would plan from the index the sweep is about to replace.
+#[gpui::test]
+async fn a_delete_landing_mid_sweep_does_not_end_the_wait(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![session("one", "/root", "First", 300)],
+        Vec::new(),
+        fs,
+        cx,
+    )
+    .await;
+
+    panel.update(&mut cx, |panel, cx| panel.refresh(cx));
+    assert!(panel.read_with(&cx, |panel, _| panel.loading));
+
+    panel.update(&mut cx, |panel, cx| {
+        panel.store.update(cx, |store, cx| store.forget("one", cx));
+    });
+    assert!(
+        panel.read_with(&cx, |panel, _| panel.loading),
+        "the sweep has not landed, so the panel is still waiting for it"
+    );
+
+    cx.run_until_parked();
+    assert!(
+        !panel.read_with(&cx, |panel, _| panel.loading),
+        "and the sweep landing is what ends the wait"
+    );
+}
+
+#[gpui::test]
+async fn deleting_a_session_a_live_tab_runs_says_so(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![open_session("running"), open_session("idle")],
+        Vec::new(),
+        fs,
+        cx,
+    )
+    .await;
+    let _running = tab_running("running", true, &panel, &mut cx);
+    let _ended = tab_running("idle", false, &panel, &mut cx);
+
+    for (id, warned) in [("running", true), ("idle", false)] {
+        let target = panel.read_with(&cx, |panel, cx| {
+            panel
+                .sessions(cx)
+                .iter()
+                .find(|session| session.id.as_ref() == id)
+                .expect("the session is in the index")
+                .clone()
+        });
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.delete(&target, window, cx)
+        });
+        cx.run_until_parked();
+
+        let prompt = cx.pending_prompt().expect("a delete must confirm first");
+        assert_eq!(prompt.0, "Delete this session?");
+        assert_eq!(
+            prompt.1.contains("An open tab is running this session"),
+            warned,
+            "{id}: {}",
+            prompt.1
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+async fn deleting_all_counts_the_sessions_live_tabs_run(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "a.jsonl": "", "b.jsonl": "" }))
+        .await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![
+            session("a", "/root", "First", 300),
+            session("b", "/root", "Second", 200),
+        ],
+        vec![
+            ("a", vec![PathBuf::from("/logs/a.jsonl")]),
+            ("b", vec![PathBuf::from("/logs/b.jsonl")]),
+        ],
+        fs,
+        cx,
+    )
+    .await;
+    let _running = tab_running("a", true, &panel, &mut cx);
+
+    click_delete_all(&mut cx);
+
+    let prompt = cx.pending_prompt().expect("a delete must confirm first");
+    assert!(
+        prompt
+            .1
+            .contains("1 of these sessions is running in an open tab"),
+        "{}",
+        prompt.1
+    );
+    cx.simulate_prompt_answer("Cancel");
+}
+
+#[gpui::test]
+async fn deleting_all_with_no_live_tab_adds_nothing_to_the_prompt(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "a.jsonl": "" })).await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![session("a", "/root", "First", 300)],
+        vec![("a", vec![PathBuf::from("/logs/a.jsonl")])],
+        fs,
+        cx,
+    )
+    .await;
+    let _ended = tab_running("a", false, &panel, &mut cx);
+
+    click_delete_all(&mut cx);
+
+    let prompt = cx.pending_prompt().expect("a delete must confirm first");
+    assert!(!prompt.1.contains("open tab"), "{}", prompt.1);
+    cx.simulate_prompt_answer("Cancel");
+}
+
+#[test]
+fn the_note_about_open_tabs_counts_what_it_is_about() {
+    use crate::session_history::actions::running_in_tabs_note;
+    assert_eq!(running_in_tabs_note(0, 1), None);
+    assert_eq!(running_in_tabs_note(0, 9), None);
+    assert!(
+        running_in_tabs_note(1, 1)
+            .unwrap()
+            .starts_with("An open tab is running this session.")
+    );
+    assert!(
+        running_in_tabs_note(1, 9)
+            .unwrap()
+            .starts_with("1 of these sessions is running in an open tab.")
+    );
+    assert!(
+        running_in_tabs_note(3, 9)
+            .unwrap()
+            .starts_with("3 of these sessions are running in open tabs.")
+    );
+}
+
+/// A row's "directory is gone" state is answered by a background check kept in
+/// the panel, not by a stat per row per frame. Until the check lands a
+/// directory reads as present.
+#[gpui::test]
+async fn the_panel_learns_which_working_directories_are_gone_in_the_background(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let here = tempfile::tempdir().unwrap();
+    let here_path = here.path().to_string_lossy().into_owned();
+    let gone_path = here.path().join("removed").to_string_lossy().into_owned();
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, cx) = panel_with(
+        &["/root"],
+        vec![
+            session("kept", &here_path, "Kept", 300),
+            session("lost", &gone_path, "Lost", 200),
+        ],
+        Vec::new(),
+        fs,
+        cx,
+    )
+    .await;
+    cx.executor().allow_parking();
+    cx.run_until_parked();
+
+    panel.read_with(&cx, |panel, _| {
+        assert!(panel.cwd_alive(std::path::Path::new(&here_path)));
+        assert!(!panel.cwd_alive(std::path::Path::new(&gone_path)));
+        assert!(
+            panel.cwd_alive(std::path::Path::new("/never/asked")),
+            "a directory nobody has checked reads as present"
+        );
+    });
 }

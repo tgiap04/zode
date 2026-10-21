@@ -102,8 +102,8 @@ pub use persistence::{
 };
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WorktreeSettings,
+    DirectoryLister, Project, ProjectActivity, ProjectEntryId, ProjectPath, ResolvedPath, Worktree,
+    WorktreeId, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     project_settings::ProjectSettings,
     toolchain_store::ToolchainStoreEvent,
@@ -1033,6 +1033,7 @@ struct SerializableItemDescriptor {
 struct SerializableItemRegistry {
     descriptors_by_kind: HashMap<Arc<str>, SerializableItemDescriptor>,
     descriptors_by_type: HashMap<TypeId, SerializableItemDescriptor>,
+    excluded: HashSet<EntityId>,
 }
 
 impl Global for SerializableItemRegistry {}
@@ -1079,6 +1080,9 @@ impl SerializableItemRegistry {
         cx: &App,
     ) -> Option<Box<dyn SerializableItemHandle>> {
         let this = cx.try_global::<Self>()?;
+        if this.excluded.contains(&view.entity_id()) {
+            return None;
+        }
         let descriptor = this.descriptors_by_type.get(&view.entity_type())?;
         Some((descriptor.view_to_serializable_item)(view))
     }
@@ -1110,6 +1114,34 @@ pub fn register_serializable_item<I: SerializableItem>(cx: &mut App) {
     registry
         .descriptors_by_type
         .insert(TypeId::of::<I>(), descriptor);
+}
+
+/// Makes `to_serializable_item_handle` answer `None` for `item`, so what
+/// records items through it, the saved layout of the workspace and the queue of
+/// items to save, leaves it out. Code that records items some other way has to
+/// ask the same question itself, as the terminal panel does for its own panes.
+///
+/// For a tab built from a serialisable type that shows something a restart
+/// cannot bring back: recorded, it would reopen as a fresh item of that type,
+/// which is a different thing.
+pub fn exclude_from_serialization<I: Item>(item: &Entity<I>, cx: &mut App) {
+    let item_id = item.entity_id();
+    cx.default_global::<SerializableItemRegistry>()
+        .excluded
+        .insert(item_id);
+    cx.observe_release(item, move |_, cx| {
+        cx.default_global::<SerializableItemRegistry>()
+            .excluded
+            .remove(&item_id);
+    })
+    .detach();
+}
+
+/// Whether a pane draws the buttons at the ends of its tab bar, which is the
+/// user's `tab_bar.show_tab_bar_buttons`. A pane that keeps its own controls
+/// there has to offer them somewhere else when this is false.
+pub fn tab_bar_buttons_shown(cx: &App) -> bool {
+    TabBarSettings::get_global(cx).show_tab_bar_buttons
 }
 
 pub struct AppState {
@@ -1397,6 +1429,9 @@ pub struct Workspace {
     last_active_center_pane: Option<WeakEntity<Pane>>,
     last_active_view_id: Option<proto::ViewId>,
     status_bar: Entity<StatusBar>,
+    /// Set by a feature that must stay visible whatever `status_bar.show`
+    /// says, such as the indicator that another device is in control.
+    status_bar_forced_visible: bool,
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
@@ -1880,6 +1915,7 @@ impl Workspace {
             last_active_center_pane: Some(center_pane.downgrade()),
             last_active_view_id: None,
             status_bar,
+            status_bar_forced_visible: false,
             modal_layer,
             toast_layer,
             titlebar_item: None,
@@ -2878,7 +2914,17 @@ impl Workspace {
     }
 
     pub fn status_bar_visible(&self, cx: &App) -> bool {
-        StatusBarSettings::get_global(cx).show
+        self.status_bar_forced_visible || StatusBarSettings::get_global(cx).show
+    }
+
+    /// Keeps the status bar on screen regardless of `status_bar.show` while
+    /// `forced` is true. For what the person must not be able to miss, such as
+    /// another device being in control of this Zode.
+    pub fn set_status_bar_forced_visible(&mut self, forced: bool, cx: &mut Context<Self>) {
+        if self.status_bar_forced_visible != forced {
+            self.status_bar_forced_visible = forced;
+            cx.notify();
+        }
     }
 
     pub fn multi_workspace(&self) -> Option<&WeakEntity<MultiWorkspace>> {
@@ -4387,6 +4433,13 @@ impl Workspace {
         self.dock_at_position(position).read(cx).is_open()
     }
 
+    /// Whether the dock at `position` is on screen: open, and not behind a
+    /// zoomed panel or pane that fills the window in its place.
+    pub fn is_dock_visible(&self, position: DockPosition, cx: &App) -> bool {
+        let covered = self.zoomed.is_some() && self.zoomed_position != Some(position);
+        !covered && self.dock_at_position(position).read(cx).is_open()
+    }
+
     pub fn toggle_dock(
         &mut self,
         dock_side: DockPosition,
@@ -4396,8 +4449,7 @@ impl Workspace {
         let mut focus_center = false;
         let mut reveal_dock = false;
 
-        let other_is_zoomed = self.zoomed.is_some() && self.zoomed_position != Some(dock_side);
-        let was_visible = self.is_dock_at_position_open(dock_side, cx) && !other_is_zoomed;
+        let was_visible = self.is_dock_visible(dock_side, cx);
 
         if let Some(panel) = self.dock_at_position(dock_side).read(cx).active_panel() {
             telemetry::event!(
@@ -6083,6 +6135,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.refresh_active_item_state(focus_changed, cx);
+        self.update_window_title(window, cx);
+    }
+
+    /// Everything `active_item_path_changed` does except retitle the window,
+    /// for a workspace that is not the one on screen: the title belongs to the
+    /// project in front, but the active path and repository are this project's.
+    fn refresh_active_item_state(&mut self, focus_changed: bool, cx: &mut Context<Self>) {
         cx.emit(Event::ActiveItemChanged);
         let active_entry = self.active_project_path(cx);
         self.project.update(cx, |project, cx| {
@@ -6095,8 +6155,6 @@ impl Workspace {
                 git_store.set_active_repo_for_path(project_path, cx);
             });
         }
-
-        self.update_window_title(window, cx);
     }
 
     fn update_window_title(&mut self, window: &mut Window, cx: &mut App) {
@@ -6911,15 +6969,42 @@ impl Workspace {
         cx: &mut Context<Workspace>,
     ) {
         self.panes.retain(|p| p != pane);
-        if let Some(focus_on) = focus_on {
-            focus_on.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
-        } else if self.active_pane() == pane {
-            let fallback_pane = self.panes.last().unwrap().clone();
-            if self.has_active_modal(window, cx) {
-                self.set_active_pane(&fallback_pane, window, cx);
+        let replacement = if self.active_pane() == pane {
+            focus_on.clone().or_else(|| self.panes.last().cloned())
+        } else {
+            None
+        };
+        // Made active here rather than left to the `Focus` event the focus below
+        // raises: a background project in a multi-project window paints
+        // nothing, so that event never reaches it, and `active_pane` would go on
+        // naming the pane just removed -- every tab opened into it would land
+        // where nobody can see it.
+        let painted = self.project.read(cx).activity() == ProjectActivity::Active;
+        if let Some(replacement) = &replacement {
+            if painted {
+                self.set_active_pane(replacement, window, cx);
             } else {
-                fallback_pane.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
+                // `set_active_pane` without the window title, which belongs to
+                // the project in front. The rest is refreshed now because
+                // switching back will not: the focus event then finds this pane
+                // already active.
+                self.active_pane = replacement.clone();
+                self.last_active_center_pane = Some(replacement.downgrade());
+                self.refresh_active_item_state(true, cx);
             }
+        }
+        // `focus_on` is focused even over an open modal; a fallback pane is not,
+        // so the modal keeps the keyboard. A pane that is not painted is focused
+        // by neither: the window would be left focused on a handle that is in no
+        // element tree, and when focus is then found lost, the project that
+        // registered its listener last takes it, whichever one is in front.
+        let focus_target = match focus_on {
+            _ if !painted => None,
+            Some(focus_on) => Some(focus_on.clone()),
+            None => replacement.filter(|_| !self.has_active_modal(window, cx)),
+        };
+        if let Some(target) = focus_target {
+            target.update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx));
         }
         if self.last_active_center_pane == Some(pane.downgrade()) {
             self.last_active_center_pane = None;
@@ -10009,6 +10094,9 @@ pub fn workspace_windows_for_location(
                 (RemoteConnectionOptions::Docker(a), RemoteConnectionOptions::Docker(b)) => {
                     a.container_id == b.container_id
                 }
+                (RemoteConnectionOptions::Relay(a), RemoteConnectionOptions::Relay(b)) => {
+                    a.host_device_id == b.host_device_id
+                }
                 #[cfg(any(test, feature = "test-support"))]
                 (RemoteConnectionOptions::Mock(a), RemoteConnectionOptions::Mock(b)) => {
                     a.id == b.id
@@ -12145,6 +12233,63 @@ mod tests {
 
         // Preparing to close succeeds, even though serialization failed.
         assert!(task.await.unwrap());
+    }
+
+    #[gpui::test]
+    async fn test_an_item_excluded_from_serialization_is_not_recorded(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            register_serializable_item::<TestItem>(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let kept = cx.new(|cx| TestItem::new(cx));
+        let excluded = cx.new(|cx| TestItem::new(cx));
+        let pane = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(kept.clone()), None, true, window, cx);
+            workspace.add_item_to_active_pane(Box::new(excluded.clone()), None, true, window, cx);
+            workspace.active_pane().clone()
+        });
+        let serializable = |cx: &mut VisualTestContext| {
+            pane.read_with(cx, |pane, cx| {
+                pane.items()
+                    .filter(|item| item.to_serializable_item_handle(cx).is_some())
+                    .map(|item| item.item_id())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            serializable(cx),
+            vec![kept.entity_id(), excluded.entity_id()]
+        );
+
+        cx.update(|_, cx| exclude_from_serialization(&excluded, cx));
+        assert_eq!(
+            serializable(cx),
+            vec![kept.entity_id()],
+            "an excluded item is left out of what is recorded"
+        );
+
+        let excluded_id = excluded.entity_id();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(excluded_id, false, true, window, cx)
+        });
+        drop(excluded);
+        // The queue of items waiting to be saved held one until it was drained.
+        cx.executor().advance_clock(SERIALIZATION_THROTTLE_TIME);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(
+                !cx.global::<SerializableItemRegistry>()
+                    .excluded
+                    .contains(&excluded_id),
+                "the exclusion goes when the item does"
+            );
+        });
     }
 
     #[gpui::test]
@@ -16250,6 +16395,11 @@ mod tests {
         let header = cx
             .debug_bounds("dock-header")
             .expect("a right dock showing a panel with an icon must draw its header");
+        assert_eq!(
+            header.size.height,
+            cx.update(|_, cx| ui::Tab::container_height(cx)),
+            "the strip is as tall as every other panel header"
+        );
         // Unique here: `dock-panel` is drawn only by a dock with something to
         // show, and this test opens exactly one.
         let dock_bounds = cx
@@ -16610,6 +16760,57 @@ mod tests {
         workspace.update(cx, |workspace, cx| {
             let right_dock = workspace.right_dock();
             assert!(!right_dock.read(cx).is_open());
+        });
+    }
+
+    /// `toggle_dock` and the title bar's toggles both read this, so an open dock
+    /// that a zoomed panel is covering has to answer the same way to each.
+    #[gpui::test]
+    async fn test_dock_behind_a_zoomed_panel_is_not_visible(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let left_panel = workspace.update_in(cx, |workspace, window, cx| {
+            let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(left_panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 101, cx));
+            workspace.add_panel(right_panel, window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            left_panel
+        });
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_dock_visible(DockPosition::Left, cx));
+            assert!(workspace.is_dock_visible(DockPosition::Right, cx));
+            assert!(
+                !workspace.is_dock_visible(DockPosition::Bottom, cx),
+                "a dock nobody opened is not visible"
+            );
+        });
+
+        left_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomIn));
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.right_dock().read(cx).is_open(),
+                "zooming a panel covers the other docks without closing them"
+            );
+            assert!(workspace.is_dock_visible(DockPosition::Left, cx));
+            assert!(
+                !workspace.is_dock_visible(DockPosition::Right, cx),
+                "the covered dock is open but not on screen"
+            );
+        });
+
+        left_panel.update(cx, |_, cx| cx.emit(PanelEvent::ZoomOut));
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.is_dock_visible(DockPosition::Left, cx));
+            assert!(workspace.is_dock_visible(DockPosition::Right, cx));
         });
     }
 
@@ -17974,6 +18175,42 @@ mod tests {
         workspace.read_with(cx, |workspace, cx| {
             let visible = workspace.status_bar_visible(cx);
             assert!(visible, "Status bar should be visible when show is true");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_status_bar_forced_visible_overrides_the_setting(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        cx.update_global(|store: &mut SettingsStore, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.status_bar.get_or_insert_default().show = Some(false);
+            });
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.status_bar_visible(cx))
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_status_bar_forced_visible(true, cx)
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace.status_bar_visible(cx),
+                "forced visibility wins over show = false"
+            );
+        });
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_status_bar_forced_visible(false, cx)
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(!workspace.status_bar_visible(cx))
         });
     }
 

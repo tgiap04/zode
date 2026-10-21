@@ -226,7 +226,7 @@ impl Render for Onboarding {
                                                 // renders an SVG tinted with one
                                                 // theme colour, which would flatten
                                                 // this logo to a silhouette.
-                                                img("images/zode_logo.png")
+                                                img("images/zode_app_icon.png")
                                                     .size(rems(2.5))
                                                     .flex_none(),
                                             )

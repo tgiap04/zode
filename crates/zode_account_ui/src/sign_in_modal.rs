@@ -4,7 +4,7 @@ use gpui::{
     App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight,
     SharedString, Subscription, Task, Window,
 };
-use ui::{Tooltip, prelude::*};
+use ui::{Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
 use workspace::ModalView;
 use zode_account::{Account, AccountStatus};
 
@@ -103,13 +103,15 @@ impl Render for SignInModal {
         // `elevation_3` carries the background, border, radius and shadow.
         // Without it the modal is transparent and whatever is behind it reads
         // straight through the middle of the code.
-        let shell = v_flex()
+        let shell = div()
             .key_context("SignInModal")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.cancel(cx)))
             .elevation_3(cx)
-            .w(rems(22.))
-            .overflow_hidden();
+            .occlude()
+            .w(rems(28.))
+            .max_h(rems(40.))
+            .debug_selector(|| "account-sign-in-modal".into());
 
         let AccountStatus::WaitingForApproval {
             user_code,
@@ -128,106 +130,109 @@ impl Render for SignInModal {
 
         shell
             .child(
-                v_flex()
-                    .p_3()
-                    .gap_0p5()
-                    .child(Label::new("Sign in to Zode").weight(FontWeight::MEDIUM))
-                    .child(
-                        Label::new("Optional — the editor works either way.")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-            )
-            .child(
-                // The code is the one thing that has to travel to another
-                // device, so it gets the largest type, its own surface, and
-                // nothing competing beside it.
-                v_flex()
-                    .w_full()
-                    .py_4()
-                    .gap_1p5()
-                    .items_center()
-                    .bg(colors.editor_background)
-                    .border_y_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        Label::new(user_code)
-                            .size(LabelSize::Large)
-                            .weight(FontWeight::MEDIUM)
-                            .buffer_font(cx),
+                Modal::new("account-sign-in", None)
+                    .header(
+                        ModalHeader::new()
+                            .child(Headline::new("Sign in to Zode").size(HeadlineSize::Small))
+                            .description("Optional — the editor works either way."),
                     )
                     .child(
-                        Button::new(
-                            "account-copy-code",
-                            if copied { "Copied" } else { "Copy code" },
-                        )
-                        .label_size(LabelSize::Small)
-                        .color(if copied { Color::Success } else { Color::Muted })
-                        .start_icon(Icon::new(if copied {
-                            IconName::Check
-                        } else {
-                            IconName::Copy
-                        }))
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| this.copy_code(code_to_copy.clone(), cx),
-                        )),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .p_3()
-                    .gap_2()
-                    .child(
-                        // The only filled button in the window.
-                        Button::new("account-open-browser", "Open browser to approve")
-                            .full_width()
-                            .style(ButtonStyle::Brand)
-                            .end_icon(Icon::new(IconName::ArrowUpRight))
-                            .on_click(move |_, _window, cx| cx.open_url(&link)),
-                    )
-                    .child(
-                        // The route for a window with no browser to open — a
-                        // remote or SSH session, which is why this flow was
-                        // chosen over a loopback redirect. Offered, not hidden,
-                        // but plainly the second choice.
+                        // The code is the one thing that has to travel to
+                        // another device, so it gets the largest type, its own
+                        // surface, and nothing competing beside it.
                         v_flex()
-                            .gap_0p5()
+                            .w_full()
+                            .py_4()
+                            .gap_1p5()
+                            .items_center()
+                            .bg(colors.editor_background)
+                            .border_y_1()
+                            .border_color(colors.border_variant)
                             .child(
-                                Label::new("No browser here? Open this and enter the code:")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
+                                Label::new(user_code)
+                                    .size(LabelSize::Large)
+                                    .weight(FontWeight::MEDIUM)
+                                    .buffer_font(cx),
                             )
                             .child(
-                                Label::new(verification_uri)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .buffer_font(cx),
+                                Button::new(
+                                    "account-copy-code",
+                                    if copied { "Copied" } else { "Copy Code" },
+                                )
+                                .label_size(LabelSize::Small)
+                                .color(if copied { Color::Success } else { Color::Muted })
+                                .start_icon(
+                                    Icon::new(if copied {
+                                        IconName::Check
+                                    } else {
+                                        IconName::Copy
+                                    })
+                                    .size(IconSize::Small),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _window, cx| {
+                                        this.copy_code(code_to_copy.clone(), cx)
+                                    },
+                                )),
+                            ),
+                    )
+                    .section(
+                        Section::new()
+                            .child(
+                                // The only filled button in the window.
+                                Button::new("account-open-browser", "Open Browser to Approve")
+                                    .full_width()
+                                    .style(ButtonStyle::Filled)
+                                    .end_icon(
+                                        Icon::new(IconName::ArrowUpRight).size(IconSize::Small),
+                                    )
+                                    .on_click(move |_, _window, cx| cx.open_url(&link)),
+                            )
+                            .child(
+                                // The route for a window with no browser to
+                                // open — a remote or SSH session, which is why
+                                // this flow was chosen over a loopback
+                                // redirect. Offered, not hidden, but plainly
+                                // the second choice.
+                                v_flex()
+                                    .pt_1()
+                                    .gap_0p5()
+                                    .child(
+                                        Label::new(
+                                            "No browser here? Open this and enter the code:",
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(verification_uri)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .buffer_font(cx),
+                                    ),
                             ),
                     ),
             )
             .child(
-                h_flex()
-                    .w_full()
-                    .p_2()
-                    .gap_2()
-                    .justify_between()
-                    .items_center()
-                    .bg(colors.editor_background)
-                    .border_t_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        // Says the window is doing something. Without it a
-                        // modal that only polls looks frozen.
-                        Label::new("Waiting for approval…")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Button::new("account-cancel-sign-in", "Cancel")
-                            .label_size(LabelSize::Small)
-                            .tooltip(Tooltip::text("Stops waiting and stops polling"))
-                            .on_click(cx.listener(|this, _, _window, cx| this.cancel(cx))),
-                    ),
+                // `ModalFooter` has no fill of its own, so this band gives it the
+                // editor background the body above it uses.
+                div().w_full().bg(colors.editor_background).child(
+                    ModalFooter::new()
+                        .start_slot(
+                            // Says the window is doing something. Without it a
+                            // modal that only polls looks frozen.
+                            Label::new("Waiting for approval…")
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .end_slot(
+                            h_flex().gap_1().child(
+                                Button::new("account-cancel-sign-in", "Cancel")
+                                    .tooltip(Tooltip::text("Stops waiting and stops polling"))
+                                    .on_click(cx.listener(|this, _, _window, cx| this.cancel(cx))),
+                            ),
+                        ),
+                ),
             )
     }
 }
@@ -275,6 +280,24 @@ mod tests {
     #[gpui::test]
     fn the_modal_draws_while_waiting(cx: &mut TestAppContext) {
         draw_modal_with(waiting(), cx);
+    }
+
+    /// A window that shows a code is the small tier of modal widths, asserted
+    /// here so a later edit cannot drift it.
+    #[gpui::test]
+    fn the_modal_is_the_small_width(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let account = cx.update(|cx| cx.new(|_| Account::for_test(waiting())));
+        let (_modal, cx) = cx.add_window_view(|_window, cx| SignInModal::new(account.clone(), cx));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+
+        let bounds = cx
+            .debug_bounds("account-sign-in-modal")
+            .expect("the modal must be drawn");
+        let small = cx.update(|window, _| rems(28.).to_pixels(window.rem_size()));
+        assert_eq!(bounds.size.width, small);
     }
 
     /// The frame between approval landing and the modal dismissing itself.

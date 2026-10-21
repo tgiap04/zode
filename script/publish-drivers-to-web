@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Uploads driver archives and the driver manifest to the Zode web backend,
-# replacing what used to be a `gh release upload` of the same files.
+# Uploads driver archives and the signed driver manifest to the Zode web
+# backend, replacing what used to be a `gh release upload` of the same files.
 #
 # GitHub Release infrastructure keeps binaries public with no way to gate
 # access; the driver archives now live behind a backend that can serve them
@@ -8,39 +8,179 @@
 # script is what a release job (or a human re-running a failed upload)
 # calls to hand the backend everything it needs.
 #
-#   script/publish-drivers-to-web <directory of driver archives + manifest> <version>
+#   script/publish-drivers-to-web [--force] <directory of driver archives + manifest> <version>
 #
-# Requires two things from the environment:
+# Requires from the environment:
 #   ZODE_DRIVER_UPLOAD_TOKEN  -- bearer token the backend's upload endpoint checks
 #   ZODE_DRIVER_UPLOAD_URL    -- base API URL, e.g. https://api.zodekit.site/api
+#   ZODE_DRIVER_SIGNING_KEY   -- the manifest signing key: the base64 of the
+#                                PKCS#8 file, on one line. This is the CI secret.
+#   ZODE_DRIVER_SIGNING_KEY_FILE
+#                             -- or the path of that PKCS#8 file, for a human
+#                                publishing from a machine that holds it
+#                                (the file wins when both are set; a relative
+#                                path is taken from where this is run)
+#   ZODE_XTASK_BIN            -- optional: a built `xtask` to sign with, instead
+#                                of `cargo xtask`. CI builds it in a step of its
+#                                own that holds no secret, so that nothing is
+#                                compiled -- every build script in the tree run
+#                                -- while the signing key and the upload token
+#                                are in the environment. A relative path is
+#                                taken from the repository root.
 #
-# Uploads every `zode-db-*.tar.gz` archive first, then the manifest last. The
-# backend only makes a version visible once the manifest publish succeeds, so
-# this order is what gives the release its atomicity: a job that dies partway
-# through the archive uploads leaves nothing live for the app to find.
+# The app downloads a driver and runs it, so it refuses any manifest that is not
+# signed with the key built into it. This script signs the manifest it is about
+# to publish and fails before uploading anything if it cannot: with no key, with
+# a key the app does not trust, with a version that is not a strict semver one
+# (`0.1.05` is refused, because every app would refuse it), or with a version
+# older than the one already published, which would silently replace newer
+# drivers with older ones.
+#
+# --force publishes that older version anyway, and what it buys is narrow. A
+# machine that has already installed the newer set will not go back to the older
+# one -- that is the protection against a server replaying an old set -- so for
+# those it changes nothing until a newer set than theirs is published. To undo a
+# bad release, publish a fixed one with a higher version. And a tag mistyped too
+# high (v0.1.50) is not undone by going back: publish above it.
+#
+# Two copies of the manifest are published, because the backend re-serialises
+# the one it is sent and would drop anything it does not know:
+#
+#   zode-db-drivers-manifest.json   as built, posted to /publish. What
+#                                   `latest` serves, and all an older app reads.
+#   the signed manifest             the same rows plus each driver's database
+#                                   protocol, signed, uploaded beside the
+#                                   archives under the one name the backend
+#                                   serves that is not the manifest's own (see
+#                                   SIGNED_MANIFEST_ASSET in
+#                                   crates/database/src/signature.rs). What the
+#                                   app acts on.
+#
+# Uploads every `zode-db-*.tar.gz` archive first, then the signed manifest,
+# then publishes the manifest last. The backend only makes a version visible
+# once the manifest publish succeeds, so this order is what gives the release
+# its atomicity: a job that dies partway through the uploads leaves nothing live
+# for the app to find.
 #
 # After publishing, re-fetches the manifest from the backend and counts its
 # `drivers` array. A publish that reports success but serves something short
 # is a bug worth catching in this job, not several days later when a user's
 # download fails.
+#
+# A publish also deletes every other version from the backend, so the version
+# uploaded here is the only driver set the server keeps, and the app downloads
+# whatever `latest` serves -- there is no older set left to fall back to. The
+# last checks therefore fetch the `latest` manifest and fail unless it names
+# this version, and fetch the signed manifest and fail unless it is
+# byte-for-byte what was signed here. Failing here stops the release job while
+# the GitHub release is still a draft, instead of failing a user's download once
+# it is public.
 
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-    echo "usage: $0 <driver-artifact-directory> <version>" >&2
+usage() {
+    echo "usage: $0 [--force] <driver-artifact-directory> <version>" >&2
     exit 1
+}
+
+force=0
+if [[ "${1:-}" == "--force" ]]; then
+    force=1
+    shift
+fi
+if [[ $# -ne 2 ]]; then
+    usage
 fi
 
-asset_directory="$1"
+if [[ ! -d "$1" ]]; then
+    echo "error: $1 is not a directory" >&2
+    exit 1
+fi
+asset_directory="$(cd "$1" && pwd)"
 version="$2"
+
+# The version becomes a URL segment and a directory name on the server, and it
+# comes from a tag name, which is text somebody else chose.
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+    echo "error: '${version}' is not a driver version (MAJOR.MINOR.PATCH, optionally -prerelease)" >&2
+    exit 1
+fi
 
 if [[ -z "${ZODE_DRIVER_UPLOAD_TOKEN:-}" ]]; then
     echo "error: ZODE_DRIVER_UPLOAD_TOKEN is not set" >&2
     exit 1
 fi
 
+if [[ -z "${ZODE_DRIVER_SIGNING_KEY:-}" && -z "${ZODE_DRIVER_SIGNING_KEY_FILE:-}" ]]; then
+    echo "error: no signing key. Set ZODE_DRIVER_SIGNING_KEY to the base64 of the PKCS#8 key," >&2
+    echo "       or ZODE_DRIVER_SIGNING_KEY_FILE to the key's path. The app refuses" >&2
+    echo "       drivers whose manifest is not signed." >&2
+    exit 1
+fi
+
+# Made absolute here, from where this was run: the signer is run from the
+# repository root, and a relative path would be looked for there instead.
+signing_key_file=""
+if [[ -n "${ZODE_DRIVER_SIGNING_KEY_FILE:-}" ]]; then
+    if [[ ! -f "${ZODE_DRIVER_SIGNING_KEY_FILE}" ]]; then
+        echo "error: ZODE_DRIVER_SIGNING_KEY_FILE names ${ZODE_DRIVER_SIGNING_KEY_FILE}, which is not a file" >&2
+        exit 1
+    fi
+    signing_key_file="$(cd "$(dirname "${ZODE_DRIVER_SIGNING_KEY_FILE}")" && pwd)/$(basename "${ZODE_DRIVER_SIGNING_KEY_FILE}")"
+fi
+
 base_url="${ZODE_DRIVER_UPLOAD_URL:-https://api.zodekit.site/api}"
 manifest_path="${asset_directory}/zode-db-drivers-manifest.json"
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+
+# A request that outlives these is a hang, not a slow network, and a CI job
+# left waiting on one holds a runner for hours. Uploads get the longer limit: an
+# archive is tens of megabytes over a runner's uplink.
+upload_max_time=900
+verify_max_time=30
+
+# The built tool CI hands over, if it did; see ZODE_XTASK_BIN above.
+xtask_binary="${ZODE_XTASK_BIN:-}"
+if [[ -n "${xtask_binary}" && "${xtask_binary}" != /* ]]; then
+    xtask_binary="${repo_root}/${xtask_binary}"
+fi
+if [[ -n "${xtask_binary}" && ! -x "${xtask_binary}" ]]; then
+    echo "error: ZODE_XTASK_BIN names ${xtask_binary}, which is not an executable; build it first" >&2
+    exit 1
+fi
+
+# The prebuilt binary when there is one, otherwise `cargo xtask` run from the
+# repository root whatever the caller's directory.
+xtask() {
+    if [[ -n "${xtask_binary}" ]]; then
+        "${xtask_binary}" "$@"
+    else
+        (cd "${repo_root}" && cargo --quiet xtask "$@")
+    fi
+}
+
+# Strict, and before anything else: the regex above lets `0.1.05` and `-rc.01`
+# through, which the app cannot order and so refuses, and the comparison against
+# what is published is skipped on a first publish. A set published under either
+# would be refused by every machine and could not be fixed under the same version.
+if ! xtask driver-manifest compare-versions "${version}" "${version}" >/dev/null; then
+    echo "error: '${version}' is not a version Zode can order (semver: no leading zeros)" >&2
+    exit 1
+fi
+
+# Both come from the sources the app is built from, so a bump of either cannot
+# leave this script publishing the old one.
+protocol_version=$(sed -n 's/^pub const PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
+    "${repo_root}/crates/database/src/protocol.rs")
+signed_asset=$(sed -n 's/^pub const SIGNED_MANIFEST_ASSET: &str = "\([^"]*\)";$/\1/p' \
+    "${repo_root}/crates/database/src/signature.rs")
+if [[ -z "${protocol_version}" || -z "${signed_asset}" ]]; then
+    echo "error: could not read PROTOCOL_VERSION or SIGNED_MANIFEST_ASSET from crates/database" >&2
+    exit 1
+fi
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "${scratch}"' EXIT
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -111,6 +251,10 @@ report_transport_failure() {
          2. the upload never finished. A slow uplink produces an identical
             timeout, and no proxy setting fixes it.
 
+       A third looks the same too: this script limits each request (see
+       `upload_max_time`), and a link too slow to move an archive in that time
+       runs into it.
+
        Tell them apart by re-running with `--speed-time`/`-w '%{size_upload}
        %{speed_upload}'`: a body that uploaded fully and got no answer is (1),
        one that stalled partway through is (2).
@@ -134,7 +278,8 @@ upload_asset() {
     # the thing worth keeping, and it is lost by the moment a second command
     # runs on the same line.
     local response status body curl_exit=0
-    response=$(curl --silent --show-error --fail-with-body --write-out '\n%{http_code}' \
+    response=$(curl --silent --show-error --fail-with-body --max-time "${upload_max_time}" \
+        --write-out '\n%{http_code}' \
         -X POST \
         -H "Authorization: Bearer ${ZODE_DRIVER_UPLOAD_TOKEN}" \
         -H "X-Driver-Sha256: ${checksum}" \
@@ -159,10 +304,18 @@ if [[ ! -f "${manifest_path}" ]]; then
     exit 1
 fi
 
+manifest_version=$(jq -er '.version' "${manifest_path}") || {
+    echo "error: ${manifest_path} has no version" >&2
+    exit 1
+}
+if [[ "${manifest_version}" != "${version}" ]]; then
+    echo "error: the manifest is for version ${manifest_version}, but ${version} was asked for" >&2
+    exit 1
+fi
+
 archive_count=0
 for asset_path in "${asset_directory}"/zode-db-*.tar.gz; do
     [[ -f "${asset_path}" ]] || continue
-    upload_asset "${asset_path}"
     archive_count=$((archive_count + 1))
 done
 
@@ -171,9 +324,84 @@ if [[ "${archive_count}" -eq 0 ]]; then
     exit 1
 fi
 
+# Signed before anything is uploaded, so a missing or wrong key costs nothing.
+#
+# The protocol is written onto every row here rather than in
+# `script/build-driver-manifest`, whose output is what the backend is sent and
+# which rejects a row with a field it does not know. Every driver in a release
+# is built from one checkout, so they all speak the one protocol that checkout
+# defines.
+echo "signing the manifest (database protocol ${protocol_version})"
+protocol_manifest="${scratch}/manifest-with-protocol.json"
+signed_path="${scratch}/${signed_asset}"
+jq --argjson protocol "${protocol_version}" '.drivers |= map(. + {protocol: $protocol})' \
+    "${manifest_path}" >"${protocol_manifest}"
+
+sign_arguments=(--manifest "${protocol_manifest}" --out "${signed_path}")
+if [[ -n "${signing_key_file}" ]]; then
+    sign_arguments+=(--key-file "${signing_key_file}")
+fi
+xtask driver-manifest sign "${sign_arguments[@]}"
+
+# A publish deletes every other version, so publishing an older one replaces the
+# newer drivers with older ones for everybody -- and the check at the very end
+# would still pass, since `latest` does then name what was just published.
+check_not_older_than_latest() {
+    local response status body curl_exit=0
+    response=$(curl --silent --show-error --max-time "${verify_max_time}" --retry 2 --retry-delay 2 \
+        -H 'Cache-Control: no-cache' --write-out '\n%{http_code}' \
+        "${base_url}/drivers/latest/zode-db-drivers-manifest.json") || curl_exit=$?
+    status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+
+    if [[ "${curl_exit}" -ne 0 ]]; then
+        report_transport_failure "reading the published version" "${status}" "${curl_exit}" || exit 1
+        exit 1
+    fi
+    if [[ "${status}" == "404" ]]; then
+        echo "nothing is published yet, so ${version} cannot be older than it"
+        return 0
+    fi
+    if [[ "${status}" != "200" ]]; then
+        echo "error: reading the published version failed with status ${status}" >&2
+        exit 1
+    fi
+
+    local latest_version order
+    latest_version=$(jq -er '.version' <<<"${body}") || {
+        echo "error: what the backend serves as latest has no version, so ${version} cannot be compared with it" >&2
+        exit 1
+    }
+    order=$(xtask driver-manifest compare-versions "${version}" "${latest_version}")
+
+    if [[ "${order}" == "older" ]]; then
+        if [[ "${force}" -eq 1 ]]; then
+            echo "warning: ${version} is older than the published ${latest_version}; publishing it anyway (--force)" >&2
+            echo "         Machines that already installed ${latest_version} or newer will not go back to it;" >&2
+            echo "         they take a set only once one newer than theirs is published." >&2
+        else
+            echo "error: ${version} is older than ${latest_version}, which is what is published now." >&2
+            echo "       Publishing it would replace the newer drivers with older ones for every user," >&2
+            echo "       and any machine that already installed ${latest_version} will refuse them until a" >&2
+            echo "       newer set is published. To undo a bad release, publish a fixed one with a higher" >&2
+            echo "       version. --force publishes it anyway, and does not change what those machines do." >&2
+            exit 1
+        fi
+    fi
+}
+
+check_not_older_than_latest
+
+for asset_path in "${asset_directory}"/zode-db-*.tar.gz; do
+    [[ -f "${asset_path}" ]] || continue
+    upload_asset "${asset_path}"
+done
+upload_asset "${signed_path}"
+
 echo "publishing manifest for version ${version}"
 publish_exit=0
-publish_response=$(curl --silent --show-error --fail-with-body --write-out '\n%{http_code}' \
+publish_response=$(curl --silent --show-error --fail-with-body --max-time "${upload_max_time}" \
+    --write-out '\n%{http_code}' \
     -X POST \
     -H "Authorization: Bearer ${ZODE_DRIVER_UPLOAD_TOKEN}" \
     -H "Content-Type: application/json" \
@@ -191,9 +419,16 @@ if [[ "${publish_exit}" -ne 0 ]]; then
     exit 1
 fi
 
+# GET, with the same limits for every one of these: they read what was just
+# published, and a stale or hung answer is a failure of this job, not of the
+# release.
+fetch_published() {
+    curl --fail --silent --show-error --max-time "${verify_max_time}" --retry 2 --retry-delay 2 \
+        -H 'Cache-Control: no-cache' "$@"
+}
+
 echo "verifying published manifest is reachable"
-served_manifest=$(curl --fail --silent --show-error \
-    "${base_url}/drivers/${version}/zode-db-drivers-manifest.json")
+served_manifest=$(fetch_published "${base_url}/drivers/${version}/zode-db-drivers-manifest.json")
 
 served_count=$(jq '.drivers | length' <<<"${served_manifest}")
 expected_count="${archive_count}"
@@ -203,4 +438,23 @@ if [[ "${served_count}" -ne "${expected_count}" ]]; then
     exit 1
 fi
 
-echo "published ${archive_count} drivers for version ${version}"
+echo "verifying latest serves version ${version}"
+latest_manifest=$(fetch_published "${base_url}/drivers/latest/zode-db-drivers-manifest.json")
+
+latest_version=$(jq -r '.version' <<<"${latest_manifest}")
+
+if [[ "${latest_version}" != "${version}" ]]; then
+    echo "error: latest serves version ${latest_version}, but ${version} was just published" >&2
+    exit 1
+fi
+
+echo "verifying the signed manifest is served as it was signed"
+served_signed="${scratch}/served-${signed_asset}"
+fetch_published --output "${served_signed}" "${base_url}/drivers/${version}/${signed_asset}"
+
+if ! cmp -s "${signed_path}" "${served_signed}"; then
+    echo "error: the signed manifest the backend serves is not the one that was signed here" >&2
+    exit 1
+fi
+
+echo "published ${archive_count} drivers for version ${version}, signed"

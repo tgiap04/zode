@@ -22,7 +22,9 @@ gpui.workspace = true
 menu.workspace = true
 project.workspace = true
 recent_projects.workspace = true
+release_channel.workspace = true
 remote.workspace = true
+remote_control.workspace = true
 remote_connection.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,6 +39,7 @@ zode_account.workspace = true
 zode_account_ui.workspace = true
 
 [dev-dependencies]
+agent_ui = { workspace = true, features = ["test-support"] }
 zode_account = { workspace = true, features = ["test-support"] }
 # `test-support` so the rail's tests open the container tab over an engine that
 # never leaves the process. Without it, pressing the button runs `docker`, whose

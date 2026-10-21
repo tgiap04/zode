@@ -1,5 +1,5 @@
 use crate::Sidebar;
-use crate::rail::{RAIL_ICON_GAP, RAIL_ICON_SIZE};
+use crate::rail::{RAIL_BLOCK_PADDING, RAIL_ICON_GAP, rail_button};
 use agent_ui::AgentView;
 use gpui::{AnyElement, App, Context, Window};
 use project::AgentId;
@@ -102,7 +102,7 @@ impl Sidebar {
                             };
                             menu.item(
                                 ContextMenuEntry::new("New Session Without Permission Prompts")
-                                    .icon(IconName::BoltFilled)
+                                    .icon(IconName::FastForward)
                                     .icon_position(IconPosition::Start)
                                     .handler(move |window, cx| {
                                         window.dispatch_action(Box::new(unprompted.clone()), cx);
@@ -115,8 +115,7 @@ impl Sidebar {
                     // the menu's open and closed states alike.
                     .trigger(move |_is_open, _window, _cx| {
                         let remembered = remembered.clone();
-                        IconButton::new(agent, icon)
-                            .icon_size(RAIL_ICON_SIZE)
+                        rail_button(agent, icon)
                             .toggle_state(is_active)
                             .tooltip({
                                 let remembered = remembered.clone();
@@ -141,7 +140,7 @@ impl Sidebar {
 
         v_flex()
             .flex_shrink_0()
-            .py(RAIL_ICON_GAP)
+            .py(RAIL_BLOCK_PADDING)
             .gap(RAIL_ICON_GAP)
             .items_center()
             .border_t_1()

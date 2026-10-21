@@ -15,7 +15,7 @@
 use container::{Resource, ResourceKind};
 use gpui::{Entity, WeakEntity, Window};
 use terminal_view::TerminalView;
-use ui::prelude::*;
+use ui::{Tab, prelude::*};
 use workspace::Workspace;
 
 use crate::container_panel::ContainerPanel;
@@ -248,16 +248,7 @@ impl ContainerPanel {
                                     .color(Color::Muted),
                             )
                             .into_any_element(),
-                        (None, None) => v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Label::new("Attaching\u{2026}")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .into_any_element(),
+                        (None, None) => crate::render::note(None, "Attaching\u{2026}"),
                     }),
             )
             .into_any_element()
@@ -281,8 +272,10 @@ impl ContainerPanel {
             .map(|(_, value)| value.clone());
 
         h_flex()
-            .flex_shrink_0()
-            .p_1p5()
+            .debug_selector(|| "container-detail-header".into())
+            .flex_none()
+            .h(Tab::container_height(cx))
+            .px_2()
             .gap_1p5()
             .justify_between()
             .border_b_1()
@@ -298,7 +291,11 @@ impl ContainerPanel {
                             .on_click(cx.listener(|this, _, _window, cx| this.close_detail(cx))),
                     )
                     .child(crate::render::state_dot(resource.state))
-                    .child(Label::new(resource.name.clone()).size(LabelSize::Small))
+                    .child(crate::render::truncated_text(
+                        "container-detail-name",
+                        resource.name.clone(),
+                        Color::Default,
+                    ))
                     .when_some(subtitle, |element, subtitle| {
                         element.child(
                             Label::new(subtitle)
@@ -310,7 +307,7 @@ impl ContainerPanel {
             .child(crate::render::render_trailing(
                 resource,
                 self.available_actions(),
-                self.in_flight.get(&resource.id).copied(),
+                self.busy_for(&resource.id),
                 self.terminal_available(crate::terminal::TerminalIntent::FollowLogs),
                 self.terminal_available(crate::terminal::TerminalIntent::Shell),
                 self.removable(),

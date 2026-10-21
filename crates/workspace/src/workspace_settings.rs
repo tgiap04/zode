@@ -237,6 +237,7 @@ pub struct StatusBarSettings {
     pub active_toolchain_button: bool,
     pub vim_mode_button: bool,
     pub image_info_button: bool,
+    pub app_version_button: bool,
 }
 
 impl Settings for StatusBarSettings {
@@ -256,6 +257,7 @@ impl Settings for StatusBarSettings {
             active_toolchain_button: status_bar.active_toolchain_button.unwrap(),
             vim_mode_button: status_bar.vim_mode_button.unwrap(),
             image_info_button: status_bar.image_info_button.unwrap(),
+            app_version_button: status_bar.app_version_button.unwrap(),
         }
     }
 }
@@ -269,7 +271,8 @@ mod tests {
     /// The four items that previously had no visibility switch
     /// (`activity_indicator`, `active_toolchain_button`, `vim_mode_button`,
     /// `image_info_button`) must default to shown, matching the unconditional
-    /// way the status bar renders them today. Resolved through a real
+    /// way the status bar renders them today -- and so must the version item,
+    /// which is new and shown unless hidden. Resolved through a real
     /// `SettingsStore` built from `default.json` rather than asserted on the
     /// struct literal, so a missing or wrong `default.json` entry fails this
     /// test instead of panicking `SettingsStore` construction for every other
@@ -286,6 +289,7 @@ mod tests {
             assert!(settings.active_toolchain_button);
             assert!(settings.vim_mode_button);
             assert!(settings.image_info_button);
+            assert!(settings.app_version_button);
         });
     }
 }
