@@ -44,6 +44,8 @@ impl BranchPanel {
             let copy = panel.clone();
             let path_for_copy = path.clone();
             let path_for_terminal = path.clone();
+            let reload = panel.clone();
+            let path_for_reload = path.clone();
             let remove = panel.clone();
             let path_for_remove = path.clone();
             let label = label.clone();
@@ -93,6 +95,20 @@ impl BranchPanel {
                                 window,
                                 cx,
                             );
+                        });
+                    }),
+            );
+
+            // With the agent entries because it is about the same list: the sessions
+            // shown under this card. Offered even when the card shows none, which is
+            // exactly when a session started outside Zode is most likely to be missing.
+            let menu = menu.item(
+                ContextMenuEntry::new("Reload Agent Sessions")
+                    .icon(IconName::RotateCw)
+                    .icon_position(IconPosition::Start)
+                    .handler(move |_, cx| {
+                        reload.update(cx, |panel, cx| {
+                            panel.reload_sessions(path_for_reload.clone(), cx);
                         });
                     }),
             );

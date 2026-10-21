@@ -14,6 +14,7 @@ mod agent_view;
 mod missing_binary;
 mod permission_bypass;
 mod session_history;
+mod session_names;
 mod session_store;
 pub mod subagents;
 mod turn_tracker;
@@ -32,6 +33,7 @@ pub use session_history::{
     delete_session, execute_session_deletion, plan_delete_all, resume_refusal,
     resume_refusal_in_background, resume_session, sessions_in_project,
 };
+pub use session_names::SessionNames;
 pub use session_store::SessionStore;
 pub use turn_tracker::TurnEvent;
 

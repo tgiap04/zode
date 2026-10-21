@@ -15,7 +15,7 @@ use project::git_store::RepositoryId;
 use workspace::Workspace;
 
 use crate::branch_panel::checkout_state::CheckoutViewState;
-use crate::branch_panel::panel::BranchPanel;
+use crate::branch_panel::panel::{BranchPanel, SessionReload};
 use crate::branch_panel::state::{SerializedBranchPanel, StoredKey};
 use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey, TreeRow, build_rows};
 
@@ -25,6 +25,13 @@ use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey, TreeRow, buil
 /// slow enough that it is a rounding error next to drawing the frame it asks
 /// for.
 const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a reload's spinner stays up even when the work under it is done sooner.
+///
+/// A clean repository rescans in milliseconds, and so does a sweep over a few
+/// transcripts, so without a floor the spinner would vanish before it is ever drawn and
+/// the click would look like it did nothing.
+const MIN_RELOAD_SPINNER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl BranchPanel {
     pub fn new(
@@ -63,6 +70,8 @@ impl BranchPanel {
                 list_state: ListState::new(0, ListAlignment::Top, px(256.)),
                 session_store: None,
                 _session_subscription: None,
+                _session_names_subscription: None,
+                session_reload: None,
                 _agent_tab_names: Vec::new(),
                 row_kinds: Vec::new(),
                 is_active: false,
@@ -150,11 +159,14 @@ impl BranchPanel {
     /// newer one with the same key is already waiting -- so leaning on the button
     /// coalesces instead of queueing one scan per press.
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
-        const MIN_RELOAD_SPINNER: std::time::Duration = std::time::Duration::from_millis(500);
-
-        // The agent rows come from the workspace, not from git, so they are refreshed by
-        // the rebuild itself rather than by any scan.
+        // Open agent tabs come from the workspace and are picked up by the rebuild itself.
+        // Finished sessions come from the transcripts on disk, which nothing re-reads on
+        // its own once the first sweep is done -- a session run from a terminal outside
+        // Zode would otherwise never appear.
         self.mark_stale(cx);
+        if let Some(store) = self.session_store.clone() {
+            store.update(cx, |store, cx| store.refresh(cx));
+        }
 
         let Some(git_store) = self.git_store(cx) else {
             return;
@@ -166,8 +178,6 @@ impl BranchPanel {
         self.reloading = true;
         let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
         self._reload_task = Some(cx.spawn(async move |panel, cx| {
-            // A clean repository rescans in milliseconds, so the spinner would vanish
-            // before it is ever drawn and the click would look like it did nothing.
             futures::join!(scans, shown_for_at_least);
             panel
                 .update(cx, |panel, cx| {
@@ -180,6 +190,68 @@ impl BranchPanel {
                 // A failed update means the panel is gone, and so is this task.
                 .ok();
         }));
+    }
+
+    /// Re-reads the agent sessions on disk, with the spinner on `checkout`'s card.
+    ///
+    /// The sweep is shared and covers every checkout -- the session stores are not
+    /// indexed by directory, so there is no cheaper read for one of them -- but it is
+    /// asked for from one card, and that card is where the answer is awaited.
+    pub(crate) fn reload_sessions(&mut self, checkout: PathBuf, cx: &mut Context<Self>) {
+        // The store exists once the panel has drawn, which it has if a card was clicked.
+        // Creating it here would start its first sweep and then chain a second one for
+        // this same click.
+        let Some(store) = self.session_store.clone() else {
+            return;
+        };
+        store.update(cx, |store, cx| store.refresh(cx));
+
+        let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
+        let min_spinner = cx.spawn(async move |panel, cx| {
+            shown_for_at_least.await;
+            panel
+                .update(cx, |panel, cx| {
+                    if let Some(reload) = panel.session_reload.as_mut() {
+                        reload.shown_long_enough = true;
+                    }
+                    panel.settle_session_reload(cx);
+                })
+                // A failed update means the panel is gone, and so is this task.
+                .ok();
+        });
+        // Replacing an earlier reload restarts the floor rather than stacking a second
+        // wait behind it: the old task is dropped with the value it lived in.
+        self.session_reload = Some(SessionReload {
+            checkout,
+            shown_long_enough: false,
+            _min_spinner: min_spinner,
+        });
+        cx.notify();
+    }
+
+    /// Takes the spinner down once both the floor has passed and the sweep has landed,
+    /// whichever comes second -- so this runs from both of them.
+    ///
+    /// Asking `is_scanning` rather than counting notifications: a refresh that arrives
+    /// mid-sweep chains one more sweep (`SessionStore::refresh`), and the store
+    /// notifies between the two, so a notification alone does not mean the answer
+    /// this card asked for is in.
+    pub(crate) fn settle_session_reload(&mut self, cx: &mut Context<Self>) {
+        let Some(reload) = &self.session_reload else {
+            return;
+        };
+        if !reload.shown_long_enough || self.index_is_settling(cx) {
+            return;
+        }
+        self.session_reload = None;
+        cx.notify();
+    }
+
+    /// Whether `checkout`'s card is waiting on a sweep it asked for.
+    pub(crate) fn is_reloading_sessions(&self, checkout: &Path) -> bool {
+        self.session_reload
+            .as_ref()
+            .is_some_and(|reload| reload.checkout == checkout)
     }
 
     /// Marks the tree for a rebuild. Rebuilding happens in `render`, so a burst
@@ -585,7 +657,13 @@ impl BranchPanel {
         // the panel and fires into a dropped handle.
         self._session_subscription = Some(cx.observe(&store, |panel, _, cx| {
             panel.mark_stale(cx);
+            panel.settle_session_reload(cx);
         }));
+        // A finished session is listed under the name it was given, so naming
+        // one has to redraw the list as much as a sweep does.
+        let names = agent_ui::SessionNames::global(cx);
+        self._session_names_subscription =
+            Some(cx.observe(&names, |panel, _, cx| panel.mark_stale(cx)));
         store.update(cx, |store, cx| store.refresh(cx));
         self.session_store = Some(store);
     }

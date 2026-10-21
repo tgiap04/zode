@@ -64,6 +64,8 @@ pub struct BranchPanel {
     pub(crate) session_store: Option<Entity<agent_ui::SessionStore>>,
     /// Dropped with the panel, so the store never notifies a dead handle.
     pub(crate) _session_subscription: Option<Subscription>,
+    /// Same lifetime and reason as `_session_subscription`, for the names.
+    pub(crate) _session_names_subscription: Option<Subscription>,
     /// One per open agent tab, so a rename redraws the row that names it.
     ///
     /// Rebuilt whenever the panel rebuilds, which is exactly when the set of
@@ -114,6 +116,9 @@ pub struct BranchPanel {
     /// Held so the reload stops when the panel is dropped, and so a second press replaces
     /// the first wait rather than stacking another one behind it.
     pub(crate) _reload_task: Option<Task<()>>,
+    /// The checkout whose card asked for the agent sessions to be re-read, until that
+    /// sweep lands -- which is what puts the spinner on that card and no other.
+    pub(crate) session_reload: Option<SessionReload>,
     /// The open right-click menu, its anchor, and the subscription that clears
     /// it on dismiss. Dropping the tuple drops all three together.
     pub(crate) context_menu: Option<(Entity<ui::ContextMenu>, gpui::Point<Pixels>, Subscription)>,
@@ -203,4 +208,16 @@ impl Panel for BranchPanel {
     fn activation_priority(&self) -> u32 {
         3
     }
+}
+
+/// A sweep of the agent sessions that one checkout's card asked for.
+///
+/// The sweep reads every transcript on disk whichever card asked, so this only
+/// decides where the spinner is drawn, not what gets read.
+pub(crate) struct SessionReload {
+    pub(crate) checkout: std::path::PathBuf,
+    /// A sweep over a handful of transcripts lands in milliseconds, and a spinner that
+    /// never gets drawn makes the click look ignored.
+    pub(crate) shown_long_enough: bool,
+    pub(crate) _min_spinner: Task<()>,
 }

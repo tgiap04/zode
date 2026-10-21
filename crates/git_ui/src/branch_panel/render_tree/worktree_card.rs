@@ -9,7 +9,7 @@ use std::sync::Arc;
 use git::repository::Worktree as GitWorktree;
 use gpui::{AnyElement, ClickEvent};
 use project::git_store::RepositoryId;
-use ui::{Chip, Indicator, Tooltip, prelude::*};
+use ui::{Chip, CommonAnimationExt as _, Indicator, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{AgentEntry, TreeRow, worktree_label};
@@ -53,6 +53,7 @@ impl BranchPanel {
         let path: SharedString = worktree.path.display().to_string().into();
         let is_current = self.is_current_checkout(worktree, cx);
         let is_pinned = self.pinned(cx).contains(&worktree.path);
+        let reloading_sessions = self.is_reloading_sessions(&worktree.path);
         let bypass_on = agent_ui::PermissionBypassStore::global(cx)
             .read(cx)
             .is_enabled(&worktree.path);
@@ -114,6 +115,17 @@ impl BranchPanel {
                                     },
                                 ),
                             ))
+                            .when(reloading_sessions, |this| {
+                                this.child(
+                                    Icon::new(IconName::LoadCircle)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted)
+                                        .with_keyed_rotate_animation(
+                                            ("worktree-sessions-reloading", ix),
+                                            2,
+                                        ),
+                                )
+                            })
                             // "main" rather than "current": which checkout the
                             // window is in is already said by the dot and the
                             // background, while which one is the repository's

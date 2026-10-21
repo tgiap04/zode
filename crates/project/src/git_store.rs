@@ -5637,14 +5637,7 @@ impl Repository {
         cx: &mut Context<Self>,
     ) -> oneshot::Receiver<anyhow::Result<()>> {
         let id = self.id;
-        let updates_tx = self
-            .git_store()
-            .and_then(|git_store| match &git_store.read(cx).state {
-                GitStoreState::Local { downstream, .. } => downstream
-                    .as_ref()
-                    .map(|downstream| downstream.updates_tx.clone()),
-                _ => None,
-            });
+        let updates_tx = self.downstream_updates(cx);
         let this = cx.weak_entity();
         self.send_job(None, move |git_repo, mut cx| async move {
             match git_repo {
@@ -7206,6 +7199,53 @@ impl Repository {
                 Ok(())
             },
         )
+    }
+
+    /// Re-reads the repository from git -- branches, head, worktrees, status --
+    /// resolving once that read is done, for a caller that shows it spinning.
+    ///
+    /// The same keyed scan a file event schedules, so pressing a reload button
+    /// while one is queued coalesces into it instead of queueing another.
+    ///
+    /// Only a local repository can be read from here; on a guest or a remote
+    /// project this resolves at once and reads nothing, see [`Self::can_rescan`].
+    pub fn rescan_and_wait(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        if !self.can_rescan(cx) {
+            return Task::ready(());
+        }
+        // Passed on rather than `None`: the queue keeps only the newest scan for a
+        // key, so this one can replace a queued scan that was going to tell guests
+        // of a shared project what changed.
+        let updates_tx = self.downstream_updates(cx);
+        let scan = self.schedule_scan(updates_tx, cx);
+        cx.background_spawn(async move {
+            match scan.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!("git repository scan failed: {error:#}"),
+                // Superseded by a newer scan of the same repository, which is still
+                // queued and brings the same state in.
+                Err(oneshot::Canceled) => {}
+            }
+        })
+    }
+
+    /// Whether this repository is read from git on this machine, which is what
+    /// [`Self::rescan_and_wait`] needs. A guest's or a remote project's copy is
+    /// brought in by its host instead.
+    pub fn can_rescan(&self, cx: &App) -> bool {
+        self.git_store()
+            .is_some_and(|git_store| git_store.read(cx).is_local())
+    }
+
+    /// Where to send what a scan finds, when this project is shared with guests.
+    fn downstream_updates(&self, cx: &App) -> Option<mpsc::UnboundedSender<DownstreamUpdate>> {
+        self.git_store()
+            .and_then(|git_store| match &git_store.read(cx).state {
+                GitStoreState::Local { downstream, .. } => downstream
+                    .as_ref()
+                    .map(|downstream| downstream.updates_tx.clone()),
+                _ => None,
+            })
     }
 
     fn spawn_local_git_worker(
