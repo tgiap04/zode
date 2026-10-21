@@ -690,6 +690,10 @@ pub struct ThemeColorsContent {
     #[serde(rename = "tab.active_background")]
     pub tab_active_background: Option<String>,
 
+    /// The accent line drawn along the top edge of the active tab.
+    #[serde(rename = "tab.active_indicator")]
+    pub tab_active_indicator: Option<String>,
+
     #[serde(rename = "search.match_background")]
     pub search_match_background: Option<String>,
 
