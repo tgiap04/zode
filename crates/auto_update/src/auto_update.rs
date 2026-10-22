@@ -18,7 +18,6 @@ use std::{
         self,
         consts::{ARCH, OS},
     },
-    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -1031,6 +1030,48 @@ async fn sole_app_bundle(dir: &Path) -> Option<PathBuf> {
     found
 }
 
+/// Copies the contents of `source_bundle` over the bundle at `running_app_path`, so the
+/// running app keeps its own name whichever bundle is the source.
+async fn copy_app_bundle_over_running_app(
+    source_bundle: &Path,
+    running_app_path: &Path,
+) -> Result<()> {
+    let mut source_contents = source_bundle.as_os_str().to_owned();
+    source_contents.push("/");
+
+    let mut cmd = new_command("rsync");
+    cmd.args(["-av", "--delete", "--exclude", "Icon?"])
+        .arg(&source_contents)
+        .arg(running_app_path);
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| "failed to rsync: {cmd}")?;
+
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to copy app: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `rsync -a` leaves the bundle with the build machine's modification time, older than the
+    // copy it replaced, and macOS only drops its cached app icon (Finder, the Dock, Cmd+Tab)
+    // when the bundle looks modified. A failure here costs a stale icon, not the update, whose
+    // files are already in place.
+    match new_command("touch").arg(running_app_path).output().await {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => log::error!(
+            "failed to update the modification time of {running_app_path:?}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => {
+            log::error!("failed to update the modification time of {running_app_path:?}: {error:?}")
+        }
+    }
+
+    Ok(())
+}
+
 async fn install_release_macos(
     temp_dir: &InstallerDir,
     downloaded_dmg: &Path,
@@ -1073,9 +1114,7 @@ async fn install_release_macos(
     // The bundle inside the image is normally named exactly like the running one, and that
     // is the case to prefer -- but the two names come from different places (the running
     // one from wherever the app was installed and possibly renamed, the other from
-    // `cargo bundle`), so a mismatch must not be a dead end. The trailing slash below
-    // copies the *contents* of the source bundle, which means the running app keeps its own
-    // name whichever bundle is used as the source.
+    // `cargo bundle`), so a mismatch must not be a dead end.
     let expected_bundle = mount_path.join(&running_app_filename);
     let source_bundle = if fs::metadata(&expected_bundle).await.is_ok() {
         expected_bundle
@@ -1097,23 +1136,7 @@ async fn install_release_macos(
         }
     };
 
-    let mut mounted_app_path: OsString = source_bundle.into();
-    mounted_app_path.push("/");
-
-    let mut cmd = new_command("rsync");
-    cmd.args(["-av", "--delete", "--exclude", "Icon?"])
-        .arg(&mounted_app_path)
-        .arg(&running_app_path);
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| "failed to rsync: {cmd}")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to copy app: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    copy_app_bundle_over_running_app(&source_bundle, &running_app_path).await?;
 
     Ok(None)
 }
@@ -1556,6 +1579,49 @@ mod tests {
         assert_eq!(
             newer_version.unwrap(),
             Some(VersionCheckType::Semantic(fetched_version))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_copying_an_update_marks_the_running_bundle_modified(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let temp_dir = tempdir().unwrap();
+        let source_bundle = temp_dir.path().join("mount").join("Zode.app");
+        let running_app_path = temp_dir.path().join("Applications").join("Zode.app");
+        // The contents differ in length: rsync skips a file whose size and mtime already match.
+        std::fs::create_dir_all(source_bundle.join("Contents")).unwrap();
+        std::fs::write(
+            source_bundle.join("Contents").join("Info.plist"),
+            "new plist",
+        )
+        .unwrap();
+        std::fs::create_dir_all(running_app_path.join("Contents")).unwrap();
+        std::fs::write(running_app_path.join("Contents").join("Info.plist"), "old").unwrap();
+
+        // Set after the children exist: creating them would bump the directory's mtime again.
+        let build_time = std::time::UNIX_EPOCH + Duration::from_secs(946_684_800);
+        std::fs::File::open(&source_bundle)
+            .unwrap()
+            .set_modified(build_time)
+            .unwrap();
+
+        let install_started = std::time::SystemTime::now();
+        copy_app_bundle_over_running_app(&source_bundle, &running_app_path)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(running_app_path.join("Contents").join("Info.plist")).unwrap(),
+            "new plist"
+        );
+        let modified = std::fs::metadata(&running_app_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            modified + Duration::from_secs(1) >= install_started,
+            "the running bundle kept the update's build-time mtime {modified:?}"
         );
     }
 }
