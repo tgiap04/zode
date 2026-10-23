@@ -913,7 +913,7 @@ Defines the bulk of the editor's data-carrying keymap actions via repeated `#[de
 
 ### Description
 
-`actions!(cli, [InstallCliBinary])` symlinks the Zode CLI auxiliary executable into `/usr/local/bin/zed` (skipping if already up to date).
+`actions!(cli, [InstallCliBinary])` symlinks the Zode CLI auxiliary executable into `/usr/local/bin/zode` (skipping if already up to date).
 
 ### Related Modules
 

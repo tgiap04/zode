@@ -87,7 +87,7 @@ Add environment variables to all terminal sessions:
 {
   "terminal": {
     "env": {
-      "EDITOR": "zed --wait",
+      "EDITOR": "zode --wait",
       "MY_VAR": "value"
     }
   }

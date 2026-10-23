@@ -22,14 +22,14 @@ On your local machine, Zode runs its UI, uses Tree-sitter to parse and syntax-hi
 
 ## Setup
 
-1. Download and install the latest [Zode](https://zed.dev/releases). You need at least Zode v0.159.
+1. Download and install the latest [Zode](https://github.com/tgiap04/zode/releases).
 1. Use {#kb projects::OpenRemote} to open the "Remote Projects" dialog.
 1. Click "Connect New Server" and enter the command you use to SSH into the server. See [Supported SSH options](#supported-ssh-options) for options you can pass.
 1. Your local machine will attempt to connect to the remote server using the `ssh` binary on your path. Assuming the connection is successful, Zode will download the server on the remote host and start it.
 1. Once the Zode server is running, you will be prompted to choose a path to open on the remote server.
    > **Note:** Zode does not currently handle opening very large directories (for example, `/` or `~` that may have >100,000 files) very well. We are working on improving this, but suggest in the meantime opening only specific projects, or subfolders of very large mono-repos.
 
-For simple cases where you don't need any SSH arguments, you can run `zed ssh://[<user>@]<host>[:<port>]/<path>` to open a remote folder/file directly. If you'd like to hotlink into an SSH project, use a link of the format: `zed://ssh/[<user>@]<host>[:<port>]/<path>`.
+For simple cases where you don't need any SSH arguments, you can run `zode ssh://[<user>@]<host>[:<port>]/<path>` to open a remote folder/file directly. If you'd like to hotlink into an SSH project, use a link of the format: `zed://ssh/[<user>@]<host>[:<port>]/<path>`.
 
 ## Supported platforms
 
@@ -91,9 +91,9 @@ There are two additional Zode-specific options per connection, `upload_binary_ov
 }
 ```
 
-If you use the command line to open a connection to a host by doing `zed ssh://192.168.1.10/~/.vimrc`, then extra options are read from your settings file by finding the first connection that matches the host/username/port of the URL on the command line.
+If you use the command line to open a connection to a host by doing `zode ssh://192.168.1.10/~/.vimrc`, then extra options are read from your settings file by finding the first connection that matches the host/username/port of the URL on the command line.
 
-Additionally it's worth noting that while you can pass a password on the command line `zed ssh://user:password@host/~`, we do not support writing a password to your settings file. If you're connecting repeatedly to the same host, you should configure key-based authentication.
+Additionally it's worth noting that while you can pass a password on the command line `zode ssh://user:password@host/~`, we do not support writing a password to your settings file. If you're connecting repeatedly to the same host, you should configure key-based authentication.
 
 ## Remote Development on Windows (SSH)
 
@@ -256,7 +256,7 @@ Note that we deliberately disallow some options (for example `-t` or `-T`) that 
 
 ## Known Limitations
 
-- You can't open files from the remote Terminal by typing the `zed` command.
+- You can't open files from the remote Terminal by typing the `zode` command.
 
 ## Feedback
 

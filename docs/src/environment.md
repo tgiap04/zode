@@ -18,22 +18,22 @@ To make the best use of these features, it helps to understand where Zode gets e
 
 ## Where does Zode get its environment variables from?
 
-How Zode starts affects which environment variables it can use. That includes launching from the macOS Dock, a Linux window manager, or the `zed` CLI.
+How Zode starts affects which environment variables it can use. That includes launching from the macOS Dock, a Linux window manager, or the `zode` CLI.
 
 ### Launched from the CLI
 
-If Zode is opened via the CLI (`zed`), it will inherit the environment variables from the surrounding shell session.
+If Zode is opened via the CLI (`zode`), it will inherit the environment variables from the surrounding shell session.
 
 That means if you do
 
 ```
 $ export MY_ENV_VAR=hello
-$ zed .
+$ zode .
 ```
 
 the environment variable `MY_ENV_VAR` is now available inside Zode. For example, in the built-in terminal.
 
-Starting with Zode 0.152.0, the CLI `zed` will _always_ pass along its environment to Zode, regardless of whether a Zode instance was previously running or not. Prior to Zode 0.152.0 this was not the case and only the first Zode instance would inherit the environment variables.
+Starting with Zode 0.152.0, the CLI `zode` will _always_ pass along its environment to Zode, regardless of whether a Zode instance was previously running or not. Prior to Zode 0.152.0 this was not the case and only the first Zode instance would inherit the environment variables.
 
 ### Launched via window manager, Dock, or launcher
 

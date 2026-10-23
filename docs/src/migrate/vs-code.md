@@ -13,14 +13,13 @@ It covers which settings import automatically, which shortcuts map cleanly, and 
 
 Zode is available on macOS, Windows, and Linux.
 
-For macOS, you can download it from zed.dev/download, or install via Homebrew:
-`brew install zed-editor/zed/zed`
+For macOS and Windows, download the installer (`Zode-<arch>.dmg` or `Zode-<arch>.exe`) from the [releases page](https://github.com/tgiap04/zode/releases).
 
 For most Linux users, the easiest way to install Zode is through our installation script:
-`curl -f https://zed.dev/install.sh | sh`
+`curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh`
 
 After installation, you can launch Zode from your Applications folder (macOS) or directly from the terminal (Linux) using:
-`zed .`
+`zode .`
 This opens the current directory in Zode.
 
 ## Import Settings from VS Code
@@ -173,14 +172,15 @@ Zode doesn’t import extensions or keybindings, but this import gets core edito
 You can configure most settings in the Settings Editor ({#kb zed::OpenSettings}). For advanced settings, run `zed: open settings file` from the Command Palette to edit your settings file directly.
 
 Here’s how common VS Code settings translate:
-| VS Code | Zode | Notes |
-| --- | --- | --- |
-| editor.fontFamily | buffer_font_family | Zode uses Zed Mono by default |
-| editor.fontSize | buffer_font_size | Set in pixels |
-| editor.tabSize | tab_size | Can override per language |
-| editor.insertSpaces | insert_spaces | Boolean |
-| editor.formatOnSave | format_on_save | Works with formatter enabled |
-| editor.wordWrap | soft_wrap | Supports optional wrap column |
+
+| VS Code             | Zode               | Notes                         |
+| ------------------- | ------------------ | ----------------------------- |
+| editor.fontFamily   | buffer_font_family | Zode uses Zed Mono by default |
+| editor.fontSize     | buffer_font_size   | Set in pixels                 |
+| editor.tabSize      | tab_size           | Can override per language     |
+| editor.insertSpaces | insert_spaces      | Boolean                       |
+| editor.formatOnSave | format_on_save     | Works with formatter enabled  |
+| editor.wordWrap     | soft_wrap          | Supports optional wrap column |
 
 Zode also supports per-project settings. You can find these in the Settings Editor as well.
 
@@ -191,7 +191,7 @@ After setup, press `Cmd+O` (`Ctrl+O` on Linux) to open a folder. This becomes yo
 To start a new project, create a directory using your terminal or file manager, then open it in Zode. The editor will treat that folder as the root of your project.
 
 You can also launch Zode from the terminal inside any folder with:
-`zed .`
+`zode .`
 
 Once inside a project, use `Cmd+P` to jump between files quickly. `Cmd+Shift+P` (`Ctrl+Shift+P` on Linux) opens the command palette for running actions / tasks, toggling settings, or starting a collaboration session.
 

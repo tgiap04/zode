@@ -11,26 +11,16 @@ This guide covers keybindings, settings, and the differences you'll encounter as
 
 Zode is available on macOS, Windows, and Linux.
 
-For macOS, you can download it from zed.dev/download, or install via Homebrew:
-
-```sh
-brew install --cask zed
-```
-
-For Windows, download the installer from zed.dev/download, or install via winget:
-
-```sh
-winget install Zed.Zed
-```
+For macOS and Windows, download the installer (`Zode-<arch>.dmg` or `Zode-<arch>.exe`) from the [releases page](https://github.com/tgiap04/zode/releases).
 
 For most Linux users, the easiest way to install Zode is through our installation script:
 
 ```sh
-curl -f https://zed.dev/install.sh | sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh
 ```
 
 After installation, you can launch Zode from your Applications folder (macOS), Start menu (Windows), or directly from the terminal using:
-`zed .`
+`zode .`
 This opens the current directory in Zode.
 
 ## Set Up the JetBrains Keymap
@@ -70,7 +60,7 @@ To start a new project, use Cargo from the terminal:
 ```sh
 cargo new my_project
 cd my_project
-zed .
+zode .
 ```
 
 Or for a library:
@@ -80,7 +70,7 @@ cargo new --lib my_library
 ```
 
 You can also launch Zode from the terminal inside any existing Cargo project with:
-`zed .`
+`zode .`
 
 Once inside a project:
 

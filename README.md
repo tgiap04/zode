@@ -168,9 +168,40 @@ SmartScreen system-wide:
   clear the attribute, so the flags stay where they were. The `xattr` line is the one that
   actually removes them.
 - **Windows**: on the SmartScreen prompt, *More info* → *Run anyway*.
-- **Linux**: `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zed.app/bin/zed`. The
-  directory inside the archive is `zed.app`, not `zode.app` — the bundle keeps upstream's
-  layout so `libexec/zed-editor` stays where the database drivers look for it.
+- **Linux**: either `tar -xzf zode-linux-$(uname -m).tar.gz` and run `zode.app/bin/zode`, or
+  install into `~/.local` with
+  `curl -fsSL https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh`
+  (set `ZODE_CHANNEL=nightly` for the nightly build). The installer only writes
+  `~/.local/zode.app`, `~/.local/bin/zode` and Zode's own `.desktop` file; it never touches a
+  Zed install. The database drivers are found beside the running binary, so the bundle
+  directory can sit anywhere.
+
+  **Upgrading a 0.1.5 Linux install.** 0.1.5 shipped the bundle as `zed.app`, and the in-app
+  update cannot cross to the `zode.app` layout of 0.1.6, so reinstall once with the
+  installer above, then clear the old bundle by hand.
+
+  Do not run `zed --uninstall` (or any `--uninstall`) from a leftover 0.1.5 binary such as
+  `~/.local/zed.app/bin/zed`. 0.1.5 embeds the old uninstall script, which can delete
+  `~/.local/share/zed`, `~/.zed_server` and `~/.config/zed` (on macOS also
+  `~/Library/Application Support/Zed` and `~/Library/Logs/Zed`), and those belong to a real
+  Zed. The `--uninstall` of 0.1.6 only touches Zode's own paths.
+
+  `~/.local/zed.app` is an old Zode, not Zed, only if
+  `~/.local/zed.app/share/applications/io.github.tgiap04.zode.desktop` exists and no
+  `dev.zed.Zed*.desktop` sits beside it (Zed unpacked over an old Zode leaves both). The nightly
+  channel uses `~/.local/zed-nightly.app` and `io.github.tgiap04.zode.nightly.desktop`. This
+  removes each old bundle that passes that check, and the `~/.local/bin/zed` link only when
+  it points into it:
+
+  ```sh
+  for bundle in zed:io.github.tgiap04.zode zed-nightly:io.github.tgiap04.zode.nightly; do
+    app="$HOME/.local/${bundle%%:*}.app"
+    [ -f "$app/share/applications/${bundle#*:}.desktop" ] || continue
+    ls "$app"/share/applications/dev.zed.Zed*.desktop >/dev/null 2>&1 && continue
+    case "$(readlink "$HOME/.local/bin/zed")" in "$app"/*) rm -f "$HOME/.local/bin/zed" ;; esac
+    rm -rf "$app"
+  done
+  ```
 
 Linux builds need **glibc 2.35 or newer** (Ubuntu 22.04 and newer, Debian 12 and newer).
 They are built inside an `ubuntu:22.04` container so that floor holds regardless of which

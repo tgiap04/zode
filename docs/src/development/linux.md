@@ -51,7 +51,7 @@ You can install a local build on your machine with:
 ./script/install-linux
 ```
 
-This builds `zed` and the `cli` in release mode, installs the binary at `~/.local/bin/zed`, and installs `.desktop` files to `~/.local/share`.
+This builds the `zode` package and the `cli` in release mode, installs the CLI at `~/.local/bin/zode`, and installs `.desktop` files to `~/.local/share`.
 
 > **_Note_**: If you encounter linker errors similar to the following:
 >
@@ -90,8 +90,8 @@ This section is for distribution maintainers packaging Zode.
 
 Zode has two main binaries:
 
-- You will need to build `crates/cli` and make its binary available in `$PATH` with the name `zed`.
-- You will need to build `crates/zed` and put it at `$PATH/to/cli/../../libexec/zed-editor`. For example, if you are going to put the cli at `~/.local/bin/zed` put zed at `~/.local/libexec/zed-editor`. As some linux distributions (notably Arch) discourage the use of `libexec`, you can also put this binary at `$PATH/to/cli/../../lib/zed/zed-editor` (e.g. `~/.local/lib/zed/zed-editor`) instead.
+- You will need to build `crates/cli` and make its binary available in `$PATH` with the name `zode`.
+- You will need to build `crates/zed` and put it at `$PATH/to/cli/../../libexec/zode-editor`. For example, if you are going to put the cli at `~/.local/bin/zode` put the editor at `~/.local/libexec/zode-editor`. As some linux distributions (notably Arch) discourage the use of `libexec`, you can also put this binary at `$PATH/to/cli/../../lib/zed/zed-editor` (e.g. `~/.local/lib/zed/zed-editor`) instead.
 - If you are going to provide a `.desktop` file you can find a template in `crates/zed/resources/zed.desktop.in`, and use `envsubst` to populate it with the values required. This file should also be renamed to `$APP_ID.desktop` so that the file [follows the FreeDesktop standards](https://github.com/zed-industries/zed/issues/12707#issuecomment-2168742761). You should also make this desktop file executable (`chmod 755`).
 - You will need to ensure that the necessary libraries are installed. You can get the current list by [inspecting the built binary](https://github.com/zed-industries/zed/blob/935cf542aebf55122ce6ed1c91d0fe8711970c82/script/bundle-linux#L65-L67) on your system.
 - For an example of a complete build script, see [script/bundle-linux](https://github.com/zed-industries/zed/blob/935cf542aebf55122ce6ed1c91d0fe8711970c82/script/bundle-linux).
@@ -103,7 +103,6 @@ Zode has two main binaries:
 Zode moves quickly, and distribution maintainers often have different constraints and priorities. The points below describe current trade-offs:
 
 - Zode is a fast-moving project. We typically publish 2-3 builds per week to address reported issues and ship larger changes.
-- There are a couple of other `zed` binaries that may be present on Linux systems ([1](https://openzfs.github.io/openzfs-docs/man/v2.2/8/zed.8.html), [2](https://zed.brimdata.io/docs/commands/zed)). If you want to rename our CLI binary because of these issues, we suggest `zedit`, `zeditor`, or `zed-cli`.
 - Zode automatically installs versions of common developer tools, similar to rustup/rbenv/pyenv. This behavior is discussed [here](https://github.com/zed-industries/zed/issues/12589).
 - Users can install extensions locally and from [zed-industries/extensions](https://github.com/zed-industries/extensions). Extensions may install additional tools such as language servers. Planned safety improvements are tracked [here](https://github.com/zed-industries/zed/issues/12358).
 - Zode connects to several online services by default (AI, telemetry, collaboration). AI and our telemetry can be disabled by your users with their zed settings or by patching our [default settings file](https://github.com/zed-industries/zed/blob/main/assets/settings/default.json).
@@ -145,8 +144,8 @@ Use this when Zode is using a lot of CPU. It is not useful for hangs.
 ### During the incident
 
 - Find the PID (process ID) using:
-  `ps -eo size,pid,comm | grep zed | sort | head -n 1 | cut -d ' ' -f 2`
-  Or find the PID of `zed-editor` with the highest RAM usage in something
+  `ps -eo size,pid,comm | grep zode | sort | head -n 1 | cut -d ' ' -f 2`
+  Or find the PID of `zode-editor` with the highest RAM usage in something
   like htop/btop/top.
 
 - Install perf:
@@ -159,7 +158,7 @@ Use this when Zode is using a lot of CPU. It is not useful for hangs.
   run `sudo chown $USER:$USER perf.data`
 
 - Get build info:
-  Run zed again and type `zed: about` in the command pallet to get the exact commit.
+  Run Zode again and type `zed: about` in the command pallet to get the exact commit.
 
 The `perf.data` file can be sent to Zode together with the exact commit.
 

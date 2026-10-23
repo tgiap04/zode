@@ -102,7 +102,7 @@ Zode simplifies language server management for users:
 2. Storage Location:
 
    - macOS: `~/Library/Application Support/Zode/languages`
-   - Linux: `$XDG_DATA_HOME/zed/languages`, `$FLATPAK_XDG_DATA_HOME/zed/languages`, or `$HOME/.local/share/zed/languages`
+   - Linux: `$XDG_DATA_HOME/zode/languages`, `$FLATPAK_XDG_DATA_HOME/zode/languages`, or `$HOME/.local/share/zode/languages`
 
 3. Automatic Updates: Zode keeps your language servers up-to-date, ensuring you always have the latest features and improvements.
 
