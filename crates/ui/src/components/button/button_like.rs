@@ -109,7 +109,11 @@ impl TintColor {
 impl From<TintColor> for Color {
     fn from(tint: TintColor) -> Self {
         match tint {
-            TintColor::Accent => Color::Accent,
+            // The tint's background and border come from `brand_accent`, which is
+            // what `Color::Selected` resolves to. `Color::Accent` reads the theme's
+            // `text_accent`, which a user's override can move, and would then put a
+            // different colour on the glyph than on the tint around it.
+            TintColor::Accent => Color::Selected,
             TintColor::Error => Color::Error,
             TintColor::Warning => Color::Warning,
             TintColor::Success => Color::Success,

@@ -25,7 +25,8 @@ impl ProgressBar {
             max_value,
             bg_color: cx.theme().colors().background,
             over_color: cx.theme().status().error,
-            fg_color: cx.theme().status().info,
+            // Not `status().info`: that token also colours LSP information diagnostics.
+            fg_color: crate::brand_accent(cx),
         }
     }
 
