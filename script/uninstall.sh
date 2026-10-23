@@ -1,27 +1,40 @@
 #!/usr/bin/env sh
 set -eu
 
-# Uninstalls Zed that was installed using the install.sh script
+# Uninstalls Zode that was installed using the install.sh script.
+# It never touches Zed's own paths (zed*.app, ~/.config/zed, ~/.local/share/zed,
+# ~/.zed_server, Application Support/Zed).
 
 check_remaining_installations() {
     platform="$(uname -s)"
     if [ "$platform" = "Darwin" ]; then
-        # Check for any Zed variants in /Applications
-        remaining=$(ls -d /Applications/Zed*.app 2>/dev/null | wc -l)
+        # Check for any Zode variants in /Applications
+        remaining=$(ls -d /Applications/Zode*.app 2>/dev/null | wc -l)
         [ "$remaining" -eq 0 ]
     else
-        # Check for any Zed variants in ~/.local
-        remaining=$(ls -d "$HOME/.local/zed"*.app 2>/dev/null | wc -l)
+        # Check for any Zode variants in ~/.local
+        remaining=$(ls -d "$HOME/.local/zode"*.app 2>/dev/null | wc -l)
         [ "$remaining" -eq 0 ]
     fi
 }
 
+# Removes the ~/.local/bin/zode link only when it points into this Zode
+# install, so a link of the same name from anything else survives.
+remove_cli_link() {
+    link="$HOME/.local/bin/zode"
+    [ -L "$link" ] || return 0
+    target="$(readlink "$link")"
+    case "$target" in
+        "$1"*) rm -f "$link" ;;
+    esac
+}
+
 prompt_remove_preferences() {
-    printf "Do you want to keep your Zed preferences? [Y/n] "
+    printf "Do you want to keep your Zode preferences? [Y/n] "
     read -r response
     case "$response" in
         [nN]|[nN][oO])
-            rm -rf "$HOME/.config/zed"
+            rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/zode"
             echo "Preferences removed."
             ;;
         *)
@@ -32,7 +45,7 @@ prompt_remove_preferences() {
 
 main() {
     platform="$(uname -s)"
-    channel="${ZED_CHANNEL:-stable}"
+    channel="${ZODE_CHANNEL:-${ZED_CHANNEL:-stable}}"
 
     if [ "$platform" = "Darwin" ]; then
         platform="macos"
@@ -45,7 +58,7 @@ main() {
 
     "$platform"
 
-    echo "Zed has been uninstalled"
+    echo "Zode has been uninstalled"
 }
 
 linux() {
@@ -80,28 +93,28 @@ linux() {
         ;;
     esac
 
-    # Remove the app directory
-    rm -rf "$HOME/.local/zed$suffix.app"
+    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/zode"
 
-    # Remove the binary symlink
-    rm -f "$HOME/.local/bin/zed"
+    # Remove the binary symlink, if it points into this install
+    remove_cli_link "$HOME/.local/zode$suffix.app/"
+
+    # Remove the app directory
+    rm -rf "$HOME/.local/zode$suffix.app"
 
     # Remove the .desktop file
     rm -f "$HOME/.local/share/applications/${appid}.desktop"
 
     # Remove the database directory for this channel
-    rm -rf "$HOME/.local/share/zed/db/0-$db_suffix"
+    rm -rf "$data_dir/db/0-$db_suffix"
 
     # Remove socket file
-    rm -f "$HOME/.local/share/zed/zed-$db_suffix.sock"
+    rm -f "$data_dir/zed-$db_suffix.sock"
 
-    # Remove the entire Zed directory if no installations remain
+    # Remove the entire Zode directory if no installations remain
     if check_remaining_installations; then
-        rm -rf "$HOME/.local/share/zed"
+        rm -rf "$data_dir"
         prompt_remove_preferences
     fi
-
-    rm -rf $HOME/.zed_server
 }
 
 macos() {
@@ -134,11 +147,11 @@ macos() {
         rm -rf "/Applications/$app"
     fi
 
-    # Remove the binary symlink
-    rm -f "$HOME/.local/bin/zed"
+    # Remove the binary symlink, if it points into this install
+    remove_cli_link "/Applications/$app/"
 
     # Remove the database directory for this channel
-    rm -rf "$HOME/Library/Application Support/Zed/db/0-$db_suffix"
+    rm -rf "$HOME/Library/Application Support/Zode/db/0-$db_suffix"
 
     # Remove app-specific files and directories
     rm -rf "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/$app_id.sfl"*
@@ -147,15 +160,13 @@ macos() {
     rm -rf "$HOME/Library/Preferences/$app_id.plist"
     rm -rf "$HOME/Library/Saved Application State/$app_id.savedState"
 
-    # Remove the entire Zed directory if no installations remain
+    # Remove the entire Zode directory if no installations remain
     if check_remaining_installations; then
-        rm -rf "$HOME/Library/Application Support/Zed"
-        rm -rf "$HOME/Library/Logs/Zed"
+        rm -rf "$HOME/Library/Application Support/Zode"
+        rm -rf "$HOME/Library/Logs/Zode"
 
         prompt_remove_preferences
     fi
-
-    rm -rf $HOME/.zed_server
 }
 
 main "$@"

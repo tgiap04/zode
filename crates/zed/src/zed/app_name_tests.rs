@@ -86,36 +86,158 @@ fn string_literals(line: &str) -> Vec<String> {
 ///
 /// Splitting the file at its first `#[cfg(test)]` -- which is what the
 /// onboarding version of this check does -- silently drops the remainder of any
-/// file that registers a test module near the top. `crates/zed/src/zed.rs`
-/// registers *this* module on its second line, and under the split rule the
-/// other 6400 lines of the app's main module counted as test code: `About Zed`
-/// could be reintroduced there and this test still passed.
+/// file that registers a test item near the top: a `mod tests;` declaration, a
+/// `#[cfg(test)]` struct field, or a test-only impl above shipping code. Under
+/// the split rule everything below it counted as test code, so a label could be
+/// reintroduced there and this test still passed.
 ///
-/// So an attribute followed by a `mod name;` declaration skips those two lines
-/// and scanning continues. An attribute followed by anything else still ends the
-/// file, which is right for the trailing `mod tests { .. }` every crate uses and
-/// wrong only for a `#[cfg(test)]` item placed mid-file above shipping code.
-/// That shape does not exist in this tree today, and nothing here would notice
-/// if it appeared in some crate other than `zed` -- the canary at the end of the
-/// test only watches `crates/zed/src/zed.rs`, because that is the one file whose
-/// early registration is load-bearing for this module.
+/// So only the attributed item is skipped and scanning continues after it, and
+/// `test_item_end` finds where it stops. The canaries in the test below watch
+/// how far the scan gets in files known to have this shape.
 fn shipping_lines(source: &str) -> Vec<(usize, &str)> {
+    let lines: Vec<&str> = source.lines().collect();
     let mut out = Vec::new();
-    let mut lines = source.lines().enumerate().peekable();
-    while let Some((index, line)) = lines.next() {
-        if !line.trim_start().starts_with("#[cfg(test)]") {
-            out.push((index + 1, line));
-            continue;
-        }
-        match lines.peek() {
-            Some((_, next)) if next.trim_end().ends_with(';') => {
-                lines.next();
-            }
-            _ => break,
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at];
+        if line.trim_start().starts_with("#[cfg(test)]") {
+            at = test_item_end(&lines, at);
+        } else {
+            out.push((at + 1, line));
+            at += 1;
         }
     }
     out
 }
+
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// `line` up to a trailing `//` comment. A `//` inside a string literal is not
+/// a comment, and URLs in test fixtures are full of them.
+fn without_line_comment(line: &str) -> &str {
+    let mut inside = false;
+    let mut characters = line.char_indices();
+    while let Some((at, character)) = characters.next() {
+        match character {
+            '\\' if inside => {
+                characters.next();
+            }
+            '"' => inside = !inside,
+            '/' if !inside && line[at..].starts_with("//") => return &line[..at],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn ends_an_item(line: &str) -> bool {
+    without_line_comment(line)
+        .trim_end()
+        .ends_with([';', ',', '}'])
+}
+
+fn opens_a_block(line: &str) -> bool {
+    without_line_comment(line).trim_end().ends_with('{')
+}
+
+/// The index of the first line after the `#[cfg(test)]` item whose attribute is
+/// on `lines[attribute]`.
+///
+/// The item starts on the attribute's own line when code follows the attribute
+/// there (`#[cfg(test)] flag: bool,`), and otherwise on the first line after the
+/// attribute stack and comments. One that ends in `;`, `,` or `}` is the whole
+/// item. Anything else runs on, and rustfmt decides where it stops by
+/// indentation, which unlike counting brackets is not fooled by the braces
+/// inside the string and char literals a test module is full of.
+///
+/// Once a line opens a block -- `mod tests {`, or the `) -> T {` closing a
+/// signature -- only a `}` at the attribute's own indentation ends the item,
+/// because anything inside a block may start in any column, raw strings
+/// included. Before that, while an item is still a signature or an initializer,
+/// a line at the attribute's own indentation is either a closer (`];`, `);`,
+/// `),`, `},`) that ends it, a continuation (`) -> T`, `where`, `{`), or the next
+/// item, which the item ends short of. A line indented less than the attribute
+/// belongs to the parent and also ends it.
+fn test_item_end(lines: &[&str], attribute: usize) -> usize {
+    let attribute_indentation = indentation(lines[attribute]);
+    let after_attribute = lines[attribute]
+        .trim_start()
+        .trim_start_matches("#[cfg(test)]")
+        .trim();
+    let item_start = if after_attribute.is_empty()
+        || after_attribute.starts_with("//")
+        || after_attribute.starts_with("#[")
+    {
+        (attribute + 1..lines.len()).find(|&index| {
+            let trimmed = lines[index].trim();
+            !(trimmed.is_empty() || trimmed.starts_with("#[") || trimmed.starts_with("//"))
+        })
+    } else {
+        Some(attribute)
+    };
+    let Some(item_start) = item_start else {
+        return lines.len();
+    };
+    if ends_an_item(lines[item_start]) {
+        return item_start + 1;
+    }
+    let mut in_block = opens_a_block(lines[item_start]);
+    for (index, line) in lines.iter().enumerate().skip(item_start + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let line_indentation = indentation(line);
+        if in_block {
+            if line_indentation == attribute_indentation && trimmed.starts_with('}') {
+                return index + 1;
+            }
+        } else if line_indentation < attribute_indentation {
+            return index;
+        } else if line_indentation == attribute_indentation {
+            if trimmed.starts_with(['}', ']', ')', '>']) {
+                if opens_a_block(line) {
+                    in_block = true;
+                } else if ends_an_item(line) {
+                    return index + 1;
+                }
+            } else if trimmed == "{" {
+                in_block = true;
+            } else if trimmed != "where" {
+                return index;
+            }
+        }
+    }
+    lines.len()
+}
+
+/// Files with a `#[cfg(test)]` item above shipping code, and a shipping line in
+/// each that the scan has to reach.
+///
+/// Matched by content rather than by how far the scan got: a scan that swallows
+/// the middle of a file and picks up again at the end still ends on a late line,
+/// so only a line it is known to cross proves it did not.
+const MID_FILE_TEST_ITEM_FILES: &[(&str, &str)] = &[
+    // Registers `#[cfg(test)] mod` declarations on its second line.
+    (
+        "zed/src/zed.rs",
+        "pub(crate) fn eager_load_active_theme_and_icon_theme(",
+    ),
+    // A test module, then shipping functions below it.
+    ("cli/src/main.rs", "fn parse_path_in_wsl("),
+    // Test-only field and `mod` declarations near the top, a test module near the
+    // bottom, and this function after it.
+    ("editor/src/editor.rs", "pub fn multibuffer_context_lines("),
+    // A test-only `const` array closed by `];`, above every item that ships.
+    ("zed/src/zed/status_bar_items.rs", "pub(crate) fn register("),
+    // A test-only `static` whose initializer sits on the next line.
+    (
+        "remote_server/src/headless_terminals.rs",
+        "const OUTPUT_QUEUE_CHUNKS: usize",
+    ),
+];
 
 fn shipping_sources(directory: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -152,7 +274,7 @@ fn no_shipping_string_calls_this_editor_zed() {
     );
 
     let mut offenders = Vec::new();
-    let mut scanned_in_app_module = 0usize;
+    let mut reached = Vec::new();
     for path in sources {
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
@@ -160,8 +282,14 @@ fn no_shipping_string_calls_this_editor_zed() {
         // Test code is not user-facing text, and this very file quotes the name
         // it is banning.
         let lines = shipping_lines(&source);
-        if path.ends_with("src/zed.rs") {
-            scanned_in_app_module = lines.last().map_or(0, |(number, _)| *number);
+        for (suffix, shipping_line) in MID_FILE_TEST_ITEM_FILES {
+            if path.ends_with(suffix)
+                && lines
+                    .iter()
+                    .any(|(_, line)| line.trim_start().starts_with(shipping_line))
+            {
+                reached.push(*suffix);
+            }
         }
         for (number, line) in lines {
             if line.trim_start().starts_with("//") {
@@ -184,14 +312,20 @@ fn no_shipping_string_calls_this_editor_zed() {
         }
     }
 
-    // A canary against this test going blind rather than green. The app's main
-    // module registers a `#[cfg(test)]` item on its second line, so a scanner
-    // that stops there reports no offenders because it read almost nothing.
+    // A canary against this test going blind rather than green: each file below
+    // has a `#[cfg(test)]` item above code that ships, so a scanner that stops at
+    // the item, or swallows past it, reports no offenders because it read almost
+    // nothing.
+    let missed: Vec<String> = MID_FILE_TEST_ITEM_FILES
+        .iter()
+        .filter(|(suffix, _)| !reached.contains(suffix))
+        .map(|(suffix, shipping_line)| format!("{suffix}: `{shipping_line}`"))
+        .collect();
     assert!(
-        scanned_in_app_module > 1000,
-        "only scanned to line {scanned_in_app_module} of crates/zed/src/zed.rs; \
-         the walk is stopping at its `#[cfg(test)]` registration and would miss \
-         anything below it"
+        missed.is_empty(),
+        "the scan never reached these shipping lines, so it is skipping past a \
+         `#[cfg(test)]` item and would miss anything below it:\n{}",
+        missed.join("\n")
     );
 
     assert!(
@@ -354,4 +488,117 @@ fn every_keymap_application_menu_names_a_real_menu() {
     }
 
     assert!(broken.is_empty(), "{}", broken.join("\n"));
+}
+
+#[test]
+fn shipping_lines_keeps_scanning_after_a_mid_file_test_item() {
+    let source = "\
+struct Holder {
+    #[cfg(test)]
+    test_only: Vec<String>,
+    shipped: String,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct Helper {
+    label: \"hidden Zed label\",
+}
+
+#[cfg(test)]
+fn helper(
+    argument: usize,
+) -> usize {
+    argument
+}
+
+#[cfg(test)]
+use std::fmt;
+const PLANTED: &str = \"Welcome to Zed\";
+";
+    let shown: Vec<&str> = shipping_lines(source)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    assert!(
+        shown.contains(&"const PLANTED: &str = \"Welcome to Zed\";"),
+        "the planted string after the test items was not scanned: {shown:?}"
+    );
+    assert!(shown.contains(&"    shipped: String,"));
+    assert!(!shown.iter().any(|line| line.contains("hidden Zed label")));
+    assert!(!shown.iter().any(|line| line.contains("test_only")));
+}
+
+/// Every line mentioning `hidden` belongs to a test item and must not be
+/// scanned; every line mentioning `shipped` follows or sits beside one and must
+/// be. Each shape is one way rustfmt closes a test item other than a lone `}`.
+#[test]
+fn shipping_lines_ends_a_test_item_where_its_layout_ends_it() {
+    let shapes = [
+        (
+            "array closed by `];`",
+            "#[cfg(test)]\nconst LABELS: [&str; 2] = [\n    \"hidden Zed label\",\n    \"hidden\",\n];",
+        ),
+        (
+            "static whose initializer is on the next line",
+            "#[cfg(test)]\nstatic LABEL: Label =\n    Label::new(\"hidden Zed label\");",
+        ),
+        (
+            "initializer closed by `});`",
+            "#[cfg(test)]\nstatic LABEL: LazyLock<Label> = LazyLock::new(|| {\n    Label::new(\"hidden Zed label\")\n});",
+        ),
+        (
+            "call closed by `);`",
+            "#[cfg(test)]\nconst LABEL: Label = Label::new(\n    \"hidden Zed label\",\n);",
+        ),
+        (
+            "array element closed by `),`",
+            "const LABELS: [Label; 2] = [\n    #[cfg(test)]\n    Label::new(\n        \"hidden Zed label\",\n    ),\n    Label::new(\"shipped\"),\n];",
+        ),
+        (
+            "variant closed by `},`",
+            "enum Label {\n    #[cfg(test)]\n    Variant {\n        hidden: \"Zed label\",\n    },\n    Other(&'static str), // shipped\n}",
+        ),
+        (
+            "field with a trailing comment",
+            "struct Holder {\n    #[cfg(test)]\n    only: &'static str, // hidden\n    shipped: String,\n}",
+        ),
+        (
+            "`//` inside a string, then a trailing comment",
+            "#[cfg(test)]\nconst LINK: &str = \"http://example.test/hidden Zed label\"; // test only",
+        ),
+        (
+            "attribute and parameter on one line",
+            "fn spawn(\n    path: &str,\n    #[cfg(test)] hidden: Checks,\n) -> Task<()> {\n    let shipped = \"Zed label\";\n    run(path)\n}",
+        ),
+        (
+            "attribute and import on one line",
+            "#[cfg(test)] use hidden::Label;",
+        ),
+        (
+            "function with a where clause",
+            "#[cfg(test)]\nfn gated<T>(\n    value: T,\n) -> T\nwhere\n    T: Clone,\n{\n    let hidden = \"Zed label\";\n    value.clone()\n}",
+        ),
+    ];
+    let after = "const SHIPPED_AFTER: &str = \"Welcome to Zed\";";
+    let mut wrong = Vec::new();
+    for (shape, item) in shapes {
+        let source = format!("{item}\n{after}\n");
+        let shown: Vec<&str> = shipping_lines(&source)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        if !shown.contains(&after) {
+            wrong.push(format!("{shape}: the line after the item was not scanned"));
+        }
+        for line in source.lines() {
+            if line.contains("shipped") && !shown.contains(&line) {
+                wrong.push(format!("{shape}: `{line}` was not scanned"));
+            }
+            if line.contains("hidden") && shown.contains(&line) {
+                wrong.push(format!("{shape}: `{line}` was scanned"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

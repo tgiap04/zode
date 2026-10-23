@@ -1,20 +1,22 @@
 #!/usr/bin/env sh
 set -eu
 
-# Downloads a tarball from https://zed.dev/releases and unpacks it
-# into ~/.local/. If you'd prefer to do this manually, instructions are at
-# https://zed.dev/docs/linux.
+# Downloads Zode from this repository's GitHub releases and installs it:
+# Linux unpacks into ~/.local/, macOS copies the app into /Applications.
+# Nothing here reads, writes or removes a Zed install.
 
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
-    channel="${ZED_CHANNEL:-stable}"
-    ZED_VERSION="${ZED_VERSION:-latest}"
+    channel="${ZODE_CHANNEL:-${ZED_CHANNEL:-stable}}"
+    version="${ZODE_VERSION:-${ZED_VERSION:-latest}}"
+    version="${version#v}"
+    bundle="${ZODE_BUNDLE_PATH:-${ZED_BUNDLE_PATH:-}}"
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
-        temp="$(mktemp -d "$TMPDIR/zed-XXXXXX")"
+        temp="$(mktemp -d "$TMPDIR/zode-XXXXXX")"
     else
-        temp="$(mktemp -d "/tmp/zed-XXXXXX")"
+        temp="$(mktemp -d "/tmp/zode-XXXXXX")"
     fi
 
     if [ "$platform" = "Darwin" ]; then
@@ -54,13 +56,13 @@ main() {
 
     "$platform" "$@"
 
-    if [ "$(command -v zed)" = "$HOME/.local/bin/zed" ]; then
-        echo "Zed has been installed. Run with 'zed'"
+    if [ "$(command -v zode)" = "$HOME/.local/bin/zode" ]; then
+        echo "Zode has been installed. Run with 'zode'"
     else
-        echo "To run Zed from your terminal, you must add ~/.local/bin to your PATH"
+        echo "To run Zode from your terminal, you must add ~/.local/bin to your PATH"
         echo "Run:"
 
-        case "$SHELL" in
+        case "${SHELL:-}" in
             *zsh)
                 echo "   echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.zshrc"
                 echo "   source ~/.zshrc"
@@ -74,16 +76,43 @@ main() {
                 ;;
         esac
 
-        echo "To run Zed now, '~/.local/bin/zed'"
+        echo "To run Zode now, '~/.local/bin/zode'"
     fi
 }
 
+download_url() {
+    asset="$1"
+    repo_url="https://github.com/tgiap04/zode/releases"
+    case "$channel" in
+        stable)
+            if [ "$version" = "latest" ]; then
+                echo "$repo_url/latest/download/$asset"
+            else
+                echo "$repo_url/download/v$version/$asset"
+            fi
+            ;;
+        nightly)
+            if [ "$version" != "latest" ]; then
+                echo "A version cannot be combined with the nightly channel" >&2
+                return 1
+            fi
+            echo "$repo_url/download/nightly/$asset"
+            ;;
+        *)
+            echo "The $channel channel is not published; use stable or nightly" >&2
+            return 1
+            ;;
+    esac
+}
+
 linux() {
-    if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
-        cp "$ZED_BUNDLE_PATH" "$temp/zed-linux-$arch.tar.gz"
+    asset="zode-linux-$arch.tar.gz"
+    if [ -n "$bundle" ]; then
+        cp "$bundle" "$temp/$asset"
     else
-        echo "Downloading Zed version: $ZED_VERSION"
-        curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&arch=$arch&os=linux&source=install.sh" > "$temp/zed-linux-$arch.tar.gz"
+        url="$(download_url "$asset")"
+        echo "Downloading Zode from: $url"
+        curl "$url" > "$temp/$asset"
     fi
 
     suffix=""
@@ -111,40 +140,60 @@ linux() {
         ;;
     esac
 
-    # Unpack
-    rm -rf "$HOME/.local/zed$suffix.app"
-    mkdir -p "$HOME/.local/zed$suffix.app"
-    tar -xzf "$temp/zed-linux-$arch.tar.gz" -C "$HOME/.local/"
+    # Unpack beside the install first, so an archive with a different layout is
+    # rejected before anything under ~/.local is touched.
+    mkdir -p "$temp/extract"
+    tar -xzf "$temp/$asset" -C "$temp/extract"
+    if [ ! -f "$temp/extract/zode$suffix.app/bin/zode" ]; then
+        echo "The archive does not contain zode$suffix.app/bin/zode. It holds:"
+        ls "$temp/extract"
+        exit 1
+    fi
+
+    mkdir -p "$HOME/.local"
+    rm -rf "$HOME/.local/zode$suffix.app"
+    mv "$temp/extract/zode$suffix.app" "$HOME/.local/zode$suffix.app"
 
     # Setup ~/.local directories
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
     # Link the binary
-    if [ -f "$HOME/.local/zed$suffix.app/bin/zed" ]; then
-        ln -sf "$HOME/.local/zed$suffix.app/bin/zed" "$HOME/.local/bin/zed"
-    else
-        # support for versions before 0.139.x.
-        ln -sf "$HOME/.local/zed$suffix.app/bin/cli" "$HOME/.local/bin/zed"
-    fi
+    ln -sf "$HOME/.local/zode$suffix.app/bin/zode" "$HOME/.local/bin/zode"
 
     # Copy .desktop file
     desktop_file_path="$HOME/.local/share/applications/${appid}.desktop"
-    src_dir="$HOME/.local/zed$suffix.app/share/applications"
-    if [ -f "$src_dir/${appid}.desktop" ]; then
-        cp "$src_dir/${appid}.desktop" "${desktop_file_path}"
-    else
-        # Fallback for older tarballs
-        cp "$src_dir/zed$suffix.desktop" "${desktop_file_path}"
+    cp "$HOME/.local/zode$suffix.app/share/applications/${appid}.desktop" "${desktop_file_path}"
+    sed -i "s|Icon=zode|Icon=$HOME/.local/zode$suffix.app/share/icons/hicolor/512x512/apps/zode.png|g" "${desktop_file_path}"
+    sed -i "s|Exec=zode|Exec=$HOME/.local/zode$suffix.app/bin/zode|g" "${desktop_file_path}"
+
+    # Only a Zode 0.1.5 or older bundle carries this id inside a zed.app
+    # directory (Zed ships dev.zed.Zed*), so Zed's own install stays unmentioned.
+    if [ -f "$HOME/.local/zed$suffix.app/share/applications/${appid}.desktop" ]; then
+        echo "An older Zode install remains at ~/.local/zed$suffix.app. To remove it, run:"
+        echo "   rm -rf ~/.local/zed$suffix.app"
+        echo "and, if ~/.local/bin/zed points into it, 'rm ~/.local/bin/zed'."
     fi
-    sed -i "s|Icon=zed|Icon=$HOME/.local/zed$suffix.app/share/icons/hicolor/512x512/apps/zed.png|g" "${desktop_file_path}"
-    sed -i "s|Exec=zed|Exec=$HOME/.local/zed$suffix.app/bin/zed|g" "${desktop_file_path}"
 }
 
 macos() {
-    echo "Downloading Zed version: $ZED_VERSION"
-    curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&os=macos&arch=$arch&source=install.sh" > "$temp/Zed-$arch.dmg"
-    hdiutil attach -quiet "$temp/Zed-$arch.dmg" -mountpoint "$temp/mount"
+    asset="Zode-$arch.dmg"
+    if [ -n "$bundle" ]; then
+        cp "$bundle" "$temp/$asset"
+    else
+        url="$(download_url "$asset")"
+        echo "Downloading Zode from: $url"
+        curl "$url" > "$temp/$asset"
+    fi
+    hdiutil attach -quiet "$temp/$asset" -mountpoint "$temp/mount"
     app="$(cd "$temp/mount/"; echo *.app)"
+    case "$app" in
+        Zode*.app) ;;
+        *)
+            echo "The disk image holds '$app', not a Zode app"
+            hdiutil detach -quiet "$temp/mount"
+            exit 1
+            ;;
+    esac
     echo "Installing $app"
     if [ -d "/Applications/$app" ]; then
         echo "Removing existing $app"
@@ -155,7 +204,7 @@ macos() {
 
     mkdir -p "$HOME/.local/bin"
     # Link the binary
-    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/zed"
+    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/zode"
 }
 
 main "$@"

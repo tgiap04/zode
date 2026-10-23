@@ -126,12 +126,12 @@ fi
 # Move everything that should end up in the final package
 # into a temp directory.
 temp_dir=$(mktemp -d)
-zed_dir="${temp_dir}/zed$suffix.app"
+zed_dir="${temp_dir}/zode$suffix.app"
 
 # Binary
 mkdir -p "${zed_dir}/bin" "${zed_dir}/libexec"
-cp "${target_dir}/${target_triple}/release/zode" "${zed_dir}/libexec/zed-editor"
-cp "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zed"
+cp "${target_dir}/${target_triple}/release/zode" "${zed_dir}/libexec/zode-editor"
+cp "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zode"
 # Beside the app binary: the project server is looked up next to the running executable.
 cp "${target_dir}/${target_triple}/release/remote_server" "${zed_dir}/libexec/remote_server"
 
@@ -153,14 +153,14 @@ cp $(find_libs) "${zed_dir}/lib"
 
 # Icons
 mkdir -p "${zed_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/zed.png"
+cp "crates/zed/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/zode.png"
 mkdir -p "${zed_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/zed.png"
+cp "crates/zed/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/zode.png"
 
 # .desktop
 export DO_STARTUP_NOTIFY="true"
-export APP_CLI="zed"
-export APP_ICON="zed"
+export APP_CLI="zode"
+export APP_ICON="zode"
 export APP_ARGS="%U"
 if [[ "$channel" == "preview" ]]; then
   export APP_NAME="Zode Preview"
@@ -190,4 +190,33 @@ archive="zode-linux-${arch}.tar.gz"
 rm -rf "${archive}"
 remove_match="zo?de(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
 ls "${target_dir}/release" | grep -E ${remove_match} | xargs -d "\n" -I {} rm -f "${target_dir}/release/{}" || true
-tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "zed$suffix.app"
+tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "zode$suffix.app"
+
+# The updater and install.sh find the bundle by these names, so a drift here
+# has to fail the release rather than ship an archive nothing can install.
+# No `grep -q` here: it exits on the first match, tar then dies of SIGPIPE, and
+# pipefail turns that into a failed check on a healthy archive.
+if ! tar -tzf "${target_dir}/release/$archive" | grep -x "zode$suffix.app/libexec/zode-editor" >/dev/null; then
+    echo "bundle-linux: ${archive} has no zode$suffix.app/libexec/zode-editor; it holds:" >&2
+    tar -tzf "${target_dir}/release/$archive" | head -n 20 >&2
+    exit 1
+fi
+
+reported_editor="$("${zed_dir}/bin/zode" --version)"
+case "$reported_editor" in
+    *"/zode$suffix.app/libexec/zode-editor") ;;
+    *)
+        echo "bundle-linux: bin/zode did not resolve to zode$suffix.app/libexec/zode-editor; --version printed:" >&2
+        echo "$reported_editor" >&2
+        exit 1
+        ;;
+esac
+
+desktop_file="${zed_dir}/share/applications/$APP_ID.desktop"
+for expected in "Exec=zode %U" "TryExec=zode" "Icon=zode"; do
+    if ! grep -qxF "$expected" "$desktop_file"; then
+        echo "bundle-linux: $desktop_file lacks the line '$expected'; it holds:" >&2
+        cat "$desktop_file" >&2
+        exit 1
+    fi
+done

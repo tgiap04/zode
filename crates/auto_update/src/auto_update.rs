@@ -783,7 +783,7 @@ impl AutoUpdater {
         let filename = match OS {
             "macos" => anyhow::Ok("Zed.dmg"),
             "linux" => Ok("zed.tar.gz"),
-            "windows" => Ok("Zed.exe"),
+            "windows" => Ok("Zode.exe"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -942,7 +942,27 @@ async fn install_release_linux(
     let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
     let running_app_path = cx.update(|cx| cx.app_path())?;
 
-    let extracted = temp_dir.path().join("zed");
+    install_linux_tarball(
+        temp_dir.path(),
+        downloaded_tar_gz,
+        channel,
+        &running_app_path,
+        &home_dir,
+    )
+    .await
+    .map(Some)
+}
+
+/// Extracts the release tarball under `work_dir` and rsyncs its app folder over the running
+/// install's prefix, or into `<home_dir>/.local` when the running binary is not inside one.
+async fn install_linux_tarball(
+    work_dir: &Path,
+    downloaded_tar_gz: &Path,
+    channel: &str,
+    running_app_path: &Path,
+    home_dir: &Path,
+) -> Result<PathBuf> {
+    let extracted = work_dir.join("zode");
     fs::create_dir_all(&extracted)
         .await
         .context("failed to create directory into which to extract update")?;
@@ -970,7 +990,7 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("zed{}.app", suffix);
+    let app_folder_name = format!("zode{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
     anyhow::ensure!(
@@ -983,7 +1003,7 @@ async fn install_release_linux(
     );
     let mut to = home_dir.join(".local");
 
-    let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
+    let expected_suffix = format!("{}/libexec/zode-editor", app_folder_name);
 
     if let Some(prefix) = running_app_path
         .to_str()
@@ -1001,13 +1021,13 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
+        "failed to copy Zode update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)
     );
 
-    Ok(Some(to.join(expected_suffix)))
+    Ok(to.join(expected_suffix))
 }
 
 /// The one `.app` bundle directly inside `dir`, when there is exactly one.
@@ -1145,7 +1165,7 @@ async fn install_release_macos(
 async fn cleanup_windows() -> Result<()> {
     let parent = std::env::current_exe()?
         .parent()
-        .context("No parent dir for Zed.exe")?
+        .context("No parent dir for Zode.exe")?
         .to_owned();
 
     // keep in sync with crates/auto_update_helper/src/updater.rs
@@ -1173,7 +1193,7 @@ async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<P
     // deleting the old one, and launching the new binary.
     let helper_path = std::env::current_exe()?
         .parent()
-        .context("No parent dir for Zed.exe")?
+        .context("No parent dir for Zode.exe")?
         .join("tools")
         .join("auto_update_helper.exe");
     Ok(Some(helper_path))
@@ -1623,5 +1643,144 @@ mod tests {
             modified + Duration::from_secs(1) >= install_started,
             "the running bundle kept the update's build-time mtime {modified:?}"
         );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn write_file(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Packs `<root>/<app_folder>` into `<root>/update.tar.gz`, the layout `bundle-linux` ships.
+    #[cfg(not(target_os = "windows"))]
+    async fn pack_linux_update(
+        root: &Path,
+        app_folder: &str,
+        editor_binary: &str,
+        contents: &str,
+    ) -> PathBuf {
+        write_file(
+            &root
+                .join("payload")
+                .join(app_folder)
+                .join("libexec")
+                .join(editor_binary),
+            contents,
+        );
+        let archive = root.join("update.tar.gz");
+        let output = new_command("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(root.join("payload"))
+            .arg(app_folder)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        archive
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    async fn a_linux_update_installs_zode_app_under_local_by_default(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let zed_editor = home.join(".local/zed.app/libexec/zed-editor");
+        let zed_cli = home.join(".local/bin/zed");
+        write_file(&zed_editor, "real zed editor");
+        write_file(&zed_cli, "real zed cli");
+        let archive =
+            pack_linux_update(root.path(), "zode.app", "zode-editor", "new zode editor").await;
+
+        let installed = install_linux_tarball(
+            &root.path().join("work"),
+            &archive,
+            "stable",
+            &root.path().join("elsewhere/zode-editor"),
+            &home,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(installed, home.join(".local/zode.app/libexec/zode-editor"));
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            "new zode editor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&zed_editor).unwrap(),
+            "real zed editor"
+        );
+        assert_eq!(std::fs::read_to_string(&zed_cli).unwrap(), "real zed cli");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    async fn a_linux_update_replaces_the_running_install_in_its_own_prefix(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let prefix = root.path().join("opt");
+        let running = prefix.join("zode-nightly.app/libexec/zode-editor");
+        write_file(&running, "old");
+        let stray = prefix.join("zode-nightly.app/stray");
+        write_file(&stray, "left over");
+        let archive = pack_linux_update(
+            root.path(),
+            "zode-nightly.app",
+            "zode-editor",
+            "new nightly editor",
+        )
+        .await;
+
+        let installed = install_linux_tarball(
+            &root.path().join("work"),
+            &archive,
+            "nightly",
+            &running,
+            &home,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(installed, running);
+        assert_eq!(
+            std::fs::read_to_string(&running).unwrap(),
+            "new nightly editor"
+        );
+        assert!(
+            !stray.exists(),
+            "rsync --delete should drop files the update lacks"
+        );
+        assert!(!home.join(".local").exists());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    async fn a_linux_update_laid_out_as_zed_app_is_refused(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let archive = pack_linux_update(root.path(), "zed.app", "zed-editor", "old layout").await;
+
+        let error = install_linux_tarball(
+            &root.path().join("work"),
+            &archive,
+            "stable",
+            &root.path().join("elsewhere/zode-editor"),
+            &home,
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("zode.app"), "{message}");
+        assert!(message.contains("zed.app"), "{message}");
+        assert!(!home.join(".local").exists());
     }
 }

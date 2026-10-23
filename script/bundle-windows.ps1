@@ -326,8 +326,8 @@ function DownloadConpty {
 function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zode.exe" -Force
+    Move-Item -Path "$innoDir\zode.sh" -Destination "$innoDir\bin\zode" -Force
     # In `bin`, which the installer already copies whole, so no installer script
     # change is needed; the project server is looked up at `bin\remote_server.exe`.
     Move-Item -Path "$innoDir\remote_server.exe" -Destination "$innoDir\bin\remote_server.exe" -Force
@@ -343,6 +343,21 @@ function CollectFiles {
         Move-Item -Path ".\conpty\build\native\runtimes\x64\OpenConsole.exe" -Destination "$innoDir\x64\OpenConsole.exe" -Force
         Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force
         Move-Item -Path ".\conpty\runtimes\win-x64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
+    }
+}
+
+# The update helper's job list moves exactly these names out of `install\`; a file it
+# expects but the installer lacks makes every in-app update roll back, and a stray
+# `bin\zed.exe` would put a second, stale CLI on PATH.
+function CheckBundleLayout {
+    $required = @("bin\zode.exe", "bin\zode", "bin\remote_server.exe", "tools\auto_update_helper.exe")
+    foreach ($relative in $required) {
+        if (-not (Test-Path -LiteralPath (Join-Path $innoDir $relative) -PathType Leaf)) {
+            throw "Bundle layout check failed: $relative is missing from $innoDir"
+        }
+    }
+    if (Test-Path -LiteralPath (Join-Path $innoDir "bin\zed.exe")) {
+        throw "Bundle layout check failed: bin\zed.exe must not be shipped; the CLI is bin\zode.exe"
     }
 }
 
@@ -491,6 +506,7 @@ ZipZedAndItsFriendsDebug
 DownloadAMDGpuServices
 DownloadConpty
 CollectFiles
+CheckBundleLayout
 BuildInstaller
 
 if($env:CI) {

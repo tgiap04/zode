@@ -6484,7 +6484,7 @@ impl Workspace {
 
             let Some(task) = task else {
                 anyhow::bail!(
-                    "failed to construct view from leader (maybe from a different version of zed?)"
+                    "failed to construct view from leader (maybe from a different version of Zode?)"
                 );
             };
 
@@ -10047,7 +10047,7 @@ pub async fn get_any_active_multi_workspace(
         })
         .await?;
     }
-    activate_any_workspace_window(&mut cx).context("could not open zed")
+    activate_any_workspace_window(&mut cx).context("could not open Zode")
 }
 
 fn activate_any_workspace_window(cx: &mut AsyncApp) -> Option<WindowHandle<MultiWorkspace>> {
