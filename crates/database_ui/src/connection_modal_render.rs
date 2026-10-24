@@ -184,6 +184,13 @@ impl ConnectionModal {
             )
             .child(
                 v_flex()
+                    .when(index == 0, |column| {
+                        column.debug_selector(|| "database-engine-text".into())
+                    })
+                    // A truncating label asks for no width of its own, so
+                    // without a share of the row the column measures as just
+                    // its ellipsis.
+                    .flex_1()
                     .min_w_0()
                     .py_1()
                     .child(Label::new(engine.name.clone()).color(text).truncate())
