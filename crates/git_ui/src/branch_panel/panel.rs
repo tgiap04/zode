@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,7 +11,6 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::branch_panel::checkout_state::CheckoutViewState;
-use crate::branch_panel::data::{AgentTab, ClosedAgentTab};
 use crate::branch_panel::settings::BranchPanelSettings;
 use crate::branch_panel::state::BRANCH_PANEL_KEY;
 use crate::branch_panel::tree::{AgentEntry, RepoData, TreeRow};
@@ -75,17 +73,13 @@ pub struct BranchPanel {
     /// closed tab is never kept alive by being listened to, and the listener
     /// retires itself once the view is gone.
     pub(crate) _agent_tab_names: Vec<Subscription>,
-    /// The agent tabs open in this panel's workspace, with the session each is
-    /// writing.
+    /// The ids of the agent tabs open in this panel's workspace.
     ///
     /// Kept apart from `rows` on purpose: `rows` is rebuilt only when the panel
     /// is drawn, and `ItemRemoved` carries nothing but an id, so this is the
     /// only way to know that a removed item was an agent tab. Holds one entry
     /// per open tab and loses it on close.
-    pub(crate) agent_tabs: HashMap<EntityId, AgentTab>,
-    /// Closed tabs whose session the next settled sweep is to be checked for.
-    /// Capped, see `MAX_CLOSED_TABS_AWAITED`.
-    pub(crate) closed_tabs_awaiting_sweep: VecDeque<ClosedAgentTab>,
+    pub(crate) agent_tabs: HashSet<EntityId>,
     /// The variant of each row as `list_state` last saw it. A row's height is
     /// decided entirely by its variant, so this is enough to work out which
     /// slice of the list actually changed and splice only that -- resetting the

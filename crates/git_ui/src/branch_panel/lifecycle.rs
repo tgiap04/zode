@@ -74,7 +74,6 @@ impl BranchPanel {
                 session_reload: None,
                 _agent_tab_names: Vec::new(),
                 agent_tabs: Self::seed_agent_tabs(workspace, cx),
-                closed_tabs_awaiting_sweep: Default::default(),
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,
@@ -660,7 +659,6 @@ impl BranchPanel {
         self._session_subscription = Some(cx.observe(&store, |panel, _, cx| {
             panel.mark_stale(cx);
             panel.settle_session_reload(cx);
-            panel.log_closed_sessions_after_sweep(cx);
         }));
         // A finished session is listed under the name it was given, so naming
         // one has to redraw the list as much as a sweep does.
