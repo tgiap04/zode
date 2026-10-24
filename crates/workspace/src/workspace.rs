@@ -685,7 +685,7 @@ fn prompt_and_open_paths(
     create_new_window: bool,
     cx: &mut App,
 ) {
-    if let Some(workspace_window) = local_workspace_windows(cx).into_iter().next() {
+    if let Some(workspace_window) = target_local_workspace_window(cx) {
         workspace_window
             .update(cx, |multi_workspace, window, cx| {
                 let workspace = multi_workspace.workspace().clone();
@@ -10071,6 +10071,23 @@ fn activate_any_workspace_window(cx: &mut AsyncApp) -> Option<WindowHandle<Multi
     })
 }
 
+/// The local workspace window an app-level request should land in: the one the
+/// user is in, else the one nearest the front, else any. Plain creation order
+/// would send a request to whichever window happened to be opened first.
+fn target_local_workspace_window(cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
+    let windows = local_workspace_windows(cx);
+    cx.active_window()
+        .and_then(|window| window.downcast::<MultiWorkspace>())
+        .filter(|window| windows.contains(window))
+        .or_else(|| {
+            cx.window_stack()?
+                .into_iter()
+                .filter_map(|window| window.downcast::<MultiWorkspace>())
+                .find(|window| windows.contains(window))
+        })
+        .or_else(|| windows.into_iter().next())
+}
+
 pub fn local_workspace_windows(cx: &App) -> Vec<WindowHandle<MultiWorkspace>> {
     workspace_windows_for_location(&SerializedWorkspaceLocation::Local, cx)
 }
@@ -10448,16 +10465,7 @@ pub fn open_paths(
 
             if all_metadatas.into_iter().all(|file| !file.is_dir) {
                 cx.update(|cx| {
-                    let windows = workspace_windows_for_location(
-                        &SerializedWorkspaceLocation::Local,
-                        cx,
-                    );
-                    let window = cx
-                        .active_window()
-                        .and_then(|window| window.downcast::<MultiWorkspace>())
-                        .filter(|window| windows.contains(window))
-                        .or_else(|| windows.into_iter().next());
-                    if let Some(window) = window {
+                    if let Some(window) = target_local_workspace_window(cx) {
                         if let Ok(multi_workspace) = window.read(cx) {
                             let active_workspace = multi_workspace.workspace().clone();
                             existing = Some((window, active_workspace));
@@ -10483,16 +10491,7 @@ pub fn open_paths(
 
             if use_existing_window {
                 let target_window = cx.update(|cx| {
-                    let windows = workspace_windows_for_location(
-                        &SerializedWorkspaceLocation::Local,
-                        cx,
-                    );
-                    let window = cx
-                        .active_window()
-                        .and_then(|window| window.downcast::<MultiWorkspace>())
-                        .filter(|window| windows.contains(window))
-                        .or_else(|| windows.into_iter().next());
-                    window.filter(|window| {
+                    target_local_workspace_window(cx).filter(|window| {
                         window
                             .read(cx)
                             .is_ok_and(|mw| mw.multi_workspace_enabled(cx))
