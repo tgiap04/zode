@@ -2474,7 +2474,9 @@ mod running_subagents {
     }
 
     #[gpui::test]
-    async fn a_running_background_subagent_gets_one_row_with_a_spinner(cx: &mut TestAppContext) {
+    async fn a_running_background_subagent_gets_one_row_with_a_typing_mark(
+        cx: &mut TestAppContext,
+    ) {
         let (_panel, view, cx) = panel_showing_an_agent(cx).await;
 
         view.update(cx, |view, cx| {
@@ -2485,8 +2487,9 @@ mod running_subagents {
 
         assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
         assert!(
-            cx.debug_bounds("subagent-spinner:agent-a").is_some(),
-            "a running subagent spins"
+            cx.debug_bounds("agent-typing-mark:subagent-typing-agent-a")
+                .is_some(),
+            "a running subagent types"
         );
     }
 
@@ -2600,7 +2603,9 @@ mod running_subagents {
         });
         assert!(
             cx.debug_bounds("subagent-row:agent-a").is_none()
-                && cx.debug_bounds("subagent-spinner:agent-a").is_none()
+                && cx
+                    .debug_bounds("agent-typing-mark:subagent-typing-agent-a")
+                    .is_none()
         );
     }
 
@@ -3034,5 +3039,122 @@ mod reload_sessions {
         cx.run_until_parked();
 
         assert_eq!(indexed_ids(&panel, cx), vec!["from-a-terminal"]);
+    }
+}
+
+/// What GPUI keeps for a row between frames -- a press in flight, an animation's
+/// clock -- is filed under the row's id and the ids above it. Rows keyed by
+/// position hand that state to whichever session slides into the place.
+mod agent_row_identity {
+    use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext};
+    use workspace::SaveIntent;
+
+    use super::running_subagents::{draw, panel_showing_an_agent};
+
+    fn row_selector(view: &Entity<agent_ui::AgentView>) -> &'static str {
+        // `debug_bounds` wants `'static`; a leaked string per call is fine in a test.
+        Box::leak(
+            format!(
+                "agent-row:{}",
+                gpui::ElementId::from(("agent", view.entity_id()))
+            )
+            .into_boxed_str(),
+        )
+    }
+
+    fn top_of(view: &Entity<agent_ui::AgentView>, cx: &mut VisualTestContext) -> f32 {
+        let bounds = cx
+            .debug_bounds(row_selector(view))
+            .expect("every open tab has a row");
+        f32::from(bounds.origin.y)
+    }
+
+    #[gpui::test]
+    async fn a_press_does_not_finish_on_the_row_that_slid_under_it(cx: &mut TestAppContext) {
+        let (panel, _first, cx) = panel_showing_an_agent(cx).await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        for _ in 0..2 {
+            workspace.update_in(cx, |workspace, window, cx| {
+                agent_ui::AgentView::open_tracked(
+                    workspace,
+                    project::CLAUDE_CODE_AGENT_ID,
+                    Default::default(),
+                    window,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+        }
+        let refresh = |cx: &mut VisualTestContext| {
+            panel.update(cx, |panel, cx| panel.mark_stale(cx));
+            panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+            draw(cx);
+        };
+        refresh(cx);
+
+        let views = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .collect::<Vec<_>>()
+        });
+        let mut by_height = views
+            .into_iter()
+            .map(|view| (top_of(&view, cx), view))
+            .collect::<Vec<_>>();
+        by_height.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let [above, pressed, slides_in]: [Entity<agent_ui::AgentView>; 3] = by_height
+            .into_iter()
+            .map(|(_, view)| view)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("three tabs were opened, so three rows are drawn");
+
+        // In front already, so that the press finishing on the wrong row is the
+        // only thing that can change which tab is.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&pressed, true, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let target = cx
+            .debug_bounds(row_selector(&pressed))
+            .expect("the row to press is drawn")
+            .center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+
+        above.update(cx, |view, cx| view.simulate_cli_alive(false, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.close_item_by_id(above.entity_id(), SaveIntent::Skip, window, cx)
+                    .detach_and_log_err(cx);
+            });
+        });
+        cx.run_until_parked();
+        refresh(cx);
+
+        let slid = cx
+            .debug_bounds(row_selector(&slides_in))
+            .expect("the row below is still drawn");
+        assert!(
+            slid.contains(&target),
+            "the row below must have slid up under the pointer, or this proves nothing"
+        );
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let active = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_item_as::<agent_ui::AgentView>(cx)
+                .map(|view| view.entity_id())
+        });
+        assert_eq!(
+            active,
+            Some(pressed.entity_id()),
+            "a press that began on one session finished on another"
+        );
     }
 }
