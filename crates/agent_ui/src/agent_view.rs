@@ -1,7 +1,7 @@
 use crate::RenameAgent;
 use crate::agent_attention::AgentAttention;
-use crate::agent_icon;
 use crate::agent_tabs;
+use crate::{agent_icon, agent_working_color};
 use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
 use gpui::{
@@ -24,7 +24,7 @@ use agent_sessions::{SessionSummary, SubagentSummary};
 use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
 use terminal::Terminal;
 use terminal_view::TerminalView;
-use ui::{CommonAnimationExt as _, Tooltip, prelude::*};
+use ui::{AgentTypingMark, CommonAnimationExt as _, Tooltip, prelude::*};
 use workspace::{Pane, Workspace};
 use zed_actions::agent::{AgentViewMode, PermissionPrompts};
 
@@ -2574,7 +2574,7 @@ impl workspace::item::Item for AgentView {
     /// two agent glyphs on the tab. `TerminalView`, which this is modelled on,
     /// gets away with its own icon because it implements no `tab_icon` at all.
     ///
-    /// The spinner is the one icon drawn here, and only because `tab_icon` hands
+    /// The typing mark is the one icon drawn here, and only because `tab_icon` hands
     /// its slot over for exactly as long as it is: an `Icon` cannot be animated,
     /// so the mark has to be built where elements are. It is not a second glyph
     /// beside the first — it is the first one's place, borrowed. Anything else
@@ -2583,9 +2583,16 @@ impl workspace::item::Item for AgentView {
         &self,
         params: workspace::item::TabContentParams,
         _window: &Window,
-        _cx: &App,
+        cx: &App,
     ) -> AnyElement {
         let handle = self.self_handle.clone();
+        // What `ui::Tab` paints behind this content. The mark floors its dots
+        // against it, and the panel's background is not what a tab sits on.
+        let tab_background = if params.selected {
+            cx.theme().colors().tab_active_background
+        } else {
+            cx.theme().colors().tab_inactive_background
+        };
         h_flex()
             .gap_1()
             .when(!params.selected, |this| {
@@ -2603,20 +2610,20 @@ impl workspace::item::Item for AgentView {
             // the glyph that says which agent and the mark that says it is
             // working occupy one slot, so the label never shifts.
             //
-            // The same spinner, colour and speed the worktree panel gives the
-            // same fact. A second vocabulary for one meaning is how a mark
+            // The same typing mark, in the same colour, the worktree panel gives
+            // the same fact. A second vocabulary for one meaning is how a mark
             // stops carrying information.
             .children(self.responding.then(|| {
-                Icon::new(IconName::LoadCircle)
-                    .size(IconSize::Small)
-                    .color(Color::Accent)
+                AgentTypingMark::new(
                     // Keyed by the tab: every agent tab shares this call site,
                     // and one id for all of them is one animation state for all
                     // of them.
-                    .with_keyed_rotate_animation(
-                        ("agent-tab-spinner", self.self_handle.entity_id()),
-                        2,
-                    )
+                    ("agent-tab-typing", self.self_handle.entity_id()),
+                    agent_icon(self.agent.as_ref()),
+                    agent_working_color(self.agent.as_ref()),
+                )
+                .size(IconSize::Small)
+                .background(tab_background)
             }))
             .children(self.runs_without_prompts().then(|| {
                 // The same glyph and colour the checkout card uses for the same
@@ -2678,7 +2685,7 @@ impl workspace::item::Item for AgentView {
     }
 
     /// The vendor's glyph — except while the agent is answering, when
-    /// `tab_content` draws a spinner in this slot's place.
+    /// `tab_content` draws the typing mark in this slot's place.
     ///
     /// Given up rather than drawn alongside, because the two say the same thing
     /// about the same tab and a strip carrying both reads as two agents. The
@@ -3196,10 +3203,82 @@ mod tests {
             let view = view.read(cx);
             assert!(
                 view.tab_icon(window, cx).is_none(),
-                "the spinner takes this slot, and two agent marks on one tab reads as two agents"
+                "the typing mark takes this slot, and two agent marks on one tab reads as two agents"
             );
             assert!(view.is_busy(cx));
         });
+    }
+
+    /// A responding tab draws its agent's typing mark in the slot the glyph
+    /// gave up, one animation per tab, the same square the glyph occupies.
+    #[gpui::test]
+    async fn an_answering_tab_types_in_its_glyph_slot(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let agent = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let views = workspace.update_in(cx, |workspace, window, cx| {
+            let handle = workspace.weak_handle();
+            [0, 1].map(|_| {
+                let view = cx.new(|cx| {
+                    AgentView::test_new(
+                        agent.clone(),
+                        AgentViewMode::Terminal,
+                        project.clone(),
+                        handle.clone(),
+                        SessionOrigin::default(),
+                        cx,
+                    )
+                });
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+                view
+            })
+        });
+
+        // `debug_bounds` wants `'static`; a leaked string per call is fine in a test.
+        let selector = |view: &Entity<AgentView>| -> &'static str {
+            Box::leak(
+                format!(
+                    "agent-typing-mark:{}",
+                    ElementId::from(("agent-tab-typing", view.entity_id()))
+                )
+                .into_boxed_str(),
+            )
+        };
+        let redraw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+
+        for view in &views {
+            view.update(cx, |view, cx| {
+                view.responding = true;
+                cx.notify();
+            });
+        }
+        redraw(cx);
+        assert_ne!(selector(&views[0]), selector(&views[1]));
+        let side = cx.update(|window, _| IconSize::Small.rems().to_pixels(window.rem_size()));
+        for view in &views {
+            let bounds = cx
+                .debug_bounds(selector(view))
+                .expect("a responding tab draws its typing mark");
+            // Layout snaps to device pixels, so the box can land a fraction off.
+            let snap = gpui::px(0.5);
+            assert!(
+                (bounds.size.width - side).abs() <= snap
+                    && (bounds.size.height - side).abs() <= snap,
+                "{:?} is not the glyph's {side:?} square",
+                bounds.size
+            );
+        }
+
+        views[0].update(cx, |view, cx| {
+            view.responding = false;
+            cx.notify();
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds(selector(&views[0])).is_none());
+        assert!(cx.debug_bounds(selector(&views[1])).is_some());
     }
 
     /// An agent pausing to read a file is not news the workspace has to write

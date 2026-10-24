@@ -20,7 +20,7 @@ pub mod subagents;
 mod turn_tracker;
 
 pub use actions::*;
-pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks};
+pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks, agent_working_color};
 pub use agent_view::{
     AgentView, AgentViewEvent, RESPONDING_WINDOW, RESPONDING_WRITES, SessionOrigin, responding_at,
 };
