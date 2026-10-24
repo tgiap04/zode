@@ -44,7 +44,7 @@ pub fn responding_at(writes_in_window: usize) -> bool {
     writes_in_window >= RESPONDING_WRITES
 }
 
-/// Whether a session should read as answering, before the debounce settles it.
+/// Whether a session should read as answering.
 ///
 /// A subagent counts. Its output reaches the same pty, but not at the same rate:
 /// a CLI waiting on one repaints a spinner once or twice a second, which is
@@ -91,26 +91,11 @@ pub const RESPONDING_WRITES: usize = 8;
 /// places a quarter of a second apart.
 const ACTIVITY_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// How long a change has to hold before the mark follows it.
-const RESPONDING_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// The same delay, counted in ticks — which is the only clock the loop has.
-///
-/// Derived rather than written out, so the two cannot drift apart when one of
-/// them is tuned. Counted rather than timed because reaching for a real clock
-/// would mean either `Instant::now`, which a test's fake timers do not move, or
-/// a dependency on the scheduler crate for one type. A tick that arrives late
-/// makes the wait longer than two seconds, which costs this nothing: the point
-/// is to outlast a flicker, not to measure one.
-const RESPONDING_DEBOUNCE_TICKS: u32 =
-    (RESPONDING_DEBOUNCE.as_millis() / ACTIVITY_TICK.as_millis()) as u32;
-
 /// How long between subagent scans.
 ///
 /// Slower than the mark's own tick because it costs file reads, and because
 /// what it watches moves at human speed: a subagent starting or finishing is
-/// not a four-times-a-second event. One second still lands well inside the
-/// two-second debounce above, so nothing it reports is late to the mark.
+/// not a four-times-a-second event.
 const SUBAGENT_SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The window the pty is counted over to decide it has gone quiet enough, with
@@ -128,42 +113,6 @@ const APPROVAL_READ_INTERVAL: std::time::Duration = std::time::Duration::from_se
 
 const APPROVAL_READ_TICKS: u32 =
     (APPROVAL_READ_INTERVAL.as_millis() / ACTIVITY_TICK.as_millis()) as u32;
-
-/// Whether the mark should change, given what the terminal says on this tick.
-///
-/// Both edges by one rule: a new answer has to survive
-/// [`RESPONDING_DEBOUNCE_TICKS`] ticks in a row before the mark follows it. An
-/// agent crosses the write-rate threshold repeatedly inside a single reply — it
-/// pauses to read a file, to run a command, to wait on the model — and a mark
-/// that followed every crossing would strobe for the length of the answer.
-///
-/// The delay on the *appearing* edge is deliberate, not an oversight of the
-/// other one. A mark that appears instantly and leaves slowly still strobes;
-/// it just strobes with a longer off-beat.
-///
-/// `None` means leave the mark alone. A free function because it is the whole
-/// rule and the loop that calls it cannot be run without a pty.
-fn settle(pending: &mut Option<(bool, u32)>, raw: bool, shown: bool) -> Option<bool> {
-    if raw == shown {
-        // Whatever was building has been contradicted before it landed.
-        *pending = None;
-        return None;
-    }
-    let ticks = match pending {
-        Some((wanted, ticks)) if *wanted == raw => {
-            *ticks += 1;
-            *ticks
-        }
-        _ => {
-            *pending = Some((raw, 1));
-            1
-        }
-    };
-    (ticks >= RESPONDING_DEBOUNCE_TICKS).then(|| {
-        *pending = None;
-        raw
-    })
-}
 
 pub struct AgentView {
     /// Which session this tab belongs to, and what that session was called when
@@ -906,8 +855,6 @@ impl AgentView {
     fn track_responding(&mut self, cx: &mut Context<Self>) {
         let follows_transcript = self.follows_transcript();
         self._activity_tick = Some(cx.spawn(async move |this, cx| {
-            let mut pending: Option<(bool, u32)> = None;
-
             loop {
                 cx.background_executor().timer(ACTIVITY_TICK).await;
 
@@ -915,25 +862,13 @@ impl AgentView {
                 // about to be dropped with it.
                 let Ok(still_running) = this.update(cx, |this, cx| {
                     let working = this.is_working(cx);
-                    let raw = answering_now(
+                    let answering = answering_now(
                         working,
                         this.is_responding(cx),
                         this.subagents.any_running(),
                     );
-                    // The debounce holds a mark steady across the pauses inside
-                    // one answer. It must not hold one over a process that has
-                    // ended: there is nothing left to flicker, and the wait
-                    // would be two seconds of a spinner above a dead prompt.
-                    let settled = if working {
-                        settle(&mut pending, raw, this.responding)
-                    } else {
-                        pending = None;
-                        Some(false)
-                    };
-                    if let Some(settled) = settled
-                        && settled != this.responding
-                    {
-                        this.responding = settled;
+                    if answering != this.responding {
+                        this.responding = answering;
                         cx.emit(AgentViewEvent::Activity);
                     }
                     if !working {
@@ -1438,10 +1373,10 @@ impl AgentView {
 
     /// Whether this tab's mark says it is answering.
     ///
-    /// The debounced answer, not [`Self::is_responding`]'s raw one, and the only
-    /// one anything outside this file should read: a panel drawing the raw
-    /// value beside a tab drawing the settled one would disagree several times
-    /// inside every reply.
+    /// The answer as of the last tick, not [`Self::is_responding`]'s, and the
+    /// only one anything outside this file should read: it also counts running
+    /// subagents, and it is the value the tab emitted `Activity` for, so a panel
+    /// reading it never disagrees with the tab.
     pub fn is_answering(&self) -> bool {
         self.responding
     }
@@ -2969,7 +2904,7 @@ mod tests {
     use project::agent_bypass::BypassCheck;
     use std::path::PathBuf;
 
-    /// What counts as answering, before the debounce settles it.
+    /// What counts as answering.
     ///
     /// The rule decides two things at once: whether a tab's mark spins, and —
     /// through `is_answering` — whether `keep_awake` holds the display lit. Both
@@ -3635,91 +3570,6 @@ mod tests {
     /// 4ms timer, so even a spinner animated while the model thinks clears the
     /// bar. The constant only has to sit between those two rates, and these
     /// name both so that lowering it back toward the idle one fails here.
-    /// The delay, held on its own because the loop that applies it cannot run
-    /// without a pty and a real two seconds. Ticks, not time — see
-    /// [`super::RESPONDING_DEBOUNCE_TICKS`].
-    mod debounce {
-        use super::super::{ACTIVITY_TICK, RESPONDING_DEBOUNCE, RESPONDING_DEBOUNCE_TICKS, settle};
-
-        /// Feeds `raw` in for `ticks` ticks and reports what the mark became.
-        fn run(start: bool, raw: bool, ticks: u32) -> bool {
-            let mut pending = None;
-            let mut shown = start;
-            for _ in 0..ticks {
-                if let Some(settled) = settle(&mut pending, raw, shown) {
-                    shown = settled;
-                }
-            }
-            shown
-        }
-
-        #[test]
-        fn the_delay_is_the_two_seconds_it_claims_to_be() {
-            assert_eq!(
-                RESPONDING_DEBOUNCE_TICKS as u128 * ACTIVITY_TICK.as_millis(),
-                RESPONDING_DEBOUNCE.as_millis(),
-                "the tick count and the duration it stands for have drifted apart"
-            );
-        }
-
-        #[test]
-        fn a_change_one_tick_short_of_the_delay_has_not_landed_yet() {
-            assert!(!run(false, true, RESPONDING_DEBOUNCE_TICKS - 1));
-            assert!(run(false, true, RESPONDING_DEBOUNCE_TICKS));
-        }
-
-        /// Both edges, which is the half a one-sided delay would miss: a mark
-        /// that appears instantly and leaves slowly still strobes.
-        #[test]
-        fn the_delay_applies_to_leaving_as_well_as_arriving() {
-            assert!(run(true, false, RESPONDING_DEBOUNCE_TICKS - 1));
-            assert!(!run(true, false, RESPONDING_DEBOUNCE_TICKS));
-        }
-
-        /// The flicker this exists for. An agent crosses the threshold several
-        /// times inside one reply -- it stops to read a file, to run a command,
-        /// to wait on the model -- and none of those crossings lasts two
-        /// seconds.
-        #[test]
-        fn a_pause_inside_one_answer_never_reaches_the_mark() {
-            let mut pending = None;
-            let mut shown = true;
-            let mut changes = 0;
-            // Seven ticks answering, three quiet, over and over: every gap is
-            // shorter than the delay, so the mark must never move.
-            for tick in 0..200 {
-                let raw = tick % 10 < 7;
-                if let Some(settled) = settle(&mut pending, raw, shown) {
-                    shown = settled;
-                    changes += 1;
-                }
-            }
-            assert_eq!(
-                changes, 0,
-                "the mark moved {changes} times during one unbroken answer"
-            );
-            assert!(shown);
-        }
-
-        /// A change that is contradicted before it lands starts again from
-        /// zero, rather than resuming its count on the next crossing.
-        #[test]
-        fn a_contradicted_change_does_not_carry_its_count_forward() {
-            let mut pending = None;
-            let shown = false;
-
-            for _ in 0..RESPONDING_DEBOUNCE_TICKS - 1 {
-                assert!(settle(&mut pending, true, shown).is_none());
-            }
-            assert!(settle(&mut pending, false, shown).is_none());
-            assert!(
-                settle(&mut pending, true, shown).is_none(),
-                "one tick of quiet reset the count, so one tick of answering \
-                 must not finish it"
-            );
-        }
-    }
-
     mod responding_rate {
         use super::super::{RESPONDING_WRITES, responding_at};
 
