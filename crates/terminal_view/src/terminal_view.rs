@@ -958,6 +958,43 @@ impl TerminalView {
         self.terminal = terminal;
     }
 
+    fn render_scroll_to_bottom_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let focus_handle = self.focus_handle.clone();
+        div()
+            .absolute()
+            .right(px(16.))
+            // High enough to stack above the floating pane launcher, which sits
+            // 16px into the workspace's bottom-right corner, the same corner as
+            // a terminal in the bottom dock.
+            .bottom(px(48.))
+            // Not `occlude`: a wheel over the button should still scroll the terminal.
+            .block_mouse_except_scroll()
+            .rounded_full()
+            .bg(colors.elevated_surface_background)
+            .border_1()
+            .border_color(colors.border)
+            .shadow_md()
+            .debug_selector(|| "TERMINAL_SCROLL_TO_BOTTOM".into())
+            .child(
+                IconButton::new("terminal-scroll-to-bottom", IconName::ArrowDown)
+                    .icon_size(IconSize::Small)
+                    .shape(ui::IconButtonShape::Square)
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action_in(
+                            "Scroll to Bottom",
+                            &ScrollToBottom,
+                            &focus_handle,
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        window.focus(&this.focus_handle, cx);
+                        this.scroll_to_bottom(&ScrollToBottom, window, cx);
+                    })),
+            )
+    }
+
     fn rerun_button(task: &TaskState) -> Option<IconButton> {
         if !task.spawned_task.show_rerun {
             return None;
@@ -1214,6 +1251,12 @@ impl Render for TerminalView {
 
         let focused = self.focus_handle.is_focused(window);
 
+        let content_mode = self.content_mode(window, cx);
+        // Not `scrolled_to_bottom()`: it defaults to false until the first sync, which
+        // would flash the button on every new terminal's first frame.
+        let show_scroll_to_bottom = content_mode.is_scrollable()
+            && self.terminal.read(cx).last_content().display_offset > 0;
+
         div()
             .id("terminal-view")
             .size_full()
@@ -1267,7 +1310,7 @@ impl Render for TerminalView {
                         self.block_below_cursor.clone(),
                         self.mode.clone(),
                     ))
-                    .when(self.content_mode(window, cx).is_scrollable(), |div| {
+                    .when(content_mode.is_scrollable(), |div| {
                         div.custom_scrollbars(
                             Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
                                 .show_along(ScrollAxes::Vertical)
@@ -1281,6 +1324,9 @@ impl Render for TerminalView {
                         )
                     }),
             )
+            .when(show_scroll_to_bottom, |this| {
+                this.child(self.render_scroll_to_bottom_button(cx))
+            })
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
                 deferred(
                     anchored()
@@ -2796,5 +2842,81 @@ mod tests {
                 text
             );
         });
+    }
+
+    /// The button exists only while the terminal is scrolled up, and a click on it
+    /// both reaches the bottom and hands focus to the terminal.
+    ///
+    /// The scroll is applied by the sync in the element's prepaint, after the view
+    /// has already rendered, so a single drain after each scroll is what proves the
+    /// view redraws on its own once the scroll lands.
+    #[gpui::test]
+    async fn test_scroll_to_bottom_button_shows_only_while_scrolled_up(cx: &mut TestAppContext) {
+        let (project, workspace) = init_test(cx).await;
+        let (terminal_view, cx) = cx.add_window_view(|window, cx| {
+            let terminal = cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    CursorShape::default(),
+                    terminal::terminal_settings::AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    PathStyle::local(),
+                )
+                .unwrap()
+                .subscribe(cx)
+            });
+            TerminalView::new(
+                terminal,
+                workspace.downgrade(),
+                None,
+                project.downgrade(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let terminal = terminal_view.read_with(cx, |view, _| view.terminal().clone());
+        terminal.update(cx, |terminal, cx| {
+            let output: String = (0..400).map(|line| format!("line {line}\n")).collect();
+            terminal.write_output(output.as_bytes(), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("TERMINAL_SCROLL_TO_BOTTOM").is_none(),
+            "a terminal showing its latest output has nothing to scroll to"
+        );
+
+        terminal_view.update_in(cx, |view, window, cx| {
+            view.scroll_page_up(&ScrollPageUp, window, cx)
+        });
+        cx.run_until_parked();
+        let button = cx
+            .debug_bounds("TERMINAL_SCROLL_TO_BOTTOM")
+            .expect("scrolling up into the scrollback must show the button");
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert!(
+            button.right() <= viewport.width - px(16.),
+            "the button must sit clear of the scrollbar, got {button:?} in {viewport:?}"
+        );
+
+        cx.update(|window, _| window.blur());
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.last_content().display_offset),
+            0,
+            "clicking the button must scroll to the bottom"
+        );
+        assert!(
+            cx.debug_bounds("TERMINAL_SCROLL_TO_BOTTOM").is_none(),
+            "the button must go away once the terminal is back at the bottom"
+        );
+        assert!(
+            terminal_view.update_in(cx, |view, window, _| view.focus_handle.is_focused(window)),
+            "clicking the button must give focus to the terminal"
+        );
     }
 }
