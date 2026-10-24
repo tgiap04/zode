@@ -191,8 +191,8 @@ pub struct SubagentTracker {
     /// Which file `scanned_to` is an offset into, as the last pass saw it.
     identity: Option<u64>,
     /// Passes since the sidecars were last listed, and since a successor was
-    /// last looked for. Counted rather than timed, as `RESPONDING_DEBOUNCE_TICKS`
-    /// is, so a test with no clock can drive them.
+    /// last looked for. Counted rather than timed, so a test with no clock can
+    /// drive them.
     passes_since_list: u32,
     passes_since_search: u32,
     /// The failure the last pass reported, so a persistent one is logged once.

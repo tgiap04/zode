@@ -27,7 +27,7 @@ When developing an extension, you can use it in Zode without needing to publish 
 
 From the extensions page, click the `Install Dev Extension` button (or the {#action zed::InstallDevExtension} action) and select the directory containing your extension.
 
-If you need to troubleshoot, check Zode.log ({#action zed::OpenLog}) for additional output. For debug output, close and relaunch Zode from the command line with `zed --foreground`, which shows more verbose INFO-level logs.
+If you need to troubleshoot, check Zode.log ({#action zed::OpenLog}) for additional output. For debug output, close and relaunch Zode from the command line with `zode --foreground`, which shows more verbose INFO-level logs.
 
 If you already have the published version of the extension installed, the published version will be uninstalled prior to the installation of the dev extension. After successful installation, the `Extensions` page will indicate that the upstream extension is "Overridden by dev extension".
 

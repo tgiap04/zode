@@ -961,7 +961,7 @@ N/A — no retry policy found in source (synchronous UI action).
 
 ### Purpose
 
-Symlinks the Zode CLI auxiliary executable into `/usr/local/bin/zed`, skipping the operation if the existing symlink is already up to date.
+Symlinks the Zode CLI auxiliary executable into `/usr/local/bin/zode`, skipping the operation if the existing symlink is already up to date.
 
 ### Schedule / Trigger
 
@@ -969,7 +969,7 @@ User-invoked via command palette; no automatic schedule.
 
 ### Data Touched
 
-N/A — no persisted app data touched; creates/updates a filesystem symlink at `/usr/local/bin/zed`, not an application entity.
+N/A — no persisted app data touched; creates/updates a filesystem symlink at `/usr/local/bin/zode`, not an application entity.
 
 ### Failure / Retry Behavior
 

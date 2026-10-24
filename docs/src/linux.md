@@ -7,17 +7,19 @@ description: "The installation script on the download page is the fastest way to
 
 ## Standard Installation
 
-The installation script on the [download](https://zed.dev/download) page is the fastest way to install Zode:
+The installation script is the fastest way to install Zode:
 
 ```sh
-curl -f https://zed.dev/install.sh | sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh
 ```
 
-We also offer a preview build of Zode which receives updates about a week ahead of stable. You can install it with:
+We also offer a nightly build of Zode. You can install it with:
 
 ```sh
-curl -f https://zed.dev/install.sh | ZED_CHANNEL=preview sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | ZODE_CHANNEL=nightly sh
 ```
+
+To install a specific version, set `ZODE_VERSION`, for example `ZODE_VERSION=0.1.6`. Preview builds are not published. The older `ZED_VERSION` and `ZED_CHANNEL` variable names are still accepted.
 
 The Zode installed by the script works best on systems that:
 
@@ -25,7 +27,7 @@ The Zode installed by the script works best on systems that:
 - have a system-wide glibc (NixOS and Alpine do not by default), version >= 2.35 —
   Ubuntu 22.04 and newer, Debian 12 and newer — on both x86_64 and aarch64
 
-Both Nix and Alpine have third-party Zode packages available (though they are currently a few weeks out of date). If you'd like to use our builds they do work if you install a glibc compatibility layer. On NixOS you can try [nix-ld](https://github.com/Mic92/nix-ld), and on Alpine [gcompat](https://wiki.alpinelinux.org/wiki/Running_glibc_programs).
+Our builds do work on NixOS and Alpine if you install a glibc compatibility layer. On NixOS you can try [nix-ld](https://github.com/Mic92/nix-ld), and on Alpine [gcompat](https://wiki.alpinelinux.org/wiki/Running_glibc_programs).
 
 You will need to build from source for:
 
@@ -39,94 +41,70 @@ Zode is open source, and [you can install from source](./development/linux.md).
 
 ### Installing via a package manager
 
-There are several third-party Zode packages for various Linux distributions and package managers, sometimes under `zed-editor`. You may be able to install Zode using these packages:
-
-- Arch: [`zed`](https://archlinux.org/packages/extra/x86_64/zed/)
-- Arch (AUR): [`zed-git`](https://aur.archlinux.org/packages/zed-git), [`zed-preview`](https://aur.archlinux.org/packages/zed-preview), [`zed-preview-bin`](https://aur.archlinux.org/packages/zed-preview-bin)
-- Alpine: `zed` ([aarch64](https://pkgs.alpinelinux.org/package/edge/testing/aarch64/zed)) ([x86_64](https://pkgs.alpinelinux.org/package/edge/testing/x86_64/zed))
-- Fedora/Ultramarine (Terra): [`zed`](https://github.com/terrapkg/packages/tree/frawhide/anda/devs/zed/stable), [`zed-preview`](https://github.com/terrapkg/packages/tree/frawhide/anda/devs/zed/preview), [`zed-nightly`](https://github.com/terrapkg/packages/tree/frawhide/anda/devs/zed/nightly)
-- Manjaro: [`zed`](https://manjaristas.org/branch_compare?q=zed)
-- Conda: [`zed`](https://anaconda.org/conda-forge/zed)
-- Nix: `zed-editor` ([unstable](https://search.nixos.org/packages?channel=unstable&show=zed-editor))
-- Solus: [`zed`](https://github.com/getsolus/packages/tree/main/packages/z/zed)
-- Parabola: [`zed`](https://www.parabola.nu/packages/extra/x86_64/zed/)
-- ALT Linux (Sisyphus): [`zed`](https://packages.altlinux.org/en/sisyphus/srpms/zed/)
-- AOSC OS: [`zed`](https://packages.aosc.io/packages/zed)
-- Flathub: [`dev.zed.Zed`](https://flathub.org/apps/dev.zed.Zed) (WARNING: [Sandboxing causes problems](https://github.com/flathub/dev.zed.Zed/pull/275))
-
-See [Repology](https://repology.org/project/zed-editor/versions) for a list of Zode packages in various repositories.
-
-### Community
-
-When installing a third-party package please be aware that it may not be completely up to date and may be slightly different from the Zode we package (a common change is to rename the binary to `zedit` or `zeditor` to avoid conflicting with other packages).
-
-We'd love your help making Zode available for everyone. If Zode is not yet available for your package manager, and you would like to fix that, we have some notes on [how to do it](./development/linux.md#notes-for-packaging-zed).
-
-The packages in this section provide binary installs for Zode but are not official packages within the associated distributions. These packages are maintained by community members and as such a higher level of caution should be taken when installing them.
-
-#### Debian and Ubuntu
-
-Zode is available in [this community-maintained repository](https://debian.griffo.io/).
-
-Instructions for each version are available in the README of the repository where packages are built.
-Build, packaging and instructions for each version are available in the README of the [repository](https://github.com/dariogriffo/zed-debian)
+No Linux distribution or package manager packages Zode. Packages named `zed` or `zed-editor` install upstream Zed, not Zode.
 
 ### Downloading manually
 
 If you'd prefer, you can install Zode by downloading our pre-built .tar.gz. This is the same artifact that our install script uses, but you can customize the location of your installation by modifying the instructions below:
 
-Download the `.tar.gz` file:
+Download the `.tar.gz` file from the [releases page](https://github.com/tgiap04/zode/releases):
 
-- [zed-linux-x86_64.tar.gz](https://cloud.zed.dev/releases/stable/latest/download?asset=zed&arch=x86_64&os=linux&source=docs)
-  ([preview](https://cloud.zed.dev/releases/preview/latest/download?asset=zed&arch=x86_64&os=linux&source=docs))
-- [zed-linux-aarch64.tar.gz](https://cloud.zed.dev/releases/stable/latest/download?asset=zed&arch=aarch64&os=linux&source=docs)
-  ([preview](https://cloud.zed.dev/releases/preview/latest/download?asset=zed&arch=aarch64&os=linux&source=docs))
+- [zode-linux-x86_64.tar.gz](https://github.com/tgiap04/zode/releases/latest/download/zode-linux-x86_64.tar.gz)
+- [zode-linux-aarch64.tar.gz](https://github.com/tgiap04/zode/releases/latest/download/zode-linux-aarch64.tar.gz)
 
-Then ensure that the `zed` binary in the tarball is on your path. The easiest way is to unpack the tarball and create a symlink:
+Then ensure that the `zode` binary in the tarball is on your path. The easiest way is to unpack the tarball and create a symlink:
 
 ```sh
-mkdir -p ~/.local
-# extract zed to ~/.local/zed.app/
+mkdir -p ~/.local/bin
+# extract zode to ~/.local/zode.app/
 tar -xvf <path/to/download>.tar.gz -C ~/.local
-# link the zed binary to ~/.local/bin (or another directory in your $PATH)
-ln -sf ~/.local/zed.app/bin/zed ~/.local/bin/zed
+# link the zode binary to ~/.local/bin (or another directory in your $PATH)
+ln -sf ~/.local/zode.app/bin/zode ~/.local/bin/zode
 ```
 
 If you'd like integration with an XDG-compatible desktop environment, you will also need to install the `.desktop` file:
 
 ```sh
-install -D ~/.local/zed.app/share/applications/dev.zed.Zed.desktop -t ~/.local/share/applications
-sed -i "s|Icon=zed|Icon=$HOME/.local/zed.app/share/icons/hicolor/512x512/apps/zed.png|g" ~/.local/share/applications/dev.zed.Zed.desktop
-sed -i "s|Exec=zed|Exec=$HOME/.local/zed.app/bin/zed|g" ~/.local/share/applications/dev.zed.Zed.desktop
+install -D ~/.local/zode.app/share/applications/io.github.tgiap04.zode.desktop -t ~/.local/share/applications
+sed -i "s|Icon=zode|Icon=$HOME/.local/zode.app/share/icons/hicolor/512x512/apps/zode.png|g" ~/.local/share/applications/io.github.tgiap04.zode.desktop
+sed -i "s|Exec=zode|Exec=$HOME/.local/zode.app/bin/zode|g" ~/.local/share/applications/io.github.tgiap04.zode.desktop
 ```
+
+### Upgrading from Zode 0.1.5
+
+Zode 0.1.5 on Linux installed into `~/.local/zed.app` (`~/.local/zed-nightly.app` on the nightly channel) and linked `~/.local/bin/zed`. From 0.1.6 the layout is `~/.local/zode.app` (`~/.local/zode-nightly.app`) and `~/.local/bin/zode`, so the 0.1.5 in-app updater cannot apply the 0.1.6 update. Reinstall once by hand with the installation script above. After that, in-app updates work as before.
+
+The scripts never remove the old directory. `~/.local/zed.app` and `~/.local/bin/zed` are also what upstream Zed uses, so check before deleting them: a Zode 0.1.5 install has `~/.local/zed.app/share/applications/io.github.tgiap04.zode.desktop` (`~/.local/zed-nightly.app/share/applications/io.github.tgiap04.zode.nightly.desktop` on the nightly channel), and upstream Zed does not. Remove them only if that file exists.
+
+Do not run `--uninstall` from the leftover 0.1.5 binary (`zed --uninstall`, `~/.local/bin/zed --uninstall` or `~/.local/zed.app/bin/zed --uninstall`). Zode 0.1.5 embeds the old uninstall script, which deletes `~/.local/share/zed`, `~/.config/zed` and `~/.zed_server`: the directories upstream Zed keeps its own data in. Delete the old app directory by hand after the check above, and use `zode --uninstall` only once you are on 0.1.6 or later.
 
 ## Uninstalling Zode
 
 ### Standard Uninstall
 
-If Zode was installed using the default installation script, it can be uninstalled by supplying the `--uninstall` flag to the `zed` shell command
+If Zode was installed using the default installation script, it can be uninstalled by supplying the `--uninstall` flag to the `zode` shell command
 
 ```sh
-zed --uninstall
+zode --uninstall
 ```
 
 If there are no errors, the shell will then prompt you whether you'd like to keep your preferences or delete them. After making a choice, you should see a message that Zode was successfully uninstalled.
 
-In the case that the `zed` shell command was not found in your PATH, you can try one of the following commands
+In the case that the `zode` shell command was not found in your PATH, you can try one of the following commands
 
 ```sh
-$HOME/.local/bin/zed --uninstall
+$HOME/.local/bin/zode --uninstall
 ```
 
 or
 
 ```sh
-$HOME/.local/zed.app/bin.zed --uninstall
+$HOME/.local/zode.app/bin/zode --uninstall
 ```
 
-The first case might fail if a symlink was not properly established between `$HOME/.local/bin/zed` and `$HOME/.local/zed.app/bin.zed`. But the second case should work as long as Zode was installed to its default location.
+The first case might fail if a symlink was not properly established between `$HOME/.local/bin/zode` and `$HOME/.local/zode.app/bin/zode`. But the second case should work as long as Zode was installed to its default location.
 
-If Zode was installed to a different location, you must invoke the `zed` binary stored in that installation directory and pass the `--uninstall` flag to it in the same format as the previous commands.
+If Zode was installed to a different location, you must invoke the `zode` binary stored in that installation directory and pass the `--uninstall` flag to it in the same format as the previous commands.
 
 ### Package Manager
 
@@ -156,7 +134,7 @@ vkcube
 
 This should output a line describing your current graphics setup and show a rotating cube. If this does not work, you should be able to fix it by installing Vulkan compatible GPU drivers, however in some cases there is no Vulkan support yet.
 
-You can find out which graphics card Zode is using by looking in the Zode log (`~/.local/share/zed/logs/Zode.log`) for `Using GPU: ...`.
+You can find out which graphics card Zode is using by looking in the Zode log (`~/.local/share/zode/logs/Zode.log`) for `Using GPU: ...`.
 
 If you see errors like `ERROR_INITIALIZATION_FAILED` or `GPU Crashed` or `ERROR_SURFACE_LOST_KHR` then you may be able to work around this by installing different drivers for your GPU, or by selecting a different GPU to run on. (See [#14225](https://github.com/zed-industries/zed/issues/14225))
 
@@ -187,14 +165,14 @@ You can obtain the device ID of your GPU by running `lspci -nn | grep VGA` which
 where the device ID here is `2484`. This value is in hexadecimal, so to force Zode to use this specific GPU you would set the environment variable like so:
 
 ```
-ZED_DEVICE_ID=0x2484 zed
+ZED_DEVICE_ID=0x2484 zode
 ```
 
 Make sure to export the variable if you choose to define it globally in a `.bashrc` or similar.
 
 ##### Option B
 
-If you are using Mesa, you can run `MESA_VK_DEVICE_SELECT=list zed --foreground` to get a list of available GPUs and then export `MESA_VK_DEVICE_SELECT=xxxx:yyyy` to choose a specific device. Furthermore, you can fallback to xwayland with an additional export of `WAYLAND_DISPLAY=""`.
+If you are using Mesa, you can run `MESA_VK_DEVICE_SELECT=list zode --foreground` to get a list of available GPUs and then export `MESA_VK_DEVICE_SELECT=xxxx:yyyy` to choose a specific device. Furthermore, you can fallback to xwayland with an additional export of `WAYLAND_DISPLAY=""`.
 
 ##### Option C
 
@@ -209,24 +187,24 @@ When reporting issues where Zode fails to start due to graphics initialization e
 Passing the `--system-specs` flag to Zode like
 
 ```sh
-zed --system-specs
+zode --system-specs
 ```
 
 will print the system specs to the terminal like so. It is strongly recommended to copy the output verbatim into the issue on GitHub, as it uses markdown formatting to ensure the output is readable.
 
-Additionally, it is extremely beneficial to provide the contents of your Zode log when reporting such issues. The log is usually located at `~/.local/share/zed/logs/Zode.log`. The recommended process for producing a helpful log file is as follows:
+Additionally, it is extremely beneficial to provide the contents of your Zode log when reporting such issues. The log is usually located at `~/.local/share/zode/logs/Zode.log`. The recommended process for producing a helpful log file is as follows:
 
 ```sh
-truncate -s 0 ~/.local/share/zed/logs/Zode.log # Clear the log file
-ZED_LOG=wgpu=info zed .
-cat ~/.local/share/zed/logs/Zode.log
+truncate -s 0 ~/.local/share/zode/logs/Zode.log # Clear the log file
+ZED_LOG=wgpu=info zode .
+cat ~/.local/share/zode/logs/Zode.log
 # copy the output
 ```
 
 Or, if you have the Zode cli setup, you can do
 
 ```sh
-ZED_LOG=wgpu=info /path/to/zed/cli --foreground .
+ZED_LOG=wgpu=info zode --foreground .
 # copy the output
 ```
 
@@ -365,7 +343,7 @@ Restart Zode for the changes to take effect.
 This Zode-specific environment variable directly sets the scale factor, bypassing all automatic detection.
 
 ```sh
-GPUI_X11_SCALE_FACTOR=1.5 zed
+GPUI_X11_SCALE_FACTOR=1.5 zode
 ```
 
 You can use decimal values (e.g., `1.25`, `1.5`, `2.0`) or set `GPUI_X11_SCALE_FACTOR=randr` to force RandR-based detection even when `Xft.dpi` is set.

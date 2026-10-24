@@ -304,13 +304,11 @@ impl SwitchColor {
         }
 
         match self {
-            // Deliberately the brand colour rather than `Color::Accent`, and the
-            // distinction is load-bearing: a switch being on is a fact about the
-            // app, so it carries the app's colour, while `Color::Accent` stays
-            // with the theme because the ~97 links, hints and emphasis labels it
-            // paints belong to the document, not the chrome. Routing
-            // `Color::Accent` here instead would turn all of those orange too --
-            // that is the simplification to refuse, not the one to make.
+            // Deliberately the brand colour itself rather than `Color::Accent`. Both
+            // are orange by default, but `Color::Accent` reads the theme's
+            // `text_accent`, which a user may override for the sake of links and
+            // hints; a switch being on is a fact about the app and should not move
+            // with them.
             //
             // The opacities are unchanged; 0.4 on the thumb and 0.2 behind it are
             // what keep the switch legible against a panel, and retuning them is
@@ -335,9 +333,9 @@ impl From<SwitchColor> for Color {
             // It is retargeted anyway so that it is not wrong the day someone
             // does wire it up: a switch that is on carries the brand colour, and
             // `Color::Selected` is the token resolving to it. `Color::Accent`
-            // would hand back the theme's accent instead, putting a blue label
-            // beside an orange switch. This conversion has no `App`, so it cannot
-            // reach `brand_accent` directly.
+            // would hand back the theme's `text_accent` instead, which a user's
+            // override can move away from the switch beside it. This conversion has
+            // no `App`, so it cannot reach `brand_accent` directly.
             SwitchColor::Accent => Color::Selected,
             SwitchColor::Custom(_) => Color::Default,
         }

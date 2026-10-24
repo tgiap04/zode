@@ -106,6 +106,21 @@ For example, add the following to your `settings.json` if you wish to override t
 }
 ```
 
+Zode lays its brand orange over every theme as it loads, before your overrides are applied.
+It sets `text.accent`, `icon.accent`, `border.focused`, `element.selection_background` and the local player's cursor, selection and background.
+Syntax, status and collaborator colors stay with the theme.
+To take one of those tokens back, set it under your theme's name in `theme_overrides`:
+
+```json [settings]
+{
+  "theme_overrides": {
+    "One Dark": {
+      "border.focused": "#4a90d9"
+    }
+  }
+}
+```
+
 To see a comprehensive list of list of captures (like `comment` and `comment.doc`) see [Language Extensions: Syntax highlighting](./extensions/languages.md#syntax-highlighting).
 
 To see a list of available theme attributes look at the JSON file for your theme.

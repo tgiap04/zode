@@ -83,6 +83,9 @@ mod windows_impl {
         Ok(())
     }
 
+    // The installer replaces this helper in place, so it is spawned by apps older than
+    // itself: every argument form an older app passes (`--launch <bool>`, `--launch=<bool>`)
+    // has to keep parsing the same way.
     fn parse_args(input: impl IntoIterator<Item = String>) -> Args {
         let mut args: Args = Args { launch: true };
 

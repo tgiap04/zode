@@ -6,14 +6,14 @@
 //! pure reader on top of that -- which is why a closed panel costs nothing at
 //! all, and why two panels open at once do not double the git work.
 
-use gpui::{App, Context, Entity, SharedString, Subscription};
+use gpui::{App, Context, Entity, EntityId, SharedString, Subscription};
 use project::git_store::{GitStore, GitStoreEvent, RepositoryEvent};
 
 use crate::branch_panel::panel::BranchPanel;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::branch_panel::tree::{AgentEntry, RepoData, TreeRow};
+use crate::branch_panel::tree::{AgentEntry, RepoData};
 use crate::branch_service::process_branches;
 use workspace::Workspace;
 
@@ -58,7 +58,8 @@ impl BranchPanel {
         })
     }
 
-    /// Marks the tree stale when an agent tab opens or closes.
+    /// Marks the tree stale when an agent tab opens or closes, and asks the
+    /// session index to re-read disk when one closes.
     ///
     /// Without this the panel only learned about agents when something *else*
     /// rebuilt it -- a git event, or switching checkouts, which builds a whole
@@ -72,21 +73,17 @@ impl BranchPanel {
     /// every agent list came back shut. `CheckoutViewState` is keyed by path
     /// instead, so the second panel reads what the first wrote.
     ///
-    /// `ItemAdded` is filtered to agent tabs, because opening a file is not
-    /// news here. `ItemRemoved` carries only an id, so it cannot be filtered
-    /// the same way -- it is acted on only while the panel is actually showing
-    /// an open tab, which is the only case where a close could change anything.
+    /// `ItemRemoved` carries only an id, so the panel remembers which ids are
+    /// agent tabs (`agent_tabs`, seeded in `new` and kept by `ItemAdded`) and
+    /// treats a removal of one of them as news. It must not be inferred from
+    /// the rows: those are rebuilt only when the panel is drawn, so a tab
+    /// opened and closed between two draws is not in them, and the close would
+    /// go unnoticed.
     ///
-    /// A closing agent tab additionally asks the session index to re-read
-    /// disk. `self.rows` still holds the count from *before* this removal --
-    /// rows are rebuilt at render (`render.rs`), not on this event -- so
-    /// comparing it against the workspace's live `AgentView` count right now
-    /// tells us an agent tab (rather than a file tab) just closed, with no
-    /// type on the event to filter by. The finished session's transcript
-    /// lands on disk the moment the tab closes, but the process-global index
-    /// is only as fresh as its last sweep and may still be missing it; without
-    /// this, the row for that session would not appear until something
-    /// unrelated happened to trigger a sweep.
+    /// The finished session's transcript lands on disk the moment the tab
+    /// closes, but the process-global index is only as fresh as its last sweep
+    /// and may still be missing it; without the refresh, its row would not
+    /// appear until something unrelated happened to trigger a sweep.
     pub(crate) fn observe_agent_tabs(
         cx: &mut Context<Self>,
         workspace: &Entity<Workspace>,
@@ -94,58 +91,63 @@ impl BranchPanel {
         cx.subscribe(workspace, |panel, workspace, event, cx| match event {
             workspace::Event::ItemAdded { item } => {
                 if item.downcast::<agent_ui::AgentView>().is_some() {
+                    panel.agent_tabs.insert(item.item_id());
                     panel.mark_stale(cx);
                 }
             }
-            workspace::Event::ItemRemoved { .. } if panel.lists_an_open_tab() => {
-                panel.mark_stale(cx);
-
-                let live_agents = workspace
+            workspace::Event::ItemRemoved { item_id } => {
+                // Moving a tab to another pane removes it from one and adds it
+                // to the other, and both events are delivered once the move has
+                // finished -- so a tab that is still somewhere in the workspace
+                // was moved, not closed.
+                if !panel.agent_tabs.contains(item_id) {
+                    return;
+                }
+                let moved = workspace
                     .read(cx)
-                    .items_of_type::<agent_ui::AgentView>(cx)
-                    .count();
-                // Only a decrease is news. Closing a file tab passes
-                // `lists_an_open_tab` too (an agent tab can sit open in the
-                // same panel), and firing a sweep -- thousands of transcripts
-                // read -- on every such close would be the exact cost this
-                // comparison exists to avoid.
-                if live_agents < panel.open_agents_listed()
-                    && let Some(store) = panel.session_store.clone()
-                {
-                    // `SessionStore::refresh` coalesces a call that arrives
-                    // mid-sweep into one more sweep rather than queuing it, so
-                    // closing several agent tabs at once still costs at most
-                    // two. Read from the field rather than
-                    // `agent_ui::SessionStore::global`: a panel that has never
-                    // been drawn has no store to ask, and must not create one
-                    // just because a tab closed somewhere else in the window.
-                    store.update(cx, |store, cx| store.refresh(cx));
+                    .items(cx)
+                    .any(|item| item.item_id() == *item_id);
+                if moved {
+                    return;
+                }
+                if panel.agent_tabs.remove(item_id) {
+                    panel.mark_stale(cx);
+                    panel.refresh_sessions_after_close(cx);
                 }
             }
             _ => {}
         })
     }
 
-    /// Whether any row currently shows a tab, rather than only transcripts.
-    fn lists_an_open_tab(&self) -> bool {
-        self.rows.iter().any(|row| match row {
-            TreeRow::Worktree { agents, .. } => agents.iter().any(|agent| agent.is_open()),
-            _ => false,
-        })
+    /// The agent tabs already open when the panel is built, which no
+    /// `ItemAdded` will ever announce.
+    pub(crate) fn seed_agent_tabs(
+        workspace: &Workspace,
+        cx: &App,
+    ) -> collections::HashSet<EntityId> {
+        workspace
+            .items_of_type::<agent_ui::AgentView>(cx)
+            .map(|view| view.entity_id())
+            .collect()
     }
 
-    /// How many rows the last rebuild drew as an open tab, across every
-    /// checkout. The *before* half of the `ItemRemoved` comparison above.
-    fn open_agents_listed(&self) -> usize {
-        self.rows
-            .iter()
-            .map(|row| match row {
-                TreeRow::Worktree { agents, .. } => {
-                    agents.iter().filter(|agent| agent.is_open()).count()
-                }
-                _ => 0,
-            })
-            .sum()
+    /// Asks the index to re-read disk for a closed agent tab.
+    fn refresh_sessions_after_close(&mut self, cx: &mut Context<Self>) {
+        // The store the panel already holds, else the shared one if somebody
+        // created it: another workspace's panel may be waiting on it even
+        // though this one was never drawn. `try_global`, not `global` -- a tab
+        // closing must not bring a store into existence.
+        let Some(store) = self
+            .session_store
+            .clone()
+            .or_else(|| agent_ui::SessionStore::try_global(cx))
+        else {
+            return;
+        };
+        // `SessionStore::refresh` coalesces a call that arrives mid-sweep into
+        // one more sweep rather than queuing it, so closing several agent tabs
+        // at once still costs at most two.
+        store.update(cx, |store, cx| store.refresh(cx));
     }
 
     /// Re-reads every repository snapshot into the shape the tree wants.
@@ -456,8 +458,8 @@ mod tests {
 
     /// **T12.** Closing an agent tab must ask the index to re-read disk.
     ///
-    /// Falsifiable today: `observe_agent_tabs` calls only `mark_stale` on
-    /// `ItemRemoved`, so `is_scanning()` stays `false` after the tab closes.
+    /// Falsifiable by dropping the refresh from the `ItemRemoved` arm:
+    /// `is_scanning()` then stays `false` after the tab closes.
     #[gpui::test]
     async fn closing_an_agent_tab_asks_the_index_to_resweep(cx: &mut TestAppContext) {
         let (panel, _workspace, pane, item_id, cx) = panel_with_one_open_agent_tab(cx).await;
@@ -498,11 +500,92 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Dragging a tab to another pane removes it from one and adds it to the
+    /// other, so the removal event alone cannot tell a move from a close.
+    #[gpui::test]
+    async fn moving_an_agent_tab_to_another_pane_is_not_a_close(cx: &mut TestAppContext) {
+        let (panel, workspace, source, item_id, cx) = panel_with_one_open_agent_tab(cx).await;
+        cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(Vec::new(), cx);
+        });
+        panel.update(cx, |panel, cx| panel.ensure_session_store(cx));
+        cx.run_until_parked();
+        let generation_before = panel.read_with(cx, |panel, cx| {
+            panel.session_store.as_ref().unwrap().read(cx).generation()
+        });
+
+        let destination = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_pane(source.clone(), workspace::SplitDirection::Right, window, cx)
+        });
+        cx.update(|window, cx| {
+            workspace::move_item(&source, &destination, item_id, 0, true, window, cx);
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert!(
+                !panel.session_store.as_ref().unwrap().read(cx).is_scanning(),
+                "a move is not a close and must not ask for a sweep"
+            );
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(
+                panel.session_store.as_ref().unwrap().read(cx).generation(),
+                generation_before,
+                "no sweep ran for the move"
+            );
+            assert!(
+                panel.agent_tabs.contains(&item_id),
+                "the moved tab is still an open agent tab"
+            );
+        });
+    }
+
+    /// One window can host several workspaces, each with its own panel, and the
+    /// session store is shared. A panel that was never drawn has no store of
+    /// its own, but the others are still waiting on the global one.
+    ///
+    /// Run against a single workspace with the global store installed and the
+    /// panel undrawn: that is the half of the situation the closing panel owns.
+    #[gpui::test]
+    async fn an_undrawn_panel_still_refreshes_the_shared_store_on_close(cx: &mut TestAppContext) {
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (panel, _workspace, pane, item_id, cx) = panel_with_one_open_agent_tab(cx).await;
+        let store = cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(
+                vec![std::sync::Arc::new(LateTranscript {
+                    written: written.clone(),
+                    with_older: false,
+                })],
+                cx,
+            )
+        });
+        let generation_before = store.read_with(cx, |store, _| store.generation());
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(item_id, true, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.generation(),
+                generation_before + 1,
+                "closing an agent tab must refresh the shared store even from an undrawn panel"
+            );
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.session_store.is_none(),
+                "and still must not hand the panel a store it never asked for"
+            );
+        });
+    }
+
     /// **T13.** Closing an ordinary file tab must not.
     ///
-    /// Green today for the wrong reason -- nothing sweeps on any tab close yet.
-    /// Falsifiable the moment the count comparison is dropped in favour of
-    /// sweeping on every `ItemRemoved`: it would then fail here.
+    /// Falsifiable by sweeping on every `ItemRemoved` instead of only for the
+    /// ids recorded as agent tabs: it would then fail here.
     #[gpui::test]
     async fn closing_a_file_tab_does_not_resweep(cx: &mut TestAppContext) {
         let (panel, workspace, _pane, _item_id, cx) = panel_with_one_open_agent_tab(cx).await;
@@ -719,6 +802,255 @@ mod tests {
         }
     }
 
+    /// A provider whose transcript only exists once `written` is set, standing
+    /// in for a Claude session started after the last sweep.
+    struct LateTranscript {
+        written: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        with_older: bool,
+    }
+
+    impl agent_sessions::SessionProvider for LateTranscript {
+        fn agent(&self) -> agent_sessions::AgentKind {
+            agent_sessions::AgentKind::Claude
+        }
+        fn availability(&self) -> agent_sessions::Availability {
+            agent_sessions::Availability::Ready
+        }
+        fn list(&self) -> anyhow::Result<Vec<agent_sessions::SessionSummary>> {
+            let mut sessions = Vec::new();
+            if self.with_older {
+                sessions.push(agent_sessions::SessionSummary {
+                    id: std::sync::Arc::from("00000000-0000-4000-8000-000000000000"),
+                    agent: agent_sessions::AgentKind::Claude,
+                    title: "older".into(),
+                    preview: String::new(),
+                    preview_speaker: None,
+                    cwd: std::path::PathBuf::from("/repos/zode"),
+                    branch: None,
+                    model: None,
+                    updated_at: std::time::SystemTime::UNIX_EPOCH,
+                    log_path: None,
+                    log_bytes: 0,
+                });
+            }
+            if !self.written.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(sessions);
+            }
+            sessions.push(agent_sessions::SessionSummary {
+                id: std::sync::Arc::from("11111111-1111-4111-8111-111111111111"),
+                agent: agent_sessions::AgentKind::Claude,
+                title: "hello".into(),
+                preview: String::new(),
+                preview_speaker: None,
+                cwd: std::path::PathBuf::from("/repos/zode"),
+                branch: None,
+                model: None,
+                updated_at: std::time::SystemTime::UNIX_EPOCH,
+                log_path: None,
+                log_bytes: 0,
+            });
+            Ok(sessions)
+        }
+        fn find(&self, _id: &str) -> anyhow::Result<Option<agent_sessions::SessionSummary>> {
+            Ok(None)
+        }
+        fn new_session_command(
+            &self,
+            _id: &str,
+            _cwd: &std::path::Path,
+        ) -> Option<agent_sessions::AgentCommand> {
+            None
+        }
+        fn counts(
+            &self,
+            _session: &agent_sessions::SessionSummary,
+        ) -> anyhow::Result<agent_sessions::SessionCounts> {
+            Ok(Default::default())
+        }
+        fn resume_command(
+            &self,
+            _s: &agent_sessions::SessionSummary,
+            _f: agent_sessions::Fork,
+        ) -> Option<agent_sessions::AgentCommand> {
+            None
+        }
+        fn deletion(&self, _session: &agent_sessions::SessionSummary) -> agent_sessions::Deletion {
+            agent_sessions::Deletion::Nothing
+        }
+    }
+
+    fn listed(panel: &gpui::Entity<BranchPanel>, cx: &mut VisualTestContext) -> (usize, usize) {
+        panel.read_with(cx, |panel, _| {
+            let mut open = 0;
+            let mut past = 0;
+            for row in &panel.rows {
+                if let crate::branch_panel::tree::TreeRow::Worktree { agents, .. } = row {
+                    for agent in agents.iter() {
+                        if agent.is_open() {
+                            open += 1;
+                        } else {
+                            past += 1;
+                        }
+                    }
+                }
+            }
+            (open, past)
+        })
+    }
+
+    /// `drawn_while_tab_open`: whether the panel was drawn (rows rebuilt) while
+    /// the tab was open. Returns what the panel lists right after the close.
+    async fn listed_after_closing_a_late_transcript_tab(
+        cx: &mut TestAppContext,
+        drawn_while_tab_open: bool,
+    ) -> (usize, usize) {
+        let (before_reload, after_reload) = close_then_reload(cx, drawn_while_tab_open).await;
+        assert_eq!(
+            after_reload,
+            (0, 1),
+            "control: a manual reload always restores the row"
+        );
+        before_reload
+    }
+
+    async fn close_then_reload(
+        cx: &mut TestAppContext,
+        drawn_while_tab_open: bool,
+    ) -> ((usize, usize), (usize, usize)) {
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(
+                vec![std::sync::Arc::new(LateTranscript {
+                    written: written.clone(),
+                    with_older: false,
+                })],
+                cx,
+            );
+        });
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace alive");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+            panel.refresh_if_stale(cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        if drawn_while_tab_open {
+            panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+            assert_eq!(listed(&panel, cx).0, 1, "the open tab must be listed");
+        }
+
+        // The CLI has now written its transcript.
+        written.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = pane.read_with(cx, |pane, _| pane.items().next().unwrap().item_id());
+        let close = pane.update_in(cx, |pane, window, cx| {
+            pane.close_item_by_id(item_id, workspace::SaveIntent::Close, window, cx)
+        });
+        close.await.expect("close");
+        cx.run_until_parked();
+        // What `render` does when the panel is shown.
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        let before_reload = listed(&panel, cx);
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        (before_reload, listed(&panel, cx))
+    }
+
+    /// A sweep still in flight when the panel next draws, and an older session
+    /// already listed under the checkout: the closed session must join it once
+    /// the sweep lands.
+    #[gpui::test]
+    async fn a_closed_tab_joins_the_listed_sessions_once_the_sweep_lands(cx: &mut TestAppContext) {
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(
+                vec![std::sync::Arc::new(LateTranscript {
+                    written: written.clone(),
+                    with_older: true,
+                })],
+                cx,
+            );
+        });
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace alive");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+            panel.refresh_if_stale(cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        written.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = pane.read_with(cx, |pane, _| pane.items().next().unwrap().item_id());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(item_id, true, true, window, cx);
+        });
+        // The panel draws while the sweep has not run yet.
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        assert_eq!(listed(&panel, cx), (0, 2));
+    }
+
+    #[gpui::test]
+    async fn a_closed_tab_comes_back_when_the_panel_was_drawn_while_it_was_open(
+        cx: &mut TestAppContext,
+    ) {
+        let (open, past) = listed_after_closing_a_late_transcript_tab(cx, true).await;
+        assert_eq!(
+            (open, past),
+            (0, 1),
+            "closed tab must come back as a Past row"
+        );
+    }
+
+    /// The owner regression test: the refresh on close must not depend on the
+    /// last draw having listed the open tab.
+    #[gpui::test]
+    async fn a_closed_tab_comes_back_even_if_the_panel_was_not_drawn_while_it_was_open(
+        cx: &mut TestAppContext,
+    ) {
+        let (open, past) = listed_after_closing_a_late_transcript_tab(cx, false).await;
+        assert_eq!(
+            (open, past),
+            (0, 1),
+            "closed tab must come back as a Past row"
+        );
+    }
+
     /// **T15.** A panel that has never been drawn has no session store to ask,
     /// and must not create one just because a tab closed.
     ///
@@ -746,5 +1078,9 @@ mod tests {
                 "a closed tab must not bring a session store into existence"
             );
         });
+        assert!(
+            cx.update(|_, cx| agent_ui::SessionStore::try_global(cx).is_none()),
+            "nor a global one: closing a tab must not create the shared store"
+        );
     }
 }

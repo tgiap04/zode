@@ -3585,3 +3585,72 @@ async fn a_pane_closed_in_a_project_opened_later_leaves_the_front_project_focuse
         assert_eq!(workspace.panes().len(), 1, "the emptied pane is gone");
     });
 }
+
+#[gpui::test]
+async fn test_prompt_and_open_paths_prompts_in_the_active_workspace_window(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let app_state = cx.update(AppState::test);
+    for root in [path!("/first"), path!("/second")] {
+        app_state.fs.as_fake().insert_tree(root, json!({})).await;
+    }
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.workspace.use_system_path_prompts = Some(false);
+            });
+        });
+    });
+    let first_project = Project::test(app_state.fs.clone(), [path!("/first").as_ref()], cx).await;
+    let first = cx.add_window(|window, cx| MultiWorkspace::test_new(first_project, window, cx));
+    let second_project = Project::test(app_state.fs.clone(), [path!("/second").as_ref()], cx).await;
+    let second = cx.add_window(|window, cx| MultiWorkspace::test_new(second_project, window, cx));
+
+    let prompted = Rc::new(RefCell::new(Vec::new()));
+    for window in [first, second] {
+        let prompted = prompted.clone();
+        window
+            .update(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, _| {
+                    workspace.set_prompt_for_open_path(Box::new(move |_, _, window, _| {
+                        prompted
+                            .borrow_mut()
+                            .push(window.window_handle().window_id());
+                        let (_sender, receiver) = futures::channel::oneshot::channel();
+                        receiver
+                    }));
+                });
+            })
+            .unwrap();
+    }
+    cx.update_window(*second, |_, window, _| window.activate_window())
+        .unwrap();
+    assert_eq!(
+        cx.update(|cx| cx.active_window().map(|window| window.window_id())),
+        Some(second.window_id()),
+        "precondition: the second window is the active one"
+    );
+
+    cx.update(|cx| {
+        prompt_and_open_paths(
+            app_state,
+            PathPromptOptions {
+                files: true,
+                directories: true,
+                multiple: true,
+                show_hidden: false,
+                prompt: None,
+            },
+            false,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        *prompted.borrow(),
+        vec![second.window_id()],
+        "the prompt belongs in the window the user is in, not the first one created"
+    );
+}

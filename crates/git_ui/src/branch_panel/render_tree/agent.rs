@@ -10,18 +10,18 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use agent_sessions::SubagentSummary;
-use gpui::{AnyElement, ClickEvent};
-use ui::{CommonAnimationExt as _, Disclosure, Indicator, Tooltip, prelude::*};
+use gpui::{AnyElement, ClickEvent, Hsla};
+use ui::{AgentTypingMark, Disclosure, Indicator, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey};
 
 /// One running subagent, under the session that spawned it.
 ///
-/// The same spinner the session's own row uses, because it is the same fact
+/// The same typing mark the session's own row uses, because it is the same fact
 /// about a different worker. Only running ones are drawn, so there is no
 /// finished state to tell apart from it.
-fn render_subagent(subagent: &SubagentSummary) -> impl IntoElement {
+fn render_subagent(subagent: &SubagentSummary, agent: &str, background: Hsla) -> impl IntoElement {
     let id = subagent.id.clone();
     h_flex()
         .debug_selector({
@@ -33,28 +33,20 @@ fn render_subagent(subagent: &SubagentSummary) -> impl IntoElement {
         .pl_2()
         .py_0p5()
         .child(
-            div()
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("subagent-spinner:{id}")
-                })
-                .child(
-                    Icon::new(IconName::LoadCircle)
-                        .size(IconSize::XSmall)
-                        .color(Color::Accent)
-                        // Keyed by the subagent, not by where it sits in the
-                        // list: a row above this one finishing shifts every
-                        // position, and a position-keyed animation would
-                        // restart the rotation of the rows that are still
-                        // going.
-                        .with_keyed_rotate_animation(
-                            (
-                                gpui::ElementId::from("subagent-spinner"),
-                                SharedString::from(id),
-                            ),
-                            2,
-                        ),
+            AgentTypingMark::new(
+                // Keyed by the subagent, not by where it sits in the list: a
+                // row above this one finishing shifts every position, and a
+                // position-keyed animation would restart the rows that are
+                // still going.
+                (
+                    gpui::ElementId::from("subagent-typing"),
+                    SharedString::from(id),
                 ),
+                agent_ui::agent_icon(agent),
+                agent_ui::agent_working_color(agent),
+            )
+            .size(IconSize::XSmall)
+            .background(background),
         )
         .child(Label::new(SharedString::from(subagent.kind.clone())).size(LabelSize::Small))
         .child(
@@ -67,17 +59,43 @@ fn render_subagent(subagent: &SubagentSummary) -> impl IntoElement {
         )
 }
 
+/// What an agent row is keyed by: the session itself, not its place in the list.
+///
+/// GPUI keys an element's state -- an animation's clock, a press in flight --
+/// by the whole path of ids above it, so the row has to carry the identity and
+/// not only the mark inside it. A row above finishing or being deleted shifts
+/// every position under it, and anything keyed by position would restart for
+/// the sessions that are still going.
+fn row_id(entry: &AgentEntry) -> gpui::ElementId {
+    match entry {
+        AgentEntry::Open { view, .. } => ("agent", view.entity_id()).into(),
+        AgentEntry::Past { id, .. } => (
+            gpui::ElementId::from("agent"),
+            SharedString::from(id.clone()),
+        )
+            .into(),
+    }
+}
+
+fn typing_mark_id(entry: &AgentEntry) -> gpui::ElementId {
+    (row_id(entry), "typing").into()
+}
+
 impl BranchPanel {
     /// The agents line and, when open, the agents under it.
     ///
     /// `None` when the branch has none: a control that opens on nothing reads
     /// as broken.
+    ///
+    /// `background` is what the card paints behind the list. The typing marks
+    /// keep their dots legible against it, and it is not the panel's.
     pub(super) fn render_agents(
         &self,
         ix: usize,
         agents: &Arc<[AgentEntry]>,
         expanded: bool,
         toggle_key: Option<RowKey>,
+        background: Hsla,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if agents.is_empty() {
@@ -130,8 +148,7 @@ impl BranchPanel {
                     this.children(
                         agents
                             .iter()
-                            .enumerate()
-                            .map(|(nth, entry)| self.render_agent(ix, nth, entry, cx)),
+                            .map(|entry| self.render_agent(entry, background, cx)),
                     )
                 })
                 .into_any_element(),
@@ -140,9 +157,8 @@ impl BranchPanel {
 
     fn render_agent(
         &self,
-        ix: usize,
-        nth: usize,
         entry: &AgentEntry,
+        background: Hsla,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let activity = entry.activity(cx);
@@ -154,41 +170,67 @@ impl BranchPanel {
         // under the row rather than inside it: the session's own line is one
         // click target, and anything clickable nested inside it would put a
         // second one in the middle of it.
-        let subagents = self.render_subagents(entry, cx);
+        let subagents = self.render_subagents(entry, background, cx);
         let entry = entry.clone();
 
+        let row_id = row_id(&entry);
         let row = h_flex()
-            .id(("agent", ix * 1000 + nth))
+            .debug_selector({
+                let row_id = row_id.clone();
+                move || format!("agent-row:{row_id}")
+            })
+            .id(row_id)
             .w_full()
             .gap_1p5()
             .pl_1()
             .py_0p5()
             .rounded_sm()
             .hover(|style| style.bg(cx.theme().colors().element_hover))
-            // A spinner only while it is answering: "still going" is a moving
-            // fact and a static mark says it no better than the words beside
-            // it, but a spinner that never stops says nothing at all. A green
-            // dot is the one worth scanning for -- that agent is done and
-            // waiting for you.
-            .child(match activity {
-                AgentActivity::Responding => Icon::new(IconName::LoadCircle)
-                    .size(IconSize::XSmall)
-                    .color(Color::Accent)
+            // The status slot is a fixed box: the dot is 6px and the mark 12px,
+            // and a slot that resizes with the state slides the label sideways
+            // every time an agent starts or stops answering.
+            .child(
+                div()
+                    .flex_none()
+                    .w(IconSize::XSmall.rems())
+                    .flex()
+                    .justify_center()
+                    .children(match activity {
+                        // The typing mark beside it is the moving fact.
+                        AgentActivity::Responding => None,
+                        // A green dot is the one worth scanning for -- that
+                        // agent is done and waiting for you.
+                        AgentActivity::Ready => {
+                            Some(Indicator::dot().color(Color::Success).into_any_element())
+                        }
+                        AgentActivity::Gone => {
+                            Some(Indicator::dot().color(Color::Muted).into_any_element())
+                        }
+                    }),
+            )
+            // The vendor's own mark in the vendor's own colour, so a glance at
+            // the list says which agent as well as which session. While the
+            // agent answers the same mark types: a moving fact says "still
+            // going" better than a static glyph, and swapping rather than
+            // adding keeps one logo per row.
+            .child(if activity == AgentActivity::Responding {
+                AgentTypingMark::new(
                     // Keyed, not caller-located: every running agent in the
                     // list shares this call site, and one id for all of them
                     // is one animation state for all of them.
-                    .with_keyed_rotate_animation(("agent-spinner", ix * 1000 + nth), 2)
-                    .into_any_element(),
-                AgentActivity::Ready => Indicator::dot().color(Color::Success).into_any_element(),
-                AgentActivity::Gone => Indicator::dot().color(Color::Muted).into_any_element(),
-            })
-            // The vendor's own mark in the vendor's own colour, so a glance at
-            // the list says which agent as well as which session.
-            .child(
+                    typing_mark_id(&entry),
+                    agent_ui::agent_icon(&agent),
+                    agent_ui::agent_working_color(&agent),
+                )
+                .size(IconSize::XSmall)
+                .background(background)
+                .into_any_element()
+            } else {
                 Icon::new(agent_ui::agent_icon(&agent))
                     .size(IconSize::XSmall)
-                    .color(Color::Custom(agent_ui::agent_color(&agent))),
-            )
+                    .color(Color::Custom(agent_ui::agent_color(&agent)))
+                    .into_any_element()
+            })
             .child(div().flex_1().min_w_0().child(
                 Label::new(label).size(LabelSize::Small).truncate().color(
                     if activity == AgentActivity::Gone {
@@ -235,7 +277,12 @@ impl BranchPanel {
     /// `None` when none is running: a finished one is gone from here rather
     /// than left behind as history, and a session with no tab open has no
     /// running subagents to show.
-    fn render_subagents(&self, entry: &AgentEntry, cx: &App) -> Option<AnyElement> {
+    fn render_subagents(
+        &self,
+        entry: &AgentEntry,
+        background: Hsla,
+        cx: &App,
+    ) -> Option<AnyElement> {
         let running = entry.running_subagents(cx);
         if running.is_empty() {
             return None;
@@ -245,7 +292,11 @@ impl BranchPanel {
                 .w_full()
                 .pl_3()
                 .gap_0p5()
-                .children(running.iter().map(render_subagent))
+                .children(
+                    running
+                        .iter()
+                        .map(|subagent| render_subagent(subagent, entry.agent(), background)),
+                )
                 .into_any_element(),
         )
     }

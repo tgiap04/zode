@@ -61,7 +61,7 @@ Open Zode.
 From the menu bar, choose File > Open Folder, or launch from the terminal:
 
 ```bash
-zed path/to/your/project
+zode path/to/your/project
 ```
 
 Zode will recognize `.py` files automatically using its native tree-sitter-python parser, with no plugins or manual setup required.

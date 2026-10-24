@@ -397,21 +397,23 @@ impl ThemeSettings {
         f32::max(self.buffer_line_height.value(), MIN_LINE_HEIGHT)
     }
 
-    /// Applies the theme overrides, if there are any, to the current theme.
-    pub fn apply_theme_overrides(&self, mut arc_theme: Arc<Theme>) -> Arc<Theme> {
+    /// Applies Zode's brand colours, then the user's theme overrides, to `arc_theme`.
+    ///
+    /// The brand goes first so that `experimental.theme_overrides` and
+    /// `theme_overrides` can still take any brand token back.
+    pub fn apply_theme_overrides(&self, arc_theme: Arc<Theme>) -> Arc<Theme> {
+        let mut theme = (*arc_theme).clone();
+        theme::apply_brand_colors(&mut theme);
+
         if let Some(experimental_theme_overrides) = &self.experimental_theme_overrides {
-            let mut theme = (*arc_theme).clone();
             ThemeSettings::modify_theme(&mut theme, experimental_theme_overrides);
-            arc_theme = Arc::new(theme);
         }
 
-        if let Some(theme_overrides) = self.theme_overrides.get(arc_theme.name.as_ref()) {
-            let mut theme = (*arc_theme).clone();
+        if let Some(theme_overrides) = self.theme_overrides.get(theme.name.as_ref()) {
             ThemeSettings::modify_theme(&mut theme, theme_overrides);
-            arc_theme = Arc::new(theme);
         }
 
-        arc_theme
+        Arc::new(theme)
     }
 
     fn modify_theme(base_theme: &mut Theme, theme_overrides: &settings::ThemeStyleContent) {

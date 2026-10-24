@@ -73,6 +73,7 @@ impl BranchPanel {
                 _session_names_subscription: None,
                 session_reload: None,
                 _agent_tab_names: Vec::new(),
+                agent_tabs: Self::seed_agent_tabs(workspace, cx),
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,

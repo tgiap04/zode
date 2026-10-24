@@ -7,6 +7,8 @@ description: "This guide covers how to uninstall Zode on different operating sys
 
 This guide covers how to uninstall Zode on different operating systems.
 
+> **Warning:** Do not run `--uninstall` from a leftover Zode 0.1.5 binary, such as `zed --uninstall`, `~/.local/bin/zed --uninstall` or `/usr/local/bin/zed --uninstall`. Zode 0.1.5 embeds the old uninstall script, which deletes `~/.local/share/zed`, `~/.config/zed` and `~/.zed_server`, and on macOS also `~/Library/Application Support/Zed` and `~/Library/Logs/Zed`. Those are the directories upstream Zed keeps its own data in. Remove Zode by hand with the steps below instead. The script that ships from 0.1.6 only touches Zode's own paths.
+
 ## macOS
 
 ### Standard Installation
@@ -17,20 +19,6 @@ If you installed Zode by downloading it from the website:
 2. Open Finder and go to your Applications folder
 3. Drag Zode to the Trash (or right-click and select "Move to Trash")
 4. Empty the Trash
-
-### Homebrew Installation
-
-If you installed Zode using Homebrew, use the following command:
-
-```sh
-brew uninstall --cask zed
-```
-
-Or for the preview version:
-
-```sh
-brew uninstall --cask zed@preview
-```
 
 ### Removing User Data (Optional)
 
@@ -47,6 +35,8 @@ To completely remove all Zode configuration files and data:
    - `~/.config/zode`
    - `~/.local/state/Zode`
 
+If you installed the CLI with `cli: install`, also remove `/usr/local/bin/zode`.
+
 ## Linux
 
 ### Standard Uninstall
@@ -54,21 +44,21 @@ To completely remove all Zode configuration files and data:
 If Zode was installed using the default installation script, run:
 
 ```sh
-zed --uninstall
+zode --uninstall
 ```
 
 You'll be prompted whether to keep or delete your preferences. After making a choice, you should see a message that Zode was successfully uninstalled.
 
-If the `zed` command is not found in your PATH, try:
+If the `zode` command is not found in your PATH, try:
 
 ```sh
-$HOME/.local/bin/zed --uninstall
+$HOME/.local/bin/zode --uninstall
 ```
 
 or:
 
 ```sh
-$HOME/.local/zed.app/bin/zed --uninstall
+$HOME/.local/zode.app/bin/zode --uninstall
 ```
 
 ### Package Manager
@@ -79,9 +69,11 @@ If you installed Zode using a package manager (such as Flatpak, Snap, or a distr
 
 If the uninstall command fails or Zode was installed to a custom location, you can manually remove:
 
-- Installation directory: `~/.local/zed.app` (or your custom installation path)
-- Binary symlink: `~/.local/bin/zed`
-- Configuration and data: `~/.config/zode`
+- Installation directory: `~/.local/zode.app` (or your custom installation path)
+- Binary symlink: `~/.local/bin/zode`
+- Configuration and data: `~/.config/zode`, `~/.local/share/zode`
+
+Paths named `zed` (`~/.local/zed.app`, `~/.local/bin/zed`, `/usr/local/bin/zed`) belong to Zed unless they point into a Zode bundle. A Zode 0.1.5 Linux install used `~/.local/zed.app` and `~/.local/bin/zed`; see [Upgrading from Zode 0.1.5](./linux.md#upgrading-from-zode-015) for how to tell the two apart. Only a Zode 0.1.5 on macOS created `/usr/local/bin/zed`; remove it only if `readlink /usr/local/bin/zed` points into a `Zode*.app` bundle.
 
 ## Windows
 

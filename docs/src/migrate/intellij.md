@@ -11,26 +11,16 @@ This guide covers how to set up Zode if you're coming from IntelliJ IDEA, includ
 
 Zode is available on macOS, Windows, and Linux.
 
-For macOS, you can download it from zed.dev/download, or install via Homebrew:
-
-```sh
-brew install --cask zed
-```
-
-For Windows, download the installer from zed.dev/download, or install via winget:
-
-```sh
-winget install Zed.Zed
-```
+For macOS and Windows, download the installer (`Zode-<arch>.dmg` or `Zode-<arch>.exe`) from the [releases page](https://github.com/tgiap04/zode/releases).
 
 For most Linux users, the easiest way to install Zode is through our installation script:
 
 ```sh
-curl -f https://zed.dev/install.sh | sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh
 ```
 
 After installation, you can launch Zode from your Applications folder (macOS), Start menu (Windows), or directly from the terminal using:
-`zed .`
+`zode .`
 This opens the current directory in Zode.
 
 ## Set Up the JetBrains Keymap
@@ -68,7 +58,7 @@ After setup, press `Cmd+Shift+O` (with JetBrains keymap) to open a folder. This 
 To start a new project, create a directory using your terminal or file manager, then open it in Zode. The editor will treat that folder as the root of your project.
 
 You can also launch Zode from the terminal inside any folder with:
-`zed .`
+`zode .`
 
 Once inside a project:
 

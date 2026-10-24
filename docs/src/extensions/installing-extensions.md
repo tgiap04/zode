@@ -12,7 +12,7 @@ Open the Extension Gallery with {#kb zed::Extensions}, or select "Zode > Extensi
 ## Installation Location
 
 - On macOS, extensions are installed in `~/Library/Application Support/Zode/extensions`.
-- On Linux, they are installed in either `$XDG_DATA_HOME/zed/extensions` or `~/.local/share/zed/extensions`.
+- On Linux, they are installed in either `$XDG_DATA_HOME/zode/extensions` or `~/.local/share/zode/extensions`.
 - On Windows, the directory is `%LOCALAPPDATA%\Zode\extensions`.
 
 This directory contains two subdirectories:
