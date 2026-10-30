@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Builds the remote server the app installs on a WSL or SSH host, as
+# `target/zed-remote-server-linux-<arch>.gz`.
+#
+# Statically linked against musl: the gnu `remote_server` in the Linux tarball
+# needs the glibc of the image it was built in, which older WSL distributions do
+# not have. Built for the runner's own architecture, so it can be run here to
+# check what it reports.
+#
+# The archive is the gzipped binary itself, not a tarball: the client gunzips
+# it straight into place and marks it executable.
+
+set -euo pipefail
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+target_dir="${CARGO_TARGET_DIR:-target}"
+
+# The same version `script/bundle-linux` builds the app with.
+version="$(script/get-crate-version zode)"
+export RELEASE_VERSION="${version}"
+
+host_line=$(rustc --version --verbose | grep '^host: ')
+host_triple=${host_line#host: }
+if [[ "${host_triple}" != *-unknown-linux-gnu ]]; then
+    echo "error: expected a Linux gnu host, got ${host_triple}" >&2
+    exit 1
+fi
+musl_triple=${host_triple%-gnu}-musl
+arch=${host_triple%%-*}
+
+if command -v rustup >/dev/null 2>&1; then
+    rustup target add "${musl_triple}"
+fi
+
+export CC=${CC:-$(command -v clang)}
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
+
+# A build of its own, never alongside the app's packages: feature unification
+# with them would decide which libraries the server links.
+cargo build --release --target "${musl_triple}" --package remote_server
+
+binary="${target_dir}/${musl_triple}/release/remote_server"
+llvm-objcopy --strip-debug "${binary}"
+
+# A program interpreter means a dynamic loader, which is exactly the dependency
+# on the host's libc this build exists to avoid. Captured rather than piped into
+# `grep -q`: under pipefail, grep exiting at the first match can kill the reader
+# with SIGPIPE and turn a match into a failed condition.
+program_headers=$(llvm-readelf --program-headers "${binary}")
+if [[ "${program_headers}" == *INTERP* ]]; then
+    echo "error: ${binary} is dynamically linked" >&2
+    exit 1
+fi
+
+# The client installs the server under the app's version; a server that reports
+# something else is one the next connection cannot recognise.
+reported=$("${binary}" version)
+if [[ "${channel}" == "stable" || "${channel}" == "preview" ]] && [[ "${reported}" != "${version}" ]]; then
+    echo "error: remote_server reports ${reported}, expected ${version} on ${channel}" >&2
+    exit 1
+fi
+echo "remote_server ${musl_triple} on ${channel} reports ${reported}"
+
+archive="${target_dir}/zed-remote-server-linux-${arch}.gz"
+gzip -9 --stdout "${binary}" > "${archive}"
+echo "wrote ${archive}"
