@@ -11,7 +11,71 @@
 
 use serde::Deserialize;
 
-use crate::resource::{Resource, ResourceKind, RunState};
+use std::collections::HashMap;
+
+use crate::resource::{ComposeLabels, Resource, ResourceKind, RunState};
+
+const COMPOSE_PROJECT: &str = "com.docker.compose.project";
+const COMPOSE_SERVICE: &str = "com.docker.compose.service";
+const COMPOSE_WORKING_DIR: &str = "com.docker.compose.project.working_dir";
+
+/// `Labels` as the engines print it: Docker joins `key=value` pairs with commas
+/// into one string, Podman may print an object. Either, or null, must read.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum Labels {
+    Joined(String),
+    Map(HashMap<String, String>),
+    #[default]
+    Absent,
+}
+
+impl Labels {
+    fn compose(self) -> Option<ComposeLabels> {
+        let mut pairs = match self {
+            Labels::Map(map) => map,
+            Labels::Joined(text) => split_joined_labels(&text),
+            Labels::Absent => return None,
+        };
+        let working_dir = pairs
+            .remove(COMPOSE_WORKING_DIR)
+            .filter(|dir| !dir.is_empty());
+        let project = pairs.remove(COMPOSE_PROJECT);
+        let service = pairs.remove(COMPOSE_SERVICE);
+        if working_dir.is_none() && project.is_none() && service.is_none() {
+            return None;
+        }
+        Some(ComposeLabels {
+            project: project.unwrap_or_default(),
+            service: service.unwrap_or_default(),
+            working_dir,
+        })
+    }
+}
+
+/// Splits Docker's `a=b,c=d` label string.
+///
+/// Only the first `=` of a piece divides key from value, so a value may hold
+/// `=`. A value may also hold commas, and the one signal that a comma is not a
+/// separator is what follows it: Docker joins with a bare `,`, so a piece that
+/// has no `=` or that starts with whitespace is the rest of the previous value
+/// (`/srv/a, x=y` is one directory, not a directory and a label).
+fn split_joined_labels(text: &str) -> HashMap<String, String> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for piece in text.split(',') {
+        let starts_a_label = !piece.starts_with(char::is_whitespace);
+        match piece.split_once('=').filter(|_| starts_a_label) {
+            Some((key, value)) => pairs.push((key.to_string(), value.to_string())),
+            None => {
+                if let Some((_, value)) = pairs.last_mut() {
+                    value.push(',');
+                    value.push_str(piece);
+                }
+            }
+        }
+    }
+    pairs.into_iter().collect()
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -33,6 +97,8 @@ pub(crate) struct DockerContainer {
     pub(crate) status: String,
     #[serde(default)]
     pub(crate) ports: String,
+    #[serde(default)]
+    pub(crate) labels: Labels,
 }
 
 impl DockerContainer {
@@ -67,6 +133,7 @@ impl DockerContainer {
             state,
             detail,
             parent: None,
+            compose: self.labels.compose(),
         }
     }
 }

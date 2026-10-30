@@ -1,9 +1,12 @@
 use gpui::{
-    App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Window,
+    App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, WeakEntity,
+    Window,
 };
 use ui::{Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
 use ui_input::InputField;
-use workspace::ModalView;
+use workspace::{ModalView, Workspace};
+
+use crate::vault_modal::VaultModal;
 use zode_env_sync::{EntryId, EnvSession, WireBytes};
 
 /// Everything that is about to leave this machine, shown before it does.
@@ -27,6 +30,9 @@ pub struct WirePanel {
     /// The name being typed, and whether that row is open.
     name_input: Entity<InputField>,
     renaming: bool,
+    /// Set when this window replaced the vault's list, so leaving it brings
+    /// the list back: someone adding files there is usually adding several.
+    return_to_vault: Option<WeakEntity<Workspace>>,
 }
 
 impl EventEmitter<DismissEvent> for WirePanel {}
@@ -55,7 +61,33 @@ impl WirePanel {
             focus_handle: cx.focus_handle(),
             name_input,
             renaming: false,
+            return_to_vault: None,
         }
+    }
+
+    pub fn returning_to_vault(mut self, workspace: WeakEntity<Workspace>) -> Self {
+        self.return_to_vault = Some(workspace);
+        self
+    }
+
+    /// Dismisses this window, and puts the vault's list back when it was the
+    /// window this one replaced.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+        let Some(workspace) = self.return_to_vault.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        let session = self.session.clone();
+        workspace.update(cx, |_workspace, cx| {
+            // Deferred because `toggle_modal` would otherwise close the window
+            // it just opened: this one is still being torn down.
+            cx.defer_in(window, move |workspace, window, cx| {
+                let handle = workspace.weak_handle();
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    VaultModal::new(session, handle, window, cx)
+                });
+            });
+        });
     }
 
     /// What the catalogue calls this file.
@@ -124,7 +156,7 @@ impl Render for WirePanel {
             // Escape discards. Enter is deliberately not bound to Send: this
             // window exists to be read, and a keystroke that skips the reading
             // would remove the only thing it is for.
-            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
                 // The open name row first, the window second.
                 if this.renaming {
                     this.renaming = false;
@@ -133,7 +165,7 @@ impl Render for WirePanel {
                 }
                 this.session
                     .update(cx, |session, cx| session.discard_prepared(cx));
-                cx.emit(DismissEvent);
+                this.close(window, cx);
             }))
             .on_action(cx.listener(|this, _: &menu::Confirm, _window, cx| {
                 if this.renaming {
@@ -236,21 +268,21 @@ impl Render for WirePanel {
                                     .gap_1()
                                     .child(
                                         Button::new("env-wire-cancel", "Do Not Send")
-                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                            .on_click(cx.listener(|this, _, window, cx| {
                                                 this.session.update(cx, |session, cx| {
                                                     session.discard_prepared(cx)
                                                 });
-                                                cx.emit(DismissEvent);
+                                                this.close(window, cx);
                                             })),
                                     )
                                     .child(
                                         Button::new("env-wire-send", "Send")
                                             .style(ButtonStyle::Filled)
-                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                            .on_click(cx.listener(|this, _, window, cx| {
                                                 this.session.update(cx, |session, cx| {
                                                     session.send_prepared(cx)
                                                 });
-                                                cx.emit(DismissEvent);
+                                                this.close(window, cx);
                                             })),
                                     ),
                             ),
@@ -324,6 +356,61 @@ mod tests {
             session.set_manifest_for_test(manifest, cx)
         });
         session
+    }
+
+    /// Leaves a wire panel opened in a real workspace, and reports which
+    /// modal is up afterwards.
+    async fn modal_after_leaving(return_to_vault: bool, cx: &mut TestAppContext) -> (bool, bool) {
+        init_theme(cx);
+        let session = session_holding(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [], cx).await;
+        let (multi, cx) = cx
+            .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi.read_with(cx, |multi, _| multi.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let handle = workspace.weak_handle();
+            workspace.toggle_modal(window, cx, |window, cx| {
+                let panel = WirePanel::new(session, wire(), entry(), window, cx);
+                if return_to_vault {
+                    panel.returning_to_vault(handle)
+                } else {
+                    panel
+                }
+            });
+        });
+        cx.run_until_parked();
+        let panel = workspace
+            .read_with(cx, |workspace, cx| workspace.active_modal::<WirePanel>(cx))
+            .expect("the panel must be open");
+
+        panel.update_in(cx, |panel, window, cx| panel.close(window, cx));
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            (
+                workspace.active_modal::<WirePanel>(cx).is_some(),
+                workspace.active_modal::<VaultModal>(cx).is_some(),
+            )
+        })
+    }
+
+    /// Someone adding files from the vault's list is usually adding several,
+    /// so sending one must bring the list back rather than leave nothing open.
+    #[gpui::test]
+    async fn leaving_a_panel_opened_from_the_vault_brings_the_list_back(cx: &mut TestAppContext) {
+        let (wire_open, vault_open) = modal_after_leaving(true, cx).await;
+        assert!(!wire_open, "the panel itself must close");
+        assert!(vault_open, "the vault's list must be back on screen");
+    }
+
+    /// Opened from anywhere else, there is no list to go back to.
+    #[gpui::test]
+    async fn leaving_a_panel_opened_elsewhere_opens_nothing(cx: &mut TestAppContext) {
+        let (wire_open, vault_open) = modal_after_leaving(false, cx).await;
+        assert!(!wire_open, "the panel itself must close");
+        assert!(!vault_open, "nothing asked for the vault");
     }
 
     #[gpui::test]

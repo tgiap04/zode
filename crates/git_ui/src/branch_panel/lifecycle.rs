@@ -73,7 +73,7 @@ impl BranchPanel {
                 _session_names_subscription: None,
                 session_reload: None,
                 _agent_tab_names: Vec::new(),
-                agent_tabs: Self::seed_agent_tabs(workspace, cx),
+                agent_tabs: Self::seed_agent_tabs(cx),
                 row_kinds: Vec::new(),
                 is_active: false,
                 stale: true,
@@ -99,6 +99,7 @@ impl BranchPanel {
             // Registering a subscription does not read the entity, so this is
             // safe where a `read` inside this closure would panic.
             subscriptions.push(Self::observe_agent_tabs(cx, &workspace_entity));
+            subscriptions.push(Self::observe_all_agent_tabs(cx));
             panel._subscriptions = subscriptions;
             panel
         })
@@ -463,20 +464,12 @@ impl BranchPanel {
     /// marking the tree stale here would re-read every repository to change one
     /// string.
     ///
-    /// Refreshed from the workspace rather than from the rows: the rows are
+    /// Refreshed from the process-wide tab list rather than from the rows: the rows are
     /// what this keeps correct, so deriving the listeners from them would mean
     /// a tab whose row has not been built yet is the one tab nobody is
     /// listening to.
     pub(crate) fn track_agent_tab_names(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            self._agent_tab_names.clear();
-            return;
-        };
-        let views: Vec<_> = workspace
-            .read(cx)
-            .items_of_type::<agent_ui::AgentView>(cx)
-            .collect();
-        self._agent_tab_names = views
+        self._agent_tab_names = agent_ui::all_agent_tabs(cx)
             .into_iter()
             .map(|view| {
                 cx.subscribe(&view, |panel, _, event, cx| {

@@ -236,6 +236,7 @@ mod tests {
             state: RunState::Running,
             detail: vec![("Namespace", namespace.into()), ("Status", status.into())],
             parent: None,
+            compose: None,
         }
     }
 
@@ -274,6 +275,7 @@ mod tests {
             state,
             detail: vec![("Image", "nginx:latest".into()), ("Status", status.into())],
             parent: None,
+            compose: None,
         }
     }
 

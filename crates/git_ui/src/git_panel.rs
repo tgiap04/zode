@@ -30,8 +30,8 @@ use git::stash::GitStash;
 use git::status::{DiffStat, StageStatus};
 use git::{Amend, Signoff, ToggleStaged, repository::RepoPath, status::FileStatus};
 use git::{
-    ExpandCommitEditor, GitHostingProviderRegistry, RestoreTrackedFiles, StageAll, StashAll,
-    StashApply, StashPop, TrashUntrackedFiles, UnstageAll,
+    DiscardAllChanges, ExpandCommitEditor, GitHostingProviderRegistry, RestoreTrackedFiles,
+    StageAll, StashAll, StashApply, StashPop, TrashUntrackedFiles, UnstageAll,
 };
 use gpui::{
     Action, Anchor, AsyncWindowContext, Bounds, ClickEvent, DismissEvent, Entity, EventEmitter,
@@ -159,6 +159,7 @@ struct GitMenuState {
     has_staged_changes: bool,
     has_unstaged_changes: bool,
     has_new_changes: bool,
+    has_discardable_changes: bool,
     sort_by_path: bool,
     has_stash_items: bool,
     tree_view: bool,
@@ -211,6 +212,11 @@ fn git_panel_context_menu(
                 !state.has_new_changes,
                 "Trash Untracked Files",
                 TrashUntrackedFiles.boxed_clone(),
+            )
+            .action_disabled_when(
+                !state.has_discardable_changes,
+                "Discard All Changes…",
+                DiscardAllChanges.boxed_clone(),
             )
             .separator()
             .entry(
@@ -2008,10 +2014,9 @@ impl GitPanel {
     }
 
     fn clean_all(&mut self, _: &TrashUntrackedFiles, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        let Some(active_repo) = self.active_repository.clone() else {
+        if self.active_repository.is_none() {
             return;
-        };
+        }
         let to_delete = self
             .entries
             .iter()
@@ -2049,8 +2054,26 @@ impl GitPanel {
                 TrashCancel::Trash => {}
                 TrashCancel::Cancel => return Ok(()),
             }
+            this.update(cx, |this, cx| this.trash_entries(to_delete, cx))?
+                .await
+        })
+        .detach_and_prompt_err("Failed to trash files", window, cx, |e, _, _| {
+            Some(format!("{e}"))
+        });
+    }
+
+    fn trash_entries(
+        &mut self,
+        entries: Vec<GitStatusEntry>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let workspace = self.workspace.clone();
+        let Some(active_repo) = self.active_repository.clone() else {
+            return Task::ready(Ok(()));
+        };
+        cx.spawn(async move |this, cx| {
             let tasks = workspace.update(cx, |workspace, cx| {
-                to_delete
+                entries
                     .iter()
                     .filter_map(|entry| {
                         workspace.project().update(cx, |project, cx| {
@@ -2062,7 +2085,7 @@ impl GitPanel {
                     })
                     .collect::<Vec<_>>()
             })?;
-            let to_unstage = to_delete
+            let to_unstage = entries
                 .into_iter()
                 .filter(|entry| !entry.status.staging().is_fully_unstaged())
                 .collect();
@@ -2072,7 +2095,63 @@ impl GitPanel {
             }
             Ok(())
         })
-        .detach_and_prompt_err("Failed to trash files", window, cx, |e, _, _| {
+    }
+
+    fn discard_all_changes(
+        &mut self,
+        _: &DiscardAllChanges,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (to_trash, to_restore): (Vec<_>, Vec<_>) = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.status_entry().cloned())
+            .partition(|status_entry| status_entry.status.is_created());
+        let total = to_restore.len() + to_trash.len();
+        if total == 0 {
+            return;
+        }
+
+        let mut details = format!(
+            "{} will be restored and {} moved to the trash.\n\n",
+            to_restore.len(),
+            to_trash.len()
+        );
+        details.push_str(
+            &to_restore
+                .iter()
+                .chain(to_trash.iter())
+                .filter_map(|entry| entry.repo_path.as_ref().file_name())
+                .map(|filename| filename.to_string())
+                .take(5)
+                .join("\n"),
+        );
+        if total > 5 {
+            details.push_str(&format!("\nand {} more…", total - 5))
+        }
+
+        #[derive(strum::EnumIter, strum::VariantNames)]
+        #[strum(serialize_all = "title_case")]
+        enum DiscardCancel {
+            DiscardAllChanges,
+            Cancel,
+        }
+        let prompt = prompt("Discard all changes?", Some(&details), window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            match prompt.await? {
+                DiscardCancel::DiscardAllChanges => {}
+                DiscardCancel::Cancel => return Ok(()),
+            }
+            let trash = this.update_in(cx, |this, window, cx| {
+                if !to_restore.is_empty() {
+                    this.perform_checkout(to_restore, window, cx);
+                }
+                this.trash_entries(to_trash, cx)
+            })?;
+            trash.await
+        })
+        .detach_and_prompt_err("Failed to discard changes", window, cx, |e, _, _| {
             Some(format!("{e}"))
         });
     }
@@ -3816,6 +3895,11 @@ impl GitPanel {
             || self.conflicted_count > self.conflicted_staged_count
     }
 
+    /// Conflicted entries count: `discard_all_changes` restores them like `restore_tracked_files` does.
+    fn has_discardable_changes(&self) -> bool {
+        self.tracked_count + self.new_count + self.conflicted_count > 0
+    }
+
     fn has_tracked_changes(&self) -> bool {
         self.tracked_count > 0
     }
@@ -4078,6 +4162,7 @@ impl GitPanel {
                 .context(self.focus_handle.clone())
                 .action(stage_title, ToggleStaged.boxed_clone())
                 .action(restore_title, git::RestoreFile::default().boxed_clone())
+                .action("Discard All Changes…", DiscardAllChanges.boxed_clone())
                 .action_disabled_when(
                     !is_created,
                     "Add to .gitignore",
@@ -4106,6 +4191,7 @@ impl GitPanel {
                 has_staged_changes: self.has_staged_changes(),
                 has_unstaged_changes: self.has_unstaged_changes(),
                 has_new_changes: self.new_count > 0,
+                has_discardable_changes: self.has_discardable_changes(),
                 sort_by_path: GitPanelSettings::get_global(cx).sort_by_path,
                 has_stash_items: self.stash_entries.entries.len() > 0,
                 tree_view: GitPanelSettings::get_global(cx).tree_view,
@@ -4327,6 +4413,7 @@ impl Render for GitPanel {
                     .on_action(cx.listener(Self::revert_selected))
                     .on_action(cx.listener(Self::add_to_gitignore))
                     .on_action(cx.listener(Self::clean_all))
+                    .on_action(cx.listener(Self::discard_all_changes))
                     .on_action(cx.listener(Self::stash_all))
                     .on_action(cx.listener(Self::stash_pop))
             })

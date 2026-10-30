@@ -11,6 +11,7 @@ impl GitPanel {
         let has_staged_changes = self.has_staged_changes();
         let has_unstaged_changes = self.has_unstaged_changes();
         let has_new_changes = self.new_count > 0;
+        let has_discardable_changes = self.has_discardable_changes();
         let has_stash_items = self.stash_entries.entries.len() > 0;
         let can_uncommit = self.can_uncommit(cx);
         let show_branch_diff = self.show_branch_diff(cx);
@@ -29,6 +30,7 @@ impl GitPanel {
                         has_staged_changes,
                         has_unstaged_changes,
                         has_new_changes,
+                        has_discardable_changes,
                         sort_by_path: GitPanelSettings::get_global(cx).sort_by_path,
                         has_stash_items,
                         tree_view: GitPanelSettings::get_global(cx).tree_view,

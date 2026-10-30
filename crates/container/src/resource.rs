@@ -69,6 +69,32 @@ pub struct Resource {
     /// The resource this one sits under, if any -- a container inside a pod, a
     /// service inside a compose project.
     pub parent: Option<String>,
+    /// The compose labels the engine stamped on this container, if it has any.
+    pub compose: Option<ComposeLabels>,
+}
+
+/// What `docker compose` records on every container it creates.
+///
+/// Read from `com.docker.compose.*` labels and carried as data so the view can
+/// group containers by project and find the checkout they were built from.
+/// Podman's `podman-compose` writes the same labels, which is the only reason
+/// this is not Docker-specific.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComposeLabels {
+    pub project: String,
+    pub service: String,
+    /// The directory `docker compose up` was run from, on the machine that ran
+    /// it. `None` when the container carries compose labels but not this one.
+    pub working_dir: Option<String>,
+}
+
+impl ComposeLabels {
+    /// Whether `other` was brought up by the same compose project from the same
+    /// directory -- two projects of one name in different directories are not
+    /// the same checkout.
+    pub fn same_project(&self, other: &ComposeLabels) -> bool {
+        self.project == other.project && self.working_dir == other.working_dir
+    }
 }
 
 /// Something the panel can ask an engine to do, without losing anything.

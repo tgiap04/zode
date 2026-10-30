@@ -2853,3 +2853,164 @@ async fn the_left_dock_width_follows_the_branch_panel(cx: &mut TestAppContext) {
         "the left column must stay 360 wide after the swap handed it to the branch panel"
     );
 }
+
+struct DiscardAllFixture {
+    fs: Arc<FakeFs>,
+    panel: Entity<GitPanel>,
+}
+
+async fn init_discard_all_panel(
+    cx: &mut TestAppContext,
+    with_modified_file: bool,
+) -> (DiscardAllFixture, VisualTestContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".git": {},
+            "tracked.txt": "edited\n",
+            "new.txt": "brand new\n",
+        }),
+    )
+    .await;
+    let dot_git = path!("/project/.git");
+    fs.set_head_and_index_for_repo(dot_git.as_ref(), &[("tracked.txt", "committed\n".into())]);
+    if !with_modified_file {
+        fs.insert_file(path!("/project/tracked.txt"), b"committed\n".to_vec())
+            .await;
+    }
+
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let mut visual_cx = VisualTestContext::from_window(window_handle.into(), cx);
+    visual_cx.run_until_parked();
+    let panel = workspace.update_in(&mut visual_cx, GitPanel::new);
+    let handle = visual_cx.update_window_entity(&panel, |panel, _, _| {
+        std::mem::replace(&mut panel.update_visible_entries_task, Task::ready(()))
+    });
+    visual_cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    handle.await;
+    (DiscardAllFixture { fs, panel }, visual_cx)
+}
+
+fn dispatch_discard_all(fixture: &DiscardAllFixture, cx: &mut VisualTestContext) {
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.discard_all_changes(&DiscardAllChanges, window, cx);
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn test_discard_all_changes_confirmed_restores_tracked_and_trashes_untracked(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, mut cx) = init_discard_all_panel(cx, true).await;
+
+    dispatch_discard_all(&fixture, &mut cx);
+    assert!(
+        cx.has_pending_prompt(),
+        "discarding everything must ask first"
+    );
+    cx.simulate_prompt_answer("Discard All Changes");
+    cx.run_until_parked();
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    assert!(
+        !fixture.fs.is_file(path!("/project/new.txt").as_ref()).await,
+        "the untracked file must be trashed"
+    );
+    assert_eq!(
+        fixture
+            .fs
+            .load(path!("/project/tracked.txt").as_ref())
+            .await
+            .unwrap(),
+        "committed\n",
+        "the modified tracked file must have its HEAD content back"
+    );
+    fixture.panel.update(&mut cx, |panel, _| {
+        assert!(
+            panel
+                .entries
+                .iter()
+                .filter_map(|entry| entry.status_entry())
+                .next()
+                .is_none(),
+            "neither the restored nor the trashed file may stay in the status list"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_discard_all_changes_cancel_leaves_everything_untouched(cx: &mut TestAppContext) {
+    let (fixture, mut cx) = init_discard_all_panel(cx, true).await;
+
+    dispatch_discard_all(&fixture, &mut cx);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+
+    assert_eq!(
+        fixture
+            .fs
+            .load(path!("/project/tracked.txt").as_ref())
+            .await
+            .unwrap(),
+        "edited\n"
+    );
+    assert!(fixture.fs.is_file(path!("/project/new.txt").as_ref()).await);
+}
+
+#[gpui::test]
+async fn test_discard_all_changes_prompts_for_a_single_changed_file(cx: &mut TestAppContext) {
+    let (fixture, mut cx) = init_discard_all_panel(cx, false).await;
+
+    dispatch_discard_all(&fixture, &mut cx);
+    assert!(
+        cx.has_pending_prompt(),
+        "a lone untracked file is still destructive and must be confirmed"
+    );
+    assert!(
+        fixture.fs.is_file(path!("/project/new.txt").as_ref()).await,
+        "nothing may be deleted before the user answers"
+    );
+}
+
+#[gpui::test]
+async fn test_discard_all_changes_does_nothing_without_changes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/project"), json!({ ".git": {}, "a.txt": "a\n" }))
+        .await;
+    fs.set_head_and_index_for_repo(path!("/project/.git").as_ref(), &[("a.txt", "a\n".into())]);
+    let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(cx, GitPanel::new);
+    cx.run_until_parked();
+
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(!panel.has_discardable_changes());
+        panel.discard_all_changes(&DiscardAllChanges, window, cx);
+    });
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+}
+
+#[gpui::test]
+async fn test_discard_all_menu_gating_follows_the_changes(cx: &mut TestAppContext) {
+    let (fixture, mut cx) = init_discard_all_panel(cx, true).await;
+    fixture.panel.update(&mut cx, |panel, _| {
+        assert!(panel.has_discardable_changes());
+    });
+}

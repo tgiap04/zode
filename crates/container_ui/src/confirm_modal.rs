@@ -343,6 +343,7 @@ mod tests {
                 state: RunState::Stopped,
                 detail: Vec::new(),
                 parent: None,
+                compose: None,
             }],
         )
         .expect("one target")

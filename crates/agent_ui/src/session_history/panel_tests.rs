@@ -1171,7 +1171,18 @@ fn tab_running(
         )
     });
     view.update(cx, |view, cx| view.simulate_cli_alive(alive, cx));
+    repaint(cx);
     view
+}
+
+/// A tab opening or closing marks the panel dirty, and the frame that follows is
+/// only published to `debug_bounds` once the platform asks for one; resizing the
+/// window to the size it already has is how a test makes it ask.
+fn repaint(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    let size = cx.update(|window, _| window.viewport_size());
+    cx.simulate_resize(size);
+    cx.run_until_parked();
 }
 
 fn open_session(id: &str) -> SessionSummary {
@@ -1375,4 +1386,250 @@ async fn the_panel_learns_which_working_directories_are_gone_in_the_background(
             "a directory nobody has checked reads as present"
         );
     });
+}
+
+/// A tab for session `id` that lives in `workspace`, added to its active pane.
+fn tab_in_workspace(
+    id: Option<&str>,
+    workspace: &Entity<workspace::Workspace>,
+    cx: &mut VisualTestContext,
+) -> Entity<crate::AgentView> {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let project = workspace.project().clone();
+        let weak_workspace = workspace.weak_handle();
+        let intent = id.map_or(crate::agent_view::SessionIntent::Untracked, |id| {
+            crate::agent_view::SessionIntent::Tracked(id.to_string().into())
+        });
+        let view = cx.new(|cx| {
+            crate::AgentView::test_new(
+                project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                zed_actions::agent::AgentViewMode::Terminal,
+                project,
+                weak_workspace,
+                crate::SessionOrigin::new(intent, None),
+                cx,
+            )
+        });
+        workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+        view
+    })
+}
+
+fn active_item_of(
+    workspace: &Entity<workspace::Workspace>,
+    cx: &mut VisualTestContext,
+) -> Option<gpui::EntityId> {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_pane()
+            .read(cx)
+            .active_item()
+            .map(|item| item.item_id())
+    })
+}
+
+fn panel_workspace(
+    panel: &Entity<AgentHistoryPanel>,
+    cx: &mut VisualTestContext,
+) -> Entity<workspace::Workspace> {
+    panel.read_with(cx, |panel, _| {
+        panel
+            .workspace()
+            .upgrade()
+            .expect("the panel's workspace is open")
+    })
+}
+
+/// Row 0 is the agent header and row 1 the project header, so the first session
+/// is row 2.
+const FIRST_SESSION_ROW: &str = "agent-history-row:2";
+const FIRST_GO_TO_TAB: &str = "agent-history-go-to-tab:2";
+
+#[gpui::test]
+async fn a_session_with_a_tab_is_open_whether_or_not_its_cli_is_running(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![
+            open_session("running"),
+            open_session("exited"),
+            open_session("closed"),
+        ],
+        Vec::new(),
+        fs,
+        cx,
+    )
+    .await;
+    let _running = tab_running("running", true, &panel, &mut cx);
+    let _exited = tab_running("exited", false, &panel, &mut cx);
+
+    let open = cx.update(|_, cx| crate::agent_tabs::open_sessions(cx));
+    let claude = project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+    for (id, expected) in [("running", true), ("exited", true), ("closed", false)] {
+        assert_eq!(
+            open.contains(&(claude.clone(), gpui::SharedString::from(id))),
+            expected,
+            "{id}"
+        );
+    }
+}
+
+#[gpui::test]
+async fn a_row_turns_open_when_its_tab_opens_and_clears_when_it_closes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![open_session("one"), open_session("two")],
+        Vec::new(),
+        fs,
+        cx,
+    )
+    .await;
+    assert!(
+        cx.debug_bounds(FIRST_GO_TO_TAB).is_none(),
+        "no tab is open yet"
+    );
+
+    let workspace = panel_workspace(&panel, &mut cx);
+    // The newest session sorts first, and both are 300 seconds old, so look the
+    // row up by id rather than by position.
+    let open_id = panel.read_with(&cx, |panel, cx| panel.sessions(cx)[0].id.to_string());
+    let tab = tab_in_workspace(Some(&open_id), &workspace, &mut cx);
+    repaint(&mut cx);
+    assert!(
+        cx.debug_bounds(FIRST_GO_TO_TAB).is_some(),
+        "opening the tab must mark its row without anything else prompting a redraw"
+    );
+    assert!(
+        cx.debug_bounds("agent-history-go-to-tab:3").is_none(),
+        "and only that row"
+    );
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let pane = workspace.active_pane().clone();
+        pane.update(cx, |pane, cx| {
+            pane.close_item_by_id(tab.entity_id(), workspace::SaveIntent::Skip, window, cx)
+                .detach();
+        });
+    });
+    drop(tab);
+    // Dropped outside an update, so the release is only seen by the next one.
+    cx.update(|_, _| {});
+    repaint(&mut cx);
+    assert!(
+        cx.debug_bounds(FIRST_GO_TO_TAB).is_none(),
+        "closing the tab must clear the mark"
+    );
+}
+
+#[gpui::test]
+async fn go_to_tab_activates_the_tab_in_its_pane(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![open_session("one")], Vec::new(), fs, cx).await;
+    let workspace = panel_workspace(&panel, &mut cx);
+    let target = tab_in_workspace(Some("one"), &workspace, &mut cx);
+    let other = tab_in_workspace(None, &workspace, &mut cx);
+    cx.run_until_parked();
+    assert_eq!(active_item_of(&workspace, &mut cx), Some(other.entity_id()));
+
+    let button = cx
+        .debug_bounds(FIRST_GO_TO_TAB)
+        .expect("an open row offers Go to Tab");
+    cx.simulate_mouse_move(button.center(), None, gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(
+        active_item_of(&workspace, &mut cx),
+        Some(target.entity_id())
+    );
+    assert!(
+        panel.read_with(&cx, |panel, _| panel.expanded_rows.is_empty()),
+        "the click must not also toggle the row"
+    );
+    assert!(cx.debug_bounds(FIRST_SESSION_ROW).is_some());
+}
+
+#[gpui::test]
+async fn go_to_tab_reaches_a_tab_in_another_window(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    fs.insert_tree("/elsewhere", json!({ "b.txt": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![open_session("one")],
+        Vec::new(),
+        fs.clone(),
+        cx,
+    )
+    .await;
+
+    let other_project = Project::test(fs, ["/elsewhere".as_ref()], &mut cx).await;
+    let other_window =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(other_project.clone(), window, cx));
+    let other_workspace = other_window
+        .read_with(&cx, |multi, _| multi.workspace().clone())
+        .unwrap();
+    let mut other_cx = VisualTestContext::from_window(other_window.into(), &cx);
+    let target = tab_in_workspace(Some("one"), &other_workspace, &mut other_cx);
+    let neighbour = tab_in_workspace(None, &other_workspace, &mut other_cx);
+    cx.run_until_parked();
+    assert_eq!(
+        active_item_of(&other_workspace, &mut other_cx),
+        Some(neighbour.entity_id())
+    );
+
+    let button = cx
+        .debug_bounds(FIRST_GO_TO_TAB)
+        .expect("an open row offers Go to Tab, whichever window holds the tab");
+    cx.simulate_mouse_move(button.center(), None, gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    assert_eq!(
+        active_item_of(&other_workspace, &mut other_cx),
+        Some(target.entity_id())
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.active_window()),
+        Some(other_window.into()),
+        "the window holding the tab must come forward"
+    );
+    drop(panel);
+}
+
+#[gpui::test]
+async fn the_panel_is_notified_when_a_tab_opens_or_closes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![open_session("one")], Vec::new(), fs, cx).await;
+    let notifications = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _observation = cx.update(|_, cx| {
+        let notifications = notifications.clone();
+        cx.observe(&panel, move |_, _| {
+            notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+    let count = || notifications.load(std::sync::atomic::Ordering::SeqCst);
+
+    let tab = tab_running("one", false, &panel, &mut cx);
+    let after_open = count();
+    assert!(after_open > 0, "a tab opening must redraw the panel");
+
+    drop(tab);
+    cx.update(|_, _| {});
+    cx.run_until_parked();
+    assert!(count() > after_open, "a tab closing must redraw the panel");
 }

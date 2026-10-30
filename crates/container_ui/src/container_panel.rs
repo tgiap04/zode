@@ -196,6 +196,15 @@ pub struct ContainerPanel {
     /// in a child process running `logs -f`, and a detached build would keep
     /// producing one after the panel that asked is gone.
     pub(crate) logs_build: Option<Task<()>>,
+    /// Reading what the open container's checkout is on. Held so closing the
+    /// view drops the git commands still running for it.
+    pub(crate) checkout_probe: Option<Task<()>>,
+    /// Counting uncommitted changes before the switch confirmation opens.
+    pub(crate) confirmation_prep: Option<Task<()>>,
+    /// The switch itself: git, then the restarts.
+    pub(crate) switch_task: Option<Task<()>>,
+    /// What the running switch is doing; `None` when nothing is switching.
+    pub(crate) branch_switch: Option<crate::branch_switch::SwitchStage>,
     /// The workspace a terminal tab would open in.
     ///
     /// `None` for a floating window's panel: it is built in a different window's
@@ -287,6 +296,10 @@ impl ContainerPanel {
             next_action_id: 0,
             detail: None,
             logs_build: None,
+            checkout_probe: None,
+            confirmation_prep: None,
+            switch_task: None,
+            branch_switch: None,
             workspace: None,
             config_path: None,
             config_targets: Vec::new(),
@@ -331,7 +344,12 @@ impl ContainerPanel {
             .collect()
     }
 
-    fn mark_busy(&mut self, ids: impl IntoIterator<Item = String>, busy: Busy, token: usize) {
+    pub(crate) fn mark_busy(
+        &mut self,
+        ids: impl IntoIterator<Item = String>,
+        busy: Busy,
+        token: usize,
+    ) {
         for id in ids {
             let displaced = self.in_flight.remove(&id).map(Box::new);
             self.in_flight.insert(
@@ -349,7 +367,7 @@ impl ContainerPanel {
     /// Success leaves the row busy until the list is read again (see
     /// `InFlight`); failure clears it at once, because the list that follows may
     /// be the very thing that is failing and the row has nothing left to wait for.
-    fn finish_busy(&mut self, ids: &[String], token: usize, failed: bool) {
+    pub(crate) fn finish_busy(&mut self, ids: &[String], token: usize, failed: bool) {
         for id in ids {
             let Some(in_flight) = self.in_flight.remove(id) else {
                 continue;
@@ -743,10 +761,16 @@ impl ContainerPanel {
                 Err(error) => ListState::Failed(error),
             };
             this.update(cx, |this, cx| {
+                let ready = matches!(state, ListState::Ready(_));
                 if let ListState::Ready(resources) = &state {
                     this.refresh_detail(resources);
                 }
                 this.state = state;
+                if ready {
+                    // A branch deleted, or a checkout moved by hand, shows up
+                    // with the next read of the list.
+                    this.probe_checkout(cx);
+                }
                 this.reloading = false;
                 // The list is the engine's answer to what the finished commands
                 // did, so rows waiting on one are done being waited on.

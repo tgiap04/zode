@@ -1,9 +1,11 @@
-use gh_workflow::{Event, Expression, Push, Run, Step, Use, Workflow, ctx::Context};
+use gh_workflow::{
+    Container, Env, Event, Expression, Push, Run, Step, Use, Workflow, ctx::Context,
+};
 use indoc::formatdoc;
 
 use crate::tasks::workflows::{
     bump_patch_version::TAG_TOKEN,
-    run_bundling::{bundle_linux, bundle_mac, bundle_windows},
+    run_bundling::{bundle_linux, bundle_mac, bundle_windows, upload_artifact},
     run_tests,
     runners::{self, Arch, Platform, ReleaseChannel},
     steps::{self, FluentBuilder, NamedJob, dependant_job, named, release_job},
@@ -66,8 +68,12 @@ pub(crate) fn release() -> Workflow {
         windows_x86_64: bundle_windows(Arch::X86_64, channel, ungated),
     };
 
+    let remote_server_x86_64 = bundle_remote_server_linux(Arch::X86_64);
+    let remote_server_aarch64 = bundle_remote_server_linux(Arch::AARCH64);
+
     let mut upload_deps = vec![&create_draft_release];
     upload_deps.extend_from_slice(gate);
+    upload_deps.extend([&remote_server_x86_64, &remote_server_aarch64]);
     let upload_release_assets = upload_release_assets(&upload_deps, &bundle);
     let validate_release_assets = validate_release_assets(&[&upload_release_assets]);
 
@@ -88,6 +94,8 @@ pub(crate) fn release() -> Workflow {
             }
             workflow
         })
+        .add_job(remote_server_x86_64.name, remote_server_x86_64.job)
+        .add_job(remote_server_aarch64.name, remote_server_aarch64.job)
         .add_job(upload_release_assets.name, upload_release_assets.job)
         .add_job(validate_release_assets.name, validate_release_assets.job)
 }
@@ -125,6 +133,42 @@ impl ReleaseBundleJobs {
     }
 }
 
+/// Builds the statically linked remote server the app installs on a WSL or SSH host.
+///
+/// A job of its own rather than a step of `bundle_linux`: the musl target needs a
+/// second full target directory, which inside a bundle job roughly doubled its time and
+/// disk. Here it runs beside the bundles and, like them, ungated -- the upload is what
+/// waits for the gate. Musl and static because the gnu build links the glibc of the
+/// build image, which older WSL distributions do not have.
+///
+/// No secrets: nothing in the remote server reads the ones `bundle_envs` hands the app.
+fn bundle_remote_server_linux(arch: Arch) -> NamedJob {
+    NamedJob {
+        name: format!("bundle_remote_server_linux_{arch}"),
+        job: dependant_job(&[])
+            .timeout_minutes(steps::RELEASE_JOB_TIMEOUT_MINUTES)
+            .runs_on(arch.linux_bundler())
+            // The image `bundle_linux` uses, so `script/linux` runs where it is known to.
+            .container(Container::new("ubuntu:22.04"))
+            .envs(vars::release_profile_envs())
+            .add_env(Env::new("CC", "clang"))
+            .add_env(Env::new("CXX", "clang++"))
+            .add_env(Env::new("DEBIAN_FRONTEND", "noninteractive"))
+            .add_step(steps::bootstrap_container())
+            .add_step(steps::checkout_repo())
+            // `remote_server` compiles its channel in from `crates/zed/RELEASE_CHANNEL`,
+            // and a server built as dev reports a commit where the app expects a version.
+            .add_step(steps::script("script/determine-release-channel"))
+            .add_step(steps::free_disk_space(Platform::Linux))
+            .add_step(steps::setup_linux())
+            .add_step(steps::script("./script/bundle-remote-server-linux"))
+            .add_step(upload_artifact(&format!(
+                "target/{}",
+                assets::remote_server_linux(arch)
+            ))),
+    }
+}
+
 /// Guards against the failure mode where a bundle succeeds but its artifact filename does
 /// not match what the release expects. `assets::all()` is the single source of truth for
 /// both this check and `prep_release_artifacts`.
@@ -135,7 +179,8 @@ impl ReleaseBundleJobs {
 /// published manifest and counts its entries before the job can succeed.
 fn validate_release_assets(deps: &[&NamedJob]) -> NamedJob {
     let expected_assets: Vec<String> = assets::all()
-        .iter()
+        .into_iter()
+        .chain(assets::remote_server_release_assets())
         .map(|asset| format!("\"{asset}\""))
         .collect();
     let expected_assets_json = format!("[{}]", expected_assets.join(", "));
@@ -220,7 +265,8 @@ pub(crate) fn prep_release_artifacts() -> Step<Run> {
 
 /// The `release.yml`-only split of `prep_release_artifacts` above: the six app assets go
 /// into `release-artifacts/`, exactly as before, but the driver archives land in their own
-/// `driver-artifacts/` directory instead.
+/// `driver-artifacts/` directory instead. The remote server archives go to
+/// `release-artifacts/` too; only this workflow builds them.
 ///
 /// They must never be reachable through `release-artifacts/*`, because that is exactly the
 /// glob `gh release upload` uses -- a driver archive left in that directory would still
@@ -237,7 +283,21 @@ pub(crate) fn prep_upload_release_and_driver_artifacts() -> Step<Run> {
         script_lines.push(format!("mv ./artifacts/{artifact}/* driver-artifacts/"));
     }
 
+    for arch in [Arch::X86_64, Arch::AARCH64] {
+        let asset = assets::remote_server_linux(arch);
+        script_lines.push(format!(
+            "mv ./artifacts/{asset}/{asset} release-artifacts/{asset}"
+        ));
+    }
+
     named::bash!(&script_lines.join("\n"))
+}
+
+/// Writes the manifest the app reads before it downloads a remote server, from the
+/// archives already in `release-artifacts/` -- the bytes `gh release upload` publishes
+/// next, so the checksums describe exactly what the app will download.
+fn build_remote_server_manifest() -> Step<Run> {
+    named::bash!("script/build-remote-server-manifest release-artifacts \"${GITHUB_REF_NAME#v}\"")
 }
 
 /// Writes the manifest the app reads to find its drivers.
@@ -325,6 +385,7 @@ fn upload_release_assets(deps: &[&NamedJob], bundle: &ReleaseBundleJobs) -> Name
             .add_step(steps::script("ls -lR ./artifacts"))
             .add_step(prep_upload_release_and_driver_artifacts())
             .add_step(build_driver_manifest())
+            .add_step(build_remote_server_manifest())
             // `--clobber`: a run that fails after this step -- in the publish, say --
             // leaves the installers attached, and without it the re-run fails here on the
             // assets that are already there, before it ever reaches the step that failed.
@@ -966,6 +1027,153 @@ mod tests {
                 .is_some_and(|version| version.contains("steps.sync.outputs.version")),
             "the commit message does not read the version the script reported: {:?}",
             push["env"]
+        );
+    }
+
+    const REMOTE_SERVER_JOBS: [&str; 2] = [
+        "bundle_remote_server_linux_x86_64",
+        "bundle_remote_server_linux_aarch64",
+    ];
+
+    /// The remote server archives reach the release through the same upload as the
+    /// installers, so that upload has to wait for the jobs that build them -- otherwise
+    /// it runs, finds nothing to move, and the release ships without a remote server.
+    #[test]
+    fn the_upload_waits_for_both_remote_server_builds() {
+        let jobs = jobs_of(release());
+        let waits_for = needs_of(&jobs, "upload_release_assets");
+        for job in REMOTE_SERVER_JOBS {
+            assert!(
+                waits_for.contains(&job.to_owned()),
+                "upload_release_assets does not wait for {job}: {waits_for:?}"
+            );
+        }
+    }
+
+    /// Built beside the bundles, like them ungated: the upload is what waits for the
+    /// gate. A remote server job that waited on a bundle would put an hour-long build
+    /// back on the critical path for a binary that takes a fraction of that.
+    #[test]
+    fn the_remote_server_builds_start_at_once_and_upload_their_archive() {
+        let jobs = jobs_of(release());
+        for (job, arch) in REMOTE_SERVER_JOBS
+            .into_iter()
+            .zip([Arch::X86_64, Arch::AARCH64])
+        {
+            assert!(!jobs[job].is_null(), "release has no {job} job");
+            assert!(
+                needs_of(&jobs, job).is_empty(),
+                "{job} waits on {:?}",
+                needs_of(&jobs, job)
+            );
+            assert!(jobs[job]["if"].is_null(), "{job} carries a condition");
+            let steps = jobs[job]["steps"].as_sequence().expect("the job has steps");
+            assert!(
+                steps.iter().any(|step| step["run"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("script/determine-release-channel"))),
+                "{job} builds the checked-in channel instead of the tag's"
+            );
+            assert!(
+                steps.iter().any(|step| step["run"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("script/bundle-remote-server-linux"))),
+                "{job} never runs script/bundle-remote-server-linux"
+            );
+            let name = assets::remote_server_linux(arch);
+            let upload = steps
+                .iter()
+                .find(|step| step["with"]["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{job} does not upload {name}"));
+            assert_eq!(
+                upload["with"]["if-no-files-found"].as_str(),
+                Some("error"),
+                "a missing archive must fail {job}, not upload nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn the_release_is_validated_for_the_remote_server_and_its_manifest() {
+        let jobs = jobs_of(release());
+        let validation_script = jobs["validate_release_assets"]["steps"][0]["run"]
+            .as_str()
+            .expect("validate_release_assets has a run step");
+        for name in [
+            "zed-remote-server-linux-x86_64.gz",
+            "zed-remote-server-linux-aarch64.gz",
+            "remote-server-manifest.json",
+        ] {
+            assert!(
+                validation_script.contains(&format!("\"{name}\"")),
+                "validate_release_assets does not expect {name}: {validation_script}"
+            );
+        }
+    }
+
+    /// The manifest has to be written from `release-artifacts/` before `gh release
+    /// upload` globs that directory, or the release carries archives the app cannot
+    /// verify and therefore refuses.
+    #[test]
+    fn the_remote_server_manifest_is_built_before_the_release_upload() {
+        let jobs = jobs_of(release());
+        let steps = jobs["upload_release_assets"]["steps"]
+            .as_sequence()
+            .expect("upload_release_assets has steps");
+        let position = |needle: &str| {
+            steps
+                .iter()
+                .position(|step| step["run"].as_str().is_some_and(|run| run.contains(needle)))
+                .unwrap_or_else(|| panic!("no step runs {needle}"))
+        };
+        let moved = position(&format!(
+            "release-artifacts/{}",
+            assets::REMOTE_SERVER_LINUX_AARCH64
+        ));
+        let manifest = position("script/build-remote-server-manifest release-artifacts");
+        let upload = position("gh release upload");
+        assert!(
+            moved < manifest && manifest < upload,
+            "expected move ({moved}) < manifest ({manifest}) < upload ({upload})"
+        );
+    }
+
+    /// The remote server is compiled from the whole dependency tree, so its jobs run
+    /// every build script in it. None of them may hold a secret, not even the ones the
+    /// app bundles carry.
+    #[test]
+    fn the_remote_server_builds_hold_no_secret() {
+        let workflow = release().to_string().expect("workflow serialises to YAML");
+        let parsed: Value = serde_yaml::from_str(&workflow).expect("generated YAML parses");
+        for job in REMOTE_SERVER_JOBS {
+            let text = serde_yaml::to_string(&parsed["jobs"][job]).expect("job serialises");
+            assert!(!parsed["jobs"][job].is_null(), "release has no {job} job");
+            assert!(
+                !text.contains("secrets."),
+                "{job} is handed a secret:\n{text}"
+            );
+            assert!(
+                parsed["jobs"][job]["permissions"].is_null(),
+                "{job} asks for permissions it has no use for"
+            );
+        }
+    }
+
+    /// The client asks for `zed-remote-server-{os}-{arch}.gz`, with the arch spelled as
+    /// Rust spells it. These must agree byte for byte with the names the jobs upload.
+    #[test]
+    fn the_remote_server_asset_names_are_the_ones_the_client_asks_for() {
+        for arch in [Arch::X86_64, Arch::AARCH64] {
+            assert_eq!(
+                assets::remote_server_linux(arch),
+                format!("zed-remote-server-linux-{arch}.gz")
+            );
+        }
+        assert!(
+            assets::all()
+                .iter()
+                .all(|asset| !assets::remote_server_release_assets().contains(asset)),
+            "the remote server leaked into the list the nightly and the bundles share"
         );
     }
 

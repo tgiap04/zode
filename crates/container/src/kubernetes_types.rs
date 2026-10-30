@@ -132,6 +132,7 @@ impl Pod {
             state,
             detail,
             parent: controller,
+            compose: None,
         }
     }
 }

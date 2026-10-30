@@ -120,6 +120,9 @@ impl AgentHistoryPanel {
             // about to replace.
             // A session renamed in a tab is listed under that name here.
             cx.observe(&names, |_, _, cx| cx.notify()),
+            // A row says whether a tab has its session open, so a tab opening
+            // or closing redraws the list.
+            crate::agent_tabs::observe_tabs(cx, |_, cx| cx.notify()),
             cx.observe(&store, |this, store, cx| {
                 if !store.read(cx).is_scanning() {
                     this.loading = false;

@@ -79,6 +79,7 @@ impl DockerImage {
             state: RunState::Unknown,
             detail,
             parent: None,
+            compose: None,
         }
     }
 }
@@ -110,6 +111,7 @@ impl DockerVolume {
             state: RunState::Unknown,
             detail,
             parent: None,
+            compose: None,
         }
     }
 }
@@ -142,6 +144,7 @@ impl DockerNetwork {
             state: RunState::Unknown,
             detail,
             parent: None,
+            compose: None,
         }
     }
 }
@@ -188,6 +191,7 @@ impl ComposeProject {
             state,
             detail,
             parent: None,
+            compose: None,
         }
     }
 }

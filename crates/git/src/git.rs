@@ -69,6 +69,8 @@ actions!(
         RestoreTrackedFiles,
         /// Moves all untracked files to trash.
         TrashUntrackedFiles,
+        /// Restores every tracked file and moves every untracked file to the trash, after one confirmation.
+        DiscardAllChanges,
         /// Undoes the last commit, keeping changes in the working directory.
         Uncommit,
         /// Pushes commits to the remote repository.
