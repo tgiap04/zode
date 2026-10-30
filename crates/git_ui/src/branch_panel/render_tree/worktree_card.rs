@@ -152,7 +152,7 @@ impl BranchPanel {
                             .color(Color::Disabled)
                             .truncate(),
                     )
-                    .children(self.render_agents(ix, agents, expanded, toggle_key, cx))
+                    .children(self.render_agents(ix, agents, expanded, toggle_key, background, cx))
                     .when(!self.menu_is_open(), |this| {
                         this.tooltip(move |_, cx| Tooltip::simple(tooltip.clone(), cx))
                     })

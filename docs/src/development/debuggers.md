@@ -96,7 +96,7 @@ rust-lldb -p <pid>
 
 To find the PID, use your system's process tools, such as Task Manager on Windows or Activity Monitor on macOS.
 
-You can also run `ps aux | grep zed` on macOS and Linux, or `Get-Process | Select-Object Id, ProcessName` in PowerShell on Windows.
+You can also run `ps aux | grep -i zode` on macOS and Linux, or `Get-Process | Select-Object Id, ProcessName` in PowerShell on Windows.
 
 #### Debugging Panics and Crashes
 

@@ -22,7 +22,7 @@ To reopen the welcome page, close all items in the center pane or use the comman
 Open a folder from the command line:
 
 ```sh
-zed ~/projects/my-app
+zode ~/projects/my-app
 ```
 
 Or use `Cmd+O` (macOS) / `Ctrl+O` (Linux/Windows) to open a folder from within Zode.

@@ -31,7 +31,7 @@ Your user settings apply globally across all projects. Open the file with {#kb z
 The file is located at:
 
 - macOS: `~/.config/zode/settings.json`
-- Linux: `~/.config/zode/settings.json` (or `$XDG_CONFIG_HOME/zed/settings.json`)
+- Linux: `~/.config/zode/settings.json` (or `$XDG_CONFIG_HOME/zode/settings.json`)
 - Windows: `%APPDATA%\Zode\settings.json`
 
 The syntax is JSON with support for `//` comments.

@@ -18,7 +18,6 @@ use std::{
         self,
         consts::{ARCH, OS},
     },
-    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -784,7 +783,7 @@ impl AutoUpdater {
         let filename = match OS {
             "macos" => anyhow::Ok("Zed.dmg"),
             "linux" => Ok("zed.tar.gz"),
-            "windows" => Ok("Zed.exe"),
+            "windows" => Ok("Zode.exe"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -943,7 +942,27 @@ async fn install_release_linux(
     let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
     let running_app_path = cx.update(|cx| cx.app_path())?;
 
-    let extracted = temp_dir.path().join("zed");
+    install_linux_tarball(
+        temp_dir.path(),
+        downloaded_tar_gz,
+        channel,
+        &running_app_path,
+        &home_dir,
+    )
+    .await
+    .map(Some)
+}
+
+/// Extracts the release tarball under `work_dir` and rsyncs its app folder over the running
+/// install's prefix, or into `<home_dir>/.local` when the running binary is not inside one.
+async fn install_linux_tarball(
+    work_dir: &Path,
+    downloaded_tar_gz: &Path,
+    channel: &str,
+    running_app_path: &Path,
+    home_dir: &Path,
+) -> Result<PathBuf> {
+    let extracted = work_dir.join("zode");
     fs::create_dir_all(&extracted)
         .await
         .context("failed to create directory into which to extract update")?;
@@ -971,7 +990,7 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("zed{}.app", suffix);
+    let app_folder_name = format!("zode{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
     anyhow::ensure!(
@@ -984,7 +1003,7 @@ async fn install_release_linux(
     );
     let mut to = home_dir.join(".local");
 
-    let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
+    let expected_suffix = format!("{}/libexec/zode-editor", app_folder_name);
 
     if let Some(prefix) = running_app_path
         .to_str()
@@ -1002,13 +1021,13 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
+        "failed to copy Zode update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)
     );
 
-    Ok(Some(to.join(expected_suffix)))
+    Ok(to.join(expected_suffix))
 }
 
 /// The one `.app` bundle directly inside `dir`, when there is exactly one.
@@ -1029,6 +1048,48 @@ async fn sole_app_bundle(dir: &Path) -> Option<PathBuf> {
         }
     }
     found
+}
+
+/// Copies the contents of `source_bundle` over the bundle at `running_app_path`, so the
+/// running app keeps its own name whichever bundle is the source.
+async fn copy_app_bundle_over_running_app(
+    source_bundle: &Path,
+    running_app_path: &Path,
+) -> Result<()> {
+    let mut source_contents = source_bundle.as_os_str().to_owned();
+    source_contents.push("/");
+
+    let mut cmd = new_command("rsync");
+    cmd.args(["-av", "--delete", "--exclude", "Icon?"])
+        .arg(&source_contents)
+        .arg(running_app_path);
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| "failed to rsync: {cmd}")?;
+
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to copy app: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `rsync -a` leaves the bundle with the build machine's modification time, older than the
+    // copy it replaced, and macOS only drops its cached app icon (Finder, the Dock, Cmd+Tab)
+    // when the bundle looks modified. A failure here costs a stale icon, not the update, whose
+    // files are already in place.
+    match new_command("touch").arg(running_app_path).output().await {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => log::error!(
+            "failed to update the modification time of {running_app_path:?}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error) => {
+            log::error!("failed to update the modification time of {running_app_path:?}: {error:?}")
+        }
+    }
+
+    Ok(())
 }
 
 async fn install_release_macos(
@@ -1073,9 +1134,7 @@ async fn install_release_macos(
     // The bundle inside the image is normally named exactly like the running one, and that
     // is the case to prefer -- but the two names come from different places (the running
     // one from wherever the app was installed and possibly renamed, the other from
-    // `cargo bundle`), so a mismatch must not be a dead end. The trailing slash below
-    // copies the *contents* of the source bundle, which means the running app keeps its own
-    // name whichever bundle is used as the source.
+    // `cargo bundle`), so a mismatch must not be a dead end.
     let expected_bundle = mount_path.join(&running_app_filename);
     let source_bundle = if fs::metadata(&expected_bundle).await.is_ok() {
         expected_bundle
@@ -1097,23 +1156,7 @@ async fn install_release_macos(
         }
     };
 
-    let mut mounted_app_path: OsString = source_bundle.into();
-    mounted_app_path.push("/");
-
-    let mut cmd = new_command("rsync");
-    cmd.args(["-av", "--delete", "--exclude", "Icon?"])
-        .arg(&mounted_app_path)
-        .arg(&running_app_path);
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| "failed to rsync: {cmd}")?;
-
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to copy app: {:?}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    copy_app_bundle_over_running_app(&source_bundle, &running_app_path).await?;
 
     Ok(None)
 }
@@ -1122,7 +1165,7 @@ async fn install_release_macos(
 async fn cleanup_windows() -> Result<()> {
     let parent = std::env::current_exe()?
         .parent()
-        .context("No parent dir for Zed.exe")?
+        .context("No parent dir for Zode.exe")?
         .to_owned();
 
     // keep in sync with crates/auto_update_helper/src/updater.rs
@@ -1150,7 +1193,7 @@ async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<P
     // deleting the old one, and launching the new binary.
     let helper_path = std::env::current_exe()?
         .parent()
-        .context("No parent dir for Zed.exe")?
+        .context("No parent dir for Zode.exe")?
         .join("tools")
         .join("auto_update_helper.exe");
     Ok(Some(helper_path))
@@ -1557,5 +1600,187 @@ mod tests {
             newer_version.unwrap(),
             Some(VersionCheckType::Semantic(fetched_version))
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    async fn test_copying_an_update_marks_the_running_bundle_modified(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let temp_dir = tempdir().unwrap();
+        let source_bundle = temp_dir.path().join("mount").join("Zode.app");
+        let running_app_path = temp_dir.path().join("Applications").join("Zode.app");
+        // The contents differ in length: rsync skips a file whose size and mtime already match.
+        std::fs::create_dir_all(source_bundle.join("Contents")).unwrap();
+        std::fs::write(
+            source_bundle.join("Contents").join("Info.plist"),
+            "new plist",
+        )
+        .unwrap();
+        std::fs::create_dir_all(running_app_path.join("Contents")).unwrap();
+        std::fs::write(running_app_path.join("Contents").join("Info.plist"), "old").unwrap();
+
+        // Set after the children exist: creating them would bump the directory's mtime again.
+        let build_time = std::time::UNIX_EPOCH + Duration::from_secs(946_684_800);
+        std::fs::File::open(&source_bundle)
+            .unwrap()
+            .set_modified(build_time)
+            .unwrap();
+
+        let install_started = std::time::SystemTime::now();
+        copy_app_bundle_over_running_app(&source_bundle, &running_app_path)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(running_app_path.join("Contents").join("Info.plist")).unwrap(),
+            "new plist"
+        );
+        let modified = std::fs::metadata(&running_app_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            modified + Duration::from_secs(1) >= install_started,
+            "the running bundle kept the update's build-time mtime {modified:?}"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn write_file(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// Packs `<root>/<app_folder>` into `<root>/update.tar.gz`, the layout `bundle-linux` ships.
+    #[cfg(not(target_os = "windows"))]
+    async fn pack_linux_update(
+        root: &Path,
+        app_folder: &str,
+        editor_binary: &str,
+        contents: &str,
+    ) -> PathBuf {
+        write_file(
+            &root
+                .join("payload")
+                .join(app_folder)
+                .join("libexec")
+                .join(editor_binary),
+            contents,
+        );
+        let archive = root.join("update.tar.gz");
+        let output = new_command("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(root.join("payload"))
+            .arg(app_folder)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        archive
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    async fn a_linux_update_installs_zode_app_under_local_by_default(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let zed_editor = home.join(".local/zed.app/libexec/zed-editor");
+        let zed_cli = home.join(".local/bin/zed");
+        write_file(&zed_editor, "real zed editor");
+        write_file(&zed_cli, "real zed cli");
+        let archive =
+            pack_linux_update(root.path(), "zode.app", "zode-editor", "new zode editor").await;
+
+        let installed = install_linux_tarball(
+            &root.path().join("work"),
+            &archive,
+            "stable",
+            &root.path().join("elsewhere/zode-editor"),
+            &home,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(installed, home.join(".local/zode.app/libexec/zode-editor"));
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            "new zode editor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&zed_editor).unwrap(),
+            "real zed editor"
+        );
+        assert_eq!(std::fs::read_to_string(&zed_cli).unwrap(), "real zed cli");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    async fn a_linux_update_replaces_the_running_install_in_its_own_prefix(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let prefix = root.path().join("opt");
+        let running = prefix.join("zode-nightly.app/libexec/zode-editor");
+        write_file(&running, "old");
+        let stray = prefix.join("zode-nightly.app/stray");
+        write_file(&stray, "left over");
+        let archive = pack_linux_update(
+            root.path(),
+            "zode-nightly.app",
+            "zode-editor",
+            "new nightly editor",
+        )
+        .await;
+
+        let installed = install_linux_tarball(
+            &root.path().join("work"),
+            &archive,
+            "nightly",
+            &running,
+            &home,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(installed, running);
+        assert_eq!(
+            std::fs::read_to_string(&running).unwrap(),
+            "new nightly editor"
+        );
+        assert!(
+            !stray.exists(),
+            "rsync --delete should drop files the update lacks"
+        );
+        assert!(!home.join(".local").exists());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test]
+    async fn a_linux_update_laid_out_as_zed_app_is_refused(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let archive = pack_linux_update(root.path(), "zed.app", "zed-editor", "old layout").await;
+
+        let error = install_linux_tarball(
+            &root.path().join("work"),
+            &archive,
+            "stable",
+            &root.path().join("elsewhere/zode-editor"),
+            &home,
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("zode.app"), "{message}");
+        assert!(message.contains("zed.app"), "{message}");
+        assert!(!home.join(".local").exists());
     }
 }

@@ -174,7 +174,7 @@ async fn capture_windows(
     use std::process::Stdio;
 
     let zed_path =
-        std::env::current_exe().context("Failed to determine current zed executable path.")?;
+        std::env::current_exe().context("Failed to determine current Zode executable path.")?;
 
     let shell_kind = ShellKind::new(shell_path, true);
     // Prefix with "./" if the path starts with "-" to prevent cd from interpreting it as a flag

@@ -513,7 +513,8 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
     fn get_download_url(
         &self,
         platform: RemotePlatform,
-        release_channel: ReleaseChannel,
+        // Every channel downloads from the same GitHub release, chosen by version alone.
+        _release_channel: ReleaseChannel,
         version: Option<Version>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Option<String>>> {
@@ -521,7 +522,6 @@ impl remote::RemoteClientDelegate for RemoteClientDelegate {
             let client = cx.update(|cx| cx.http_client());
             remote_server_release::get_remote_server_release_url(
                 client,
-                release_channel,
                 version,
                 platform.os.as_str(),
                 platform.arch.as_str(),
@@ -681,7 +681,8 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
     fn get_download_url(
         &self,
         platform: RemotePlatform,
-        release_channel: ReleaseChannel,
+        // Every channel downloads from the same GitHub release, chosen by version alone.
+        _release_channel: ReleaseChannel,
         version: Option<Version>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Option<String>>> {
@@ -689,7 +690,6 @@ impl remote::RemoteClientDelegate for BackgroundRemoteClientDelegate {
             let client = cx.update(|cx| cx.http_client());
             remote_server_release::get_remote_server_release_url(
                 client,
-                release_channel,
                 version,
                 platform.os.as_str(),
                 platform.arch.as_str(),

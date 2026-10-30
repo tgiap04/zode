@@ -161,7 +161,7 @@ ls ~/Library/Application\ Support/Zode/extensions/installed/
 On Linux:
 
 ```sh
-ls ~/.local/share/zed/extensions/installed
+ls ~/.local/share/zode/extensions/installed
 ```
 
 Define extensions which should be installed (`true`) or never installed (`false`).
@@ -3063,7 +3063,7 @@ Examples:
 
 - Description:
   Preview tabs allow you to open files in preview mode, where they close automatically when you switch to another file unless you explicitly pin them. This is useful for quickly viewing files without cluttering your workspace. Preview tabs display their file names in italics. \
-   There are several ways to convert a preview tab into a regular tab:
+  There are several ways to convert a preview tab into a regular tab:
 
   - Double-clicking on the file
   - Double-clicking on the tab header

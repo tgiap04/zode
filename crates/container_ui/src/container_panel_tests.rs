@@ -13,7 +13,7 @@ use settings::Settings as _;
 /// The engine cannot be injected through the action -- that path builds a real
 /// `DockerBackend` on purpose -- so the view is added directly and the action is
 /// used only where the action itself is what is under test.
-fn tab_in_workspace(
+pub(crate) fn tab_in_workspace(
     workspace: &gpui::Entity<workspace::Workspace>,
     backends: Vec<Arc<dyn ContainerBackend>>,
     cx: &mut VisualTestContext,
@@ -30,7 +30,7 @@ fn tab_in_workspace(
     })
 }
 
-fn init_test(cx: &mut TestAppContext) {
+pub(crate) fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let settings_store = settings::SettingsStore::test(cx);
         cx.set_global(settings_store);
@@ -1078,6 +1078,7 @@ mod busy {
             state: RunState::Running,
             detail: vec![("Image", "postgres:16".into())],
             parent: None,
+            compose: None,
         }
     }
 
@@ -1586,6 +1587,7 @@ mod detail {
             state,
             detail: vec![("Image", "postgres:16".into())],
             parent: None,
+            compose: None,
         }
     }
 
@@ -1856,6 +1858,7 @@ mod chrome {
                     state: RunState::Running,
                     detail: vec![("Image", "postgres:16".into())],
                     parent: None,
+                    compose: None,
                 },
                 window,
                 cx,
@@ -2527,6 +2530,7 @@ mod search {
                 ("Status", "Running".into()),
             ],
             parent: None,
+            compose: None,
         }
     }
 

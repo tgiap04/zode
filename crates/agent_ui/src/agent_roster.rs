@@ -9,7 +9,7 @@
 //! `project::builtin_agent`, which is the one place it is written down.
 
 use gpui::Hsla;
-use ui::IconName;
+use ui::{Color, IconName};
 
 /// The mark one built-in agent is drawn with.
 ///
@@ -107,6 +107,20 @@ pub fn agent_color(agent: &str) -> Hsla {
         })
 }
 
+/// The colour an agent's mark moves in while it answers.
+///
+/// `agent_color`'s grey suits a still mark, but a moving mark in that grey would
+/// say "working" in the colour the worktree panel uses for "gone". `Accent` is
+/// what every agent's spinner used before, so an unknown agent keeps that hue.
+pub fn agent_working_color(agent: &str) -> Color {
+    AGENT_MARKS
+        .iter()
+        .find(|mark| mark.id == agent)
+        .map_or(Color::Accent, |mark| {
+            Color::Custom(gpui::rgb(mark.color).into())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +162,10 @@ mod tests {
     fn unknown_agent_falls_back_to_the_placeholder_mark() {
         assert_eq!(agent_icon("not-a-real-agent"), IconName::Sparkle);
         assert_eq!(agent_color("not-a-real-agent"), gpui::rgb(0x9A9A9A).into());
+        assert_eq!(agent_working_color("not-a-real-agent"), Color::Accent);
+        assert_eq!(
+            agent_working_color(project::CLAUDE_CODE_AGENT_ID),
+            Color::Custom(gpui::rgb(0xD97757).into())
+        );
     }
 }

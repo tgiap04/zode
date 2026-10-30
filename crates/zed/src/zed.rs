@@ -2286,7 +2286,9 @@ mod tests {
     use serde_json::json;
     use settings::{SaturatingBool, SettingsStore, watch_config_file};
     use std::{
+        cell::RefCell,
         path::{Path, PathBuf},
+        rc::Rc,
         sync::Arc,
         time::Duration,
     };
@@ -6543,6 +6545,193 @@ mod tests {
         assert!(
             keys.is_empty(),
             "project group should be removed after CloseProject: {keys:?}"
+        );
+    }
+
+    /// Wires every window's workspace to a stub path prompt that records which
+    /// window asked for it, so a test can tell where `Open` landed without a
+    /// system file dialog.
+    fn record_open_prompts_by_window(
+        windows: &[WindowHandle<MultiWorkspace>],
+        chosen_paths: Vec<PathBuf>,
+        cx: &mut TestAppContext,
+    ) -> Rc<RefCell<Vec<gpui::WindowId>>> {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.use_system_path_prompts = Some(false);
+                });
+            });
+        });
+        let prompted = Rc::new(RefCell::new(Vec::new()));
+        for window in windows {
+            window
+                .update(cx, |multi_workspace, _, cx| {
+                    let prompted = prompted.clone();
+                    let chosen_paths = chosen_paths.clone();
+                    multi_workspace.workspace().update(cx, |workspace, _| {
+                        workspace.set_prompt_for_open_path(Box::new(move |_, _, window, _| {
+                            prompted
+                                .borrow_mut()
+                                .push(window.window_handle().window_id());
+                            let (sender, receiver) = futures::channel::oneshot::channel();
+                            if !chosen_paths.is_empty() {
+                                sender.send(Some(chosen_paths.clone())).ok();
+                            }
+                            receiver
+                        }));
+                    });
+                })
+                .unwrap();
+        }
+        prompted
+    }
+
+    async fn two_local_windows(
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<MultiWorkspace>, WindowHandle<MultiWorkspace>) {
+        let app_state = init_test(cx);
+        for root in [path!("/first"), path!("/second")] {
+            app_state.fs.as_fake().insert_tree(root, json!({})).await;
+        }
+        let first_project =
+            Project::test(app_state.fs.clone(), [path!("/first").as_ref()], cx).await;
+        let first = cx.add_window(|window, cx| MultiWorkspace::test_new(first_project, window, cx));
+        let second_project =
+            Project::test(app_state.fs.clone(), [path!("/second").as_ref()], cx).await;
+        let second =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(second_project, window, cx));
+        cx.update_window(*second, |_, window, _| window.activate_window())
+            .unwrap();
+        (first, second)
+    }
+
+    #[gpui::test]
+    async fn test_open_from_inside_workspace_prompts_in_that_window(cx: &mut TestAppContext) {
+        let (first, second) = two_local_windows(cx).await;
+        let prompted = record_open_prompts_by_window(&[first, second], Vec::new(), cx);
+
+        second
+            .update(cx, |multi_workspace, window, cx| {
+                let pane = multi_workspace.workspace().read(cx).active_pane().clone();
+                window.focus(&pane.focus_handle(cx), cx);
+            })
+            .unwrap();
+        cx.dispatch_action(second.into(), workspace::Open::DEFAULT);
+        cx.run_until_parked();
+
+        assert_eq!(*prompted.borrow(), vec![second.window_id()]);
+    }
+
+    #[gpui::test]
+    async fn test_open_from_the_sidebar_prompts_in_the_active_window(cx: &mut TestAppContext) {
+        let (first, second) = two_local_windows(cx).await;
+        let prompted = record_open_prompts_by_window(&[first, second], Vec::new(), cx);
+
+        second
+            .update(cx, |multi_workspace, window, cx| {
+                let multi_workspace_entity = cx.entity();
+                let sidebar =
+                    cx.new(|cx| sidebar::Sidebar::new(multi_workspace_entity, window, cx));
+                multi_workspace.register_sidebar(sidebar, cx);
+                multi_workspace.open_sidebar(cx);
+                multi_workspace.focus_sidebar(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        second.update(cx, |_, window, _| window.refresh()).unwrap();
+        cx.run_until_parked();
+        let sidebar_has_focus = second
+            .update(cx, |multi_workspace, window, cx| {
+                multi_workspace
+                    .sidebar()
+                    .is_some_and(|sidebar| sidebar.focus_handle(cx).contains_focused(window, cx))
+            })
+            .unwrap();
+        assert!(
+            sidebar_has_focus,
+            "precondition: focus must sit in the sidebar"
+        );
+        cx.dispatch_action(second.into(), workspace::Open::DEFAULT);
+        cx.run_until_parked();
+
+        assert_eq!(
+            *prompted.borrow(),
+            vec![second.window_id()],
+            "Open dispatched in the active window must prompt in that window, not the first one",
+        );
+    }
+
+    fn open_window_project_roots(cx: &mut TestAppContext) -> Vec<(gpui::WindowId, Vec<PathBuf>)> {
+        cx.update(|cx| {
+            workspace::local_workspace_windows(cx)
+                .into_iter()
+                .map(|window| {
+                    let roots = window
+                        .read(cx)
+                        .unwrap()
+                        .workspaces()
+                        .flat_map(|workspace| workspace.read(cx).root_paths(cx))
+                        .map(|path| path.to_path_buf())
+                        .collect();
+                    (window.window_id(), roots)
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn test_open_adds_the_chosen_folder_to_the_dispatching_window(cx: &mut TestAppContext) {
+        let (first, second) = two_local_windows(cx).await;
+        let app_state = cx.update(|cx| AppState::global(cx));
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(path!("/third"), json!({}))
+            .await;
+        let _prompted = record_open_prompts_by_window(
+            &[first, second],
+            vec![PathBuf::from(path!("/third"))],
+            cx,
+        );
+        second.update(cx, |_, window, _| window.blur()).unwrap();
+
+        cx.dispatch_action(second.into(), workspace::Open::DEFAULT);
+        cx.run_until_parked();
+
+        let windows = open_window_project_roots(cx);
+        assert_eq!(windows.len(), 2, "no window may be created: {windows:?}");
+        for (window_id, roots) in &windows {
+            let gained = roots.contains(&PathBuf::from(path!("/third")));
+            assert_eq!(gained, *window_id == second.window_id(), "{windows:?}");
+        }
+    }
+
+    #[gpui::test]
+    async fn test_open_of_a_folder_open_in_another_window_stays_in_the_dispatching_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (first, second) = two_local_windows(cx).await;
+        let _prompted = record_open_prompts_by_window(
+            &[first, second],
+            vec![PathBuf::from(path!("/first"))],
+            cx,
+        );
+        second.update(cx, |_, window, _| window.blur()).unwrap();
+
+        cx.dispatch_action(second.into(), workspace::Open::DEFAULT);
+        cx.run_until_parked();
+
+        let windows = open_window_project_roots(cx);
+        assert_eq!(windows.len(), 2, "no window may be created: {windows:?}");
+        let second_roots = windows
+            .iter()
+            .find(|(window_id, _)| *window_id == second.window_id())
+            .map(|(_, roots)| roots.clone())
+            .unwrap_or_default();
+        assert!(
+            second_roots.contains(&PathBuf::from(path!("/first"))),
+            "{windows:?}"
         );
     }
 }

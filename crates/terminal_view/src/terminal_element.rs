@@ -991,6 +991,7 @@ impl Element for TerminalElement {
 
                 let background_color = theme.colors().terminal_background;
 
+                let was_scrolled_up = self.terminal.read(cx).last_content.display_offset > 0;
                 let (last_hovered_word, hover_tooltip) =
                     self.terminal.update(cx, |terminal, cx| {
                         terminal.set_size(dimensions);
@@ -1015,6 +1016,13 @@ impl Element for TerminalElement {
                             (None, None)
                         }
                     });
+                // The view decides whether to draw its scroll-to-bottom button in render,
+                // before this sync applies pending scrolls, and a notify raised during a
+                // draw phase is discarded, so the redraw is deferred.
+                if (self.terminal.read(cx).last_content.display_offset > 0) != was_scrolled_up {
+                    let terminal_view = self.terminal_view.clone();
+                    cx.defer(move |cx| terminal_view.update(cx, |_, cx| cx.notify()));
+                }
 
                 let scroll_top = self.terminal_view.read(cx).scroll_top;
                 let hyperlink_tooltip = hover_tooltip.map(|hover_tooltip| {

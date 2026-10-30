@@ -87,7 +87,7 @@ Add environment variables to all terminal sessions:
 {
   "terminal": {
     "env": {
-      "EDITOR": "zed --wait",
+      "EDITOR": "zode --wait",
       "MY_VAR": "value"
     }
   }
@@ -189,6 +189,8 @@ Navigate terminal history with these keybindings:
 | Scroll line down | `Shift+Down`                   | `Shift+Down`     |
 | Scroll to top    | `Shift+Home` or `Cmd+Home`     | `Shift+Home`     |
 | Scroll to bottom | `Shift+End` or `Cmd+End`       | `Shift+End`      |
+
+While you are scrolled up in the history, a small round down-arrow button appears at the bottom-right of the terminal. Click it to jump to the bottom and focus the terminal; its tooltip shows your current `terminal::ScrollToBottom` keybinding.
 
 Adjust scroll speed with:
 

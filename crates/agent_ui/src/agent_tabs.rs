@@ -9,9 +9,13 @@
 
 use crate::agent_view::AgentView;
 use collections::HashSet;
-use gpui::{App, Entity, EntityId, Global, SharedString, WeakEntity};
+use gpui::{
+    App, BorrowAppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription,
+    WeakEntity, Window,
+};
 use project::AgentId;
 use std::sync::Arc;
+use workspace::{MultiWorkspace, Workspace};
 
 #[derive(Default)]
 struct AgentTabs {
@@ -27,10 +31,36 @@ impl Global for AgentTabs {}
 /// Records a tab as it is built. Tabs that have gone are dropped here, so the
 /// list is bounded by what is alive plus whatever has closed since the last
 /// tab opened.
-pub(crate) fn register(view: WeakEntity<AgentView>, cx: &mut App) {
+///
+/// Opening a tab and closing one both notify the global, which is what lets a
+/// list of sessions say which have a tab without anyone telling it.
+pub(crate) fn register(cx: &mut Context<AgentView>) {
+    cx.on_release(|_, cx| announce_change(cx)).detach();
+    let view = cx.weak_entity();
     let tabs = cx.default_global::<AgentTabs>();
     tabs.views.retain(|view| view.upgrade().is_some());
     tabs.views.push(view);
+    announce_change(cx);
+}
+
+pub(crate) fn announce_change(cx: &mut App) {
+    if cx.has_global::<AgentTabs>() {
+        cx.update_global::<AgentTabs, _>(|_, _| {});
+    }
+}
+
+/// Calls `on_change` whenever a tab opens or closes, or starts following a new
+/// session.
+pub fn observe_tabs<T: 'static>(
+    cx: &mut Context<T>,
+    on_change: impl FnMut(&mut T, &mut Context<T>) + 'static,
+) -> Subscription {
+    cx.observe_global::<AgentTabs>(on_change)
+}
+
+/// Every agent tab in the process, whichever window or workspace holds it.
+pub fn all_agent_tabs(cx: &App) -> Vec<Entity<AgentView>> {
+    live(cx)
 }
 
 fn live(cx: &App) -> Vec<Entity<AgentView>> {
@@ -56,6 +86,89 @@ pub(crate) fn running_sessions(cx: &App) -> HashSet<(AgentId, SharedString)> {
                 .then(|| (view.agent_id().clone(), SharedString::from(id.to_string())))
         })
         .collect()
+}
+
+/// Every session that has a tab, whatever state its CLI is in. A tab whose CLI
+/// ended still holds the conversation on screen, and is where a person would go
+/// to read it.
+///
+/// Reads every tab, so it must not be called from inside an update of one.
+pub(crate) fn open_sessions(cx: &App) -> HashSet<(AgentId, SharedString)> {
+    live(cx)
+        .iter()
+        .filter_map(|view| {
+            let view = view.read(cx);
+            let id = view.session_id()?;
+            Some((view.agent_id().clone(), SharedString::from(id.to_string())))
+        })
+        .collect()
+}
+
+/// The tab that has `session_id` open under `agent`, if any.
+pub(crate) fn open_tab(agent: &AgentId, session_id: &str, cx: &App) -> Option<Entity<AgentView>> {
+    live(cx).into_iter().find(|view| {
+        let view = view.read(cx);
+        view.is_agent(agent) && view.session_id() == Some(session_id)
+    })
+}
+
+/// Brings `view` to the front wherever it lives: its window raised, its
+/// workspace made the active one, and its pane showing it.
+///
+/// `window` is the one the caller is running in. It is already being updated,
+/// so it cannot be reached through its handle and is handled directly; any
+/// other window is entered through its handle.
+pub fn go_to_tab(view: &Entity<AgentView>, window: &mut Window, cx: &mut App) {
+    let Some(workspace) = view.read(cx).workspace().upgrade() else {
+        return;
+    };
+    cx.activate(true);
+    if let Some(Some(multi)) = window.root::<MultiWorkspace>()
+        && multi
+            .read(cx)
+            .workspaces()
+            .any(|candidate| candidate == &workspace)
+    {
+        multi.update(cx, |multi, cx| {
+            multi.activate(workspace.clone(), None, window, cx)
+        });
+        reveal(&workspace, view, window, cx);
+        return;
+    }
+    for handle in cx.windows() {
+        let Some(handle) = handle.downcast::<MultiWorkspace>() else {
+            continue;
+        };
+        let workspace = workspace.clone();
+        let view = view.clone();
+        // Fails for a window that is closing or is the one already updating;
+        // neither can hold the tab we are after.
+        let found = handle
+            .update(cx, |multi, window, cx| {
+                if !multi.workspaces().any(|candidate| candidate == &workspace) {
+                    return false;
+                }
+                multi.activate(workspace.clone(), None, window, cx);
+                reveal(&workspace, &view, window, cx);
+                true
+            })
+            .unwrap_or(false);
+        if found {
+            return;
+        }
+    }
+}
+
+fn reveal(
+    workspace: &Entity<Workspace>,
+    view: &Entity<AgentView>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.activate_window();
+    workspace.update(cx, |workspace, cx| {
+        workspace.activate_item(view, true, true, window, cx)
+    });
 }
 
 /// The sessions tabs other than `except` follow, whatever state their CLI is
@@ -173,6 +286,51 @@ mod tests {
         assert!(running.contains(&(claude.clone(), SharedString::from("one"))));
         assert!(!running.contains(&(claude, SharedString::from("two"))));
         assert_eq!(running.len(), 1, "a tab with no session runs none");
+    }
+
+    #[gpui::test]
+    async fn a_tab_opening_or_closing_notifies_observers(cx: &mut TestAppContext) {
+        struct Probe(usize);
+        let project = project(cx).await;
+        let probe = cx.new(|_| Probe(0));
+        let _subscription = probe.update(cx, |_, cx| {
+            observe_tabs(cx, |probe: &mut Probe, _| probe.0 += 1)
+        });
+
+        let tab = tab(project::CLAUDE_CODE_AGENT_ID, Some("one"), &project, cx);
+        cx.run_until_parked();
+        let opened = probe.read_with(cx, |probe, _| probe.0);
+        assert!(opened > 0, "opening a tab must notify");
+
+        drop(tab);
+        // Dropped outside an update, so the release is only seen by the next one.
+        cx.update(|_| {});
+        cx.run_until_parked();
+        assert!(
+            probe.read_with(cx, |probe, _| probe.0) > opened,
+            "closing a tab must notify"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_tab_is_open_for_its_session_alive_or_not(cx: &mut TestAppContext) {
+        let project = project(cx).await;
+        let alive = tab(project::CLAUDE_CODE_AGENT_ID, Some("one"), &project, cx);
+        let exited = tab(project::CLAUDE_CODE_AGENT_ID, Some("two"), &project, cx);
+        let _untracked = tab(project::CLAUDE_CODE_AGENT_ID, None, &project, cx);
+        alive.update(cx, |view, cx| view.simulate_cli_alive(true, cx));
+
+        let claude = AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string());
+        let open = cx.update(|cx| open_sessions(cx));
+        assert_eq!(open.len(), 2, "an untracked tab opens no session");
+        assert!(open.contains(&(claude.clone(), SharedString::from("two"))));
+        assert_eq!(
+            cx.update(|cx| open_tab(&claude, "two", cx)),
+            Some(exited),
+            "a tab whose CLI is gone is still where the session is open"
+        );
+        let codex = AgentId::new(project::CODEX_AGENT_ID.to_string());
+        assert!(cx.update(|cx| open_tab(&codex, "two", cx)).is_none());
     }
 
     #[gpui::test]

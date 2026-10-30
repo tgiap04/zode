@@ -2474,7 +2474,9 @@ mod running_subagents {
     }
 
     #[gpui::test]
-    async fn a_running_background_subagent_gets_one_row_with_a_spinner(cx: &mut TestAppContext) {
+    async fn a_running_background_subagent_gets_one_row_with_a_typing_mark(
+        cx: &mut TestAppContext,
+    ) {
         let (_panel, view, cx) = panel_showing_an_agent(cx).await;
 
         view.update(cx, |view, cx| {
@@ -2485,8 +2487,9 @@ mod running_subagents {
 
         assert!(cx.debug_bounds("subagent-row:agent-a").is_some());
         assert!(
-            cx.debug_bounds("subagent-spinner:agent-a").is_some(),
-            "a running subagent spins"
+            cx.debug_bounds("agent-typing-mark:subagent-typing-agent-a")
+                .is_some(),
+            "a running subagent types"
         );
     }
 
@@ -2600,7 +2603,9 @@ mod running_subagents {
         });
         assert!(
             cx.debug_bounds("subagent-row:agent-a").is_none()
-                && cx.debug_bounds("subagent-spinner:agent-a").is_none()
+                && cx
+                    .debug_bounds("agent-typing-mark:subagent-typing-agent-a")
+                    .is_none()
         );
     }
 
@@ -3034,5 +3039,668 @@ mod reload_sessions {
         cx.run_until_parked();
 
         assert_eq!(indexed_ids(&panel, cx), vec!["from-a-terminal"]);
+    }
+}
+
+/// What GPUI keeps for a row between frames -- a press in flight, an animation's
+/// clock -- is filed under the row's id and the ids above it. Rows keyed by
+/// position hand that state to whichever session slides into the place.
+mod agent_row_identity {
+    use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext};
+    use workspace::SaveIntent;
+
+    use super::running_subagents::{draw, panel_showing_an_agent};
+
+    fn row_selector(view: &Entity<agent_ui::AgentView>) -> &'static str {
+        // `debug_bounds` wants `'static`; a leaked string per call is fine in a test.
+        Box::leak(
+            format!(
+                "agent-row:{}",
+                gpui::ElementId::from(("agent", view.entity_id()))
+            )
+            .into_boxed_str(),
+        )
+    }
+
+    fn top_of(view: &Entity<agent_ui::AgentView>, cx: &mut VisualTestContext) -> f32 {
+        let bounds = cx
+            .debug_bounds(row_selector(view))
+            .expect("every open tab has a row");
+        f32::from(bounds.origin.y)
+    }
+
+    #[gpui::test]
+    async fn a_press_does_not_finish_on_the_row_that_slid_under_it(cx: &mut TestAppContext) {
+        let (panel, _first, cx) = panel_showing_an_agent(cx).await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        for _ in 0..2 {
+            workspace.update_in(cx, |workspace, window, cx| {
+                agent_ui::AgentView::open_tracked(
+                    workspace,
+                    project::CLAUDE_CODE_AGENT_ID,
+                    Default::default(),
+                    window,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+        }
+        let refresh = |cx: &mut VisualTestContext| {
+            panel.update(cx, |panel, cx| panel.mark_stale(cx));
+            panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+            draw(cx);
+        };
+        refresh(cx);
+
+        let views = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items_of_type::<agent_ui::AgentView>(cx)
+                .collect::<Vec<_>>()
+        });
+        let mut by_height = views
+            .into_iter()
+            .map(|view| (top_of(&view, cx), view))
+            .collect::<Vec<_>>();
+        by_height.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let [above, pressed, slides_in]: [Entity<agent_ui::AgentView>; 3] = by_height
+            .into_iter()
+            .map(|(_, view)| view)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("three tabs were opened, so three rows are drawn");
+
+        // In front already, so that the press finishing on the wrong row is the
+        // only thing that can change which tab is.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&pressed, true, true, window, cx);
+        });
+        cx.run_until_parked();
+
+        let target = cx
+            .debug_bounds(row_selector(&pressed))
+            .expect("the row to press is drawn")
+            .center();
+        cx.simulate_mouse_move(target, None, Modifiers::default());
+        cx.simulate_mouse_down(target, MouseButton::Left, Modifiers::default());
+
+        above.update(cx, |view, cx| view.simulate_cli_alive(false, cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.close_item_by_id(above.entity_id(), SaveIntent::Skip, window, cx)
+                    .detach_and_log_err(cx);
+            });
+        });
+        cx.run_until_parked();
+        refresh(cx);
+
+        let slid = cx
+            .debug_bounds(row_selector(&slides_in))
+            .expect("the row below is still drawn");
+        assert!(
+            slid.contains(&target),
+            "the row below must have slid up under the pointer, or this proves nothing"
+        );
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let active = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_item_as::<agent_ui::AgentView>(cx)
+                .map(|view| view.entity_id())
+        });
+        assert_eq!(
+            active,
+            Some(pressed.entity_id()),
+            "a press that began on one session finished on another"
+        );
+    }
+}
+
+/// Agent tabs open in a workspace other than the panel's own: another worktree
+/// of the same repository, in the same window or in another one.
+mod foreign_tabs {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    use agent_sessions::{AgentKind, SessionSummary};
+    use fs::FakeFs;
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
+    use project::Project;
+    use serde_json::json;
+    use workspace::dock::Panel as _;
+    use workspace::{MultiWorkspace, Workspace};
+
+    use super::init_test;
+    use crate::branch_panel::panel::BranchPanel;
+    use crate::branch_panel::tree::{AgentActivity, AgentEntry};
+
+    const MAIN: &str = "/repos/zode";
+    const LINKED: &str = "/repos/zode-linked";
+
+    struct Fixture {
+        panel: Entity<BranchPanel>,
+        window: WindowHandle<MultiWorkspace>,
+        main: Entity<Workspace>,
+        fs: Arc<FakeFs>,
+        cx: VisualTestContext,
+    }
+
+    /// A repository with one linked worktree, and a panel for the workspace
+    /// standing in the main checkout.
+    async fn fixture(cx: &mut TestAppContext) -> Fixture {
+        init_test(cx);
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            MAIN,
+            json!({
+                ".git": { "worktrees": { "linked": {
+                    "HEAD": "ref: refs/heads/linked",
+                    "commondir": "../..",
+                    "gitdir": "/repos/zode-linked/.git",
+                } } },
+                "src": { "main.rs": "fn main() {}" },
+            }),
+        )
+        .await;
+        fs.insert_tree(
+            LINKED,
+            json!({
+                ".git": "gitdir: /repos/zode/.git/worktrees/linked",
+                "src": { "main.rs": "fn main() {}" },
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [MAIN.as_ref()], cx).await;
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let main = window
+            .read_with(&cx, |multi, _| multi.workspace().clone())
+            .expect("the window is open");
+        let panel = main.update_in(&mut cx, |workspace, window, cx| {
+            BranchPanel::new(workspace, window, cx)
+        });
+        cx.run_until_parked();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+        });
+        // The first sweep has to land before a test stocks the index, or it
+        // overwrites what the test put there.
+        cx.run_until_parked();
+        panel.update_in(&mut cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        assert_eq!(
+            panel.read_with(&cx, |panel, _| panel.repos[0].worktrees.len()),
+            2,
+            "the fixture repository must list its linked worktree"
+        );
+        Fixture {
+            panel,
+            window,
+            main,
+            fs,
+            cx,
+        }
+    }
+
+    impl Fixture {
+        /// A workspace for the linked worktree in the panel's own window.
+        async fn second_workspace_in_the_window(&mut self) -> Entity<Workspace> {
+            let project = Project::test(self.fs.clone(), [LINKED.as_ref()], &mut self.cx).await;
+            self.window
+                .update(&mut self.cx, |multi, window, cx| {
+                    multi.test_enable_background_retention(cx);
+                    multi.retain_active_workspace(cx);
+                    multi.test_add_workspace(project, window, cx)
+                })
+                .expect("the window is open")
+        }
+
+        /// A window of its own holding the linked worktree.
+        async fn second_window(&mut self) -> (WindowHandle<MultiWorkspace>, Entity<Workspace>) {
+            let project = Project::test(self.fs.clone(), [LINKED.as_ref()], &mut self.cx).await;
+            let window = self
+                .cx
+                .add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+            let workspace = window
+                .read_with(&self.cx, |multi, _| multi.workspace().clone())
+                .expect("the window is open");
+            (window, workspace)
+        }
+
+        fn rebuild(&mut self) {
+            self.panel.update_in(&mut self.cx, |panel, _, cx| {
+                panel.stale = true;
+                panel.refresh_if_stale(cx);
+            });
+        }
+
+        fn open_entries_under(&mut self, checkout: &str) -> Vec<AgentEntry> {
+            self.panel.read_with(&self.cx, |panel, _| {
+                panel.repos[0]
+                    .agents
+                    .get(Path::new(checkout))
+                    .map(|agents| agents.iter().filter(|a| a.is_open()).cloned().collect())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn past_ids_under(&mut self, checkout: &str) -> Vec<String> {
+            self.panel.read_with(&self.cx, |panel, _| {
+                panel.repos[0]
+                    .agents
+                    .get(Path::new(checkout))
+                    .map(|agents| {
+                        agents
+                            .iter()
+                            .filter_map(|agent| match agent {
+                                AgentEntry::Past { id, .. } => Some(id.to_string()),
+                                AgentEntry::Open { .. } => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+        }
+    }
+
+    fn tab_in(
+        session: Option<&str>,
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<agent_ui::AgentView> {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let project = workspace.project().clone();
+            let weak_workspace = workspace.weak_handle();
+            let intent = session.map_or(agent_ui::SessionIntent::Untracked, |id| {
+                agent_ui::SessionIntent::Tracked(id.to_string().into())
+            });
+            let view = cx.new(|cx| {
+                agent_ui::AgentView::test_new(
+                    project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    zed_actions::agent::AgentViewMode::Terminal,
+                    project,
+                    weak_workspace,
+                    agent_ui::SessionOrigin::new(intent, None),
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            view
+        })
+    }
+
+    fn active_item_of(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Option<gpui::EntityId> {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_pane()
+                .read(cx)
+                .active_item()
+                .map(|item| item.item_id())
+        })
+    }
+
+    fn finished_session(id: &str) -> SessionSummary {
+        SessionSummary {
+            id: Arc::from(id),
+            agent: AgentKind::Claude,
+            title: id.to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from(LINKED),
+            branch: None,
+            model: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+            log_path: None,
+            log_bytes: 0,
+        }
+    }
+
+    #[gpui::test]
+    async fn a_live_tab_in_another_worktrees_workspace_shows_under_that_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        let mut fixture = fixture(cx).await;
+        let other = fixture.second_workspace_in_the_window().await;
+        let tab = tab_in(Some("one"), &other, &mut fixture.cx);
+        tab.update(&mut fixture.cx, |view, cx| {
+            view.simulate_cli_alive(true, cx)
+        });
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+
+        let linked = fixture.open_entries_under(LINKED);
+        assert_eq!(linked.len(), 1, "the tab belongs to the linked worktree");
+        assert!(
+            fixture.open_entries_under(MAIN).is_empty(),
+            "and not to the checkout the panel's own workspace is in"
+        );
+        let activity = |fixture: &mut Fixture| fixture.cx.update(|_, cx| linked[0].activity(cx));
+        assert_eq!(activity(&mut fixture), AgentActivity::Ready);
+
+        tab.update(&mut fixture.cx, |view, cx| {
+            view.simulate_answering(true, cx)
+        });
+        assert_eq!(activity(&mut fixture), AgentActivity::Responding);
+        drop(tab);
+    }
+
+    #[gpui::test]
+    async fn a_live_tab_in_another_window_shows_and_starts_the_activity_tick(
+        cx: &mut TestAppContext,
+    ) {
+        let mut fixture = fixture(cx).await;
+        let (_window, other) = fixture.second_window().await;
+        assert!(
+            fixture
+                .panel
+                .read_with(&fixture.cx, |panel, _| panel._activity_tick.is_none()),
+            "nothing live yet"
+        );
+        let tab = tab_in(Some("one"), &other, &mut fixture.cx);
+        tab.update(&mut fixture.cx, |view, cx| {
+            view.simulate_cli_alive(true, cx)
+        });
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+        fixture
+            .panel
+            .update(&mut fixture.cx, |panel, cx| panel.track_agent_activity(cx));
+
+        assert_eq!(fixture.open_entries_under(LINKED).len(), 1);
+        assert!(
+            fixture
+                .panel
+                .read_with(&fixture.cx, |panel, _| panel._activity_tick.is_some()),
+            "a live tab elsewhere has a mark that must keep animating"
+        );
+        drop(tab);
+    }
+
+    #[gpui::test]
+    async fn a_tab_opening_or_closing_elsewhere_rebuilds_the_panel(cx: &mut TestAppContext) {
+        let mut fixture = fixture(cx).await;
+        let other = fixture.second_workspace_in_the_window().await;
+        fixture.rebuild();
+        fixture.panel.read_with(&fixture.cx, |panel, _| {
+            assert!(!panel.stale, "control: freshly rebuilt");
+        });
+
+        let tab = tab_in(Some("one"), &other, &mut fixture.cx);
+        fixture.cx.run_until_parked();
+        fixture.panel.read_with(&fixture.cx, |panel, _| {
+            assert!(
+                panel.stale,
+                "a tab opening in another workspace must reach the panel"
+            );
+        });
+        fixture.rebuild();
+        assert_eq!(fixture.open_entries_under(LINKED).len(), 1);
+
+        let pane = other.read_with(&fixture.cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = tab.entity_id();
+        pane.update_in(&mut fixture.cx, |pane, window, cx| {
+            pane.remove_item(item_id, true, true, window, cx);
+        });
+        drop(tab);
+        fixture.cx.update(|_, _| {});
+        fixture.cx.run_until_parked();
+        fixture.panel.read_with(&fixture.cx, |panel, _| {
+            assert!(
+                panel.stale,
+                "a tab closing in another workspace must reach the panel"
+            );
+        });
+        fixture.rebuild();
+        assert!(fixture.open_entries_under(LINKED).is_empty());
+    }
+
+    #[gpui::test]
+    async fn a_tab_closing_elsewhere_asks_the_index_to_resweep(cx: &mut TestAppContext) {
+        let mut fixture = fixture(cx).await;
+        cx.update(|cx| {
+            agent_ui::SessionStore::install_global_for_test(Vec::new(), cx);
+        });
+        fixture
+            .panel
+            .update(&mut fixture.cx, |panel, cx| panel.ensure_session_store(cx));
+        fixture.cx.run_until_parked();
+        let other = fixture.second_workspace_in_the_window().await;
+        let tab = tab_in(Some("one"), &other, &mut fixture.cx);
+        fixture.cx.run_until_parked();
+        fixture.panel.read_with(&fixture.cx, |panel, cx| {
+            assert!(
+                !panel
+                    .session_store
+                    .as_ref()
+                    .expect("store")
+                    .read(cx)
+                    .is_scanning(),
+                "control: nothing has closed"
+            );
+        });
+
+        let pane = other.read_with(&fixture.cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = tab.entity_id();
+        pane.update_in(&mut fixture.cx, |pane, window, cx| {
+            pane.remove_item(item_id, true, true, window, cx);
+        });
+        drop(tab);
+        fixture.cx.update(|_, _| {});
+        fixture.panel.read_with(&fixture.cx, |panel, cx| {
+            assert!(
+                panel
+                    .session_store
+                    .as_ref()
+                    .expect("store")
+                    .read(cx)
+                    .is_scanning(),
+                "a transcript lands on disk when any tab closes, not only this workspace's"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_foreign_tab_open_before_the_panel_still_asks_for_a_resweep_when_it_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let mut fixture = fixture(cx).await;
+        let other = fixture.second_workspace_in_the_window().await;
+        let tab = tab_in(Some("one"), &other, &mut fixture.cx);
+        fixture.cx.run_until_parked();
+
+        // Built after the tab, so nothing will ever announce it to this panel.
+        let main = fixture.main.clone();
+        fixture.panel = main.update_in(&mut fixture.cx, |workspace, window, cx| {
+            BranchPanel::new(workspace, window, cx)
+        });
+        fixture
+            .panel
+            .update_in(&mut fixture.cx, |panel, window, cx| {
+                panel.set_active(true, window, cx);
+                panel.ensure_session_store(cx);
+            });
+        fixture.cx.run_until_parked();
+        fixture.panel.read_with(&fixture.cx, |panel, cx| {
+            assert!(
+                !panel
+                    .session_store
+                    .as_ref()
+                    .expect("store")
+                    .read(cx)
+                    .is_scanning(),
+                "control: the first sweep has settled"
+            );
+        });
+
+        let pane = other.read_with(&fixture.cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = tab.entity_id();
+        pane.update_in(&mut fixture.cx, |pane, window, cx| {
+            pane.remove_item(item_id, true, true, window, cx);
+        });
+        drop(tab);
+        fixture.cx.update(|_, _| {});
+        fixture.panel.read_with(&fixture.cx, |panel, cx| {
+            assert!(
+                panel
+                    .session_store
+                    .as_ref()
+                    .expect("store")
+                    .read(cx)
+                    .is_scanning(),
+                "a tab that was open before the panel existed must still be noticed closing"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_live_tab_in_another_repository_is_not_listed_here(cx: &mut TestAppContext) {
+        let mut fixture = fixture(cx).await;
+        fixture
+            .fs
+            .insert_tree("/elsewhere", json!({ "b.txt": "" }))
+            .await;
+        let project =
+            Project::test(fixture.fs.clone(), ["/elsewhere".as_ref()], &mut fixture.cx).await;
+        let window = fixture
+            .cx
+            .add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(&fixture.cx, |multi, _| multi.workspace().clone())
+            .expect("the window is open");
+        let store = fixture
+            .panel
+            .read_with(&fixture.cx, |panel, _| panel.session_store.clone())
+            .expect("the fixture ensured the store");
+        store.update(&mut fixture.cx, |store, cx| {
+            store.set_index_for_test(vec![finished_session("one")], cx);
+        });
+        let tab = tab_in(Some("one"), &workspace, &mut fixture.cx);
+        tab.update(&mut fixture.cx, |view, cx| {
+            view.simulate_cli_alive(true, cx)
+        });
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+
+        assert!(fixture.open_entries_under(MAIN).is_empty());
+        assert!(fixture.open_entries_under(LINKED).is_empty());
+        assert_eq!(
+            fixture.past_ids_under(LINKED),
+            vec!["one".to_string()],
+            "no row here stands for that tab, so the finished one stays"
+        );
+        drop(tab);
+    }
+
+    #[gpui::test]
+    async fn an_open_foreign_session_is_not_listed_again_as_finished(cx: &mut TestAppContext) {
+        let mut fixture = fixture(cx).await;
+        let store = fixture
+            .panel
+            .read_with(&fixture.cx, |panel, _| panel.session_store.clone())
+            .expect("the fixture ensured the store");
+        store.update(&mut fixture.cx, |store, cx| {
+            store.set_index_for_test(vec![finished_session("one")], cx);
+        });
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+        assert_eq!(
+            fixture.past_ids_under(LINKED),
+            vec!["one".to_string()],
+            "control: with no tab the session is a finished one"
+        );
+
+        let (_window, other) = fixture.second_window().await;
+        let tab = tab_in(Some("one"), &other, &mut fixture.cx);
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+        assert_eq!(fixture.open_entries_under(LINKED).len(), 1);
+        assert!(
+            fixture.past_ids_under(LINKED).is_empty(),
+            "the session is the open tab, not also a row to resume into a second copy"
+        );
+        drop(tab);
+    }
+
+    #[gpui::test]
+    async fn clicking_an_open_row_brings_its_tab_forward_in_its_own_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        let mut fixture = fixture(cx).await;
+        let other = fixture.second_workspace_in_the_window().await;
+        let target = tab_in(Some("one"), &other, &mut fixture.cx);
+        let neighbour = tab_in(None, &other, &mut fixture.cx);
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+        assert_eq!(
+            active_item_of(&other, &mut fixture.cx),
+            Some(neighbour.entity_id())
+        );
+        // Another workspace is in front, as it is when the row is clicked.
+        let main = fixture.main.clone();
+        fixture
+            .window
+            .update(&mut fixture.cx, |multi, window, cx| {
+                multi.activate(main, None, window, cx)
+            })
+            .expect("the window is open");
+        let entry = fixture.open_entries_under(LINKED).remove(0);
+        fixture
+            .panel
+            .update_in(&mut fixture.cx, |panel, window, cx| {
+                panel.open_agent(&entry, window, cx);
+            });
+        fixture.cx.run_until_parked();
+
+        assert_eq!(
+            active_item_of(&other, &mut fixture.cx),
+            Some(target.entity_id())
+        );
+        let active = fixture
+            .window
+            .read_with(&fixture.cx, |multi, _| multi.workspace().clone())
+            .expect("window");
+        assert_eq!(
+            active, other,
+            "the tab's workspace must be the window's active one"
+        );
+    }
+
+    #[gpui::test]
+    async fn clicking_an_open_row_reaches_a_tab_in_another_window(cx: &mut TestAppContext) {
+        let mut fixture = fixture(cx).await;
+        let (other_window, other) = fixture.second_window().await;
+        let target = tab_in(Some("one"), &other, &mut fixture.cx);
+        let neighbour = tab_in(None, &other, &mut fixture.cx);
+        fixture.cx.run_until_parked();
+        fixture.rebuild();
+        assert_eq!(
+            active_item_of(&other, &mut fixture.cx),
+            Some(neighbour.entity_id())
+        );
+
+        let entry = fixture.open_entries_under(LINKED).remove(0);
+        fixture
+            .panel
+            .update_in(&mut fixture.cx, |panel, window, cx| {
+                panel.open_agent(&entry, window, cx);
+            });
+        fixture.cx.run_until_parked();
+
+        assert_eq!(
+            active_item_of(&other, &mut fixture.cx),
+            Some(target.entity_id())
+        );
+        assert_eq!(
+            fixture.cx.update(|_, cx| cx.active_window()),
+            Some(other_window.into()),
+            "the window holding the tab must come forward"
+        );
     }
 }

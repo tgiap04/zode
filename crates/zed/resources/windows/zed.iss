@@ -52,9 +52,20 @@ Name: "simplifiedChinese"; MessagesFile: "{#ResourcesDir}\messages\Default.zh-cn
 ; Delete logs
 Type: filesandordirs; Name: "{app}\updates"
 ; Delete newer files which may not have been added by the initial installation
+; (an in-app update stages them in install\ and the helper moves them out, so the
+; uninstall log names install\bin\zode.exe, not the file left in bin\)
 Type: filesandordirs; Name: "{app}\x64"
 Type: filesandordirs; Name: "{app}\arm64"
+Type: files; Name: "{app}\bin\zode.exe"
+Type: files; Name: "{app}\bin\zode"
 
+
+[InstallDelete]
+; The CLI used to ship as bin\zed.exe with a bin\zed shell shim. A full install over an
+; existing Zode drops them so only bin\zode.exe stays on PATH. Skipped when Zed.exe sits
+; beside Zode.exe, because then those files may belong to a real Zed install.
+Type: files; Name: "{app}\bin\zed.exe"; Check: not IsUpdating() and IsZodeOnlyDir()
+Type: files; Name: "{app}\bin\zed"; Check: not IsUpdating() and IsZodeOnlyDir()
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -71,7 +82,11 @@ Source: "{#ResourcesDir}\Zode.exe"; DestDir: "{code:GetInstallDir}"; Flags: igno
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
 ; The in-app updater hands off to tools\auto_update_helper.exe on quit, because Windows
 ; will not let the running Zode.exe be overwritten in place.
-Source: "{#ResourcesDir}\tools\*"; DestDir: "{code:GetInstallDir}\tools"; Flags: ignoreversion
+; Written straight to {app}\tools even on an update, not to {app}\install: the running app
+; spawns whatever helper sits in {app}\tools, and nothing else ever moves a newer one there.
+; Routed through install\, the helper of the first install would run every later update
+; with its own stale job list. No helper runs while the installer does, so the file is free.
+Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
 #ifexist ResourcesDir + "\amd_ags_x64.dll"
 Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion
@@ -1406,6 +1421,11 @@ begin
       SaveStringToFile(ExpandConstant('{app}\updates\versions.txt'), '{#Version}' + #13#10, True);
     end
   end;
+end;
+
+function IsZodeOnlyDir(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\Zode.exe')) and not FileExists(ExpandConstant('{app}\Zed.exe'));
 end;
 
 function GetAppMutex(Param: string): string;

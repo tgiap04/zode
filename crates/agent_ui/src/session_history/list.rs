@@ -334,6 +334,8 @@ impl AgentHistoryPanel {
             self.list_state.reset(rows.len());
         }
         let rows = std::rc::Rc::new(rows);
+        // Once per render rather than per row: the set reads every tab.
+        let open = std::rc::Rc::new(crate::agent_tabs::open_sessions(cx));
         v_flex()
             .flex_1()
             .min_h_0()
@@ -360,7 +362,11 @@ impl AgentHistoryPanel {
                             // Only rows the list actually renders pay for their
                             // numbers.
                             this.ensure_counts(session, cx);
-                            row::render_session(ix, session, this, cx).into_any_element()
+                            let open = open.contains(&(
+                                project::AgentId::new(session.agent.builtin_agent_id()),
+                                gpui::SharedString::from(session.id.to_string()),
+                            ));
+                            row::render_session(ix, session, open, this, cx).into_any_element()
                         }
                     }),
                 )

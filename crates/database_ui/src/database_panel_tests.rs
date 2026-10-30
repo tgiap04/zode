@@ -980,6 +980,21 @@ fn bounds_of(
         .unwrap_or_else(|| panic!("{selector} must be drawn"))
 }
 
+/// An engine row's name and description sat in a column that was given no
+/// width of its own, so the row squeezed it to nothing and both labels drew
+/// as a lone ellipsis.
+#[gpui::test]
+async fn an_engine_row_gives_its_name_the_room_the_row_has(cx: &mut TestAppContext) {
+    let (_modal, cx) = drawn_dialog(cx).await;
+
+    let list = bounds_of(cx, "database-engine-list");
+    let text = bounds_of(cx, "database-engine-text");
+    assert!(
+        text.size.width > list.size.width / 2.,
+        "the name column must take the row's free width, got {text:?} in {list:?}"
+    );
+}
+
 /// The dialog used to put Cancel, Save and Save & Connect in its header on every
 /// step after the first, and Cancel and Continue in a footer on the first. Two
 /// places for the same job is the defect: the actions belong under what they

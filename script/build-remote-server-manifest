@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Writes the remote server manifest for a release, from the archives already
+# gathered for upload.
+#
+# The app fetches this manifest before it downloads a remote server, and refuses
+# an archive whose SHA-256 differs from its entry. Checksums are computed here,
+# from the very bytes about to be uploaded, rather than carried over from the
+# jobs that built them: a checksum that travels separately from what it
+# describes is one more thing that can disagree.
+#
+#   script/build-remote-server-manifest <directory of release assets> <version>
+#
+# Reads `zed-remote-server-<os>-<arch>.gz` and writes
+# `remote-server-manifest.json` beside them. The URLs point at the release of
+# tag `v<version>` in `$GITHUB_REPOSITORY`. The shape is a contract with
+# `ReleaseManifest` in `crates/remote_connection/src/remote_server_release.rs`.
+
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "usage: $0 <asset-directory> <version>" >&2
+    exit 1
+fi
+
+asset_directory="$1"
+version="$2"
+repository="${GITHUB_REPOSITORY:-}"
+manifest="${asset_directory}/remote-server-manifest.json"
+
+# Both are spliced into JSON and URLs unescaped, so only the characters a
+# version and an `owner/name` can hold are let through.
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]*)?$ ]]; then
+    echo "error: '${version}' is not a release version" >&2
+    exit 1
+fi
+if [[ ! "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "error: GITHUB_REPOSITORY must be set to owner/name, got '${repository}'" >&2
+    exit 1
+fi
+
+download_base="https://github.com/${repository}/releases/download/v${version}"
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+entries=()
+for asset_path in "${asset_directory}"/zed-remote-server-*-*.gz; do
+    [[ -f "${asset_path}" ]] || continue
+    asset=$(basename "${asset_path}")
+    checksum=$(sha256_of "${asset_path}")
+    if [[ ! "${checksum}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "error: could not hash ${asset_path}" >&2
+        exit 1
+    fi
+
+    entries+=("$(printf '{"name":"%s","url":"%s/%s","sha256":"%s"}' \
+        "${asset}" "${download_base}" "${asset}" "${checksum}")")
+    echo "manifest: ${asset} ${checksum}"
+done
+
+if [[ ${#entries[@]} -eq 0 ]]; then
+    # Loud rather than an empty manifest, which would upload cleanly and then
+    # fail every download with "publishes no asset", pointing at the app rather
+    # than at the packaging step that went wrong.
+    echo "error: no remote server archives found in ${asset_directory}" >&2
+    exit 1
+fi
+
+printf '{"version":"%s","assets":[%s]}\n' "${version}" "$(IFS=,; echo "${entries[*]}")" > "${manifest}"
+
+if command -v jq >/dev/null 2>&1; then
+    jq . "${manifest}" > "${manifest}.pretty" && mv "${manifest}.pretty" "${manifest}"
+fi
+
+echo "wrote ${manifest} with ${#entries[@]} archives"

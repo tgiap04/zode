@@ -59,17 +59,24 @@ var!(AZURE_SIGNING_ENDPOINT);
 // than by changing code.
 var!(ZODE_DRIVER_UPLOAD_URL);
 
-pub fn bundle_envs(platform: Platform) -> Env {
-    // The stock `[profile.release]` (debug = "limited", codegen-units = 1, lto = "thin")
-    // is tuned for the shipped binary and does not fit a hosted runner's 14 GB disk or the
-    // arm64 mac's 7 GB of RAM. Overriding by env rather than editing Cargo.toml keeps the
-    // profile *named* `release`, so the paths baked into `script/bundle-*` still resolve.
-    // Cost: no debug symbols (nothing consumes them here) and a ~10-20% slower binary.
-    let env = Env::default()
+/// The stock `[profile.release]` (debug = "limited", codegen-units = 1, lto = "thin")
+/// is tuned for the shipped binary and does not fit a hosted runner's 14 GB disk or the
+/// arm64 mac's 7 GB of RAM. Overriding by env rather than editing Cargo.toml keeps the
+/// profile *named* `release`, so the paths baked into `script/bundle-*` still resolve.
+/// Cost: no debug symbols (nothing consumes them here) and a ~10-20% slower binary.
+///
+/// Separate from `bundle_envs` so a job that builds only the remote server gets the
+/// profile without the secrets the app bundles carry.
+pub fn release_profile_envs() -> Env {
+    Env::default()
         .add("CARGO_INCREMENTAL", 0)
         .add("CARGO_PROFILE_RELEASE_DEBUG", "none")
         .add("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", 16)
         .add("CARGO_PROFILE_RELEASE_LTO", "false")
+}
+
+pub fn bundle_envs(platform: Platform) -> Env {
+    let env = release_profile_envs()
         .add("ZED_CLIENT_CHECKSUM_SEED", ZED_CLIENT_CHECKSUM_SEED)
         .add("ZED_MINIDUMP_ENDPOINT", ZED_SENTRY_MINIDUMP_ENDPOINT);
 
@@ -386,12 +393,15 @@ impl serde::Serialize for WorkflowSecret {
 }
 
 pub mod assets {
+    use crate::tasks::workflows::runners::Arch;
+
     // These MUST match the filenames the bundle scripts actually write, because
     // `upload-artifact` runs with `if-no-files-found: error`: a mismatch fails the job
     // after a successful build. See `script/bundle-mac`, `script/bundle-linux` and
     // `script/bundle-windows.ps1`.
     //
-    // `remote_server` is deliberately not built or shipped by this fork.
+    // The remote server is not among these: it is built by jobs of its own, never inside
+    // a bundle, and published only by `release.yml`. See `REMOTE_SERVER_LINUX_X86_64`.
     pub const MAC_AARCH64: &str = "Zode-aarch64.dmg";
     pub const MAC_X86_64: &str = "Zode-x86_64.dmg";
     pub const LINUX_AARCH64: &str = "zode-linux-aarch64.tar.gz";
@@ -407,6 +417,35 @@ pub mod assets {
             LINUX_X86_64,
             WINDOWS_X86_64,
             WINDOWS_AARCH64,
+        ]
+    }
+
+    /// The statically linked (musl) remote server, gzipped, that the app downloads and
+    /// installs on a WSL or SSH host. The names are what
+    /// `remote_connection::remote_server_release::asset_name` asks for, so a spelling
+    /// change here is a download the app can no longer find.
+    pub const REMOTE_SERVER_LINUX_X86_64: &str = "zed-remote-server-linux-x86_64.gz";
+    pub const REMOTE_SERVER_LINUX_AARCH64: &str = "zed-remote-server-linux-aarch64.gz";
+
+    /// Names the two archives above with their checksums; the app fetches it first and
+    /// refuses an archive that does not hash to its entry. Written by
+    /// `script/build-remote-server-manifest`.
+    pub const REMOTE_SERVER_MANIFEST: &str = "remote-server-manifest.json";
+
+    pub fn remote_server_linux(arch: Arch) -> &'static str {
+        match arch {
+            Arch::X86_64 => REMOTE_SERVER_LINUX_X86_64,
+            Arch::AARCH64 => REMOTE_SERVER_LINUX_AARCH64,
+        }
+    }
+
+    /// Kept apart from `all()`: that list is shared with `release_nightly.rs` and the
+    /// bundle uploads, and the remote server is published by `release.yml` alone.
+    pub fn remote_server_release_assets() -> Vec<&'static str> {
+        vec![
+            REMOTE_SERVER_LINUX_X86_64,
+            REMOTE_SERVER_LINUX_AARCH64,
+            REMOTE_SERVER_MANIFEST,
         ]
     }
 

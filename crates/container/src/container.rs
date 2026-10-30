@@ -30,4 +30,4 @@ pub use destructive::{DestructivePlan, Intent, PruneScope};
 pub use docker_backend::DockerBackend;
 pub use kubeconfig::{KubeContext, Kubeconfig};
 pub use kubernetes_backend::{KubernetesBackend, Scope};
-pub use resource::{Resource, ResourceAction, ResourceKind, RunState};
+pub use resource::{ComposeLabels, Resource, ResourceAction, ResourceKind, RunState};

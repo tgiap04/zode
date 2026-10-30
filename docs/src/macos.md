@@ -9,25 +9,9 @@ Zode is developed primarily on macOS, making it a first-class platform with full
 
 ## Installing Zode
 
-Download Zode from the [download page](https://zed.dev/download). The download is a `.dmg` file—open it and drag Zode to your Applications folder.
-
-For the preview build, which receives updates about a week ahead of stable, visit the [preview releases page](https://zed.dev/releases/preview).
+Download the `Zode-<arch>.dmg` file from the [releases page](https://github.com/tgiap04/zode/releases)—open it and drag Zode to your Applications folder.
 
 After installation, Zode checks for updates automatically and prompts you when a new version is available.
-
-### Homebrew
-
-You can also install Zode using Homebrew:
-
-```sh
-brew install --cask zed
-```
-
-For the preview version:
-
-```sh
-brew install --cask zed@preview
-```
 
 ### Building from Source
 
@@ -48,12 +32,12 @@ Zode includes a command-line tool for opening files and projects from Terminal. 
 2. Open the command palette with `Cmd+Shift+P`
 3. Run `cli: install`
 
-This creates a `zed` command in `/usr/local/bin`. You can then open files and folders:
+This creates a `zode` command in `/usr/local/bin`. You can then open files and folders:
 
 ```sh
-zed .                    # Open current folder
-zed file.txt             # Open a file
-zed project/ file.txt    # Open a folder and a file
+zode .                   # Open current folder
+zode file.txt            # Open a file
+zode project/ file.txt   # Open a folder and a file
 ```
 
 See the [CLI Reference](./reference/cli.md) for all available options.
@@ -65,7 +49,7 @@ See the [CLI Reference](./reference/cli.md) for all available options.
 3. Optionally, remove your settings and extensions:
 
 ```sh
-rm -rf ~/.config/zed
+rm -rf ~/.config/zode
 rm -rf ~/Library/Application\ Support/Zode
 rm -rf ~/Library/Caches/Zode
 rm -rf ~/Library/Logs/Zode
@@ -75,8 +59,10 @@ rm -rf ~/Library/Saved\ Application\ State/io.github.tgiap04.zode.savedState
 If you installed the CLI, remove it with:
 
 ```sh
-rm /usr/local/bin/zed
+rm /usr/local/bin/zode
 ```
+
+An older Zode created `/usr/local/bin/zed` instead. Remove it only if `readlink /usr/local/bin/zed` points into a `Zode*.app` bundle; otherwise it belongs to Zed. Do not run `/usr/local/bin/zed --uninstall` from that older Zode: see the warning on the [Uninstall](./uninstall.md) page.
 
 ## Troubleshooting
 
@@ -98,7 +84,7 @@ xattr -cr /Applications/Zode.app
 
 ### CLI command not found
 
-If the `zed` command isn't available after installation:
+If the `zode` command isn't available after installation:
 
 1. Check that `/usr/local/bin` is in your PATH
 2. Try reinstalling the CLI via `cli: install` in the command palette

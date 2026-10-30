@@ -1,23 +1,15 @@
 ---
 title: Zode on Windows
-description: "Get the latest stable builds via the download page. If you want to download our preview build, you can find it on its [releases p..."
+description: "Download the Zode installer for Windows from the GitHub releases page, or build Zode from source."
 ---
 
 # Zode on Windows
 
 ## Installing Zode
 
-Get the latest stable builds via [the download page](https://zed.dev/download). If you want to download our preview build, you can find it on its [releases page](https://zed.dev/releases/preview). After the first manual installation, Zode will periodically check for install updates.
+Download the latest `Zode-<arch>.exe` installer from the [releases page](https://github.com/tgiap04/zode/releases) and run it. After the first manual installation, Zode will periodically check for install updates.
 
-You can also build zed from source, see [these docs](https://zed.dev/docs/development/windows) for instructions.
-
-### Package managers
-
-Additionally, you can install Zode using winget:
-
-```sh
-winget install -e --id ZedIndustries.Zed
-```
+You can also build Zode from source, see [these docs](./development/windows.md) for instructions.
 
 ## Uninstall
 

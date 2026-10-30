@@ -23,7 +23,8 @@ impl CircularProgress {
             size,
             stroke_width: px(4.0),
             bg_color: cx.theme().colors().border_variant,
-            progress_color: cx.theme().status().info,
+            // Not `status().info`: that token also colours LSP information diagnostics.
+            progress_color: crate::brand_accent(cx),
         }
     }
 

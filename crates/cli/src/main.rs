@@ -532,7 +532,7 @@ fn main() -> Result<()> {
 
         let status = std::process::Command::new("sh")
             .arg(&script_path)
-            .env("ZED_CHANNEL", &*release_channel::RELEASE_CHANNEL_NAME)
+            .env("ZODE_CHANNEL", &*release_channel::RELEASE_CHANNEL_NAME)
             .status()
             .context("Failed to execute uninstall script")?;
 
@@ -662,7 +662,7 @@ fn main() -> Result<()> {
             let exit_status = exit_status.clone();
             let user_data_dir_for_thread = user_data_dir.clone();
             move || {
-                let (_, handshake) = server.accept().context("Handshake after Zed spawn")?;
+                let (_, handshake) = server.accept().context("Handshake after Zode spawn")?;
                 let (tx, rx) = (handshake.requests, handshake.responses);
 
                 #[cfg(target_os = "windows")]
@@ -793,7 +793,7 @@ fn anonymous_fd(path: &str) -> Option<fs::File> {
 }
 
 /// Shows an interactive prompt asking the user to choose the default open
-/// behavior for `zed <path>`. Returns `None` if the prompt cannot be shown
+/// behavior for `zode <path>`. Returns `None` if the prompt cannot be shown
 /// (e.g. stdin is not a terminal) or the user cancels.
 fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     if !std::io::stdin().is_terminal() {
@@ -803,16 +803,16 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
-            blue.apply_to("zed --existing")
+            "Add to existing Zode window ({})",
+            blue.apply_to("zode --existing")
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!("Open a new window ({})", blue.apply_to("zode --classic")),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        blue.apply_to("zode <path>"),
+        console::style("You can change this later in Zode settings"),
     );
 
     let selection = dialoguer::Select::new()
@@ -861,7 +861,7 @@ mod linux {
                 // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
                 // ./zode is for the target directory in development builds.
                 let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zode"];
+                    ["../libexec/zode-editor", "../lib/zed/zed-editor", "./zode"];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1196,9 +1196,9 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
+                // ../Zode.exe is the standard, lib/zed is for MSYS2, ./zode.exe is for the target
                 // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                let possible_locations = ["../Zode.exe", "../lib/zed/zed-editor.exe", "./zode.exe"];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))

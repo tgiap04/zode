@@ -32,6 +32,9 @@ pub struct FakeBackend {
     acted: parking_lot::Mutex<Vec<(ResourceAction, String)>>,
     /// Every plan that reached `destroy`, so a test can prove one did *not*.
     destroyed: parking_lot::Mutex<Vec<crate::DestructivePlan>>,
+    /// Ids an `act` is refused for, to prove one bad container does not hide
+    /// what happened to the rest.
+    refused_ids: Vec<String>,
 }
 
 const DOCKER_KINDS: &[ResourceKind] = &[
@@ -55,10 +58,12 @@ impl FakeBackend {
                 state: RunState::Running,
                 detail: vec![("Image", "postgres:16".into())],
                 parent: None,
+                compose: None,
             }],
             misbehaviour: Misbehaviour::None,
             acted: parking_lot::Mutex::new(Vec::new()),
             destroyed: parking_lot::Mutex::new(Vec::new()),
+            refused_ids: Vec::new(),
         }
     }
 
@@ -70,12 +75,19 @@ impl FakeBackend {
             misbehaviour: Misbehaviour::None,
             acted: parking_lot::Mutex::new(Vec::new()),
             destroyed: parking_lot::Mutex::new(Vec::new()),
+            refused_ids: Vec::new(),
         }
     }
 
     /// The same fake, answering with `resources` instead of what it held.
     pub fn holding(mut self, resources: Vec<Resource>) -> Self {
         self.resources = resources;
+        self
+    }
+
+    /// The same fake, refusing every action on `id`.
+    pub fn refusing_actions_on(mut self, id: &str) -> Self {
+        self.refused_ids.push(id.to_string());
         self
     }
 
@@ -167,6 +179,12 @@ impl ContainerBackend for FakeBackend {
         }
         if !self.resources.iter().any(|resource| resource.id == id) {
             return Err(ContainerError::NotFound { id: id.into() });
+        }
+        if self.refused_ids.iter().any(|refused| refused == id) {
+            return Err(ContainerError::CommandFailed {
+                program: "fake".into(),
+                stderr: format!("{id} refused {action:?}"),
+            });
         }
         self.acted.lock().push((action, id.to_string()));
         Ok(())

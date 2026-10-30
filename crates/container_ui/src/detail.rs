@@ -36,6 +36,11 @@ pub(crate) struct Detail {
     /// Shown rather than logged. A blank panel where logs were asked for is the
     /// failure mode this field exists to prevent.
     pub(crate) trouble: Option<String>,
+    /// The git checkout a compose container was built from, once read.
+    ///
+    /// `None` for anything without a compose working directory, and for one
+    /// whose directory is not a checkout: neither gets a Switch Branch button.
+    pub(crate) checkout: Option<crate::compose_checkout::Checkout>,
 }
 
 impl ContainerPanel {
@@ -75,7 +80,9 @@ impl ContainerPanel {
             resource: resource.clone(),
             logs: None,
             trouble: None,
+            checkout: None,
         });
+        self.probe_checkout(cx);
         cx.notify();
 
         let Some((program, args)) = command else {
@@ -176,6 +183,7 @@ impl ContainerPanel {
     pub(crate) fn close_detail(&mut self, cx: &mut Context<Self>) {
         self.detail = None;
         self.logs_build = None;
+        self.checkout_probe = None;
         cx.notify();
     }
 
@@ -220,6 +228,7 @@ impl ContainerPanel {
             .size_full()
             .debug_selector(|| "container-detail".into())
             .child(self.render_detail_header(&resource, cx))
+            .children(self.render_checkout_row(cx))
             .child(
                 div()
                     .flex_1()

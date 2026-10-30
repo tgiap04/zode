@@ -6,7 +6,7 @@ description: "Configure which folders Zode trusts for running code and extension
 # Zode and trusted worktrees
 
 A worktree in Zode is either a directory or a single file that Zode opens as a standalone "project".
-Zode opens a worktree each time you run `zed some/path`, drag a file or directory into Zode, or open your user settings file.
+Zode opens a worktree each time you run `zode some/path`, drag a file or directory into Zode, or open your user settings file.
 
 Every worktree opened may contain a `.zed/settings.json` file with extra configuration options that may require installing and spawning language servers or MCP servers.
 To let users choose based on their own threat model and risk tolerance, all worktrees start in Restricted Mode. Restricted Mode prevents downloading and running related items from `.zed/settings.json`. Until a worktree is trusted, Zode does not run related untrusted actions and waits for user confirmation. This gives users a chance to review project settings, MCP servers, and language servers.

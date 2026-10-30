@@ -1,6 +1,6 @@
 ---
 title: Install Zode - macOS, Linux, Windows
-description: Download and install Zode on macOS, Linux, or Windows. Includes Homebrew, direct download, and package manager options.
+description: Download and install Zode on macOS, Linux, or Windows. Includes direct download and the Linux installation script.
 ---
 
 # Installing Zode
@@ -9,57 +9,43 @@ description: Download and install Zode on macOS, Linux, or Windows. Includes Hom
 
 ### macOS
 
-Get the latest stable builds via [the download page](https://zed.dev/download). If you want to download our preview build, you can find it on its [releases page](https://zed.dev/releases/preview). After the first manual installation, Zode will periodically check for install updates.
-
-You can also install Zode stable via Homebrew:
-
-```sh
-brew install --cask zed
-```
-
-As well as Zode preview:
-
-```sh
-brew install --cask zed@preview
-```
+Download the latest `Zode-<arch>.dmg` from the [releases page](https://github.com/tgiap04/zode/releases), open it, and drag Zode to your Applications folder. After the first manual installation, Zode will periodically check for install updates.
 
 ### Windows
 
-Get the latest stable builds via [the download page](https://zed.dev/download). If you want to download our preview build, you can find it on its [releases page](https://zed.dev/releases/preview). After the first manual installation, Zode will periodically check for install updates.
-
-Additionally, you can install Zode using winget:
-
-```sh
-winget install -e --id ZedIndustries.Zed
-```
+Download the latest `Zode-<arch>.exe` installer from the [releases page](https://github.com/tgiap04/zode/releases) and run it. After the first manual installation, Zode will periodically check for install updates.
 
 ### Linux
 
 For most Linux users, the easiest way to install Zode is through our installation script:
 
 ```sh
-curl -f https://zed.dev/install.sh | sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh
 ```
 
-You can now optionally specify a **version** of Zode to install using the `ZED_VERSION` environment variable:
+You can optionally specify a **version** of Zode to install using the `ZODE_VERSION` environment variable:
 
 ```sh
 # Install the latest stable version (default)
-curl -f https://zed.dev/install.sh | sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | sh
 
 # Install a specific version
-curl -f https://zed.dev/install.sh | ZED_VERSION=0.216.0 sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | ZODE_VERSION=0.1.6 sh
 ```
 
-To install the preview build, which receives updates about a week ahead of stable:
+To install the nightly build:
 
 ```sh
-curl -f https://zed.dev/install.sh | ZED_CHANNEL=preview sh
+curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | ZODE_CHANNEL=nightly sh
 ```
+
+Preview builds are not published. The older `ZED_VERSION` and `ZED_CHANNEL` variable names are still accepted.
+
+If you installed Zode 0.1.5 on Linux, it cannot update itself to 0.1.6: run the installation script once more. See [Upgrading from Zode 0.1.5](./linux.md#upgrading-from-zode-015).
 
 This script supports `x86_64` and `AArch64`, as well as common Linux distributions: Ubuntu, Arch, Debian, RedHat, CentOS, Fedora, and more.
 
-If Zode is installed using this installation script, it can be uninstalled at any time by running the shell command `zed --uninstall`. The shell will then prompt you whether you'd like to keep your preferences or delete them. After making a choice, you should see a message that Zode was successfully uninstalled.
+If Zode is installed using this installation script, it can be uninstalled at any time by running the shell command `zode --uninstall`. The shell will then prompt you whether you'd like to keep your preferences or delete them. After making a choice, you should see a message that Zode was successfully uninstalled.
 
 If this script is insufficient for your use case, you run into problems running Zode, or there are errors in uninstalling Zode, please see our [Linux-specific documentation](./linux.md).
 
@@ -107,10 +93,11 @@ Zode requires a Vulkan 1.3 driver and the following desktop portals:
 ### Windows
 
 Zode supports the following Windows releases:
-| Version | Zode Status |
-| ------------------------- | ------------------- |
-| Windows 11, version 22H2 and later | Supported |
-| Windows 10, version 1903 and later | Supported |
+
+| Version                            | Zode Status |
+| ---------------------------------- | ----------- |
+| Windows 11, version 22H2 and later | Supported   |
+| Windows 10, version 1903 and later | Supported   |
 
 A 64-bit operating system is required to run Zode.
 

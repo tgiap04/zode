@@ -35,7 +35,7 @@ With that aside, we can now launch Zode. Given how the OCaml package manager wor
 Once you have the cli, simply from a terminal, navigate to your project and run
 
 ```sh
-zed .
+zode .
 ```
 
 You should now have Zode running with OCaml support, with no additional setup required.

@@ -411,6 +411,7 @@ pub fn decrease_buffer_font_size(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::UpdateGlobal as _;
     use std::path::PathBuf;
 
     fn bundled_theme_files() -> Vec<PathBuf> {
@@ -439,6 +440,129 @@ mod tests {
         // to be caught here instead.
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|err| panic!("failed to parse theme at {}: {err}", path.display()))
+    }
+
+    fn init_settings(cx: &mut App) {
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        init(LoadThemes::JustBase, cx);
+    }
+
+    /// Every bundled family ships its own blue accent, so this walks the real files
+    /// rather than the one fallback theme the app starts with.
+    #[gpui::test]
+    fn every_bundled_theme_carries_the_brand(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_settings(cx);
+            let settings = ThemeSettings::get_global(cx);
+            for path in bundled_theme_files() {
+                for content in parse_family(&path).themes {
+                    let refined = refine_theme(&content);
+                    let branded = settings.apply_theme_overrides(Arc::new(refined.clone()));
+                    let brand = theme::BrandColors::for_appearance(branded.appearance());
+                    let name = &branded.name;
+                    let colors = branded.colors();
+
+                    assert_eq!(colors.text_accent, brand.accent, "{name}: text.accent");
+                    assert_eq!(colors.icon_accent, brand.accent, "{name}: icon.accent");
+                    assert_eq!(
+                        colors.border_focused, brand.accent,
+                        "{name}: border.focused"
+                    );
+                    assert_eq!(
+                        branded.players().local(),
+                        brand.local_player(),
+                        "{name}: the local cursor and selection"
+                    );
+                    assert_eq!(
+                        colors.element_selection_background,
+                        branded.players().local().selection,
+                        "{name}: text selected in markdown, hovers and notifications"
+                    );
+                    let expected_selection_alpha = match branded.appearance() {
+                        Appearance::Dark => 0x66 as f32 / 255.0,
+                        Appearance::Light => 0x3d as f32 / 255.0,
+                    };
+                    let selection_alpha = branded.players().local().selection.a;
+                    assert!(
+                        (selection_alpha - expected_selection_alpha).abs() < 1e-4,
+                        "{name}: selection alpha is {selection_alpha}, expected \
+                         {expected_selection_alpha}"
+                    );
+                    assert_eq!(
+                        branded.players().0.get(1..),
+                        refined.players().0.get(1..),
+                        "{name}: a collaborator's colours moved with the brand"
+                    );
+                    assert_eq!(
+                        branded.status().info,
+                        refined.status().info,
+                        "{name}: status.info also colours LSP information diagnostics"
+                    );
+                }
+            }
+        });
+    }
+
+    /// The brand is a default, not a lock: the user's overrides land after it.
+    /// `border.focused` is left alone by the user here, so it must still be the brand.
+    #[gpui::test]
+    fn user_theme_overrides_beat_the_brand(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_settings(cx);
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/themes/vscode-2026/vscode-2026.json");
+            let content = parse_family(&path)
+                .themes
+                .into_iter()
+                .find(|theme| theme.name == ::settings::DEFAULT_DARK_THEME)
+                .expect("the default dark theme is bundled in vscode-2026");
+            let user_text_accent = "#00ff00ff";
+            let user_icon_accent = "#ff00ffff";
+            let user_selection = "#0000ff80";
+
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.theme.experimental_theme_overrides = Some(ThemeStyleContent {
+                        colors: ThemeColorsContent {
+                            icon_accent: Some(user_icon_accent.to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                    settings.theme.theme_overrides.insert(
+                        content.name.clone(),
+                        ThemeStyleContent {
+                            colors: ThemeColorsContent {
+                                text_accent: Some(user_text_accent.to_string()),
+                                element_selection_background: Some(user_selection.to_string()),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    );
+                });
+            });
+
+            let branded = ThemeSettings::get_global(cx)
+                .apply_theme_overrides(Arc::new(refine_theme(&content)));
+            let brand = theme::BrandColors::for_appearance(branded.appearance());
+            let colors = branded.colors();
+
+            assert_eq!(
+                colors.text_accent,
+                try_parse_color(user_text_accent).expect("valid")
+            );
+            assert_eq!(
+                colors.icon_accent,
+                try_parse_color(user_icon_accent).expect("valid")
+            );
+            assert_eq!(
+                colors.element_selection_background,
+                try_parse_color(user_selection).expect("valid")
+            );
+            assert_eq!(colors.border_focused, brand.accent);
+        });
     }
 
     #[test]
