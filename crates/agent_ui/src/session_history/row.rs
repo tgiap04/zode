@@ -108,6 +108,7 @@ pub(crate) fn render_group(
 pub(crate) fn render_session(
     ix: usize,
     session: &SessionSummary,
+    open: bool,
     panel: &mut AgentHistoryPanel,
     cx: &mut Context<AgentHistoryPanel>,
 ) -> impl IntoElement {
@@ -131,6 +132,7 @@ pub(crate) fn render_session(
         .gap_1()
         .border_b_1()
         .border_color(colors.border_variant)
+        .relative()
         .hover(|style| style.bg(colors.element_hover))
         .child(
             h_flex()
@@ -155,6 +157,7 @@ pub(crate) fn render_session(
                 .child(render_controls(
                     ix,
                     session,
+                    open,
                     alive,
                     can_fork,
                     expanded,
@@ -171,10 +174,21 @@ pub(crate) fn render_session(
                     .gap_1()
                     .child(render_preview(session, expanded))
                     .child(render_facts(session, panel))
-                    .child(render_badges(session, &roots, alive, cx))
+                    .child(render_badges(session, &roots, alive, open, cx))
                     .children(expanded.then(|| render_details(session, cx))),
             ),
         )
+        // Drawn over the row's padding, so it takes no width from the content and
+        // an open row lines up with the rest.
+        .children(open.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(2.))
+                .bg(Color::Accent.color(cx))
+        }))
         .on_click(cx.listener({
             let id = session.id.clone();
             move |this, _, _window, cx| {
@@ -201,6 +215,7 @@ fn row_group(ix: usize) -> SharedString {
 fn render_controls(
     ix: usize,
     session: &SessionSummary,
+    open: bool,
     alive: bool,
     can_fork: bool,
     expanded: bool,
@@ -211,6 +226,35 @@ fn render_controls(
     h_flex()
         .flex_none()
         .gap_0p5()
+        .children(open.then(|| {
+            // Wrapped only so a test can find the button's bounds and click it.
+            div()
+                .debug_selector(move || format!("agent-history-go-to-tab:{ix}"))
+                .child(
+                    IconButton::new(("go-to-tab", ix), IconName::ArrowUpRight)
+                        .icon_size(IconSize::Small)
+                        .visible_on_hover(group.clone())
+                        .tooltip(Tooltip::text("Go to Tab"))
+                        .on_click(cx.listener({
+                            let agent = project::AgentId::new(session.agent.builtin_agent_id());
+                            let id = session.id.clone();
+                            move |_, _, window, cx| {
+                                let agent = agent.clone();
+                                let id = id.clone();
+                                // Deferred: this handler runs with the panel leased,
+                                // and bringing a workspace forward reads the panel
+                                // back through the dock that holds it.
+                                window.defer(cx, move |window, cx| {
+                                    // The tab may have closed since the row was drawn.
+                                    if let Some(view) = crate::agent_tabs::open_tab(&agent, &id, cx)
+                                    {
+                                        crate::agent_tabs::go_to_tab(&view, window, cx);
+                                    }
+                                });
+                            }
+                        })),
+                )
+        }))
         .child(
             IconButton::new(("resume", ix), IconName::PlayFilled)
                 .icon_size(IconSize::Small)
@@ -509,6 +553,7 @@ fn render_badges(
     session: &SessionSummary,
     roots: &[PathBuf],
     alive: bool,
+    open: bool,
     cx: &mut Context<AgentHistoryPanel>,
 ) -> impl IntoElement {
     let colors = cx.theme().colors();
@@ -525,6 +570,12 @@ fn render_badges(
         // The worktree badge is outlined with no fill and the branch badge is
         // filled with no rule, so each overrides one of the chip's defaults. The
         // chip also sets the label in the buffer font.
+        .children(open.then(|| {
+            Chip::new("Open")
+                .label_color(Color::Accent)
+                .bg_color(gpui::transparent_black())
+                .border_color(Color::Accent.color(cx))
+        }))
         .children(worktree.map(|(label, color)| {
             Chip::new(label)
                 .label_color(color)

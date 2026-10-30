@@ -627,7 +627,7 @@ impl AgentView {
             attention_shown: false,
             _attention_watch: Vec::new(),
         };
-        agent_tabs::register(cx.weak_entity(), cx);
+        agent_tabs::register(cx);
         view.watch_attention(window, cx);
         view.start(window, cx);
         view
@@ -722,7 +722,7 @@ impl AgentView {
         origin: SessionOrigin,
         cx: &mut Context<Self>,
     ) -> Self {
-        agent_tabs::register(cx.weak_entity(), cx);
+        agent_tabs::register(cx);
         let custom_name = stored_session_name(&origin, cx);
         Self {
             origin,
@@ -1059,6 +1059,14 @@ impl AgentView {
         cx.notify();
     }
 
+    /// Stands in for the activity tick settling on a verdict, which reads the
+    /// pty's write rate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_answering(&mut self, answering: bool, cx: &mut Context<Self>) {
+        self.responding = answering;
+        cx.notify();
+    }
+
     /// Stands in for a subagent scan: the listed subagents, and the ones whose
     /// latest run the transcript has since reported ended.
     #[cfg(any(test, feature = "test-support"))]
@@ -1343,6 +1351,9 @@ impl AgentView {
         );
         self.turn_silence = SilenceWatch::default();
         self.origin.follow(session);
+        // Lists that mark which sessions have a tab learn of a tab only through
+        // the registry, and this tab now holds a different one.
+        agent_tabs::announce_change(cx);
         // A tab wearing a name carries it to the session it now shows, or
         // reopening that session would lose it. A tab with none takes whatever
         // that session was already called, rather than writing "no name" over it.
@@ -5206,6 +5217,36 @@ mod tests {
                 Some("review")
             );
         });
+    }
+
+    /// A list marking which sessions have a tab must hear when a tab moves to
+    /// another session, or it keeps the mark on the session the tab left.
+    #[gpui::test]
+    async fn following_a_session_tells_the_tab_lists(cx: &mut TestAppContext) {
+        struct Probe(usize);
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = resumed_tab(
+            &workspace,
+            &project,
+            SessionOrigin::new(SessionIntent::Tracked("source".into()), None),
+            cx,
+        );
+        let probe = cx.update(|_, cx| cx.new(|_| Probe(0)));
+        let _subscription = probe.update(cx, |_, cx| {
+            agent_tabs::observe_tabs(cx, |probe: &mut Probe, _| probe.0 += 1)
+        });
+        cx.run_until_parked();
+        let before = probe.read_with(cx, |probe, _| probe.0);
+
+        view.update(cx, |view, cx| {
+            view.follow_session(summary(AgentKind::Claude, "destination"), cx)
+        });
+        cx.run_until_parked();
+
+        assert!(
+            probe.read_with(cx, |probe, _| probe.0) > before,
+            "a tab that follows a new session must notify the tab lists"
+        );
     }
 
     /// Deleting a session takes its name with it.
