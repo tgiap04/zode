@@ -119,14 +119,36 @@ impl BranchPanel {
         })
     }
 
-    /// The agent tabs already open when the panel is built, which no
-    /// `ItemAdded` will ever announce.
-    pub(crate) fn seed_agent_tabs(
-        workspace: &Workspace,
-        cx: &App,
-    ) -> collections::HashSet<EntityId> {
-        workspace
-            .items_of_type::<agent_ui::AgentView>(cx)
+    /// Marks the tree stale when an agent tab opens, closes or follows a new
+    /// session in *any* workspace, since the rows show every tab in the
+    /// process and only a tab of this workspace announces itself on it.
+    ///
+    /// A tab that closed elsewhere is noticed by its id leaving the process-wide
+    /// list, which is also what asks the index to re-read disk for it: the
+    /// workspace's own `ItemRemoved` never fires for a tab it does not hold.
+    pub(crate) fn observe_all_agent_tabs(cx: &mut Context<Self>) -> Subscription {
+        agent_ui::observe_tabs(cx, |panel, cx| {
+            let alive: collections::HashSet<EntityId> = agent_ui::all_agent_tabs(cx)
+                .iter()
+                .map(|view| view.entity_id())
+                .collect();
+            let before = panel.agent_tabs.len();
+            panel.agent_tabs.retain(|id| alive.contains(id));
+            let closed = panel.agent_tabs.len() != before;
+            panel.agent_tabs.extend(alive);
+            panel.mark_stale(cx);
+            if closed {
+                panel.refresh_sessions_after_close(cx);
+            }
+        })
+    }
+
+    /// The agent tabs already open when the panel is built, in any workspace,
+    /// which no `ItemAdded` will ever announce. A tab of another workspace that
+    /// is missing here would close without the index being asked to re-read.
+    pub(crate) fn seed_agent_tabs(cx: &App) -> collections::HashSet<EntityId> {
+        agent_ui::all_agent_tabs(cx)
+            .iter()
             .map(|view| view.entity_id())
             .collect()
     }
@@ -215,10 +237,11 @@ impl BranchPanel {
     ///
     /// Two sources, gathered once per rebuild so `build_rows` stays pure:
     ///
-    /// - **Open**: every agent tab of this window. They belong to the checkout
-    ///   this workspace has open, so opening one from the editor's own New
-    ///   Agent button lands under the checkout you are in -- from the moment it
-    ///   opens, not from the moment its CLI answers. Whether it is working is
+    /// - **Open**: every agent tab in the process, whichever window holds it.
+    ///   Each belongs to the checkout its own workspace has open, so opening
+    ///   one from the editor's New Agent button lands under the checkout you
+    ///   are in -- from the moment it opens, not from the moment its CLI
+    ///   answers -- and a tab running in another worktree shows under that one. Whether it is working is
     ///   the mark's business, not this list's.
     /// - **Finished**: from the shared session index, one hash per checkout.
     fn agents_by_checkout(
@@ -233,33 +256,48 @@ impl BranchPanel {
         // finished one you could resume into a second copy of itself.
         let mut open_sessions: collections::HashSet<String> = Default::default();
 
+        // This workspace's own tabs first, in pane order, then everyone else's:
+        // the order the rows have always had for the tabs you are looking at.
+        let mut tabs: Vec<Entity<agent_ui::AgentView>> = Vec::new();
+        let mut seen: collections::HashSet<EntityId> = Default::default();
         if let Some(workspace) = self.workspace.upgrade() {
-            // The checkout this window is in: the worktree whose path a root of
-            // the workspace sits under. A running agent has no other checkout
-            // it could be editing.
-            let roots = workspace.read(cx).root_paths(cx);
-            let here = checkout_containing(worktrees, &roots);
-
-            if let Some(here) = here {
-                let mut open = Vec::new();
-                for view in workspace.read(cx).items_of_type::<agent_ui::AgentView>(cx) {
-                    let tab = view.read(cx);
-                    if let Some(id) = tab.session_id() {
-                        open_sessions.insert(id.to_string());
-                    }
-                    open.push(AgentEntry::Open {
-                        label: tab.tab_label(),
-                        agent: tab.agent_id().to_string().into(),
-                        view: view.downgrade(),
-                    });
-                }
-                if !open.is_empty() {
-                    by_path
-                        .entry(Arc::from(here.path.as_path()))
-                        .or_default()
-                        .extend(open);
+            for view in workspace.read(cx).items_of_type::<agent_ui::AgentView>(cx) {
+                if seen.insert(view.entity_id()) {
+                    tabs.push(view);
                 }
             }
+        }
+        for view in agent_ui::all_agent_tabs(cx) {
+            if seen.insert(view.entity_id()) {
+                tabs.push(view);
+            }
+        }
+
+        for view in tabs {
+            let tab = view.read(cx);
+            // The checkout is the one the tab's own workspace stands in: a
+            // running agent has no other checkout it could be editing, and a
+            // tab in another worktree's workspace is not in this one's.
+            let Some(workspace) = tab.workspace().upgrade() else {
+                continue;
+            };
+            let roots = workspace.read(cx).root_paths(cx);
+            let Some(here) = checkout_containing(worktrees, &roots) else {
+                continue;
+            };
+            // Only a tab this panel draws hides its session's finished row: a
+            // tab of another repository leaves nothing here to stand for it.
+            if let Some(id) = tab.session_id() {
+                open_sessions.insert(id.to_string());
+            }
+            by_path
+                .entry(Arc::from(here.path.as_path()))
+                .or_default()
+                .push(AgentEntry::Open {
+                    label: tab.tab_label(),
+                    agent: tab.agent_id().to_string().into(),
+                    view: view.downgrade(),
+                });
         }
 
         let Some(index) = self

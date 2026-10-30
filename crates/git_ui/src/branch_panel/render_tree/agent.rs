@@ -390,20 +390,22 @@ impl BranchPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-
         match entry {
             AgentEntry::Open { view, .. } => {
-                let Some(view) = view.upgrade() else {
-                    return;
-                };
-                workspace.update(cx, |workspace, cx| {
-                    workspace.activate_item(&view, true, true, window, cx);
+                let view = view.clone();
+                // Deferred: this runs with the panel leased, and bringing a
+                // workspace forward reads the panel back through its dock.
+                window.defer(cx, move |window, cx| {
+                    // The tab may have closed since the row was drawn.
+                    if let Some(view) = view.upgrade() {
+                        agent_ui::go_to_tab(&view, window, cx);
+                    }
                 });
             }
             AgentEntry::Past { id, .. } => {
+                let Some(workspace) = self.workspace.upgrade() else {
+                    return;
+                };
                 let Some(store) = self.session_store.clone() else {
                     return;
                 };
