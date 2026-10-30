@@ -202,7 +202,8 @@ if ! tar -tzf "${target_dir}/release/$archive" | grep -x "zode$suffix.app/libexe
     exit 1
 fi
 
-reported_editor="$("${zed_dir}/bin/zode" --version)"
+# Release builds run as root inside a container, where the CLI refuses to start.
+reported_editor="$(ZED_ALLOW_ROOT=true "${zed_dir}/bin/zode" --version)"
 case "$reported_editor" in
     *"/zode$suffix.app/libexec/zode-editor") ;;
     *)
