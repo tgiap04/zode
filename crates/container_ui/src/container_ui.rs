@@ -6,6 +6,10 @@
 //! offers, and draws that. The day a `if backend == Kubernetes` appears here,
 //! that seam has been breached.
 
+mod branch_switch;
+mod branch_switch_modals;
+mod branch_switch_picker;
+mod compose_checkout;
 mod confirm_modal;
 mod container_panel;
 mod detail;
@@ -177,5 +181,7 @@ pub fn use_fake_engines_for_test(cx: &mut App) {
     ]));
 }
 
+#[cfg(test)]
+mod branch_switch_tests;
 #[cfg(test)]
 mod container_panel_tests;

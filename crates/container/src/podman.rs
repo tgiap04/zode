@@ -59,6 +59,7 @@ impl PodmanPod {
             state,
             detail,
             parent: None,
+            compose: None,
         }
     }
 }

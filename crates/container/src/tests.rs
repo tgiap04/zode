@@ -114,6 +114,7 @@ fn the_suite_rejects_a_backend_that_lists_an_undeclared_kind() {
                 state: RunState::Unknown,
                 detail: Vec::new(),
                 parent: None,
+                compose: None,
             }])
         }
         async fn act(
@@ -252,6 +253,65 @@ mod docker_output {
         let stdout = "{\n  \"ID\": \"aaa\",\n  \"Names\": \"one\"\n}\n{\n  \"ID\": \"bbb\",\n  \"Names\": \"two\"\n}\n";
         let rows = crate::docker_backend::parse_json_lines::<DockerContainer>(stdout);
         assert_eq!(rows.len(), 2);
+    }
+
+    fn compose_of(row: &str) -> Option<crate::resource::ComposeLabels> {
+        crate::docker_backend::parse_json_lines::<DockerContainer>(row)
+            .into_iter()
+            .next()
+            .expect("one row")
+            .into_resource()
+            .compose
+    }
+
+    #[test]
+    fn compose_labels_are_read_from_docker_s_joined_string() {
+        let row = r#"{"ID":"a","Names":"web","Labels":"maintainer=me,com.docker.compose.project=sclm,com.docker.compose.service=api,com.docker.compose.project.working_dir=/home/me/sclm"}"#;
+        let compose = compose_of(row).expect("compose labels");
+        assert_eq!(compose.project, "sclm");
+        assert_eq!(compose.service, "api");
+        assert_eq!(compose.working_dir.as_deref(), Some("/home/me/sclm"));
+    }
+
+    #[test]
+    fn a_comma_inside_the_working_directory_does_not_cut_it_short() {
+        let row = r#"{"ID":"a","Names":"web","Labels":"com.docker.compose.project.working_dir=/home/me/a,b/app,com.docker.compose.service=api"}"#;
+        let compose = compose_of(row).expect("compose labels");
+        assert_eq!(compose.working_dir.as_deref(), Some("/home/me/a,b/app"));
+        assert_eq!(compose.service, "api");
+    }
+
+    #[test]
+    fn podman_may_print_labels_as_an_object() {
+        let row = r#"{"ID":"a","Names":"web","Labels":{"com.docker.compose.project":"p","com.docker.compose.project.working_dir":"/srv/p"}}"#;
+        let compose = compose_of(row).expect("compose labels");
+        assert_eq!(compose.project, "p");
+        assert_eq!(compose.working_dir.as_deref(), Some("/srv/p"));
+    }
+
+    #[test]
+    fn an_equals_sign_or_a_comma_then_space_inside_the_directory_keeps_it_whole() {
+        let row = r#"{"ID":"a","Names":"web","Labels":"com.docker.compose.project.working_dir=/srv/a=b, x=y/app,com.docker.compose.service=api"}"#;
+        let compose = compose_of(row).expect("compose labels");
+        assert_eq!(
+            compose.working_dir.as_deref(),
+            Some("/srv/a=b, x=y/app"),
+            "parsed whole rather than cut at the first look-alike label"
+        );
+        assert_eq!(compose.service, "api");
+    }
+
+    #[test]
+    fn a_container_without_compose_labels_has_none_and_null_labels_still_parse() {
+        assert_eq!(
+            compose_of(r#"{"ID":"a","Names":"web","Labels":"maintainer=me"}"#),
+            None
+        );
+        assert_eq!(
+            compose_of(r#"{"ID":"a","Names":"web","Labels":null}"#),
+            None
+        );
+        assert_eq!(compose_of(r#"{"ID":"a","Names":"web"}"#), None);
     }
 
     #[test]
@@ -1291,6 +1351,7 @@ mod destructive {
             state: RunState::Stopped,
             detail: Vec::new(),
             parent: None,
+            compose: None,
         }
     }
 
