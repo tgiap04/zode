@@ -32,7 +32,9 @@ zode_env_sync.workspace = true
 zode_sync.workspace = true
 
 [dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 theme.workspace = true
 theme_settings.workspace = true

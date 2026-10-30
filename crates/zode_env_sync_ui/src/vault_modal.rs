@@ -248,8 +248,9 @@ impl VaultModal {
             // Deferred because `toggle_modal` would otherwise close the window
             // it just opened: this one is still being torn down.
             cx.defer_in(window, move |workspace, window, cx| {
+                let handle = workspace.weak_handle();
                 workspace.toggle_modal(window, cx, |window, cx| {
-                    WirePanel::new(session, wire, entry, window, cx)
+                    WirePanel::new(session, wire, entry, window, cx).returning_to_vault(handle)
                 });
             });
         });
